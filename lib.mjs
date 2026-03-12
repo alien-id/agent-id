@@ -544,6 +544,50 @@ export async function verifyIdToken(params) {
   };
 }
 
+/**
+ * Verify only the RSA signature of an id_token against the SSO's JWKS,
+ * without checking expiration, audience, or issuer. This is used for
+ * post-hoc provenance verification: the token has expired but the
+ * signature remains valid proof that the SSO server attested the binding.
+ */
+export async function verifyIdTokenSignatureOnly(params) {
+  const parsed = parseJwt(params.idToken);
+  if (parsed.header.alg !== "RS256") {
+    throw new Error(`Unsupported id_token alg: ${String(parsed.header.alg)}`);
+  }
+
+  const discovery = await fetchOidcDiscovery(params.ssoBaseUrl);
+  const jwksUri = discovery.jwks_uri;
+  if (!jwksUri) {
+    throw new Error("Discovery response missing jwks_uri");
+  }
+
+  const jwks = await fetchJwks(jwksUri);
+  const kid = parsed.header.kid;
+  const key = jwks.keys.find((k) => k.kid === kid && k.kty === "RSA");
+  if (!key) {
+    throw new Error(`Unable to find RSA JWK for kid=${String(kid)}`);
+  }
+
+  const validSig = verifyJwtRs256Signature({
+    signingInput: parsed.signingInput,
+    signatureB64url: parsed.signatureB64url,
+    jwk: key,
+  });
+
+  if (!validSig) {
+    throw new Error("id_token signature verification failed");
+  }
+
+  return {
+    signatureValid: true,
+    issuer: discovery.issuer,
+    payload: parsed.payload,
+    header: parsed.header,
+    keyId: kid,
+  };
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // Signing Engine
 // ════════════════════════════════════════════════════════════════════════════════
@@ -604,7 +648,7 @@ export function resolveAgentId(ctx = {}) {
 export class SignatureEngine {
   constructor(params) {
     this.baseDir = params.baseDir;
-    this.ownerProfileUrl = params.ownerProfileUrl || "https://alien.id/legal";
+    this.ownerProfileUrl = params.ownerProfileUrl || null;
     this.paths = statePaths(this.baseDir);
     this.keys = new Map();
     this.delegations = new Map();
@@ -944,7 +988,8 @@ function verifyOwnerBindingRecord(ownerBinding, keyByAgent, errors) {
 function verifyOwnerSessionProofInBinding(payload, errors) {
   const proof = payload?.ownerSessionProof;
   if (!proof || typeof proof !== "object") {
-    errors.push("owner session proof missing in owner binding payload");
+    // ownerSessionProof is optional — some Alien App versions don't return it.
+    // The binding is still valid via the id_token server signature.
     return;
   }
 

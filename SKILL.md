@@ -133,9 +133,21 @@ This creates a commit that is:
    ```
 3. **Logged in your audit trail** with a hash-chained signed record
 
+Each `git-commit` also attaches a **proof bundle** as a git note (`refs/notes/agent-id`). This contains the agent's public key, owner binding, and SSO id_token — everything needed for anyone to verify the provenance chain without access to the agent's local state.
+
+To share proof notes with a remote, push them:
+```bash
+git push origin refs/notes/agent-id
+```
+
+To fetch proof notes from a remote:
+```bash
+git fetch origin refs/notes/agent-id:refs/notes/agent-id
+```
+
 ### Option B: Use normal `git commit`
 
-Since `git-setup` sets `commit.gpgsign = true`, any `git commit` is automatically SSH-signed. This works but does not add the Agent ID trailers or audit log entry.
+Since `git-setup` sets `commit.gpgsign = true`, any `git commit` is automatically SSH-signed. This works but does not add the Agent ID trailers, audit log entry, or proof note.
 
 ### What the commit looks like on GitHub
 
@@ -163,6 +175,25 @@ node CLI sign --type MESSAGE_SEND --action "slack.post" --payload '{"channel":"#
 
 Each signed operation is appended to the hash-chained audit log.
 
+## 7b) Verifying commit provenance
+
+To verify the full chain from a git commit back to its human owner:
+
+```bash
+node CLI git-verify --commit HEAD
+```
+
+This traces the provenance chain:
+1. **SSH signature** — `git verify-commit` checks the commit signature
+2. **Agent key match** — commit's `Agent-ID-Fingerprint` trailer matches the agent's stored key
+3. **Owner binding** — agent's Ed25519-signed binding links the agent to a human owner
+4. **SSO attestation** — the id_token's RS256 signature (verified against Alien SSO's JWKS) proves the SSO server attested the agent-to-human binding
+
+Output includes a `summary` field like:
+> "Commit a1b2c3d4e5f6 was signed by agent 945d41991dac... owned by 0x7a3f..."
+
+If the commit has a proof note attached (via `git-commit`), verification is **fully self-contained** — no access to the agent's state directory needed. The proof is read from the git note. Falls back to local state if no note is found.
+
 ## 8) Command reference
 
 | Command | Purpose | Blocking? |
@@ -173,6 +204,7 @@ Each signed operation is appended to the hash-chained audit log.
 | `bind` | Poll for approval, create owner binding | **Yes** (up to 5 min) |
 | `git-setup [--global] [--name N] [--email E]` | Configure git SSH signing | No |
 | `git-commit --message "..."` | Signed commit with trailers + audit log | No |
+| `git-verify [--commit <hash>]` | Verify provenance: commit → agent → human | No |
 | `sign --type T --action A --payload JSON` | Sign any operation | No |
 | `verify` | Verify state chain integrity | No |
 | `export-proof` | Export proof bundle to stdout | No |
