@@ -1,0 +1,693 @@
+#!/usr/bin/env node
+
+// Alien Agent ID — CLI tool for agent identity management.
+// Usage: node cli.mjs <command> [flags]
+//
+// Commands: init, auth, bind, status, sign, verify, export-proof, git-setup, git-commit
+
+import path from "node:path";
+import os from "node:os";
+import fs from "node:fs/promises";
+import { execFile as execFileCb } from "node:child_process";
+
+import {
+  statePaths,
+  readJsonFile,
+  writeJsonFile,
+  readJsonl,
+  ensureDir,
+  setPrivateFilePermissions,
+  generateEd25519PemPair,
+  fingerprintPublicKeyPem,
+  nowMs,
+  beginOidcAuthorization,
+  pollForAuthorizationCode,
+  exchangeAuthorizationCode,
+  verifyIdToken,
+  verifyOwnerSessionProof,
+  verifyState,
+  SignatureEngine,
+  buildQrPageHtml,
+  ed25519PemToSshPublicKey,
+} from "./lib.mjs";
+
+// ─── Helpers ────────────────────────────────────────────────────────────────────
+
+function stderr(msg) {
+  process.stderr.write(`${msg}\n`);
+}
+
+function outputJson(obj) {
+  process.stdout.write(JSON.stringify(obj, null, 2) + "\n");
+}
+
+function outputError(message) {
+  outputJson({ ok: false, error: message });
+  process.exitCode = 1;
+}
+
+function parseFlags(argv) {
+  const flags = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg.startsWith("--")) {
+      const key = arg.slice(2);
+      if (key.startsWith("no-")) {
+        flags[key.slice(3)] = false;
+      } else if (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+        flags[key] = argv[++i];
+      } else {
+        flags[key] = true;
+      }
+    }
+  }
+  return flags;
+}
+
+function resolveStateDir(flags) {
+  if (flags["state-dir"]) {
+    return path.resolve(String(flags["state-dir"]));
+  }
+  if (process.env.AGENT_ID_STATE_DIR) {
+    return path.resolve(process.env.AGENT_ID_STATE_DIR);
+  }
+  return path.join(os.homedir(), ".agent-id");
+}
+
+function execFile(command, args, options = {}) {
+  return new Promise((resolve) => {
+    execFileCb(command, args, { timeout: 5000, ...options }, (err, stdout, stderr) => {
+      resolve({
+        code: err?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? 1 : err ? (err.code ?? 1) : 0,
+        stdout: stdout || "",
+        stderr: stderr || "",
+      });
+    });
+  });
+}
+
+async function tryOpenBrowser(urlOrPath) {
+  const hasDisplay = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+  const isWsl = Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
+  const attempts = [];
+
+  if (process.platform === "darwin") {
+    attempts.push(["open", [urlOrPath]]);
+  } else if (process.platform === "win32") {
+    attempts.push(["cmd", ["/c", "start", "", urlOrPath]]);
+  } else if (process.platform === "linux") {
+    if (!hasDisplay && !isWsl) {
+      return { opened: false, reason: "no display (DISPLAY/WAYLAND_DISPLAY missing)" };
+    }
+    if (isWsl) {
+      attempts.push(["wslview", [urlOrPath]]);
+    }
+    attempts.push(["xdg-open", [urlOrPath]]);
+  } else {
+    return { opened: false, reason: `unsupported platform ${process.platform}` };
+  }
+
+  for (const [cmd, args] of attempts) {
+    const out = await execFile(cmd, args);
+    if (out.code === 0) {
+      return { opened: true, command: cmd };
+    }
+  }
+  return { opened: false, reason: "all browser-open commands failed" };
+}
+
+// ─── Commands ───────────────────────────────────────────────────────────────────
+
+async function cmdInit(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  await ensureDir(stateDir);
+  await ensureDir(path.dirname(paths.mainKey));
+  await ensureDir(path.dirname(paths.auditJsonl));
+
+  let key = await readJsonFile(paths.mainKey, null);
+  if (!key) {
+    const pair = generateEd25519PemPair();
+    key = {
+      version: 1,
+      agentId: "main",
+      keyNonce: 0,
+      createdAt: nowMs(),
+      publicKeyPem: pair.publicKeyPem,
+      privateKeyPem: pair.privateKeyPem,
+      fingerprint: fingerprintPublicKeyPem(pair.publicKeyPem),
+    };
+    await writeJsonFile(paths.mainKey, key);
+    await setPrivateFilePermissions(paths.mainKey);
+    stderr(`Generated agent keypair: ${key.fingerprint.slice(0, 16)}...`);
+  } else {
+    stderr(`Agent keypair already exists: ${key.fingerprint.slice(0, 16)}...`);
+  }
+
+  if (!flags._quiet) {
+    outputJson({
+      ok: true,
+      fingerprint: key.fingerprint,
+      publicKeyPem: key.publicKeyPem,
+      stateDir,
+    });
+  }
+
+  return key;
+}
+
+async function cmdAuth(flags) {
+  const stateDir = resolveStateDir(flags);
+  const providerAddress = flags["provider-address"];
+  const ssoBaseUrl = flags["sso-url"] || "https://sso.alien-api.com";
+  const oidcOrigin = flags["oidc-origin"] || "http://localhost";
+  const openBrowser = flags.browser !== false;
+
+  if (!providerAddress) {
+    outputError("--provider-address is required");
+    return;
+  }
+
+  // Auto-init if needed
+  await cmdInit({ ...flags, _quiet: true });
+
+  // Start OIDC authorization
+  stderr(`Starting OIDC authorization against ${ssoBaseUrl}...`);
+  let auth;
+  try {
+    auth = await beginOidcAuthorization({ ssoBaseUrl, providerAddress, oidcOrigin });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (oidcOrigin !== "http://localhost" && msg.includes("Origin not allowed")) {
+      stderr(`Origin ${oidcOrigin} rejected, retrying with http://localhost...`);
+      auth = await beginOidcAuthorization({
+        ssoBaseUrl,
+        providerAddress,
+        oidcOrigin: "http://localhost",
+      });
+    } else {
+      throw err;
+    }
+  }
+
+  // Persist pending auth state (includes PKCE code_verifier)
+  const paths = statePaths(stateDir);
+  await writeJsonFile(paths.pendingAuth, {
+    pollingCode: auth.pollingCode,
+    codeVerifier: auth.codeVerifier,
+    deepLink: auth.deepLink,
+    expiredAt: auth.expiredAt,
+    providerAddress,
+    ssoBaseUrl,
+    oidcOrigin,
+    createdAt: Date.now(),
+  });
+  await setPrivateFilePermissions(paths.pendingAuth);
+
+  // Generate QR page
+  const qrDir = path.join(stateDir, "auth-ui");
+  await ensureDir(qrDir);
+  const qrPath = path.join(qrDir, `qr-${Date.now()}.html`);
+  const html = buildQrPageHtml({
+    deepLink: auth.deepLink,
+    pollingCode: auth.pollingCode,
+    providerAddress,
+    ssoBaseUrl,
+  });
+  await fs.writeFile(qrPath, html, "utf8");
+
+  // Try opening in browser
+  let browserOpened = false;
+  if (openBrowser) {
+    const { pathToFileURL } = await import("node:url");
+    const fileUrl = pathToFileURL(qrPath).href;
+    const result = await tryOpenBrowser(fileUrl);
+    browserOpened = result.opened;
+    if (result.opened) {
+      stderr(`Opened QR page in browser via ${result.command}.`);
+    } else {
+      stderr(`Could not auto-open browser: ${result.reason}`);
+    }
+  }
+
+  outputJson({
+    ok: true,
+    deepLink: auth.deepLink,
+    pollingCode: auth.pollingCode,
+    expiredAt: auth.expiredAt,
+    qrPagePath: qrPath,
+    browserOpened,
+    message: "Ask the user to open the deep link or scan the QR code with Alien App",
+  });
+}
+
+async function cmdBind(flags) {
+  const stateDir = resolveStateDir(flags);
+  const timeoutSec = Number(flags["timeout-sec"] || 300);
+  const pollIntervalMs = Number(flags["poll-interval-ms"] || 3000);
+  const requireOwnerProof = flags["require-owner-proof"] !== false;
+
+  const paths = statePaths(stateDir);
+  const pending = await readJsonFile(paths.pendingAuth, null);
+  if (!pending) {
+    outputError("No pending auth found. Run `auth` first.");
+    return;
+  }
+
+  // Poll for authorization
+  stderr(`Polling for authorization (timeout ${timeoutSec}s)...`);
+  const poll = await pollForAuthorizationCode({
+    ssoBaseUrl: pending.ssoBaseUrl,
+    pollingCode: pending.pollingCode,
+    pollIntervalMs,
+    timeoutSec,
+  });
+  stderr("Authorization received. Exchanging tokens...");
+
+  // Exchange code for tokens
+  const tokens = await exchangeAuthorizationCode({
+    ssoBaseUrl: pending.ssoBaseUrl,
+    providerAddress: pending.providerAddress,
+    authorizationCode: poll.authorizationCode,
+    codeVerifier: pending.codeVerifier,
+  });
+
+  // Verify id_token
+  const id = await verifyIdToken({
+    ssoBaseUrl: pending.ssoBaseUrl,
+    providerAddress: pending.providerAddress,
+    idToken: tokens.id_token,
+  });
+  stderr(`Verified id_token: sub=${id.payload.sub}`);
+
+  // Verify owner session proof
+  if (requireOwnerProof && !poll.ownerProof) {
+    outputError(
+      "OAuth poll did not return owner key proof (owner_proof). " +
+        "Upgrade SSO server or pass --no-require-owner-proof.",
+    );
+    return;
+  }
+
+  let ownerSessionProof = null;
+  if (poll.ownerProof) {
+    const proofCheck = verifyOwnerSessionProof({
+      proof: poll.ownerProof,
+      expectedSessionAddress: id.payload.sub,
+      expectedProviderAddress: pending.providerAddress,
+    });
+    if (!proofCheck.ok) {
+      outputError(`Owner session proof verification failed: ${proofCheck.reason}`);
+      return;
+    }
+    ownerSessionProof = proofCheck.proof;
+    stderr(
+      `Owner proof verified: session=${ownerSessionProof.sessionAddress} pub=${ownerSessionProof.sessionPublicKey.slice(0, 16)}...`,
+    );
+  }
+
+  // Create engine and bind
+  const engine = new SignatureEngine({ baseDir: stateDir });
+  await engine.init();
+  const owner = await engine.bindOwnerSession({
+    issuer: id.issuer,
+    providerAddress: pending.providerAddress,
+    ownerSessionSub: id.payload.sub,
+    ownerAudience: id.payload.aud,
+    idToken: tokens.id_token,
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token,
+    ownerSessionProof,
+  });
+
+  // Clean up pending auth
+  await fs.unlink(paths.pendingAuth).catch(() => {});
+
+  const mainKey = engine.keys.get("main");
+  stderr("Owner binding created successfully.");
+
+  outputJson({
+    ok: true,
+    ownerSessionSub: owner.binding.payload.ownerSessionSub,
+    bindingId: owner.binding.id,
+    issuer: id.issuer,
+    providerAddress: pending.providerAddress,
+    fingerprint: mainKey?.fingerprint || null,
+  });
+}
+
+async function cmdStatus(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  const key = await readJsonFile(paths.mainKey, null);
+  if (!key) {
+    outputJson({
+      ok: true,
+      initialized: false,
+      bound: false,
+      stateDir,
+    });
+    return;
+  }
+
+  const owner = await readJsonFile(paths.ownerBinding, null);
+  const seq = await readJsonFile(paths.seq, null);
+  const nonces = await readJsonFile(paths.nonces, null);
+
+  outputJson({
+    ok: true,
+    initialized: true,
+    bound: Boolean(owner?.binding),
+    fingerprint: key.fingerprint,
+    ownerSessionSub: owner?.binding?.payload?.ownerSessionSub || null,
+    providerAddress: owner?.binding?.payload?.providerAddress || null,
+    issuer: owner?.binding?.payload?.issuer || null,
+    bindingId: owner?.binding?.id || null,
+    nextSeq: seq?.nextSeq ?? null,
+    nonceAgents: Object.keys(nonces?.byAgent || {}).length,
+    stateDir,
+  });
+}
+
+async function cmdSign(flags) {
+  const stateDir = resolveStateDir(flags);
+  const operationType = flags.type;
+  const action = flags.action;
+  const payloadRaw = flags.payload;
+
+  if (!operationType || !action || !payloadRaw) {
+    outputError("Required flags: --type <type> --action <action> --payload <json>");
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(payloadRaw);
+  } catch {
+    outputError("--payload must be valid JSON");
+    return;
+  }
+
+  const engine = new SignatureEngine({ baseDir: stateDir });
+  await engine.init();
+
+  const rec = await engine.appendOperation({
+    operationType,
+    action,
+    payload,
+    ctx: { agentId: flags["agent-id"] || "main" },
+    meta: flags.meta ? JSON.parse(flags.meta) : null,
+  });
+
+  outputJson({
+    ok: true,
+    operationId: rec.auditEntry.envelope.operationId,
+    seq: rec.seq,
+    nonce: rec.nonce,
+    agentId: rec.agentId,
+    signatureShort: rec.signatureShort,
+    envelopeHashShort: rec.envelopeHashShort,
+  });
+}
+
+async function cmdVerify(flags) {
+  const stateDir = resolveStateDir(flags);
+  const result = await verifyState(stateDir);
+  outputJson(result);
+  if (!result.ok) {
+    process.exitCode = 1;
+  }
+}
+
+async function cmdExportProof(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  const owner = await readJsonFile(paths.ownerBinding, null);
+  const audit = await readJsonl(paths.auditJsonl);
+
+  outputJson({
+    exportedAt: Date.now(),
+    stateDir,
+    ownerBinding: owner,
+    operations: audit,
+  });
+}
+
+// ─── Git Commands ───────────────────────────────────────────────────────────────
+
+async function cmdGitSetup(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+  const scope = flags.global ? "--global" : "--local";
+
+  // Ensure we have a key
+  const key = await readJsonFile(paths.mainKey, null);
+  if (!key) {
+    outputError("No agent keypair. Run `init` first.");
+    return;
+  }
+
+  // Write SSH key files
+  const sshDir = path.join(stateDir, "ssh");
+  await ensureDir(sshDir);
+  const privateKeyPath = path.join(sshDir, "agent-id");
+  const publicKeyPath = path.join(sshDir, "agent-id.pub");
+  const allowedSignersPath = path.join(sshDir, "allowed_signers");
+
+  // Private key (PKCS8 PEM — supported by ssh-keygen since OpenSSH 7.8)
+  await fs.writeFile(privateKeyPath, key.privateKeyPem, { encoding: "utf8", mode: 0o600 });
+  await setPrivateFilePermissions(privateKeyPath);
+
+  // Public key in SSH format
+  const comment = `agent-id:${key.fingerprint.slice(0, 16)}`;
+  const sshPubKey = ed25519PemToSshPublicKey(key.publicKeyPem, comment);
+  await fs.writeFile(publicKeyPath, sshPubKey + "\n", "utf8");
+
+  // Allowed signers for verification
+  const owner = await readJsonFile(paths.ownerBinding, null);
+  const email = flags.email || `agent-${key.fingerprint.slice(0, 8)}@agent-id.local`;
+  const signerLine = `${email} ${sshPubKey}`;
+  await fs.writeFile(allowedSignersPath, signerLine + "\n", "utf8");
+
+  // Configure git
+  const gitConfigs = [
+    ["gpg.format", "ssh"],
+    ["user.signingkey", privateKeyPath],
+    ["gpg.ssh.allowedSignersFile", allowedSignersPath],
+    ["commit.gpgsign", "true"],
+  ];
+
+  for (const [k, v] of gitConfigs) {
+    const out = await execFile("git", ["config", scope, k, v]);
+    if (out.code !== 0) {
+      outputError(`git config ${scope} ${k} failed: ${out.stderr.trim()}`);
+      return;
+    }
+  }
+
+  // Set committer identity for the agent
+  const agentName = flags.name || "Agent";
+  await execFile("git", ["config", scope, "user.name", agentName]);
+  await execFile("git", ["config", scope, "user.email", email]);
+
+  stderr(`Git SSH signing configured (${scope.replace("--", "")}).`);
+  stderr(`Add this SSH public key to your GitHub account as a "Signing key":`);
+  stderr(`  GitHub → Settings → SSH and GPG keys → New SSH key → Key type: Signing Key`);
+  stderr(``);
+  stderr(sshPubKey);
+
+  const result = {
+    ok: true,
+    scope: scope.replace("--", ""),
+    privateKeyPath,
+    publicKeyPath,
+    allowedSignersPath,
+    sshPublicKey: sshPubKey,
+    fingerprint: key.fingerprint,
+    email,
+    agentName,
+  };
+
+  if (owner?.binding) {
+    result.ownerSessionSub = owner.binding.payload.ownerSessionSub;
+    result.bindingId = owner.binding.id;
+  }
+
+  outputJson(result);
+}
+
+async function cmdGitCommit(flags) {
+  const stateDir = resolveStateDir(flags);
+  const message = flags.message || flags.m;
+
+  if (!message) {
+    outputError("--message <msg> is required");
+    return;
+  }
+
+  // Read agent state for trailers
+  const paths = statePaths(stateDir);
+  const key = await readJsonFile(paths.mainKey, null);
+  const owner = await readJsonFile(paths.ownerBinding, null);
+
+  if (!key) {
+    outputError("No agent keypair. Run `init` first.");
+    return;
+  }
+
+  // Build commit message with Agent ID trailers
+  const trailers = [
+    `Agent-ID-Fingerprint: ${key.fingerprint}`,
+  ];
+  if (owner?.binding) {
+    trailers.push(`Agent-ID-Owner: ${owner.binding.payload.ownerSessionSub}`);
+    trailers.push(`Agent-ID-Binding: ${owner.binding.id}`);
+  }
+
+  const fullMessage = `${message}\n\n${trailers.join("\n")}`;
+
+  // Commit with SSH signature (uses git config from git-setup)
+  const commitArgs = ["commit", "-S", "-m", fullMessage];
+  if (flags["allow-empty"]) {
+    commitArgs.push("--allow-empty");
+  }
+
+  const commitResult = await execFile("git", commitArgs, { timeout: 30000 });
+  if (commitResult.code !== 0) {
+    outputError(`git commit failed: ${commitResult.stderr.trim()}`);
+    return;
+  }
+
+  // Get the commit hash
+  const hashResult = await execFile("git", ["rev-parse", "HEAD"]);
+  const commitHash = hashResult.stdout.trim();
+
+  // Log to audit trail if bound
+  let auditRecord = null;
+  if (owner?.binding) {
+    try {
+      const engine = new SignatureEngine({ baseDir: stateDir });
+      await engine.init();
+      auditRecord = await engine.appendOperation({
+        operationType: "GIT_COMMIT",
+        action: "git.commit",
+        payload: {
+          commitHash,
+          message,
+          fingerprint: key.fingerprint,
+        },
+        ctx: { agentId: "main" },
+      });
+    } catch {
+      // Non-fatal — commit succeeded, audit logging is best-effort
+      stderr("Warning: could not log commit to audit trail");
+    }
+  }
+
+  stderr(`Signed commit: ${commitHash.slice(0, 12)}`);
+
+  const result = {
+    ok: true,
+    commitHash,
+    signed: true,
+    fingerprint: key.fingerprint,
+  };
+  if (auditRecord) {
+    result.auditSeq = auditRecord.seq;
+    result.signatureShort = auditRecord.signatureShort;
+  }
+  outputJson(result);
+}
+
+// ─── Help ───────────────────────────────────────────────────────────────────────
+
+function printHelp() {
+  stderr(`
+Alien Agent ID — Verifiable identity for AI agents
+
+Usage: node cli.mjs <command> [flags]
+
+Commands:
+  init           Generate Ed25519 keypair and initialize state directory
+  auth           Start OIDC authorization (returns deep link + QR page)
+  bind           Poll for user approval and create owner binding
+  status         Show current Agent ID status
+  sign           Sign an operation and append to audit trail
+  verify         Verify entire state chain integrity
+  export-proof   Export proof bundle to stdout
+  git-setup      Configure git to sign commits with Agent ID key
+  git-commit     Create a signed commit with Agent ID trailers
+
+Common flags:
+  --state-dir <path>       State directory (default: ~/.agent-id)
+
+Auth flags:
+  --provider-address <addr>  Provider address (required)
+  --sso-url <url>            SSO base URL (default: https://sso.alien-api.com)
+  --oidc-origin <origin>     OIDC Origin header (default: http://localhost)
+  --no-browser               Don't auto-open browser with QR page
+
+Bind flags:
+  --timeout-sec <n>          Poll timeout (default: 300)
+  --poll-interval-ms <n>     Poll interval (default: 3000)
+  --no-require-owner-proof   Don't require owner session proof
+
+Sign flags:
+  --type <type>              Operation type (e.g., TOOL_CALL, MESSAGE_SEND)
+  --action <action>          Action name (e.g., bash.exec, message.send)
+  --payload <json>           Operation payload as JSON string
+  --agent-id <id>            Agent ID (default: main)
+
+Git flags:
+  --global                   Apply git config globally (default: local)
+  --email <email>            Committer email (default: agent-<fp>@agent-id.local)
+  --name <name>              Committer name (default: Agent)
+  --message <msg>            Commit message (required for git-commit)
+  --allow-empty              Allow empty commits
+
+All commands output JSON to stdout. Progress and errors go to stderr.
+`.trim());
+}
+
+// ─── Main ───────────────────────────────────────────────────────────────────────
+
+const commands = {
+  init: cmdInit,
+  auth: cmdAuth,
+  bind: cmdBind,
+  status: cmdStatus,
+  sign: cmdSign,
+  verify: cmdVerify,
+  "export-proof": cmdExportProof,
+  "git-setup": cmdGitSetup,
+  "git-commit": cmdGitCommit,
+};
+
+async function main() {
+  const args = process.argv.slice(2);
+  const command = args[0];
+
+  if (!command || command === "help" || command === "--help" || command === "-h") {
+    printHelp();
+    return;
+  }
+
+  const handler = commands[command];
+  if (!handler) {
+    outputError(`Unknown command: ${command}. Run with --help for usage.`);
+    return;
+  }
+
+  const flags = parseFlags(args.slice(1));
+
+  try {
+    await handler(flags);
+  } catch (err) {
+    outputError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+main();

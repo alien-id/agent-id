@@ -1,0 +1,13 @@
+{
+  "name": "alien-agent-id",
+  "version": "1.0.0",
+  "description": "Universal Agent ID - verifiable identity for AI agents linked to human owners via Alien Network SSO",
+  "type": "module",
+  "bin": {
+    "alien-agent-id": "./cli.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "UNLICENSED"
+}

@@ -1,0 +1,230 @@
+---
+name: agent-id
+description: Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Sign git commits so every line of agent-written code is cryptographically attributable to the agent and its human owner.
+license: Proprietary (internal use only)
+compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, OpenClaw, etc.)
+metadata:
+  author: Alien Wallet
+  version: "1.1.0"
+allowed-tools: Bash(node:*) Bash(git:*) Bash(xdg-open:*) Bash(open:*) Read
+---
+
+# Agent ID — Verifiable Identity for AI Agents
+
+You are an AI agent. This skill gives you a **cryptographic identity** linked to a verified human owner. Once you have it, every git commit you make is signed and traceable — from code, to you, to the human who authorized you.
+
+## 1) What you get
+
+- An **Ed25519 keypair** unique to you (this agent instance)
+- A verified **owner binding** — cryptographic proof that a real human authorized you via the Alien App
+- **SSH-signed git commits** with a "Verified" badge on GitHub
+- **Agent ID trailers** on every commit linking to your identity and your human owner
+- A **hash-chained audit log** of all your signed operations
+
+## 2) When to use
+
+**ALWAYS check for an existing Agent ID at the start of a session** if you expect to make commits or perform signed operations. If you don't have one, obtain it before proceeding.
+
+Use this skill when:
+- You are about to write code and make git commits
+- The user asks you to "sign in with Alien" or "get an Agent ID"
+- You need a verifiable identity for any operation
+- A system requires agent identity verification
+
+## 3) Prerequisites
+
+- **Node.js 18+** and **git 2.34+** available in the shell
+- **Provider address**: Ask the user if you don't have it. This is the Alien provider address for your deployment.
+- **Alien App**: The user must have it installed with a verified AlienID
+
+## 4) Resolve tool path
+
+The CLI tool is at `cli.mjs` in the same directory as this skill file. Before running any commands, resolve the absolute path. For example, if this skill file is at `/home/user/alien/agent-id/SKILL.md`, then the tool is at `/home/user/alien/agent-id/cli.mjs`.
+
+In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
+
+## 5) Obtain Agent ID — Step by Step
+
+### Step 1: Check status
+
+```bash
+node CLI status
+```
+
+If `"bound": true` — you already have an Agent ID. Skip to **Section 6**.
+
+### Step 2: Start authentication
+
+```bash
+node CLI auth --provider-address <PROVIDER_ADDRESS>
+```
+
+This returns **immediately** with JSON containing:
+- `deepLink` — URL for the Alien App
+- `qrPagePath` — local HTML file with a QR code
+- `browserOpened` — whether the QR page was auto-opened
+
+### Step 3: Show the QR code to the user
+
+**You MUST present this to the user before proceeding to Step 4.**
+
+If `browserOpened` is `true`:
+> "I've opened a QR code page in your browser. Please scan it with your Alien App to link your identity to me."
+
+If `browserOpened` is `false`, try opening it:
+```bash
+xdg-open <qrPagePath>   # Linux
+open <qrPagePath>        # macOS
+```
+
+If that also fails, show the deep link directly:
+> "Please open this link with your Alien App to verify your identity: <deepLink>"
+
+### Step 4: Wait for approval
+
+```bash
+node CLI bind --no-require-owner-proof
+```
+
+**This blocks** for up to 5 minutes while the user scans the QR code. On success:
+```json
+{"ok": true, "ownerSessionSub": "0x...", "bindingId": "...", "fingerprint": "..."}
+```
+
+Note: `--no-require-owner-proof` is needed because some Alien App versions don't yet return the session proof in the OAuth callback. The binding is still valid — it just won't include the embedded session signature proof.
+
+If it fails (timeout, rejection, expired session), run `auth` again from Step 2.
+
+### Step 5: Set up git signing
+
+```bash
+node CLI git-setup
+```
+
+This configures git in the current repository to:
+- Sign all commits with your Agent ID key (SSH signature)
+- Use your agent identity as the committer
+
+The command outputs an SSH public key. **Tell the user:**
+> "To get the 'Verified' badge on GitHub, add this SSH public key to your GitHub account:
+> Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**
+>
+> `ssh-ed25519 AAAAC3...`"
+
+The user only needs to do this once per agent keypair.
+
+**Done.** Your Agent ID is active and git signing is configured.
+
+## 6) Making signed commits
+
+### Option A: Use `git-commit` (recommended)
+
+```bash
+node CLI git-commit --message "feat: implement auth flow"
+```
+
+This creates a commit that is:
+1. **SSH-signed** with your Ed25519 key (git verifies this)
+2. **Tagged with trailers** linking to your identity and human owner:
+   ```
+   Agent-ID-Fingerprint: 945d41991dac1187...
+   Agent-ID-Owner: 0xabc123...
+   Agent-ID-Binding: uuid-here
+   ```
+3. **Logged in your audit trail** with a hash-chained signed record
+
+### Option B: Use normal `git commit`
+
+Since `git-setup` sets `commit.gpgsign = true`, any `git commit` is automatically SSH-signed. This works but does not add the Agent ID trailers or audit log entry.
+
+### What the commit looks like on GitHub
+
+```
+✓ Verified  — This commit was signed with the committer's verified signature.
+
+feat: implement auth flow
+
+Agent-ID-Fingerprint: 945d41991dac118776409673019ed0fba36e13fc9d6b5534145f9e31128a3ec6
+Agent-ID-Owner: 0x7a3f...session-address
+Agent-ID-Binding: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+Anyone can trace: **this code** → **this agent** (fingerprint) → **this human** (owner session) → **verified AlienID holder**.
+
+## 7) Signing other operations
+
+Beyond git commits, sign any significant action:
+
+```bash
+node CLI sign --type TOOL_CALL --action "bash.exec" --payload '{"command":"rm -rf /tmp/old"}'
+node CLI sign --type API_CALL --action "deploy.trigger" --payload '{"env":"staging"}'
+node CLI sign --type MESSAGE_SEND --action "slack.post" --payload '{"channel":"#ops"}'
+```
+
+Each signed operation is appended to the hash-chained audit log.
+
+## 8) Command reference
+
+| Command | Purpose | Blocking? |
+|---------|---------|-----------|
+| `status` | Check if Agent ID exists and is bound | No |
+| `init` | Generate keypair (auto-called by `auth`) | No |
+| `auth --provider-address <addr>` | Start OIDC auth, get QR page | No |
+| `bind` | Poll for approval, create owner binding | **Yes** (up to 5 min) |
+| `git-setup [--global] [--name N] [--email E]` | Configure git SSH signing | No |
+| `git-commit --message "..."` | Signed commit with trailers + audit log | No |
+| `sign --type T --action A --payload JSON` | Sign any operation | No |
+| `verify` | Verify state chain integrity | No |
+| `export-proof` | Export proof bundle to stdout | No |
+
+### Common flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--state-dir <path>` | `~/.agent-id` | State directory (or set `AGENT_ID_STATE_DIR` env var) |
+| `--provider-address <addr>` | — | Alien provider address (required for `auth`) |
+| `--sso-url <url>` | `https://sso.alien-api.com` | SSO base URL |
+| `--no-browser` | — | Don't auto-open browser for QR page |
+| `--timeout-sec <n>` | `300` | Poll timeout for `bind` |
+| `--global` | — | Apply git config globally instead of per-repo |
+| `--name <name>` | `Agent` | Git committer name |
+| `--email <email>` | auto-generated | Git committer email |
+| `--allow-empty` | — | Allow empty commits with `git-commit` |
+
+## 9) State directory
+
+```
+~/.agent-id/
+├── keys/main.json             # Ed25519 keypair (mode 0600)
+├── ssh/
+│   ├── agent-id               # SSH private key (mode 0600)
+│   ├── agent-id.pub           # SSH public key
+│   └── allowed_signers        # For git signature verification
+├── audit/operations.jsonl     # Hash-chained signed operation log
+├── owner-binding.json         # Owner binding (human ↔ agent link)
+├── owner-session.json         # Session tokens (mode 0600)
+├── nonces.json                # Per-agent nonce tracking
+├── sequence.json              # Sequence counter
+└── auth-ui/                   # Generated QR pages
+```
+
+## 10) Error handling
+
+| Error | Action |
+|-------|--------|
+| `No pending auth found` | Run `auth` before `bind` |
+| `Alien SSO authorization session expired` | Run `auth` again |
+| `User rejected Alien SSO authorization` | Ask user to try again |
+| `Timed out waiting` | Run `auth` again, remind user to scan promptly |
+| `Owner binding missing` | Complete auth + bind first |
+| `git commit failed` | Check that `git-setup` was run and files are staged |
+| `--provider-address is required` | Ask the user for the provider address |
+
+## 11) Security
+
+- Private keys stored with **0600** permissions
+- **PKCE** prevents authorization code interception
+- **Owner session proof** cryptographically binds the human's identity
+- **Hash-chained audit log** — any tampering breaks the chain
+- **Ed25519 SSH signatures** on commits provide non-repudiation
+- Never expose `owner-session.json` (contains tokens)
