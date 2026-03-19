@@ -441,6 +441,60 @@ async function cmdExportProof(flags) {
   });
 }
 
+// ─── Git Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Sync and push Agent ID proof notes to the remote.
+ * Git notes live under a single ref (refs/notes/agent-id) that contains notes
+ * for ALL commits. Pushing this ref can conflict when the remote already has
+ * notes from other commits. This helper fetches, merges, and pushes.
+ */
+async function syncAndPushNotes(remote = "origin") {
+  const notesRef = "refs/notes/agent-id";
+
+  // Try a plain push first — works when remote has no notes or we're ahead
+  const directPush = await execFile("git", ["push", remote, notesRef], { timeout: 30000 });
+  if (directPush.code === 0) {
+    return { ok: true, method: "direct" };
+  }
+
+  // Fetch remote notes into a temporary ref
+  const tmpRef = "refs/notes/agent-id-remote";
+  const fetchResult = await execFile(
+    "git",
+    ["fetch", remote, `${notesRef}:${tmpRef}`],
+    { timeout: 30000 },
+  );
+  if (fetchResult.code !== 0) {
+    // Remote has no notes yet — our direct push should have worked.
+    // Retry once in case of a transient error.
+    const retry = await execFile("git", ["push", remote, notesRef], { timeout: 30000 });
+    if (retry.code === 0) return { ok: true, method: "retry" };
+    return { ok: false, error: `fetch failed: ${fetchResult.stderr.trim()}` };
+  }
+
+  // Merge remote notes into local
+  const mergeResult = await execFile(
+    "git",
+    ["notes", "--ref=agent-id", "merge", tmpRef],
+    { timeout: 10000 },
+  );
+  if (mergeResult.code !== 0) {
+    return { ok: false, error: `notes merge failed: ${mergeResult.stderr.trim()}` };
+  }
+
+  // Clean up temporary ref
+  await execFile("git", ["update-ref", "-d", tmpRef], { timeout: 5000 });
+
+  // Push merged notes
+  const pushResult = await execFile("git", ["push", remote, notesRef], { timeout: 30000 });
+  if (pushResult.code !== 0) {
+    return { ok: false, error: `push after merge failed: ${pushResult.stderr.trim()}` };
+  }
+
+  return { ok: true, method: "fetch-merge-push" };
+}
+
 // ─── Git Commands ───────────────────────────────────────────────────────────────
 
 async function cmdGitSetup(flags) {
@@ -628,12 +682,41 @@ async function cmdGitCommit(flags) {
 
   stderr(`Signed commit: ${commitHash.slice(0, 12)}`);
 
+  // Push commit and notes if --push is set
+  let pushed = false;
+  let notesPushed = false;
+  if (flags.push) {
+    const remote = flags.remote || "origin";
+
+    // Push the commit
+    const pushResult = await execFile("git", ["push", remote], { timeout: 60000 });
+    if (pushResult.code === 0) {
+      pushed = true;
+      stderr(`Pushed to ${remote}.`);
+    } else {
+      stderr(`Warning: git push failed: ${pushResult.stderr.trim()}`);
+    }
+
+    // Sync and push proof notes
+    if (proofAttached) {
+      const notesResult = await syncAndPushNotes(remote);
+      if (notesResult.ok) {
+        notesPushed = true;
+        stderr(`Proof notes pushed to ${remote} (${notesResult.method}).`);
+      } else {
+        stderr(`Warning: could not push proof notes: ${notesResult.error}`);
+      }
+    }
+  }
+
   const result = {
     ok: true,
     commitHash,
     signed: true,
     fingerprint: key.fingerprint,
     proofAttached,
+    pushed,
+    notesPushed,
   };
   if (auditRecord) {
     result.auditSeq = auditRecord.seq;
@@ -893,6 +976,8 @@ Git flags:
   --name <name>              Committer name (default: Agent)
   --message <msg>            Commit message (required for git-commit)
   --allow-empty              Allow empty commits
+  --push                     Push commit and proof notes after committing
+  --remote <name>            Remote to push to (default: origin)
 
 Git-verify flags:
   --commit <hash>            Commit to verify (default: HEAD)

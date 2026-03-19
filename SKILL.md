@@ -135,14 +135,29 @@ This creates a commit that is:
 
 Each `git-commit` also attaches a **proof bundle** as a git note (`refs/notes/agent-id`). This contains the agent's public key, owner binding, and SSO id_token — everything needed for anyone to verify the provenance chain without access to the agent's local state.
 
-To share proof notes with a remote, push them:
+### Pushing commits and proof notes
+
+Use `--push` to push the commit **and** proof notes in one step:
+```bash
+node CLI git-commit --message "feat: implement auth flow" --push
+```
+
+This handles the proof notes automatically — git notes share a single ref (`refs/notes/agent-id`) across all commits, so pushing them requires fetching and merging with the remote first. The `--push` flag takes care of this.
+
+To push to a non-default remote:
+```bash
+node CLI git-commit --message "feat: something" --push --remote upstream
+```
+
+If you need to push notes separately (e.g., for commits already made):
 ```bash
 git push origin refs/notes/agent-id
 ```
-
-To fetch proof notes from a remote:
+If that fails due to divergence, fetch and merge first:
 ```bash
-git fetch origin refs/notes/agent-id:refs/notes/agent-id
+git fetch origin refs/notes/agent-id:refs/notes/agent-id-remote
+git notes --ref=agent-id merge refs/notes/agent-id-remote
+git push origin refs/notes/agent-id
 ```
 
 ### Option B: Use normal `git commit`
@@ -203,7 +218,7 @@ If the commit has a proof note attached (via `git-commit`), verification is **fu
 | `auth --provider-address <addr>` | Start OIDC auth, get QR page | No |
 | `bind` | Poll for approval, create owner binding | **Yes** (up to 5 min) |
 | `git-setup [--global] [--name N] [--email E]` | Configure git SSH signing | No |
-| `git-commit --message "..."` | Signed commit with trailers + audit log | No |
+| `git-commit --message "..." [--push]` | Signed commit with trailers + audit log; `--push` pushes commit and proof notes | No |
 | `git-verify [--commit <hash>]` | Verify provenance: commit → agent → human | No |
 | `sign --type T --action A --payload JSON` | Sign any operation | No |
 | `verify` | Verify state chain integrity | No |
@@ -222,6 +237,8 @@ If the commit has a proof note attached (via `git-commit`), verification is **fu
 | `--name <name>` | `Agent` | Git committer name |
 | `--email <email>` | auto-generated | Git committer email |
 | `--allow-empty` | — | Allow empty commits with `git-commit` |
+| `--push` | — | Push commit and proof notes after `git-commit` |
+| `--remote <name>` | `origin` | Remote to push to (with `--push`) |
 
 ## 9) State directory
 
