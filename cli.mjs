@@ -904,7 +904,6 @@ Auth flags:
   --provider-address <addr>  Provider address (required)
   --sso-url <url>            SSO base URL (default: https://sso.alien-api.com)
   --oidc-origin <origin>     OIDC Origin header (default: http://localhost)
-  --no-browser               Don't auto-open browser with QR page
 
 Bind flags:
   --timeout-sec <n>          Poll timeout (default: 300)
