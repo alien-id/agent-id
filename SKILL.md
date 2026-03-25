@@ -6,7 +6,7 @@ compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, Open
 metadata:
   author: Alien Wallet
   version: "1.1.0"
-allowed-tools: Bash(node:*) Bash(git:*) Bash(xdg-open:*) Bash(open:*) Read
+allowed-tools: Bash(node:*) Bash(git:*) Read
 ---
 
 # Agent ID — Verifiable Identity for AI Agents
@@ -61,24 +61,20 @@ node CLI auth --provider-address <PROVIDER_ADDRESS>
 
 This returns **immediately** with JSON containing:
 - `deepLink` — URL for the Alien App
-- `qrPagePath` — local HTML file with a QR code
-- `browserOpened` — whether the QR page was auto-opened
+- `qrCode` — the QR code as Unicode text
 
 ### Step 3: Show the QR code to the user
 
 **You MUST present this to the user before proceeding to Step 4.**
 
-If `browserOpened` is `true`:
-> "I've opened a QR code page in your browser. Please scan it with your Alien App to link your identity to me."
+Output the `qrCode` value from the JSON directly as text in your response inside a code block so the user can see and scan it. Also show the deep link as a fallback.
 
-If `browserOpened` is `false`, try opening it:
-```bash
-xdg-open <qrPagePath>   # Linux
-open <qrPagePath>        # macOS
-```
-
-If that also fails, show the deep link directly:
-> "Please open this link with your Alien App to verify your identity: <deepLink>"
+Example output:
+> Scan this QR code with your Alien App:
+> ```
+> <qrCode value from JSON>
+> ```
+> Or open this link: <deepLink>
 
 ### Step 4: Wait for approval
 
@@ -231,7 +227,6 @@ If the commit has a proof note attached (via `git-commit`), verification is **fu
 | `--state-dir <path>` | `~/.agent-id` | State directory (or set `AGENT_ID_STATE_DIR` env var) |
 | `--provider-address <addr>` | — | Alien provider address (required for `auth`) |
 | `--sso-url <url>` | `https://sso.alien-api.com` | SSO base URL |
-| `--no-browser` | — | Don't auto-open browser for QR page |
 | `--timeout-sec <n>` | `300` | Poll timeout for `bind` |
 | `--global` | — | Apply git config globally instead of per-repo |
 | `--name <name>` | `Agent` | Git committer name |
@@ -254,7 +249,6 @@ If the commit has a proof note attached (via `git-commit`), verification is **fu
 ├── owner-session.json         # Session tokens (mode 0600)
 ├── nonces.json                # Per-agent nonce tracking
 ├── sequence.json              # Sequence counter
-└── auth-ui/                   # Generated QR pages
 ```
 
 ## 10) Error handling
