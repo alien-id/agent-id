@@ -161,6 +161,52 @@ export function ed25519PemToSshPublicKey(publicKeyPem, comment) {
   return `ssh-ed25519 ${b64}${comment ? ` ${comment}` : ""}`;
 }
 
+export function ed25519PemToOpenSSHPrivateKey(privateKeyPem) {
+  const pk = createPrivateKey(privateKeyPem);
+  const pub = createPublicKey(pk);
+  const privDer = pk.export({ format: "der", type: "pkcs8" });
+  const pubDer = pub.export({ format: "der", type: "spki" });
+  const privRaw = privDer.subarray(privDer.length - 32);
+  const pubRaw = pubDer.subarray(pubDer.length - 32);
+
+  function strBuf(s) {
+    const b = Buffer.alloc(4 + s.length);
+    b.writeUInt32BE(s.length, 0);
+    b.write(s, 4);
+    return b;
+  }
+  function binBuf(d) {
+    const b = Buffer.alloc(4 + d.length);
+    b.writeUInt32BE(d.length, 0);
+    d.copy(b, 4);
+    return b;
+  }
+
+  const keytype = "ssh-ed25519";
+  const checkInt = randomBytes(4);
+  const pubBlob = Buffer.concat([strBuf(keytype), binBuf(pubRaw)]);
+  const privSection = Buffer.concat([
+    checkInt, checkInt,
+    strBuf(keytype),
+    binBuf(pubRaw),
+    binBuf(Buffer.concat([privRaw, pubRaw])),
+    strBuf(""),
+  ]);
+  const padLen = (8 - (privSection.length % 8)) % 8;
+  const padding = Buffer.alloc(padLen);
+  for (let i = 0; i < padLen; i++) padding[i] = i + 1;
+
+  const nkeysBuf = Buffer.alloc(4);
+  nkeysBuf.writeUInt32BE(1, 0);
+  const body = Buffer.concat([
+    Buffer.from("openssh-key-v1\0"),
+    strBuf("none"), strBuf("none"), binBuf(Buffer.alloc(0)),
+    nkeysBuf, binBuf(pubBlob), binBuf(Buffer.concat([privSection, padding])),
+  ]);
+  const lines = body.toString("base64").match(/.{1,70}/g);
+  return "-----BEGIN OPENSSH PRIVATE KEY-----\n" + lines.join("\n") + "\n-----END OPENSSH PRIVATE KEY-----\n";
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // State Management
 // ════════════════════════════════════════════════════════════════════════════════
@@ -1260,227 +1306,4 @@ export function verifyAgentToken(tokenB64, opts = {}) {
     timestamp: parsed.timestamp,
     nonce: parsed.nonce,
   };
-}
-
-// ════════════════════════════════════════════════════════════════════════════════
-// QR Page HTML
-// ════════════════════════════════════════════════════════════════════════════════
-
-export function buildQrPageHtml(params) {
-  const deepLinkJson = JSON.stringify(params.deepLink);
-  const pollingCodeJson = JSON.stringify(params.pollingCode);
-  const providerAddressJson = JSON.stringify(params.providerAddress);
-  const ssoBaseUrlJson = JSON.stringify(params.ssoBaseUrl);
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Alien Agent ID — Verify with Alien App</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f5f7fb;
-      --card: #ffffff;
-      --text: #14213d;
-      --muted: #51627a;
-      --accent: #009fb7;
-      --border: #d7deea;
-      --shadow: 0 16px 30px rgba(16, 24, 40, 0.12);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-      background: radial-gradient(1200px 500px at 10% -10%, #d7f9ff 0, transparent 60%), var(--bg);
-      color: var(--text);
-    }
-    .wrap {
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 28px;
-    }
-    .card {
-      width: min(780px, 100%);
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      box-shadow: var(--shadow);
-      padding: 26px;
-      display: grid;
-      gap: 18px;
-    }
-    .eyebrow {
-      color: var(--accent);
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      font-size: 12px;
-    }
-    h1 {
-      margin: 0;
-      font-size: clamp(24px, 4vw, 34px);
-      line-height: 1.12;
-    }
-    p {
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.5;
-    }
-    .grid {
-      display: grid;
-      gap: 18px;
-      grid-template-columns: 360px 1fr;
-      align-items: start;
-    }
-    .qr-box {
-      width: 360px;
-      height: 360px;
-      border-radius: 18px;
-      border: 1px solid var(--border);
-      background: #fff;
-      display: grid;
-      place-items: center;
-      overflow: hidden;
-    }
-    #qr-status {
-      font-size: 14px;
-      color: var(--muted);
-      text-align: center;
-      padding: 18px;
-    }
-    .meta {
-      display: grid;
-      gap: 10px;
-      font-size: 14px;
-    }
-    .meta code {
-      display: block;
-      white-space: pre-wrap;
-      word-break: break-all;
-      font-size: 12px;
-      line-height: 1.4;
-      padding: 10px 12px;
-      border-radius: 10px;
-      background: #f2f5f9;
-      border: 1px solid var(--border);
-    }
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 4px;
-    }
-    .btn {
-      appearance: none;
-      border: 0;
-      border-radius: 999px;
-      padding: 10px 16px;
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer;
-      text-decoration: none;
-    }
-    .btn-primary {
-      background: var(--accent);
-      color: white;
-    }
-    .btn-secondary {
-      background: #edf2f8;
-      color: #1f3557;
-    }
-    @media (max-width: 860px) {
-      .card { padding: 18px; border-radius: 16px; }
-      .grid { grid-template-columns: 1fr; }
-      .qr-box { width: min(82vw, 360px); height: min(82vw, 360px); margin: 0 auto; }
-    }
-  </style>
-</head>
-<body>
-  <main class="wrap">
-    <section class="card">
-      <div class="eyebrow">Agent Identity Verification</div>
-      <h1>Verify with Alien App</h1>
-      <p>Scan this QR code with the Alien App to link your identity to this AI agent.</p>
-      <div class="grid">
-        <div class="qr-box">
-          <div id="qrcode"></div>
-          <div id="qr-status">Preparing QR code...</div>
-        </div>
-        <div class="meta">
-          <div>
-            <strong>Polling code</strong>
-            <code id="polling-code"></code>
-          </div>
-          <div>
-            <strong>Provider address</strong>
-            <code id="provider-address"></code>
-          </div>
-          <div>
-            <strong>SSO base URL</strong>
-            <code id="sso-base-url"></code>
-          </div>
-          <div>
-            <strong>Deep link</strong>
-            <code id="deep-link"></code>
-          </div>
-          <div class="actions">
-            <a id="open-link" class="btn btn-primary" target="_blank" rel="noopener noreferrer">Open Deep Link</a>
-            <button id="copy-link" class="btn btn-secondary" type="button">Copy Link</button>
-          </div>
-        </div>
-      </div>
-    </section>
-  </main>
-  <script>
-    (function() {
-      const deepLink = ${deepLinkJson};
-      const pollingCode = ${pollingCodeJson};
-      const providerAddress = ${providerAddressJson};
-      const ssoBaseUrl = ${ssoBaseUrlJson};
-
-      document.getElementById("deep-link").textContent = deepLink;
-      document.getElementById("polling-code").textContent = pollingCode;
-      document.getElementById("provider-address").textContent = providerAddress;
-      document.getElementById("sso-base-url").textContent = ssoBaseUrl;
-      document.getElementById("open-link").href = deepLink;
-
-      const statusEl = document.getElementById("qr-status");
-      const qrEl = document.getElementById("qrcode");
-
-      document.getElementById("copy-link").addEventListener("click", async function() {
-        try {
-          await navigator.clipboard.writeText(deepLink);
-          this.textContent = "Copied";
-          setTimeout(() => { this.textContent = "Copy Link"; }, 1200);
-        } catch {
-          this.textContent = "Copy failed";
-          setTimeout(() => { this.textContent = "Copy Link"; }, 1600);
-        }
-      });
-
-      function renderQr() {
-        if (!window.QRCode) {
-          statusEl.textContent = "QR library unavailable. Use the deep link directly.";
-          return;
-        }
-        statusEl.remove();
-        new window.QRCode(qrEl, {
-          text: deepLink,
-          width: 320,
-          height: 320,
-          correctLevel: window.QRCode.CorrectLevel.M,
-        });
-      }
-
-      const script = document.createElement("script");
-      script.src = "https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js";
-      script.onload = renderQr;
-      script.onerror = () => { statusEl.textContent = "Could not load QR renderer. Use deep link button."; };
-      document.head.appendChild(script);
-    })();
-  </script>
-</body>
-</html>`;
 }

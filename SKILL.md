@@ -6,7 +6,7 @@ compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, Open
 metadata:
   author: Alien Wallet
   version: "2.0.0"
-allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Bash(xdg-open:*) Bash(open:*) Read
+allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Read
 ---
 
 # Agent ID — Identity, Authentication & Credentials for AI Agents
@@ -30,6 +30,12 @@ This generates your keypair, starts OIDC auth with Alien SSO, waits for the huma
 
 If `"alreadyBootstrapped": true` appears in the output, you're already set up.
 
+### Prerequisites
+
+- **Node.js 18+** and **git 2.34+** available in the shell
+- **Provider address**: See below for how to resolve this.
+- **Alien App**: The user must have it installed with a verified AlienID
+
 ### Resolve the CLI path first
 
 The CLI tool is at `cli.mjs` in the same directory as this skill file. Before running any commands, resolve the absolute path. In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
@@ -41,7 +47,11 @@ Bootstrap reads the provider address from (in order):
 2. `ALIEN_PROVIDER_ADDRESS` environment variable
 3. `provider.txt` file next to the CLI
 
-If none are found, ask the user for their Alien provider address.
+If none are found, ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
+
+- **Default provider**: Ask the user for the provider address.
+- **Set up your own**: Direct the user to create a SSO provider:
+  > Create your SSO provider at: https://dev.alien.org/dashboard/sso
 
 ## 1) When to use
 
@@ -290,7 +300,13 @@ node CLI init
 node CLI auth --provider-address <PROVIDER_ADDRESS>
 ```
 
-This returns a `deepLink` and `qrPagePath`. Show the QR code to the user or give them the deep link.
+This returns JSON containing a `deepLink` and a `qrCode` (Unicode text). Output the `qrCode` value directly in a code block so the user can scan it with the Alien App. Also show the deep link as a fallback:
+
+> Scan this QR code with your Alien App:
+> ```
+> <qrCode value from JSON>
+> ```
+> Or open this link: <deepLink>
 
 ### Step 3: Wait for approval
 ```bash
@@ -300,8 +316,13 @@ node CLI bind --no-require-owner-proof
 Blocks for up to 5 minutes while the user scans the QR code with Alien App.
 
 ### Step 4: Configure git signing
+
+Before running git-setup, ask the user for their **GitHub email** so commits are associated with their GitHub account:
+
+> "What email should I use for commits? This should match your GitHub account email (you can find it at GitHub → Settings → Emails). A GitHub noreply email like `user@users.noreply.github.com` works too."
+
 ```bash
-node CLI git-setup
+node CLI git-setup --email <USER_GITHUB_EMAIL>
 ```
 
 ## 8) Command reference
@@ -316,9 +337,9 @@ node CLI git-setup
 | `vault-list` | List stored credentials (no secrets shown) | No |
 | `vault-remove --service S` | Remove a credential | No |
 | `init` | Generate keypair | No |
-| `auth --provider-address <addr>` | Start OIDC auth, get QR page | No |
+| `auth --provider-address <addr>` | Start OIDC auth, get QR code | No |
 | `bind` | Poll for approval, create owner binding | **Yes** (up to 5 min) |
-| `git-setup [--global]` | Configure git SSH signing | No |
+| `git-setup [--global] [--email E]` | Configure git SSH signing | No |
 | `git-commit --message "..." [--push]` | Signed commit + trailers + proof note | No |
 | `git-verify [--commit <hash>]` | Verify provenance chain | No |
 | `sign --type T --action A --payload JSON` | Sign operation for audit trail | No |
@@ -333,6 +354,13 @@ node CLI git-setup
 | `--provider-address <addr>` | — | Alien provider address |
 | `--sso-url <url>` | `https://sso.alien-api.com` | SSO base URL |
 | `--raw` | — | Output raw text instead of JSON (auth-header) |
+| `--timeout-sec <n>` | `300` | Poll timeout for `bind` |
+| `--global` | — | Apply git config globally instead of per-repo |
+| `--name <name>` | `Agent` | Git committer name |
+| `--email <email>` | auto-generated | Git committer email |
+| `--allow-empty` | — | Allow empty commits with `git-commit` |
+| `--push` | — | Push commit and proof notes after `git-commit` |
+| `--remote <name>` | `origin` | Remote to push to (with `--push`) |
 
 ## 9) State directory
 
@@ -348,11 +376,10 @@ node CLI git-setup
 │   ├── slack.json
 │   └── ...
 ├── audit/operations.jsonl     # Hash-chained signed operation log
-├── owner-binding.json         # Owner binding (human <-> agent link)
+├── owner-binding.json         # Owner binding (human ↔ agent link)
 ├── owner-session.json         # Session tokens (mode 0600) — NEVER commit
-├── nonces.json
-├── sequence.json
-└── auth-ui/                   # Generated QR pages
+├── nonces.json                # Per-agent nonce tracking
+├── sequence.json              # Sequence counter
 ```
 
 ## 10) Integration patterns

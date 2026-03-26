@@ -30,8 +30,8 @@ import {
   verifyOwnerSessionProof,
   verifyState,
   SignatureEngine,
-  buildQrPageHtml,
   ed25519PemToSshPublicKey,
+  ed25519PemToOpenSSHPrivateKey,
   canonicalJSONString,
   sha256Hex,
   sha256HexCanonical,
@@ -41,6 +41,7 @@ import {
   vaultDecrypt,
   createAgentToken,
 } from "./lib.mjs";
+import qrcode from "./qrcode.cjs";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -97,36 +98,6 @@ function execFile(command, args, options = {}) {
   });
 }
 
-async function tryOpenBrowser(urlOrPath) {
-  const hasDisplay = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
-  const isWsl = Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
-  const attempts = [];
-
-  if (process.platform === "darwin") {
-    attempts.push(["open", [urlOrPath]]);
-  } else if (process.platform === "win32") {
-    attempts.push(["cmd", ["/c", "start", "", urlOrPath]]);
-  } else if (process.platform === "linux") {
-    if (!hasDisplay && !isWsl) {
-      return { opened: false, reason: "no display (DISPLAY/WAYLAND_DISPLAY missing)" };
-    }
-    if (isWsl) {
-      attempts.push(["wslview", [urlOrPath]]);
-    }
-    attempts.push(["xdg-open", [urlOrPath]]);
-  } else {
-    return { opened: false, reason: `unsupported platform ${process.platform}` };
-  }
-
-  for (const [cmd, args] of attempts) {
-    const out = await execFile(cmd, args);
-    if (out.code === 0) {
-      return { opened: true, command: cmd };
-    }
-  }
-  return { opened: false, reason: "all browser-open commands failed" };
-}
-
 // ─── Commands ───────────────────────────────────────────────────────────────────
 
 async function cmdInit(flags) {
@@ -173,8 +144,6 @@ async function cmdAuth(flags) {
   const providerAddress = flags["provider-address"];
   const ssoBaseUrl = flags["sso-url"] || "https://sso.alien-api.com";
   const oidcOrigin = flags["oidc-origin"] || "http://localhost";
-  const openBrowser = flags.browser !== false;
-
   if (!providerAddress) {
     outputError("--provider-address is required");
     return;
@@ -216,39 +185,18 @@ async function cmdAuth(flags) {
   });
   await setPrivateFilePermissions(paths.pendingAuth);
 
-  // Generate QR page
-  const qrDir = path.join(stateDir, "auth-ui");
-  await ensureDir(qrDir);
-  const qrPath = path.join(qrDir, `qr-${Date.now()}.html`);
-  const html = buildQrPageHtml({
-    deepLink: auth.deepLink,
-    pollingCode: auth.pollingCode,
-    providerAddress,
-    ssoBaseUrl,
+  // Generate QR code text for agent to display
+  let qrText = "";
+  qrcode.generate(auth.deepLink, { small: true }, (code) => {
+    qrText = code;
   });
-  await fs.writeFile(qrPath, html, "utf8");
-
-  // Try opening in browser
-  let browserOpened = false;
-  if (openBrowser) {
-    const { pathToFileURL } = await import("node:url");
-    const fileUrl = pathToFileURL(qrPath).href;
-    const result = await tryOpenBrowser(fileUrl);
-    browserOpened = result.opened;
-    if (result.opened) {
-      stderr(`Opened QR page in browser via ${result.command}.`);
-    } else {
-      stderr(`Could not auto-open browser: ${result.reason}`);
-    }
-  }
 
   const result = {
     ok: true,
     deepLink: auth.deepLink,
+    qrCode: qrText,
     pollingCode: auth.pollingCode,
     expiredAt: auth.expiredAt,
-    qrPagePath: qrPath,
-    browserOpened,
     message: "Ask the user to open the deep link or scan the QR code with Alien App",
   };
   if (!flags._noOutput) {
@@ -530,8 +478,9 @@ async function cmdGitSetup(flags) {
   const publicKeyPath = path.join(sshDir, "agent-id.pub");
   const allowedSignersPath = path.join(sshDir, "allowed_signers");
 
-  // Private key (PKCS8 PEM — supported by ssh-keygen since OpenSSH 7.8)
-  await fs.writeFile(privateKeyPath, key.privateKeyPem, { encoding: "utf8", mode: 0o600 });
+  // Private key in OpenSSH format (required by ssh-keygen for Ed25519 signing)
+  const opensshKey = ed25519PemToOpenSSHPrivateKey(key.privateKeyPem);
+  await fs.writeFile(privateKeyPath, opensshKey, { encoding: "utf8", mode: 0o600 });
   await setPrivateFilePermissions(privateKeyPath);
 
   // Public key in SSH format
@@ -1285,7 +1234,6 @@ Auth flags:
   --provider-address <addr>  Provider address (required)
   --sso-url <url>            SSO base URL (default: https://sso.alien-api.com)
   --oidc-origin <origin>     OIDC Origin header (default: http://localhost)
-  --no-browser               Don't auto-open browser with QR page
 
 Bind flags:
   --timeout-sec <n>          Poll timeout (default: 300)
