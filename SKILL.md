@@ -34,7 +34,7 @@ Use this skill when:
 ## 3) Prerequisites
 
 - **Node.js 18+** and **git 2.34+** available in the shell
-- **Provider address**: Ask the user if you don't have it. This is the Alien provider address for your deployment.
+- **Provider address**: See Step 2 below for how to resolve this.
 - **Alien App**: The user must have it installed with a verified AlienID
 
 ## 4) Resolve tool path
@@ -53,7 +53,33 @@ node CLI status
 
 If `"bound": true` — you already have an Agent ID. Skip to **Section 6**.
 
-### Step 2: Start authentication
+### Step 2: Choose provider and start authentication
+
+Ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
+
+- **Default provider**: Read the file `provider.txt` in the same directory as this skill file to get the address. Proceed to the `auth` command below.
+- **Set up your own**: Show the user this QR code and link to create a SSO provider. Wait for them to provide the address before proceeding.
+  > Scan or open to set up your provider: https://dev.alien.org/dashboard/sso
+  > ```
+  > ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+  > █ ▄▄▄▄▄ █▄▄████▀ ▄▀ ▄▄█ ▄▄▄▄▄ █
+  > █ █   █ █ ▀█ ▄▄▄▄█▀█▀▄█ █   █ █
+  > █ █▄▄▄█ █▄ ▄▄▀▄▀██▄█  █ █▄▄▄█ █
+  > █▄▄▄▄▄▄▄█▄▀▄▀▄▀ ▀ ▀ ▀▄█▄▄▄▄▄▄▄█
+  > █▄▄  ▀▀▄▀▄▀███▄▄▄ ▄▄ ▀ ▀▀ ▄▄█ █
+  > █ ▄▀▄█▀▄ ▀██▀▀▀ ▀ █▀█▄▀▀  █▄▄▀█
+  > ██▀▄██ ▄█ ▄▀ █▀█  ▄█▀▄█▀▀█▄ ▀▀█
+  > ██▀▀▄▀█▄▀▄ ▄█ ▀▄███▀   █▀ █▄ ▄█
+  > ██  ▄ ▀▄█▄ █▄▀▀█▀▄█▄▄ ▄█▀▄ ▀ ██
+  > █▄█▀▀ ▄▄▄█▄ ▄ ██   ▄▀█ ▄▄▄█ ███
+  > ██▄▄▄██▄▄  █▄  ▀▄▄  █ ▄▄▄   ▀▀█
+  > █ ▄▄▄▄▄ ██  ▄▄▄████   █▄█  █ ██
+  > █ █   █ █▀  ▀ █  ▀ ██▄ ▄  ▀▄▄▀█
+  > █ █▄▄▄█ █ █▄ █▄▀█▄███ ██▄▀▀▄▀▄█
+  > █▄▄▄▄▄▄▄█▄███▄█▄█▄█▄▄▄▄█████▄██
+  > ```
+
+Then run:
 
 ```bash
 node CLI auth --provider-address <PROVIDER_ADDRESS>
