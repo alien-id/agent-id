@@ -158,6 +158,52 @@ export function ed25519PemToSshPublicKey(publicKeyPem, comment) {
   return `ssh-ed25519 ${b64}${comment ? ` ${comment}` : ""}`;
 }
 
+export function ed25519PemToOpenSSHPrivateKey(privateKeyPem) {
+  const pk = createPrivateKey(privateKeyPem);
+  const pub = createPublicKey(pk);
+  const privDer = pk.export({ format: "der", type: "pkcs8" });
+  const pubDer = pub.export({ format: "der", type: "spki" });
+  const privRaw = privDer.subarray(privDer.length - 32);
+  const pubRaw = pubDer.subarray(pubDer.length - 32);
+
+  function strBuf(s) {
+    const b = Buffer.alloc(4 + s.length);
+    b.writeUInt32BE(s.length, 0);
+    b.write(s, 4);
+    return b;
+  }
+  function binBuf(d) {
+    const b = Buffer.alloc(4 + d.length);
+    b.writeUInt32BE(d.length, 0);
+    d.copy(b, 4);
+    return b;
+  }
+
+  const keytype = "ssh-ed25519";
+  const checkInt = randomBytes(4);
+  const pubBlob = Buffer.concat([strBuf(keytype), binBuf(pubRaw)]);
+  const privSection = Buffer.concat([
+    checkInt, checkInt,
+    strBuf(keytype),
+    binBuf(pubRaw),
+    binBuf(Buffer.concat([privRaw, pubRaw])),
+    strBuf(""),
+  ]);
+  const padLen = (8 - (privSection.length % 8)) % 8;
+  const padding = Buffer.alloc(padLen);
+  for (let i = 0; i < padLen; i++) padding[i] = i + 1;
+
+  const nkeysBuf = Buffer.alloc(4);
+  nkeysBuf.writeUInt32BE(1, 0);
+  const body = Buffer.concat([
+    Buffer.from("openssh-key-v1\0"),
+    strBuf("none"), strBuf("none"), binBuf(Buffer.alloc(0)),
+    nkeysBuf, binBuf(pubBlob), binBuf(Buffer.concat([privSection, padding])),
+  ]);
+  const lines = body.toString("base64").match(/.{1,70}/g);
+  return "-----BEGIN OPENSSH PRIVATE KEY-----\n" + lines.join("\n") + "\n-----END OPENSSH PRIVATE KEY-----\n";
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // State Management
 // ════════════════════════════════════════════════════════════════════════════════

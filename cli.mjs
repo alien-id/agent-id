@@ -29,6 +29,7 @@ import {
   verifyState,
   SignatureEngine,
   ed25519PemToSshPublicKey,
+  ed25519PemToOpenSSHPrivateKey,
   canonicalJSONString,
   sha256Hex,
   sha256HexCanonical,
@@ -463,8 +464,9 @@ async function cmdGitSetup(flags) {
   const publicKeyPath = path.join(sshDir, "agent-id.pub");
   const allowedSignersPath = path.join(sshDir, "allowed_signers");
 
-  // Private key (PKCS8 PEM — supported by ssh-keygen since OpenSSH 7.8)
-  await fs.writeFile(privateKeyPath, key.privateKeyPem, { encoding: "utf8", mode: 0o600 });
+  // Private key in OpenSSH format (required by ssh-keygen for Ed25519 signing)
+  const opensshKey = ed25519PemToOpenSSHPrivateKey(key.privateKeyPem);
+  await fs.writeFile(privateKeyPath, opensshKey, { encoding: "utf8", mode: 0o600 });
   await setPrivateFilePermissions(privateKeyPath);
 
   // Public key in SSH format
