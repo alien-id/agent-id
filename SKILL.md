@@ -119,13 +119,19 @@ If it fails (timeout, rejection, expired session), run `auth` again from Step 2.
 
 ### Step 5: Set up git signing
 
+Before running git-setup, ask the user for their **GitHub email** so commits are associated with their GitHub account. Without this, GitHub will show commits as "Unverified" even if the signature is valid.
+
+> "What email should I use for commits? This should match your GitHub account email (you can find it at GitHub → Settings → Emails). A GitHub noreply email like `user@users.noreply.github.com` works too."
+
+Then run:
+
 ```bash
-node CLI git-setup
+node CLI git-setup --email <USER_GITHUB_EMAIL>
 ```
 
 This configures git in the current repository to:
 - Sign all commits with your Agent ID key (SSH signature)
-- Use your agent identity as the committer
+- Use the provided email as the committer email
 
 The command outputs an SSH public key. **Tell the user:**
 > "To get the 'Verified' badge on GitHub, add this SSH public key to your GitHub account:
