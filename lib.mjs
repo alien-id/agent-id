@@ -12,6 +12,9 @@ import {
   sign,
   verify,
   randomBytes,
+  createCipheriv,
+  createDecipheriv,
+  hkdfSync,
 } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -222,6 +225,7 @@ export function statePaths(baseDir) {
     subagentKeysDir: path.join(baseDir, "keys", "subagents"),
     delegationsDir: path.join(baseDir, "delegations"),
     auditJsonl: path.join(baseDir, "audit", "operations.jsonl"),
+    vaultDir: path.join(baseDir, "vault"),
   };
 }
 
@@ -1144,6 +1148,117 @@ export async function verifyState(baseDir) {
     operations: auditRecords.length,
     agents: Array.from(keyByAgent.keys()).sort(),
     subagentDelegations: Array.from(delegationsByChild.keys()).sort(),
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Vault — Encrypted credential storage linked to agent identity
+// ════════════════════════════════════════════════════════════════════════════════
+
+export function deriveVaultKey(privateKeyPem) {
+  const privKey = createPrivateKey(privateKeyPem);
+  const rawKey = privKey.export({ type: "pkcs8", format: "der" });
+  return Buffer.from(
+    hkdfSync("sha256", rawKey, "agent-id-vault-v1", "vault-encryption", 32),
+  );
+}
+
+export function vaultEncrypt(key, plaintext) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([
+    cipher.update(plaintext, "utf8"),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+  return {
+    iv: iv.toString("hex"),
+    data: encrypted.toString("hex"),
+    tag: tag.toString("hex"),
+  };
+}
+
+export function vaultDecrypt(key, entry) {
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    key,
+    Buffer.from(entry.iv, "hex"),
+  );
+  decipher.setAuthTag(Buffer.from(entry.tag, "hex"));
+  const decrypted = Buffer.concat([
+    decipher.update(Buffer.from(entry.data, "hex")),
+    decipher.final(),
+  ]);
+  return decrypted.toString("utf8");
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Agent Auth Token — Self-contained signed assertions for service authentication
+// ════════════════════════════════════════════════════════════════════════════════
+
+export function createAgentToken(params) {
+  const payload = {
+    v: 1,
+    fingerprint: params.fingerprint,
+    publicKeyPem: params.publicKeyPem,
+    owner: params.ownerSessionSub || null,
+    timestamp: nowMs(),
+    nonce: randomBytes(16).toString("hex"),
+  };
+  const canonical = canonicalJSONString(payload);
+  const signature = signEd25519Base64Url(canonical, params.privateKeyPem);
+  return b64url(JSON.stringify({ ...payload, sig: signature }));
+}
+
+export function verifyAgentToken(tokenB64, opts = {}) {
+  const maxAgeMs = opts.maxAgeMs || 5 * 60 * 1000;
+
+  let parsed;
+  try {
+    const json = fromB64url(tokenB64).toString("utf8");
+    parsed = JSON.parse(json);
+  } catch {
+    return { ok: false, error: "Invalid token encoding" };
+  }
+
+  if (parsed.v !== 1) {
+    return { ok: false, error: `Unsupported token version: ${parsed.v}` };
+  }
+
+  const age = nowMs() - parsed.timestamp;
+  if (age < 0 || age > maxAgeMs) {
+    return { ok: false, error: `Token expired (age: ${Math.round(age / 1000)}s)` };
+  }
+
+  let computedFingerprint;
+  try {
+    computedFingerprint = fingerprintPublicKeyPem(parsed.publicKeyPem);
+  } catch {
+    return { ok: false, error: "Invalid public key in token" };
+  }
+  if (computedFingerprint !== parsed.fingerprint) {
+    return { ok: false, error: "Fingerprint does not match public key" };
+  }
+
+  const { sig, ...payloadFields } = parsed;
+  const canonical = canonicalJSONString(payloadFields);
+  let sigOk;
+  try {
+    sigOk = verifyEd25519Base64Url(canonical, sig, parsed.publicKeyPem);
+  } catch {
+    return { ok: false, error: "Signature verification error" };
+  }
+  if (!sigOk) {
+    return { ok: false, error: "Signature verification failed" };
+  }
+
+  return {
+    ok: true,
+    fingerprint: parsed.fingerprint,
+    publicKeyPem: parsed.publicKeyPem,
+    owner: parsed.owner,
+    timestamp: parsed.timestamp,
+    nonce: parsed.nonce,
   };
 }
 
