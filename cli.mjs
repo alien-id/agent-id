@@ -555,6 +555,9 @@ async function cmdGitCommit(flags) {
     trailers.push(`Agent-ID-Binding: ${owner.binding.id}`);
   }
 
+  const coAuthor = `Co-Authored-By: Alien Agent <${key.fingerprint ? `agent-${key.fingerprint.slice(0, 8)}@agent-id.local` : "agent@agent-id.local"}>`;
+  trailers.push(coAuthor);
+
   const fullMessage = `${message}\n\n${trailers.join("\n")}`;
 
   // Commit with SSH signature (uses git config from git-setup)
