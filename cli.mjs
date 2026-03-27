@@ -559,14 +559,25 @@ async function cmdGitCommit(flags) {
 
   const agentEmail = key.fingerprint ? `agent-${key.fingerprint.slice(0, 8)}@agent-id.local` : "agent@agent-id.local";
 
+  // Resolve human (owner) identity for committer
+  const humanName = flags.committer || owner?.binding?.payload?.ownerSessionSub || "Human";
+  const humanEmail = flags["committer-email"] || flags.email || agentEmail;
+
   // Commit with SSH signature (uses git config from git-setup)
-  // Agent is the author (wrote the code), human committer is preserved from git config
+  // Agent is the author (wrote the code), human is the committer (reviewed and applied)
   const commitArgs = ["commit", "-S", "-m", fullMessage, "--author", `Alien Agent <${agentEmail}>`];
   if (flags["allow-empty"]) {
     commitArgs.push("--allow-empty");
   }
 
-  const commitResult = await execFile("git", commitArgs, { timeout: 30000 });
+  const commitResult = await execFile("git", commitArgs, {
+    timeout: 30000,
+    env: {
+      ...process.env,
+      GIT_COMMITTER_NAME: humanName,
+      GIT_COMMITTER_EMAIL: humanEmail,
+    },
+  });
   if (commitResult.code !== 0) {
     outputError(`git commit failed: ${commitResult.stderr.trim()}`);
     return;
