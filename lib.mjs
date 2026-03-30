@@ -526,6 +526,26 @@ export async function exchangeAuthorizationCode(params) {
   return out;
 }
 
+export async function refreshSession(params) {
+  const base = withNoTrailingSlash(params.ssoBaseUrl);
+  const body = new URLSearchParams();
+  body.set("grant_type", "refresh_token");
+  body.set("refresh_token", params.refreshToken);
+  body.set("client_id", params.providerAddress);
+
+  const out = await fetchJson(`${base}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  if (!out.access_token) {
+    throw new Error("Refresh response missing access_token");
+  }
+
+  return out;
+}
+
 export async function fetchOidcDiscovery(ssoBaseUrl) {
   const base = withNoTrailingSlash(ssoBaseUrl);
   return await fetchJson(`${base}/.well-known/openid-configuration`, { method: "GET" });
@@ -859,6 +879,7 @@ export class SignatureEngine {
     const ownerSessionRecord = {
       version: 1,
       issuer: params.issuer,
+      ssoBaseUrl: params.ssoBaseUrl || params.issuer,
       providerAddress: params.providerAddress,
       ownerSessionSub: params.ownerSessionSub,
       idToken: params.idToken,
@@ -871,6 +892,51 @@ export class SignatureEngine {
     await setPrivateFilePermissions(this.paths.ownerSession);
 
     return ownerRecord;
+  }
+
+  async ensureValidSession(opts = {}) {
+    const session = await readJsonFile(this.paths.ownerSession, null);
+    if (!session?.accessToken) return null;
+
+    const bufferSec = opts.bufferSec ?? 60;
+
+    // Decode the access_token JWT to check expiry (no signature verification —
+    // we just need to know if it's still fresh).
+    let expired = false;
+    try {
+      const payload = parseJwt(session.accessToken).payload;
+      const nowSec = Math.floor(Date.now() / 1000);
+      expired = typeof payload.exp === "number" && payload.exp - bufferSec <= nowSec;
+    } catch {
+      // If the access_token isn't a JWT (opaque token), treat it as expired
+      // so we attempt a refresh.
+      expired = true;
+    }
+
+    if (!expired) return session;
+
+    // No refresh_token — can't renew.
+    if (!session.refreshToken) return null;
+
+    // Resolve SSO base URL: explicit field, fall back to issuer.
+    const ssoBaseUrl = session.ssoBaseUrl || session.issuer;
+    if (!ssoBaseUrl) return null;
+
+    const fresh = await refreshSession({
+      ssoBaseUrl,
+      refreshToken: session.refreshToken,
+      providerAddress: session.providerAddress,
+    });
+
+    session.accessToken = fresh.access_token;
+    if (fresh.refresh_token) session.refreshToken = fresh.refresh_token;
+    if (fresh.id_token) session.idToken = fresh.id_token;
+    session.refreshedAt = nowMs();
+
+    await writeJsonFile(this.paths.ownerSession, session);
+    await setPrivateFilePermissions(this.paths.ownerSession);
+
+    return session;
   }
 
   async nextNonce(agentId) {

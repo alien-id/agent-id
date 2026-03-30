@@ -5,7 +5,7 @@
 //
 // Commands: bootstrap, init, auth, bind, status, sign, verify, export-proof,
 //           git-setup, git-commit, git-verify, vault-store, vault-get, vault-list,
-//           vault-remove, auth-header
+//           vault-remove, auth-header, refresh
 
 import path from "node:path";
 import os from "node:os";
@@ -275,6 +275,7 @@ async function cmdBind(flags) {
   await engine.init();
   const owner = await engine.bindOwnerSession({
     issuer: id.issuer,
+    ssoBaseUrl: pending.ssoBaseUrl,
     providerAddress: pending.providerAddress,
     ownerSessionSub: id.payload.sub,
     ownerAudience: id.payload.aud,
@@ -955,11 +956,7 @@ async function cmdBootstrap(flags) {
   });
 
   // 5. Tell the user what to do
-  if (authResult.browserOpened) {
-    stderr("QR code opened in browser. Scan with Alien App to authorize this agent.");
-  } else {
-    stderr(`Open this link with your Alien App: ${authResult.deepLink}`);
-  }
+  stderr(`Open this link with your Alien App: ${authResult.deepLink}`);
 
   // 6. Bind (poll for approval)
   const bindResult = await cmdBind({
@@ -1165,6 +1162,37 @@ async function cmdVaultRemove(flags) {
   }
 }
 
+// ─── Session Refresh ─────────────────────────────────────────────────────────────
+
+async function cmdRefresh(flags) {
+  const stateDir = resolveStateDir(flags);
+  const engine = new SignatureEngine({ baseDir: stateDir });
+  await engine.init();
+
+  try {
+    const session = await engine.ensureValidSession({ bufferSec: 0 });
+    if (!session) {
+      outputError("No session to refresh. Run `bootstrap` first.");
+      return;
+    }
+    outputJson({
+      ok: true,
+      refreshedAt: session.refreshedAt || null,
+      ownerSessionSub: session.ownerSessionSub,
+      providerAddress: session.providerAddress,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("401") || msg.includes("403") || msg.includes("invalid_grant")) {
+      outputError(
+        `Session refresh failed (authorization may have been revoked): ${msg}. Run \`bootstrap\` to re-authenticate.`,
+      );
+    } else {
+      throw err;
+    }
+  }
+}
+
 // ─── Auth Header ────────────────────────────────────────────────────────────────
 
 async function cmdAuthHeader(flags) {
@@ -1175,6 +1203,17 @@ async function cmdAuthHeader(flags) {
   if (!key) {
     outputError("No agent keypair. Run `bootstrap` or `init` first.");
     return;
+  }
+
+  // Transparently refresh the SSO session if the access_token is expired.
+  const engine = new SignatureEngine({ baseDir: stateDir });
+  await engine.init();
+  try {
+    await engine.ensureValidSession();
+  } catch {
+    // Non-fatal: auth-header uses the local keypair, not the access_token.
+    // Log but don't block.
+    stderr("Warning: SSO session refresh failed. Local auth tokens still work.");
   }
 
   const owner = await readJsonFile(paths.ownerBinding, null);
@@ -1222,6 +1261,7 @@ Commands:
   git-commit     Create a signed commit with Agent ID trailers
   git-verify     Verify provenance chain of a signed commit
   auth-header    Generate a signed authentication token for service calls
+  refresh        Refresh SSO session tokens (access_token / refresh_token)
   vault-store    Store an encrypted credential in the agent vault
   vault-get      Retrieve a decrypted credential from the vault
   vault-list     List all stored credentials
@@ -1298,6 +1338,7 @@ const commands = {
   "vault-list": cmdVaultList,
   "vault-remove": cmdVaultRemove,
   "auth-header": cmdAuthHeader,
+  refresh: cmdRefresh,
 };
 
 async function main() {
