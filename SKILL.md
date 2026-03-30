@@ -61,19 +61,37 @@ If none are found, ask the user: **"Would you like to use the default Alien prov
 node CLI status
 ```
 
-If `"bound": true` — you have an identity. If not, run `bootstrap`.
+If `"bound": true` — you already have an Agent ID. Skip to **Section 6**.
 
-Use this skill when:
-- You need to make git commits (always sign them)
-- You need to call a service that requires agent authentication
-- You need credentials for an external service (GitHub API, AWS, etc.)
-- The user asks you to "sign in with Alien" or "get an Agent ID"
+### Step 2: Choose provider and start authentication
 
-## 2) Authenticating with services
+**IMPORTANT: You MUST ask the user before proceeding. Never silently read `provider.txt` and use it without asking. The user must explicitly choose their provider.**
 
-### Alien-aware services (Agent ID token)
+Ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
 
-Generate a signed authentication token:
+- **Default provider**: Only after the user confirms, read the file `provider.txt` in the same directory as this skill file to get the address. Proceed to the `auth` command below.
+- **Set up your own**: Show the user this QR code and link to create a SSO provider. Wait for them to provide the address before proceeding.
+  > Scan or open to set up your provider: https://dev.alien.org/dashboard/sso
+  > ```
+  > ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+  > █ ▄▄▄▄▄ █▄▄████▀ ▄▀ ▄▄█ ▄▄▄▄▄ █
+  > █ █   █ █ ▀█ ▄▄▄▄█▀█▀▄█ █   █ █
+  > █ █▄▄▄█ █▄ ▄▄▀▄▀██▄█  █ █▄▄▄█ █
+  > █▄▄▄▄▄▄▄█▄▀▄▀▄▀ ▀ ▀ ▀▄█▄▄▄▄▄▄▄█
+  > █▄▄  ▀▀▄▀▄▀███▄▄▄ ▄▄ ▀ ▀▀ ▄▄█ █
+  > █ ▄▀▄█▀▄ ▀██▀▀▀ ▀ █▀█▄▀▀  █▄▄▀█
+  > ██▀▄██ ▄█ ▄▀ █▀█  ▄█▀▄█▀▀█▄ ▀▀█
+  > ██▀▀▄▀█▄▀▄ ▄█ ▀▄███▀   █▀ █▄ ▄█
+  > ██  ▄ ▀▄█▄ █▄▀▀█▀▄█▄▄ ▄█▀▄ ▀ ██
+  > █▄█▀▀ ▄▄▄█▄ ▄ ██   ▄▀█ ▄▄▄█ ███
+  > ██▄▄▄██▄▄  █▄  ▀▄▄  █ ▄▄▄   ▀▀█
+  > █ ▄▄▄▄▄ ██  ▄▄▄████   █▄█  █ ██
+  > █ █   █ █▀  ▀ █  ▀ ██▄ ▄  ▀▄▄▀█
+  > █ █▄▄▄█ █ █▄ █▄▀█▄███ ██▄▀▀▄▀▄█
+  > █▄▄▄▄▄▄▄█▄███▄█▄█▄█▄▄▄▄█████▄██
+  > ```
+
+Then run:
 
 ```bash
 node CLI auth-header
@@ -178,9 +196,15 @@ node CLI vault-store --service github --type api-key --credential "ghp_xxx"
 node CLI vault-get --service github
 ```
 
-**IMPORTANT:** Prefer `--credential-file` or `--credential-env` over `--credential`. The `--credential` flag puts the secret in the process argument list, visible via `ps`. The other methods keep it off the command line entirely.
-
-### Credential types
+This creates a commit that is:
+1. **SSH-signed** with your Ed25519 key (git verifies this)
+2. **Tagged with trailers** linking to your identity and human owner:
+   ```
+   Agent-ID-Fingerprint: 945d41991dac1187...
+   Agent-ID-Owner: 0000000301...
+   Agent-ID-Binding: uuid-here
+   ```
+3. **Logged in your audit trail** with a hash-chained signed record
 
 Use `--type` to tag what kind of credential it is:
 - `api-key` — API key / personal access token (default)
