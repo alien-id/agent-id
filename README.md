@@ -1,20 +1,3 @@
----
-title: "Agent ID"
-description: "Verifiable cryptographic identity for AI agents, linked to human owners via Alien Network SSO"
-author: "Alien Wallet"
-created: "2026-03-12"
-updated: "2026-03-30"
-version: "1.1.0"
-status: "draft"
-tags: ["agent-identity", "cryptography", "git-signing", "sso", "oidc"]
-category: "guide"
-related:
-  - "./SKILL.md"
-refs:
-  - https://alien.id
-  - https://developer.alien.id
----
-
 # Agent ID
 
 > Verifiable cryptographic identity for AI agents, linked to human owners
