@@ -13,7 +13,7 @@
     {
       "name": "agent-id",
       "description": "Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Sign git commits so every line of agent-written code is cryptographically attributable.",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "source": {
         "source": "url",
         "url": "https://github.com/alien-id/agent-id.git"

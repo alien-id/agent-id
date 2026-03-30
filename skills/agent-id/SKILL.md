@@ -5,7 +5,7 @@ license: Proprietary (internal use only)
 compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, OpenClaw, etc.)
 metadata:
   author: Alien Wallet
-  version: "2.0.0"
+  version: "2.0.1"
 allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Read
 ---
 
@@ -38,7 +38,7 @@ If `"alreadyBootstrapped": true` appears in the output, you're already set up.
 
 ### Resolve the CLI path first
 
-The CLI tool is at `cli.mjs` in the same directory as this skill file. Before running any commands, resolve the absolute path. In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
+The CLI tool is at `cli.mjs` two directories up from this skill file. Before running any commands, resolve the absolute path. In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
 
 ### Provider address
 
