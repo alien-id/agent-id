@@ -1,51 +1,61 @@
 ---
 name: agent-id
-description: Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Sign git commits so every line of agent-written code is cryptographically attributable to the agent and its human owner.
+description: Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Authenticate with Alien-aware services. Store and retrieve credentials for external services (GitHub, Slack, AWS, etc.). Sign git commits so every line of agent-written code is cryptographically attributable.
 license: Proprietary (internal use only)
 compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, OpenClaw, etc.)
 metadata:
   author: Alien Wallet
-  version: "1.1.0"
-allowed-tools: Bash(node:*) Bash(git:*) Read
+  version: "2.0.0"
+allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Read
 ---
 
-# Agent ID — Verifiable Identity for AI Agents
+# Agent ID — Identity, Authentication & Credentials for AI Agents
 
-You are an AI agent. This skill gives you a **cryptographic identity** linked to a verified human owner. Once you have it, every git commit you make is signed and traceable — from code, to you, to the human who authorized you.
+You are an AI agent. This skill gives you:
 
-## 1) What you get
+1. **A cryptographic identity** linked to a verified human owner (Alien Network)
+2. **Service authentication** — signed tokens accepted by Alien-aware services
+3. **A credential vault** — encrypted storage for API keys, passwords, OAuth tokens
+4. **Signed git commits** — every commit traceable to you and your human owner
 
-- An **Ed25519 keypair** unique to you (this agent instance)
-- A verified **owner binding** — cryptographic proof that a real human authorized you via the Alien App
-- **SSH-signed git commits** with a "Verified" badge on GitHub
-- **Agent ID trailers** on every commit linking to your identity and your human owner
-- A **hash-chained audit log** of all your signed operations
+## Quick Start — Bootstrap
 
-## 2) When to use
+Run one command to go from zero to a working identity:
 
-**ALWAYS check for an existing Agent ID at the start of a session** if you expect to make commits or perform signed operations. If you don't have one, obtain it before proceeding.
+```bash
+node CLI bootstrap
+```
 
-Use this skill when:
-- You are about to write code and make git commits
-- The user asks you to "sign in with Alien" or "get an Agent ID"
-- You need a verifiable identity for any operation
-- A system requires agent identity verification
+This generates your keypair, starts OIDC auth with Alien SSO, waits for the human owner to approve (via QR code / Alien App), and configures git signing — all in one step.
 
-## 3) Prerequisites
+If `"alreadyBootstrapped": true` appears in the output, you're already set up.
+
+### Prerequisites
 
 - **Node.js 18+** and **git 2.34+** available in the shell
-- **Provider address**: See Step 2 below for how to resolve this.
+- **Provider address**: See below for how to resolve this.
 - **Alien App**: The user must have it installed with a verified AlienID
 
-## 4) Resolve tool path
+### Resolve the CLI path first
 
-The CLI tool is at `cli.mjs` in the same directory as this skill file. Before running any commands, resolve the absolute path. For example, if this skill file is at `/home/user/alien/agent-id/SKILL.md`, then the tool is at `/home/user/alien/agent-id/cli.mjs`.
+The CLI tool is at `cli.mjs` in the same directory as this skill file. Before running any commands, resolve the absolute path. In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
 
-In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
+### Provider address
 
-## 5) Obtain Agent ID — Step by Step
+Bootstrap reads the provider address from (in order):
+1. `--provider-address <addr>` flag
+2. `ALIEN_PROVIDER_ADDRESS` environment variable
+3. `provider.txt` file next to the CLI
 
-### Step 1: Check status
+If none are found, ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
+
+- **Default provider**: Ask the user for the provider address.
+- **Set up your own**: Direct the user to create a SSO provider:
+  > Create your SSO provider at: https://dev.alien.org/dashboard/sso
+
+## 1) When to use
+
+**Check for an existing Agent ID at the start of every session** if you expect to make commits, call authenticated services, or access stored credentials.
 
 ```bash
 node CLI status
@@ -84,73 +94,106 @@ Ask the user: **"Would you like to use the default Alien provider, or set up you
 Then run:
 
 ```bash
-node CLI auth --provider-address <PROVIDER_ADDRESS>
+node CLI auth-header
 ```
 
-This returns **immediately** with JSON containing:
-- `deepLink` — URL for the Alien App
-- `qrCode` — the QR code as Unicode text
-
-### Step 3: Show the QR code to the user
-
-**You MUST present this to the user before proceeding to Step 4.**
-
-Output the `qrCode` value from the JSON directly as text in your response inside a code block so the user can see and scan it. Also show the deep link as a fallback.
-
-Example output:
-> Scan this QR code with your Alien App:
-> ```
-> <qrCode value from JSON>
-> ```
-> Or open this link: <deepLink>
-
-### Step 4: Wait for approval
+This returns JSON with a `token` field. Use it in HTTP requests:
 
 ```bash
-node CLI bind --no-require-owner-proof
+# Get the auth header for curl
+AUTH=$(node CLI auth-header --raw)
+curl -H "$AUTH" https://service.example.com/api/whoami
 ```
 
-**This blocks** for up to 5 minutes while the user scans the QR code. On success:
+The token is a self-contained Ed25519-signed assertion containing your fingerprint, public key, owner identity, and a timestamp. Tokens are valid for 5 minutes.
+
+### External services (vault credentials)
+
+For services that use API keys, passwords, or OAuth tokens, retrieve stored credentials from the vault:
+
+```bash
+# Retrieve a stored credential
+node CLI vault-get --service github
+```
+
+Returns:
 ```json
-{"ok": true, "ownerSessionSub": "0x...", "bindingId": "...", "fingerprint": "..."}
+{"ok": true, "service": "github", "type": "api-key", "credential": "ghp_xxx..."}
 ```
 
-Note: `--no-require-owner-proof` is needed because some Alien App versions don't yet return the session proof in the OAuth callback. The binding is still valid — it just won't include the embedded session signature proof.
-
-If it fails (timeout, rejection, expired session), run `auth` again from Step 2.
-
-### Step 5: Set up git signing
-
-Before running git-setup, ask the user for their **GitHub email** so commits are associated with their GitHub account. Without this, GitHub will show commits as "Unverified" even if the signature is valid.
-
-> "What email should I use for commits? This should match your GitHub account email (you can find it at GitHub → Settings → Emails). A GitHub noreply email like `user@users.noreply.github.com` works too."
-
-Then run:
+Use the `credential` value in the appropriate header or config for that service. For example:
 
 ```bash
-node CLI git-setup --email <USER_GITHUB_EMAIL>
+# GitHub API
+GITHUB_TOKEN=$(node CLI vault-get --service github | node -e "process.stdin.resume(); let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>console.log(JSON.parse(d).credential))")
+curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user
+
+# Or more simply using jq if available
+GITHUB_TOKEN=$(node CLI vault-get --service github | jq -r .credential)
 ```
 
-This configures git in the current repository to:
-- Sign all commits with your Agent ID key (SSH signature)
-- Use the provided email as the committer email
+If the credential doesn't exist in the vault, **ask the user** to provide it (see Section 3 below for the secure flow), then store it and retrieve again.
 
-The command outputs an SSH public key. **Tell the user:**
-> "To get the 'Verified' badge on GitHub, add this SSH public key to your GitHub account:
-> Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**
+**Never hardcode credentials. Always use the vault.**
+
+## 3) Credential vault
+
+The vault encrypts credentials with a key derived from your agent's Ed25519 private key (HKDF + AES-256-GCM). Only this agent instance can decrypt them.
+
+### Storing credentials — the human-agent flow
+
+When you need a credential for an external service, follow this protocol:
+
+**Step 1: Check if it's already stored**
+```bash
+node CLI vault-get --service github
+```
+
+If it returns the credential, use it. If not, continue.
+
+**Step 2: Ask the user**
+
+Tell the user exactly what you need and give them secure options to provide it:
+
+> "I need a GitHub personal access token to proceed. Please provide it using one of these methods (most secure first):
 >
-> `ssh-ed25519 AAAAC3...`"
+> **Option A** — Write it to a temporary file:
+> ```
+> echo 'ghp_your_token' > /tmp/gh-token && chmod 600 /tmp/gh-token
+> ```
+> Then tell me the file path.
+>
+> **Option B** — Set it as an environment variable and restart:
+> ```
+> export GITHUB_TOKEN=ghp_your_token
+> ```
+> Then tell me the variable name.
+>
+> **Option C** — Paste it here and I'll store it immediately."
 
-The user only needs to do this once per agent keypair.
+**Step 3: Store it securely**
 
-**Done.** Your Agent ID is active and git signing is configured.
-
-## 6) Making signed commits
-
-### Option A: Use `git-commit` (recommended)
+Depending on which option the user chose:
 
 ```bash
-node CLI git-commit --message "feat: implement auth flow"
+# Option A: from file (most secure — secret never on command line)
+node CLI vault-store --service github --type api-key --credential-file /tmp/gh-token
+# Then clean up the temp file:
+rm /tmp/gh-token
+
+# Option B: from environment variable
+node CLI vault-store --service github --type api-key --credential-env GITHUB_TOKEN
+
+# Option C: piped via stdin (secret not in process list)
+echo 'ghp_xxx' | node CLI vault-store --service github --type api-key
+
+# Last resort: direct argument (visible in process list)
+node CLI vault-store --service github --type api-key --credential "ghp_xxx"
+```
+
+**Step 4: Confirm and use**
+```bash
+node CLI vault-get --service github
 ```
 
 This creates a commit that is:
@@ -163,94 +206,167 @@ This creates a commit that is:
    ```
 3. **Logged in your audit trail** with a hash-chained signed record
 
-Each `git-commit` also attaches a **proof bundle** as a git note (`refs/notes/agent-id`). This contains the agent's public key, owner binding, and SSO id_token — everything needed for anyone to verify the provenance chain without access to the agent's local state.
+Use `--type` to tag what kind of credential it is:
+- `api-key` — API key / personal access token (default)
+- `password` — username + password pair (use with `--username`)
+- `oauth` — OAuth access/refresh token
+- `bearer` — Bearer token
+- `custom` — Anything else
 
-### Pushing commits and proof notes
+### Store examples
 
-Use `--push` to push the commit **and** proof notes in one step:
+```bash
+# GitHub personal access token (from file)
+echo 'ghp_abc123' > /tmp/cred && chmod 600 /tmp/cred
+node CLI vault-store --service github --type api-key --credential-file /tmp/cred
+rm /tmp/cred
+
+# AWS credentials (from env)
+node CLI vault-store --service aws --type api-key --credential-env AWS_SECRET_ACCESS_KEY --username "$AWS_ACCESS_KEY_ID" --url "https://aws.amazon.com"
+
+# Service with username + password (piped)
+echo 'mypassword' | node CLI vault-store --service docker-hub --type password --username "myuser" --url "https://hub.docker.com"
+
+# OAuth token
+node CLI vault-store --service slack --type oauth --credential-env SLACK_BOT_TOKEN
+```
+
+### Retrieve a credential
+
+```bash
+node CLI vault-get --service <name>
+```
+
+Returns JSON with `service`, `type`, `credential`, `url`, `username`.
+
+### List stored credentials
+
+```bash
+node CLI vault-list
+```
+
+Returns a list of services with metadata (without decrypting credential values).
+
+### Remove a credential
+
+```bash
+node CLI vault-remove --service <name>
+```
+
+### Update a credential
+
+Run `vault-store` again with the same `--service` name. The existing credential is replaced; the original creation timestamp is preserved.
+
+## 4) Making signed git commits
+
+### Option A: Use `git-commit` (recommended)
+
+```bash
+node CLI git-commit --message "feat: implement auth flow"
+```
+
+This creates a commit that is:
+1. **SSH-signed** with your Ed25519 key
+2. **Tagged with trailers** linking to your identity and human owner
+3. **Logged in your audit trail** with a hash-chained signed record
+4. **Proof-bundled** as a git note for external verification
+
+### Push commits and proof notes
+
 ```bash
 node CLI git-commit --message "feat: implement auth flow" --push
 ```
 
-This handles the proof notes automatically — git notes share a single ref (`refs/notes/agent-id`) across all commits, so pushing them requires fetching and merging with the remote first. The `--push` flag takes care of this.
+The `--push` flag pushes both the commit and proof notes (handling note ref merging automatically).
 
-To push to a non-default remote:
-```bash
-node CLI git-commit --message "feat: something" --push --remote upstream
-```
+### Option B: Normal `git commit`
 
-If you need to push notes separately (e.g., for commits already made):
-```bash
-git push origin refs/notes/agent-id
-```
-If that fails due to divergence, fetch and merge first:
-```bash
-git fetch origin refs/notes/agent-id:refs/notes/agent-id-remote
-git notes --ref=agent-id merge refs/notes/agent-id-remote
-git push origin refs/notes/agent-id
-```
+Since `bootstrap` / `git-setup` sets `commit.gpgsign = true`, any `git commit` is SSH-signed. But it won't have Agent ID trailers or proof notes.
 
-### Option B: Use normal `git commit`
+### GitHub verified badge
 
-Since `git-setup` sets `commit.gpgsign = true`, any `git commit` is automatically SSH-signed. This works but does not add the Agent ID trailers, audit log entry, or proof note.
+After bootstrap, tell the user:
+> "To get the 'Verified' badge on GitHub, add this SSH public key to your GitHub account:
+> Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**"
 
-### What the commit looks like on GitHub
+The SSH public key is shown in the `git-setup` output.
 
-```
-✓ Verified  — This commit was signed with the committer's verified signature.
-
-feat: implement auth flow
-
-Agent-ID-Fingerprint: 945d41991dac118776409673019ed0fba36e13fc9d6b5534145f9e31128a3ec6
-Agent-ID-Owner: 0x7a3f...session-address
-Agent-ID-Binding: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-```
-
-Anyone can trace: **this code** → **this agent** (fingerprint) → **this human** (owner session) → **verified AlienID holder**.
-
-## 7) Signing other operations
-
-Beyond git commits, sign any significant action:
-
-```bash
-node CLI sign --type TOOL_CALL --action "bash.exec" --payload '{"command":"rm -rf /tmp/old"}'
-node CLI sign --type API_CALL --action "deploy.trigger" --payload '{"env":"staging"}'
-node CLI sign --type MESSAGE_SEND --action "slack.post" --payload '{"channel":"#ops"}'
-```
-
-Each signed operation is appended to the hash-chained audit log.
-
-## 7b) Verifying commit provenance
-
-To verify the full chain from a git commit back to its human owner:
+## 5) Verifying commit provenance
 
 ```bash
 node CLI git-verify --commit HEAD
 ```
 
-This traces the provenance chain:
-1. **SSH signature** — `git verify-commit` checks the commit signature
-2. **Agent key match** — commit's `Agent-ID-Fingerprint` trailer matches the agent's stored key
-3. **Owner binding** — agent's Ed25519-signed binding links the agent to a human owner
-4. **SSO attestation** — the id_token's RS256 signature (verified against Alien SSO's JWKS) proves the SSO server attested the agent-to-human binding
+Traces the full chain: SSH signature → agent key → owner binding → SSO attestation.
 
-Output includes a `summary` field like:
-> "Commit a1b2c3d4e5f6 was signed by agent 945d41991dac... owned by 0x7a3f..."
+If the commit has a proof note (from `git-commit`), verification is **fully self-contained** — works without access to the agent's state directory.
 
-If the commit has a proof note attached (via `git-commit`), verification is **fully self-contained** — no access to the agent's state directory needed. The proof is read from the git note. Falls back to local state if no note is found.
+## 6) Signing other operations
+
+Sign any significant action for the audit trail:
+
+```bash
+node CLI sign --type TOOL_CALL --action "bash.exec" --payload '{"command":"deploy"}'
+node CLI sign --type API_CALL --action "github.create-pr" --payload '{"repo":"foo/bar"}'
+```
+
+## 7) Step-by-step bootstrap (manual)
+
+If `bootstrap` doesn't work for your setup, you can run each step individually:
+
+### Step 1: Initialize keypair
+```bash
+node CLI init
+```
+
+### Step 2: Start OIDC authorization
+```bash
+node CLI auth --provider-address <PROVIDER_ADDRESS>
+```
+
+This returns JSON containing a `deepLink` and a `qrCode` (Unicode text). Output the `qrCode` value directly in a code block so the user can scan it with the Alien App. Also show the deep link as a fallback:
+
+> Scan this QR code with your Alien App:
+> ```
+> <qrCode value from JSON>
+> ```
+> Or open this link: <deepLink>
+
+### Step 3: Wait for approval
+```bash
+node CLI bind --no-require-owner-proof
+```
+
+Blocks for up to 5 minutes while the user scans the QR code with Alien App.
+
+### Step 4: Configure git signing
+
+Before running git-setup, ask the user for their **GitHub email** so commits are associated with their GitHub account:
+
+> "What email should I use for commits? This should match your GitHub account email (you can find it at GitHub → Settings → Emails). A GitHub noreply email like `user@users.noreply.github.com` works too."
+
+```bash
+node CLI git-setup --email <USER_GITHUB_EMAIL>
+```
 
 ## 8) Command reference
 
 | Command | Purpose | Blocking? |
 |---------|---------|-----------|
+| `bootstrap` | One-command setup: init + auth + bind + git-setup | **Yes** (up to 5 min) |
 | `status` | Check if Agent ID exists and is bound | No |
-| `init` | Generate keypair (auto-called by `auth`) | No |
-| `auth --provider-address <addr>` | Start OIDC auth, get QR page | No |
+| `auth-header [--raw]` | Generate signed auth token for service calls | No |
+| `vault-store --service S --credential C` | Store encrypted credential | No |
+| `vault-get --service S` | Retrieve decrypted credential | No |
+| `vault-list` | List stored credentials (no secrets shown) | No |
+| `vault-remove --service S` | Remove a credential | No |
+| `init` | Generate keypair | No |
+| `auth --provider-address <addr>` | Start OIDC auth, get QR code | No |
 | `bind` | Poll for approval, create owner binding | **Yes** (up to 5 min) |
-| `git-setup [--global] [--name N] [--email E]` | Configure git SSH signing | No |
-| `git-commit --message "..." [--push]` | Signed commit with trailers + audit log; `--push` pushes commit and proof notes | No |
-| `git-verify [--commit <hash>]` | Verify provenance: commit → agent → human | No |
-| `sign --type T --action A --payload JSON` | Sign any operation | No |
+| `git-setup [--global] [--email E]` | Configure git SSH signing | No |
+| `git-commit --message "..." [--push]` | Signed commit + trailers + proof note | No |
+| `git-verify [--commit <hash>]` | Verify provenance chain | No |
+| `sign --type T --action A --payload JSON` | Sign operation for audit trail | No |
 | `verify` | Verify state chain integrity | No |
 | `export-proof` | Export proof bundle to stdout | No |
 
@@ -258,9 +374,10 @@ If the commit has a proof note attached (via `git-commit`), verification is **fu
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--state-dir <path>` | `~/.agent-id` | State directory (or set `AGENT_ID_STATE_DIR` env var) |
-| `--provider-address <addr>` | — | Alien provider address (required for `auth`) |
+| `--state-dir <path>` | `~/.agent-id` | State directory (or `AGENT_ID_STATE_DIR` env) |
+| `--provider-address <addr>` | — | Alien provider address |
 | `--sso-url <url>` | `https://sso.alien-api.com` | SSO base URL |
+| `--raw` | — | Output raw text instead of JSON (auth-header) |
 | `--timeout-sec <n>` | `300` | Poll timeout for `bind` |
 | `--global` | — | Apply git config globally instead of per-repo |
 | `--name <name>` | `Agent` | Git committer name |
@@ -278,30 +395,56 @@ If the commit has a proof note attached (via `git-commit`), verification is **fu
 │   ├── agent-id               # SSH private key (mode 0600)
 │   ├── agent-id.pub           # SSH public key
 │   └── allowed_signers        # For git signature verification
+├── vault/
+│   ├── github.json            # Encrypted credential (mode 0600)
+│   ├── slack.json
+│   └── ...
 ├── audit/operations.jsonl     # Hash-chained signed operation log
 ├── owner-binding.json         # Owner binding (human ↔ agent link)
-├── owner-session.json         # Session tokens (mode 0600)
+├── owner-session.json         # Session tokens (mode 0600) — NEVER commit
 ├── nonces.json                # Per-agent nonce tracking
 ├── sequence.json              # Sequence counter
 ```
 
-## 10) Error handling
+## 10) Integration patterns
+
+### Claude Code (CLAUDE.md)
+```
+Before making your first git commit, run: node /path/to/cli.mjs bootstrap
+```
+
+### Environment variables
+```bash
+export ALIEN_PROVIDER_ADDRESS="00000003..."
+export AGENT_ID_STATE_DIR="~/.agent-id"
+```
+
+### CI/CD (GitHub Actions)
+```yaml
+- name: Bootstrap agent identity
+  env:
+    ALIEN_PROVIDER_ADDRESS: ${{ secrets.ALIEN_PROVIDER_ADDRESS }}
+  run: node /path/to/cli.mjs bootstrap
+```
+
+## 11) Error handling
 
 | Error | Action |
 |-------|--------|
-| `No pending auth found` | Run `auth` before `bind` |
-| `Alien SSO authorization session expired` | Run `auth` again |
+| `No provider address` | Set `--provider-address`, env var, or `provider.txt` |
+| `No pending auth found` | Run `auth` or `bootstrap` |
+| `Alien SSO authorization session expired` | Run `bootstrap` again |
 | `User rejected Alien SSO authorization` | Ask user to try again |
-| `Timed out waiting` | Run `auth` again, remind user to scan promptly |
-| `Owner binding missing` | Complete auth + bind first |
-| `git commit failed` | Check that `git-setup` was run and files are staged |
-| `--provider-address is required` | Ask the user for the provider address |
+| `Timed out waiting` | Run `bootstrap` again, remind user to scan promptly |
+| `No agent keypair` | Run `bootstrap` or `init` |
+| `No credential stored for "..."` | Ask user for the credential, then `vault-store` |
 
-## 11) Security
+## 12) Security
 
-- Private keys stored with **0600** permissions
+- Private keys stored with **0600** permissions — never transmitted
+- Vault credentials encrypted with **AES-256-GCM** (key derived via HKDF from agent's Ed25519 key)
 - **PKCE** prevents authorization code interception
-- **Owner session proof** cryptographically binds the human's identity
+- Auth tokens are **short-lived** (5 minute validity)
 - **Hash-chained audit log** — any tampering breaks the chain
 - **Ed25519 SSH signatures** on commits provide non-repudiation
-- Never expose `owner-session.json` (contains tokens)
+- Never expose `owner-session.json` or vault files

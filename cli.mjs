@@ -3,7 +3,9 @@
 // Alien Agent ID — CLI tool for agent identity management.
 // Usage: node cli.mjs <command> [flags]
 //
-// Commands: init, auth, bind, status, sign, verify, export-proof, git-setup, git-commit
+// Commands: bootstrap, init, auth, bind, status, sign, verify, export-proof,
+//           git-setup, git-commit, git-verify, vault-store, vault-get, vault-list,
+//           vault-remove, auth-header
 
 import path from "node:path";
 import os from "node:os";
@@ -34,6 +36,10 @@ import {
   sha256Hex,
   sha256HexCanonical,
   verifyEd25519Base64Url,
+  deriveVaultKey,
+  vaultEncrypt,
+  vaultDecrypt,
+  createAgentToken,
 } from "./lib.mjs";
 import qrcode from "./qrcode.cjs";
 
@@ -185,14 +191,18 @@ async function cmdAuth(flags) {
     qrText = code;
   });
 
-  outputJson({
+  const result = {
     ok: true,
     deepLink: auth.deepLink,
     qrCode: qrText,
     pollingCode: auth.pollingCode,
     expiredAt: auth.expiredAt,
     message: "Ask the user to open the deep link or scan the QR code with Alien App",
-  });
+  };
+  if (!flags._noOutput) {
+    outputJson(result);
+  }
+  return result;
 }
 
 async function cmdBind(flags) {
@@ -280,14 +290,18 @@ async function cmdBind(flags) {
   const mainKey = engine.keys.get("main");
   stderr("Owner binding created successfully.");
 
-  outputJson({
+  const result = {
     ok: true,
     ownerSessionSub: owner.binding.payload.ownerSessionSub,
     bindingId: owner.binding.id,
     issuer: id.issuer,
     providerAddress: pending.providerAddress,
     fingerprint: mainKey?.fingerprint || null,
-  });
+  };
+  if (!flags._noOutput) {
+    outputJson(result);
+  }
+  return result;
 }
 
 async function cmdStatus(flags) {
@@ -882,6 +896,311 @@ function extractTrailer(message, key) {
   return match ? match[1].trim() : null;
 }
 
+// ─── Bootstrap ──────────────────────────────────────────────────────────────────
+
+async function resolveProviderAddress(flags) {
+  if (flags["provider-address"]) return flags["provider-address"];
+  if (process.env.ALIEN_PROVIDER_ADDRESS) return process.env.ALIEN_PROVIDER_ADDRESS;
+
+  // Try provider.txt next to the CLI
+  const scriptDir = path.dirname(new URL(import.meta.url).pathname);
+  try {
+    const txt = await fs.readFile(path.join(scriptDir, "provider.txt"), "utf8");
+    const trimmed = txt.trim();
+    if (trimmed) return trimmed;
+  } catch {}
+  return null;
+}
+
+async function cmdBootstrap(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  // 1. Already bootstrapped?
+  const existingKey = await readJsonFile(paths.mainKey, null);
+  const existingOwner = await readJsonFile(paths.ownerBinding, null);
+
+  if (existingKey && existingOwner?.binding) {
+    stderr("Agent ID already bootstrapped.");
+    await cmdGitSetup({ ...flags, _quiet: true });
+    outputJson({
+      ok: true,
+      alreadyBootstrapped: true,
+      fingerprint: existingKey.fingerprint,
+      ownerSessionSub: existingOwner.binding.payload.ownerSessionSub,
+      providerAddress: existingOwner.binding.payload.providerAddress,
+      stateDir,
+    });
+    return;
+  }
+
+  // 2. Resolve provider address
+  const providerAddress = await resolveProviderAddress(flags);
+  if (!providerAddress) {
+    outputError(
+      "No provider address. Set --provider-address, ALIEN_PROVIDER_ADDRESS env, or create provider.txt next to the CLI.",
+    );
+    return;
+  }
+  stderr(`Provider address: ${providerAddress}`);
+
+  // 3. Init (generate keypair)
+  await cmdInit({ ...flags, _quiet: true });
+
+  // 4. Auth (start OIDC, show QR)
+  const authResult = await cmdAuth({
+    ...flags,
+    "provider-address": providerAddress,
+    _noOutput: true,
+  });
+
+  // 5. Tell the user what to do
+  if (authResult.browserOpened) {
+    stderr("QR code opened in browser. Scan with Alien App to authorize this agent.");
+  } else {
+    stderr(`Open this link with your Alien App: ${authResult.deepLink}`);
+  }
+
+  // 6. Bind (poll for approval)
+  const bindResult = await cmdBind({
+    ...flags,
+    _noOutput: true,
+  });
+
+  // 7. Git setup
+  stderr("Setting up git signing...");
+  await cmdGitSetup({ ...flags, _quiet: true });
+
+  stderr("Bootstrap complete.");
+  outputJson({
+    ok: true,
+    fingerprint: bindResult.fingerprint,
+    ownerSessionSub: bindResult.ownerSessionSub,
+    bindingId: bindResult.bindingId,
+    providerAddress,
+    stateDir,
+  });
+}
+
+// ─── Vault ──────────────────────────────────────────────────────────────────────
+
+function safeServiceName(name) {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+async function loadVaultKey(stateDir) {
+  const paths = statePaths(stateDir);
+  const key = await readJsonFile(paths.mainKey, null);
+  if (!key?.privateKeyPem) {
+    throw new Error("No agent keypair. Run `bootstrap` or `init` first.");
+  }
+  return { vaultKey: deriveVaultKey(key.privateKeyPem), paths };
+}
+
+async function readStdin() {
+  if (process.stdin.isTTY) return null;
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8").replace(/\n$/, "");
+}
+
+async function resolveCredential(flags) {
+  // 1. --credential-file <path>  (most secure — never touches CLI args)
+  if (flags["credential-file"]) {
+    try {
+      return (await fs.readFile(flags["credential-file"], "utf8")).replace(/\n$/, "");
+    } catch (err) {
+      throw new Error(`Cannot read credential file: ${err.message}`);
+    }
+  }
+
+  // 2. --credential-env <VAR_NAME>  (reads from environment variable)
+  if (flags["credential-env"]) {
+    const val = process.env[flags["credential-env"]];
+    if (!val) throw new Error(`Environment variable ${flags["credential-env"]} is not set`);
+    return val;
+  }
+
+  // 3. stdin  (piped: echo "secret" | node cli.mjs vault-store ...)
+  const fromStdin = await readStdin();
+  if (fromStdin) return fromStdin;
+
+  // 4. --credential <value>  (fallback — visible in process list)
+  if (flags.credential) return flags.credential;
+
+  return null;
+}
+
+async function cmdVaultStore(flags) {
+  const stateDir = resolveStateDir(flags);
+  const service = flags.service;
+  const credType = flags.type || "api-key";
+
+  if (!service) {
+    outputError("--service <name> is required");
+    return;
+  }
+
+  const credential = await resolveCredential(flags);
+  if (!credential) {
+    outputError(
+      "Credential required. Provide via:\n" +
+      "  --credential-file <path>   (read from file — most secure)\n" +
+      "  --credential-env <VAR>     (read from environment variable)\n" +
+      "  echo 'secret' | node cli.mjs vault-store ...   (pipe via stdin)\n" +
+      "  --credential <value>       (CLI arg — visible in process list)",
+    );
+    return;
+  }
+
+  const { vaultKey, paths } = await loadVaultKey(stateDir);
+  await ensureDir(paths.vaultDir);
+
+  const filePath = path.join(paths.vaultDir, `${safeServiceName(service)}.json`);
+
+  // Preserve creation time if updating an existing credential
+  const existing = await readJsonFile(filePath, null);
+  const encrypted = vaultEncrypt(vaultKey, credential);
+  const record = {
+    version: 1,
+    service,
+    type: credType,
+    url: flags.url || existing?.url || null,
+    username: flags.username || existing?.username || null,
+    encrypted,
+    createdAt: existing?.createdAt || nowMs(),
+    updatedAt: nowMs(),
+  };
+
+  await writeJsonFile(filePath, record);
+  await setPrivateFilePermissions(filePath);
+
+  stderr(`Stored credential for "${service}" (${credType}).`);
+  outputJson({ ok: true, service, type: credType, updated: !!existing });
+}
+
+async function cmdVaultGet(flags) {
+  const stateDir = resolveStateDir(flags);
+  const service = flags.service;
+
+  if (!service) {
+    outputError("--service <name> is required");
+    return;
+  }
+
+  const { vaultKey, paths } = await loadVaultKey(stateDir);
+  const filePath = path.join(paths.vaultDir, `${safeServiceName(service)}.json`);
+  const record = await readJsonFile(filePath, null);
+
+  if (!record) {
+    outputError(`No credential stored for "${service}".`);
+    return;
+  }
+
+  const credential = vaultDecrypt(vaultKey, record.encrypted);
+
+  outputJson({
+    ok: true,
+    service: record.service,
+    type: record.type,
+    credential,
+    url: record.url,
+    username: record.username,
+  });
+}
+
+async function cmdVaultList(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  let files;
+  try {
+    files = await fs.readdir(paths.vaultDir);
+  } catch {
+    outputJson({ ok: true, credentials: [] });
+    return;
+  }
+
+  const credentials = [];
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    const record = await readJsonFile(path.join(paths.vaultDir, file), null);
+    if (record?.service) {
+      credentials.push({
+        service: record.service,
+        type: record.type,
+        url: record.url,
+        username: record.username,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+      });
+    }
+  }
+
+  outputJson({ ok: true, credentials });
+}
+
+async function cmdVaultRemove(flags) {
+  const stateDir = resolveStateDir(flags);
+  const service = flags.service;
+
+  if (!service) {
+    outputError("--service <name> is required");
+    return;
+  }
+
+  const paths = statePaths(stateDir);
+  const filePath = path.join(paths.vaultDir, `${safeServiceName(service)}.json`);
+
+  try {
+    await fs.unlink(filePath);
+    stderr(`Removed credential for "${service}".`);
+    outputJson({ ok: true, service });
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      outputError(`No credential stored for "${service}".`);
+    } else {
+      throw err;
+    }
+  }
+}
+
+// ─── Auth Header ────────────────────────────────────────────────────────────────
+
+async function cmdAuthHeader(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  const key = await readJsonFile(paths.mainKey, null);
+  if (!key) {
+    outputError("No agent keypair. Run `bootstrap` or `init` first.");
+    return;
+  }
+
+  const owner = await readJsonFile(paths.ownerBinding, null);
+
+  const token = createAgentToken({
+    fingerprint: key.fingerprint,
+    publicKeyPem: key.publicKeyPem,
+    privateKeyPem: key.privateKeyPem,
+    ownerSessionSub: owner?.binding?.payload?.ownerSessionSub || null,
+  });
+
+  const header = `AgentID ${token}`;
+
+  if (flags.raw) {
+    process.stdout.write(`Authorization: ${header}\n`);
+  } else {
+    outputJson({
+      ok: true,
+      header: `Authorization: ${header}`,
+      token,
+      fingerprint: key.fingerprint,
+      owner: owner?.binding?.payload?.ownerSessionSub || null,
+    });
+  }
+}
+
 // ─── Help ───────────────────────────────────────────────────────────────────────
 
 function printHelp() {
@@ -891,6 +1210,7 @@ Alien Agent ID — Verifiable identity for AI agents
 Usage: node cli.mjs <command> [flags]
 
 Commands:
+  bootstrap      One-command identity setup (init + auth + bind + git-setup)
   init           Generate Ed25519 keypair and initialize state directory
   auth           Start OIDC authorization (returns deep link + QR page)
   bind           Poll for user approval and create owner binding
@@ -901,6 +1221,14 @@ Commands:
   git-setup      Configure git to sign commits with Agent ID key
   git-commit     Create a signed commit with Agent ID trailers
   git-verify     Verify provenance chain of a signed commit
+  auth-header    Generate a signed authentication token for service calls
+  vault-store    Store an encrypted credential in the agent vault
+  vault-get      Retrieve a decrypted credential from the vault
+  vault-list     List all stored credentials
+  vault-remove   Remove a credential from the vault
+
+Bootstrap flags:
+  --provider-address <addr>  Provider address (or ALIEN_PROVIDER_ADDRESS env / provider.txt)
 
 Common flags:
   --state-dir <path>       State directory (default: ~/.agent-id)
@@ -934,6 +1262,19 @@ Git-verify flags:
   --commit <hash>            Commit to verify (default: HEAD)
   --sso-url <url>            SSO base URL for id_token verification
 
+Auth-header flags:
+  --raw                      Output raw header (not JSON) for use with curl
+
+Vault flags:
+  --service <name>           Service name (required for store/get/remove)
+  --type <type>              Credential type: api-key, password, oauth, bearer (default: api-key)
+  --credential <value>       Credential value (visible in process list — least secure)
+  --credential-file <path>   Read credential from file (most secure)
+  --credential-env <VAR>     Read credential from environment variable
+                             Also accepts credential via stdin pipe
+  --url <url>                Optional service URL
+  --username <name>          Optional username
+
 All commands output JSON to stdout. Progress and errors go to stderr.
 `.trim());
 }
@@ -941,6 +1282,7 @@ All commands output JSON to stdout. Progress and errors go to stderr.
 // ─── Main ───────────────────────────────────────────────────────────────────────
 
 const commands = {
+  bootstrap: cmdBootstrap,
   init: cmdInit,
   auth: cmdAuth,
   bind: cmdBind,
@@ -951,6 +1293,11 @@ const commands = {
   "git-setup": cmdGitSetup,
   "git-commit": cmdGitCommit,
   "git-verify": cmdGitVerify,
+  "vault-store": cmdVaultStore,
+  "vault-get": cmdVaultGet,
+  "vault-list": cmdVaultList,
+  "vault-remove": cmdVaultRemove,
+  "auth-header": cmdAuthHeader,
 };
 
 async function main() {
