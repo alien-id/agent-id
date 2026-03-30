@@ -212,11 +212,11 @@ export function ed25519PemToOpenSSHPrivateKey(privateKeyPem) {
 // ════════════════════════════════════════════════════════════════════════════════
 
 async function ensureParent(filePath) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
 }
 
 export async function ensureDir(dirPath) {
-  await fs.mkdir(dirPath, { recursive: true });
+  await fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
 }
 
 export async function readJsonFile(filePath, fallback = null) {
@@ -362,6 +362,9 @@ function parseJwt(token) {
   }
   const [headerPart, payloadPart, sigPart] = parts;
   const header = JSON.parse(fromB64url(headerPart).toString("utf8"));
+  if (header.alg === "none") {
+    throw new Error("Unsigned JWTs (alg: none) are not accepted");
+  }
   const payload = JSON.parse(fromB64url(payloadPart).toString("utf8"));
   return {
     token,
@@ -927,6 +930,21 @@ export class SignatureEngine {
       refreshToken: session.refreshToken,
       providerAddress: session.providerAddress,
     });
+
+    // Verify the refreshed token still belongs to the same owner.
+    if (session.ownerSessionSub) {
+      try {
+        const freshPayload = parseJwt(fresh.access_token).payload;
+        if (freshPayload.sub && freshPayload.sub !== session.ownerSessionSub) {
+          throw new Error(
+            `Refreshed token subject mismatch: expected ${session.ownerSessionSub}, got ${freshPayload.sub}`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("subject mismatch")) throw err;
+        // Non-JWT or unparseable — skip subject check (opaque tokens have no sub).
+      }
+    }
 
     session.accessToken = fresh.access_token;
     if (fresh.refresh_token) session.refreshToken = fresh.refresh_token;

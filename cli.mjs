@@ -11,6 +11,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { execFile as execFileCb } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 import {
   statePaths,
@@ -778,7 +779,7 @@ async function cmdGitVerify(flags) {
   let sshSignatureValid = false;
   if (agentPublicKeyPem) {
     const sshPub = ed25519PemToSshPublicKey(agentPublicKeyPem);
-    const tmpSignersPath = path.join(os.tmpdir(), `agent-id-signers-${Date.now()}`);
+    const tmpSignersPath = path.join(os.tmpdir(), `agent-id-signers-${randomUUID()}`);
     const signerEmail = `agent-${trailerFingerprint.slice(0, 8)}@agent-id.local`;
     await fs.writeFile(tmpSignersPath, `${signerEmail} ${sshPub}\n`, "utf8");
 
