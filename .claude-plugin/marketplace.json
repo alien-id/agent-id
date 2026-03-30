@@ -1,0 +1,22 @@
+{
+    "name": "agent-id",
+    "version": "2.0.0",
+    "description": "Verifiable cryptographic identity for AI agents — SSH-signed git commits, owner binding via Alien Network SSO, and hash-chained audit logs",
+    "owner": {
+      "name": "Alien",
+      "email": "support@alien.org"
+    },
+    "metadata": {
+      "pluginRoot": "."
+    },
+    "plugins": [
+      {
+        "name": "agent-id",
+        "description": "Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Sign git commits so every line of agent-written code is cryptographically attributable.",
+        "version": "2.0.0",
+        "source": ".",
+        "category": "identity",
+        "keywords": ["agent-identity", "cryptography", "git-signing", "sso", "oidc", "provenance"]
+      }
+    ]
+  }
