@@ -1,5 +1,5 @@
 ---
-name: agent-id
+name: alien-agent-id
 description: Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Authenticate with Alien-aware services. Store and retrieve credentials for external services (GitHub, Slack, AWS, etc.). Sign git commits so every line of agent-written code is cryptographically attributable.
 license: Proprietary (internal use only)
 compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, OpenClaw, etc.)

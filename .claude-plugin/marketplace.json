@@ -1,5 +1,5 @@
 {
-  "name": "agent-id",
+  "name": "alien-agent-id",
   "version": "2.0.2",
   "description": "Verifiable cryptographic identity for AI agents — SSH-signed git commits, owner binding via Alien Network SSO, and hash-chained audit logs",
   "owner": {
@@ -11,7 +11,7 @@
   },
   "plugins": [
     {
-      "name": "agent-id",
+      "name": "alien-agent-id",
       "description": "Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Sign git commits so every line of agent-written code is cryptographically attributable.",
       "version": "2.0.2",
       "source": {
