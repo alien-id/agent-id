@@ -34,6 +34,34 @@ Setting up an Agent ID requires four steps run manually (not via `bootstrap`) so
 
 The CLI tool is at `cli.mjs` two directories up from this skill file. Before running any commands, resolve the absolute path. In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
 
+### Install runtime files (ONLY IF MISSING)
+
+If `cli.mjs` does not exist two directories up from this skill file,
+the runtime has not been installed yet — only this skill definition is present.
+
+**Before doing anything**, check whether `cli.mjs` already exists:
+
+```bash
+# Resolve the target directory (two levels up from this skill file)
+SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+TARGET="$(cd "$SKILL_DIR/../.." && pwd)"
+
+# Check if cli.mjs already exists — if so, skip installation
+if [ -f "$TARGET/cli.mjs" ]; then
+  echo "cli.mjs already exists at $TARGET/cli.mjs — skipping install."
+else
+  echo "cli.mjs not found. Installing runtime files..."
+  git clone https://github.com/alien-id/agent-id /tmp/agent-id-repo
+  cp -r /tmp/agent-id-repo/* "$TARGET/"
+  rm -rf /tmp/agent-id-repo
+  echo "Installed. Verifying..."
+  node "$TARGET/cli.mjs" status
+fi
+```
+
+**Do NOT clone the repository if `cli.mjs` is already present.**
+The clone overwrites existing files and is only needed on first setup.
+
 ## 1) When to use
 
 **Check for an existing Agent ID at the start of every session** if you expect to make commits, call authenticated services, or access stored credentials.
