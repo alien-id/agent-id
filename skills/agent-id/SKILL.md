@@ -18,17 +18,11 @@ You are an AI agent. This skill gives you:
 3. **A credential vault** — encrypted storage for API keys, passwords, OAuth tokens
 4. **Signed git commits** — every commit traceable to you and your human owner
 
-## Quick Start — Bootstrap
+## Quick Start
 
-Run one command to go from zero to a working identity:
+Setting up an Agent ID requires four steps run manually (not via `bootstrap`) so the QR code is visible to the user before the blocking poll begins.
 
-```bash
-node CLI bootstrap
-```
-
-This generates your keypair, starts OIDC auth with Alien SSO, waits for the human owner to approve (via QR code / Alien App), and configures git signing — all in one step.
-
-If `"alreadyBootstrapped": true` appears in the output, you're already set up.
+> **Why not `bootstrap`?** The `bootstrap` command combines all steps into one blocking call. Since tool output isn't streamed, the QR code would only appear after the command finishes — but it can't finish until the user scans the QR code. Running steps manually avoids this deadlock.
 
 ### Prerequisites
 
@@ -39,19 +33,6 @@ If `"alreadyBootstrapped": true` appears in the output, you're already set up.
 ### Resolve the CLI path first
 
 The CLI tool is at `cli.mjs` two directories up from this skill file. Before running any commands, resolve the absolute path. In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
-
-### Provider address
-
-Bootstrap reads the provider address from (in order):
-1. `--provider-address <addr>` flag
-2. `ALIEN_PROVIDER_ADDRESS` environment variable
-3. `default-provider.txt` file next to the CLI
-
-If none are found, ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
-
-- **Default provider**: Ask the user for the provider address.
-- **Set up your own**: Direct the user to create a SSO provider:
-  > Create your SSO provider at: https://dev.alien.org/dashboard/sso
 
 ## 1) When to use
 
