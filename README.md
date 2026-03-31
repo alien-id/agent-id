@@ -13,6 +13,9 @@ fully verifiable: **commit → agent key → owner binding → SSO attestation �
 - [Quick Start (Claude Code)](#quick-start)
 - [What a Signed Commit Looks Like](#what-a-signed-commit-looks-like)
 - [Verifying Provenance](#verifying-provenance)
+- [Service Authentication](#service-authentication)
+- [Credential Vault](#credential-vault)
+- [Session Refresh](#session-refresh)
 - [Prerequisites](#prerequisites)
 - [Agent State](#agent-state)
 - [CLI Commands](#cli-commands)
@@ -46,13 +49,17 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 
 ## What's in the Box
 
-| File | Purpose |
+| Path | Purpose |
 | --- | --- |
-| `SKILL.md` | Instructions for AI agents — point your agent here |
-| `cli.mjs` | CLI tool (`status`, `auth`, `bind`, `git-setup`, `git-commit`, `git-verify`, etc.) |
+| `skills/alien-agent-id/SKILL.md` | Instructions for AI agents — point your agent here |
+| `cli.mjs` | CLI tool — all agent operations |
 | `lib.mjs` | Portable library — crypto, OIDC, signing engine, verification (zero npm deps) |
-| `qrcode.cjs` | Vendored QR code generator |
+| `qrcode.cjs` | Vendored QR code generator (terminal output) |
 | `default-provider.txt` | Default SSO provider address |
+| `docs/AGENT-SSO.md` | System documentation for humans |
+| `docs/INTEGRATION.md` | Integration guide for service providers |
+| `examples/demo-service.mjs` | Reference HTTP service with agent token verification |
+| `tests/test-refresh.mjs` | Test suite for session refresh flow |
 | `package.json` | Minimal metadata |
 
 ---
@@ -113,7 +120,7 @@ You can pass arguments to the skill for common operations:
 
 ### Other agents
 
-Any agent with shell access can use `SKILL.md` directly. The agent
+Any agent with shell access can use `skills/alien-agent-id/SKILL.md` directly. The agent
 needs Node.js 18+, git 2.34+, and permission to run
 `node cli.mjs ...` commands.
 
@@ -179,6 +186,76 @@ Falls back to the agent's local state (`~/.agent-id/`) if no git note is found.
 
 ---
 
+## Service Authentication
+
+Agents can authenticate to Alien-aware services using self-issued Ed25519 signed tokens:
+
+```bash
+# Generate a signed auth header (valid for 5 minutes)
+node cli.mjs auth-header --raw
+# → Authorization: AgentID eyJ...
+
+# Use in API calls
+AUTH=$(node cli.mjs auth-header --raw)
+curl -H "$AUTH" https://service.example.com/api/whoami
+```
+
+The token is self-contained — it includes the agent's public key, fingerprint, owner identity,
+a timestamp, and an Ed25519 signature. Services verify it inline using `verifyAgentToken()`
+from `lib.mjs` with no prior key registration needed.
+
+See `examples/demo-service.mjs` for a working reference implementation.
+
+---
+
+## Credential Vault
+
+The vault stores credentials for external services (GitHub, AWS, Slack, etc.) encrypted
+with AES-256-GCM. The encryption key is derived from the agent's Ed25519 private key via
+HKDF — only the agent that stored the credential can decrypt it.
+
+```bash
+# Store a credential (most secure — from file)
+echo 'ghp_xxx' > /tmp/tok && chmod 600 /tmp/tok
+node cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
+rm /tmp/tok
+
+# Store from environment variable
+node cli.mjs vault-store --service github --type api-key --credential-env GITHUB_TOKEN
+
+# Retrieve
+node cli.mjs vault-get --service github
+# → {"ok": true, "service": "github", "type": "api-key", "credential": "ghp_xxx..."}
+
+# List all stored credentials (no secrets shown)
+node cli.mjs vault-list
+
+# Remove
+node cli.mjs vault-remove --service github
+```
+
+Supported credential types: `api-key`, `password`, `oauth`, `bearer`, `custom`.
+
+---
+
+## Session Refresh
+
+After bootstrap, the agent receives SSO tokens including a `refresh_token`. The `refresh`
+command renews the `access_token` without requiring human interaction:
+
+```bash
+# Explicit refresh
+node cli.mjs refresh
+
+# Transparent — auth-header automatically refreshes expired sessions
+node cli.mjs auth-header
+```
+
+If the human revokes the agent's authorization via the Alien App, the refresh will fail
+and the agent will need to re-bootstrap.
+
+---
+
 ## Prerequisites
 
 - **Node.js 18+** — uses built-in `crypto`, `fetch`, `fs` (zero npm dependencies)
@@ -199,6 +276,10 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 │   ├── agent-id             # SSH private key (mode 0600)
 │   ├── agent-id.pub         # SSH public key
 │   └── allowed_signers      # For git signature verification
+├── vault/                   # Encrypted credentials (mode 0600)
+│   ├── github.json
+│   ├── aws.json
+│   └── ...
 ├── owner-binding.json       # Cryptographic human ↔ agent link
 ├── owner-session.json       # SSO tokens (mode 0600)
 ├── nonces.json              # Per-agent nonce tracking
@@ -212,13 +293,21 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 
 | Command | Purpose |
 | --- | --- |
+| `bootstrap` | One-command setup: init + auth + bind + git-setup |
+| `init` | Generate Ed25519 keypair |
 | `status` | Check if Agent ID exists and is bound |
-| `auth --provider-address <addr>` | Start OIDC auth, get QR page |
+| `auth --provider-address <addr>` | Start OIDC auth, get QR / deep link |
 | `bind` | Poll for user approval, create owner binding |
-| `git-setup` | Write SSH key files for commit signing |
-| `git-commit --message "..." [--push]` | Signed commit with trailers + audit log |
+| `git-setup [--email E]` | Configure git SSH signing |
+| `git-commit --message "..." [--push]` | Signed commit with trailers + proof note + audit log |
 | `git-verify [--commit <hash>]` | Verify provenance chain of a commit |
-| `sign --type T --action A --payload JSON` | Sign any operation |
+| `auth-header [--raw]` | Generate signed auth token for service calls |
+| `refresh` | Refresh SSO session tokens |
+| `vault-store --service S` | Store encrypted credential |
+| `vault-get --service S` | Retrieve decrypted credential |
+| `vault-list` | List stored credentials (no secrets shown) |
+| `vault-remove --service S` | Remove a credential |
+| `sign --type T --action A --payload JSON` | Sign any operation for audit trail |
 | `verify` | Verify state chain integrity |
 | `export-proof` | Export proof bundle |
 
@@ -228,17 +317,23 @@ Run `node cli.mjs --help` for all flags.
 
 ## Security
 
-- Private keys stored with `0600` permissions
-- PKCE prevents authorization code interception
-- Owner binding is Ed25519-signed by the agent's key
-- SSO id_token (RS256) provides server attestation of the human-agent link
-- Hash-chained audit log — any tampering breaks the chain
+- **Private keys** stored with `0600` permissions; state directories created with `0700`
+- **PKCE (S256)** prevents authorization code interception
+- **Owner binding** is Ed25519-signed by the agent's key
+- **SSO id_token** (RS256) provides server attestation of the human-agent link
+- **Hash-chained audit log** — any tampering breaks the chain
+- **Vault encryption** — AES-256-GCM with HKDF-derived key from agent's private key
+- **JWT alg:none rejected** — unsigned tokens are refused at parse level
+- **Subject validation** — token refresh verifies the subject claim still matches the bound owner
+- **Auth tokens** are short-lived (5 minutes) with random nonces for replay protection
 - `owner-session.json` contains tokens — never commit or share it
 
 ---
 
 ## Additional Resources
 
+- [System Documentation](docs/AGENT-SSO.md) — detailed SSO flow, credential storage, service auth
+- [Integration Guide](docs/INTEGRATION.md) — how to integrate token verification into your service
 - [Alien Network][alien]
 - [Developer Portal][dev-portal]
 
