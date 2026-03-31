@@ -546,9 +546,10 @@ async function cmdGitCommit(flags) {
     trailers.push(`Agent-ID-Binding: ${owner.binding.id}`);
   }
 
-  const fullMessage = `${message}\n\n${trailers.join("\n")}`;
-
   const agentEmail = 'alienagentid@eti.co';
+  trailers.push(`Co-Authored-By: Alien Agent <${agentEmail}>`);
+
+  const fullMessage = `${message}\n\n${trailers.join("\n")}`;
 
   // Write SSH key files for signing
   const sshDir = path.join(stateDir, "ssh");
@@ -568,7 +569,7 @@ async function cmdGitCommit(flags) {
   const commitArgs = [
     "-c", "gpg.format=ssh",
     "-c", `user.signingkey=${privateKeyPath}`,
-    "commit", "-S", "-m", fullMessage, "--author", `Alien Agent <${agentEmail}>`,
+    "commit", "-S", "-m", fullMessage,
   ];
   if (flags["allow-empty"]) {
     commitArgs.push("--allow-empty");
