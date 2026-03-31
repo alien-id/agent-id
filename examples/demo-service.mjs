@@ -6,7 +6,7 @@
 // Test:  node cli.mjs auth-header --raw | xargs -I{} curl -H {} http://localhost:3141/api/whoami
 
 import http from "node:http";
-import { verifyAgentToken } from "./lib.mjs";
+import { verifyAgentToken } from "../lib.mjs";
 
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === "--port") || process.env.PORT || "3141", 10);
 
