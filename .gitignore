@@ -1,2 +1,4 @@
 .agent-id/
+.agents
+.claude
 *.html

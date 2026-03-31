@@ -1,15 +1,15 @@
 ---
 name: alien-agent-id
-description: Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Authenticate with Alien-aware services. Store and retrieve credentials for external services (GitHub, Slack, AWS, etc.). Sign git commits so every line of agent-written code is cryptographically attributable.
-license: Proprietary (internal use only)
+description: Obtain a verifiable Alien Agent ID linked to a human owner via Alien Network SSO. Authenticate with Alien-aware services. Store and retrieve credentials for external services (GitHub, Slack, AWS, etc.). Sign git commits so every line of agent-written code is cryptographically attributable.
+license: MIT
 compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, OpenClaw, etc.)
 metadata:
   author: Alien Wallet
-  version: "2.1.0"
+  version: "2.1.1"
 allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Read
 ---
 
-# Agent ID — Identity, Authentication & Credentials for AI Agents
+# Alien Agent ID — Identity, Authentication & Credentials for AI Agents
 
 You are an AI agent. This skill gives you:
 
@@ -20,7 +20,7 @@ You are an AI agent. This skill gives you:
 
 ## Quick Start
 
-Setting up an Agent ID requires four steps run manually (not via `bootstrap`) so the QR code is visible to the user before the blocking poll begins.
+Setting up an Alien Agent ID requires four steps run manually (not via `bootstrap`) so the QR code is visible to the user before the blocking poll begins.
 
 > **Why not `bootstrap`?** The `bootstrap` command combines all steps into one blocking call. Since tool output isn't streamed, the QR code would only appear after the command finishes — but it can't finish until the user scans the QR code. Running steps manually avoids this deadlock.
 
@@ -36,19 +36,19 @@ The CLI tool is at `cli.mjs` in the same directory as this skill file. Before ru
 
 ## 1) When to use
 
-**Check for an existing Agent ID at the start of every session** if you expect to make commits, call authenticated services, or access stored credentials.
+**Check for an existing Alien Agent ID at the start of every session** if you expect to make commits, call authenticated services, or access stored credentials.
 
 ```bash
 node CLI status
 ```
 
-If `"bound": true` — you already have an Agent ID. Skip to **Section 6**.
+If `"bound": true` — you already have an Alien Agent ID. Skip to **Section 6**.
 
 ### Step 2: Choose provider and start authentication
 
 **IMPORTANT: You MUST ask the user before proceeding. Never silently read `default-provider.txt` and use it without asking. The user must explicitly choose their provider.**
 
-Ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
+Ask the user: **"Would you like to use the default Alien provider (recommended), or set up your own?"**
 
 - **Default provider**: Only after the user confirms, read the file `default-provider.txt` in the same directory as this skill file (next to `cli.mjs`) to get the address. Proceed to the `auth` command below.
 - **Set up your own**: Show the user this QR code and link to create a SSO provider. Wait for them to provide the address before proceeding.
@@ -252,7 +252,7 @@ The `--push` flag pushes both the commit and proof notes (handling note ref merg
 
 ### Option B: Normal `git commit`
 
-Normal `git commit` will work but won't have Agent ID trailers, proof notes, or SSH signing. Use `git-commit` for full provenance.
+Normal `git commit` will work but won't have Alien Agent ID trailers, proof notes, or SSH signing. Use `git-commit` for full provenance.
 
 ### GitHub verified badge
 
@@ -324,7 +324,7 @@ Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **S
 | Command | Purpose | Blocking? |
 |---------|---------|-----------|
 | `bootstrap` | One-command setup: init + auth + bind + git-setup | **Yes** (up to 5 min) |
-| `status` | Check if Agent ID exists and is bound | No |
+| `status` | Check if Alien Agent ID exists and is bound | No |
 | `auth-header [--raw]` | Generate signed auth token for service calls | No |
 | `vault-store --service S --credential C` | Store encrypted credential | No |
 | `vault-get --service S` | Retrieve decrypted credential | No |

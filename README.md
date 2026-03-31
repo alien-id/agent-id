@@ -1,9 +1,9 @@
-# Agent ID
+# Alien Agent ID
 
 > Verifiable cryptographic identity for AI agents, linked to human owners
 > via [Alien Network][alien] SSO.
 
-When an AI agent has an Agent ID, every git commit it makes is SSH-signed and carries trailers
+When an AI agent has an Alien Agent ID, every git commit it makes is SSH-signed and carries trailers
 that trace back to the specific agent and the human who authorized it. The provenance chain is
 fully verifiable: **commit → agent key → owner binding → SSO attestation → verified AlienID holder**.
 
@@ -35,7 +35,7 @@ sequenceDiagram
     SSO->>App: 2. Human scans QR with Alien App
     App->>SSO: 3. Human approves, callback to SSO
     SSO->>Agent: 4. Exchange tokens, create cryptographic owner binding
-    Note over Agent: Agent ID bound → SSH-signed git commits with provenance trailers
+    Note over Agent: Alien Agent ID bound → SSH-signed git commits with provenance trailers
 ```
 
 1. Agent starts OIDC auth, gets a QR code / deep link
@@ -89,7 +89,7 @@ Reload plugins:
 Sometimes the reload does not work properly the first time — restarting
 Claude usually helps.
 
-### 2. Set up your Agent ID
+### 2. Set up your Alien Agent ID
 
 When the plugin is loaded, run the skill:
 
@@ -99,7 +99,7 @@ When the plugin is loaded, run the skill:
 
 Follow the instructions — the agent will generate a keypair, show a
 QR code, and wait for you to approve in the Alien App. Once done,
-your Agent ID is created and bound.
+your Alien Agent ID is created and bound.
 
 ### 3. Add the signing key to GitHub
 
@@ -295,7 +295,7 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 | --- | --- |
 | `bootstrap` | One-command setup: init + auth + bind + git-setup |
 | `init` | Generate Ed25519 keypair |
-| `status` | Check if Agent ID exists and is bound |
+| `status` | Check if Alien Agent ID exists and is bound |
 | `auth --provider-address <addr>` | Start OIDC auth, get QR / deep link |
 | `bind` | Poll for user approval, create owner binding |
 | `git-setup [--email E]` | Configure git SSH signing |
