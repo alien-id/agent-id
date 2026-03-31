@@ -573,7 +573,7 @@ async function cmdGitCommit(flags) {
 
   const fullMessage = `${message}\n\n${trailers.join("\n")}`;
 
-  const agentEmail = key.fingerprint ? `agent-${key.fingerprint.slice(0, 8)}@agent-id.local` : "agent@agent-id.local";
+  const agentEmail = 'alienagentid@eti.co';
 
   // Commit with SSH signature (uses git config from git-setup)
   // Agent is the author (wrote the code), human committer is preserved from git config
