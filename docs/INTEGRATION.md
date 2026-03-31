@@ -622,7 +622,7 @@ If all checks pass, you have cryptographic proof that:
 ### Start the demo service as a reference
 
 ```bash
-node demo-service.mjs --port 3141
+node examples/demo-service.mjs --port 3141
 ```
 
 ### Generate a test token

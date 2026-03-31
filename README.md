@@ -16,7 +16,6 @@ fully verifiable: **commit → agent key → owner binding → SSO attestation �
 - [Prerequisites](#prerequisites)
 - [Agent State](#agent-state)
 - [CLI Commands](#cli-commands)
-- [Error Handling](#error-handling)
 - [Security](#security)
 
 ---
@@ -53,7 +52,7 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 | `cli.mjs` | CLI tool (`status`, `auth`, `bind`, `git-setup`, `git-commit`, `git-verify`, etc.) |
 | `lib.mjs` | Portable library — crypto, OIDC, signing engine, verification (zero npm deps) |
 | `qrcode.cjs` | Vendored QR code generator |
-| `provider.txt` | Default SSO provider address |
+| `default-provider.txt` | Default SSO provider address |
 | `package.json` | Minimal metadata |
 
 ---

@@ -45,7 +45,7 @@ The CLI tool is at `cli.mjs` two directories up from this skill file. Before run
 Bootstrap reads the provider address from (in order):
 1. `--provider-address <addr>` flag
 2. `ALIEN_PROVIDER_ADDRESS` environment variable
-3. `provider.txt` file next to the CLI
+3. `default-provider.txt` file next to the CLI
 
 If none are found, ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
 
@@ -65,11 +65,11 @@ If `"bound": true` — you already have an Agent ID. Skip to **Section 6**.
 
 ### Step 2: Choose provider and start authentication
 
-**IMPORTANT: You MUST ask the user before proceeding. Never silently read `provider.txt` and use it without asking. The user must explicitly choose their provider.**
+**IMPORTANT: You MUST ask the user before proceeding. Never silently read `default-provider.txt` and use it without asking. The user must explicitly choose their provider.**
 
 Ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
 
-- **Default provider**: Only after the user confirms, read the file `provider.txt` in the same directory as this skill file to get the address. Proceed to the `auth` command below.
+- **Default provider**: Only after the user confirms, read the file `default-provider.txt` in the same directory as this skill file to get the address. Proceed to the `auth` command below.
 - **Set up your own**: Show the user this QR code and link to create a SSO provider. Wait for them to provide the address before proceeding.
   > Scan or open to set up your provider: https://dev.alien.org/dashboard/sso
   > ```
@@ -431,7 +431,7 @@ export AGENT_ID_STATE_DIR="~/.agent-id"
 
 | Error | Action |
 |-------|--------|
-| `No provider address` | Set `--provider-address`, env var, or `provider.txt` |
+| `No provider address` | Set `--provider-address`, env var, or `default-provider.txt` |
 | `No pending auth found` | Run `auth` or `bootstrap` |
 | `Alien SSO authorization session expired` | Run `bootstrap` again |
 | `User rejected Alien SSO authorization` | Ask user to try again |

@@ -904,10 +904,10 @@ async function resolveProviderAddress(flags) {
   if (flags["provider-address"]) return flags["provider-address"];
   if (process.env.ALIEN_PROVIDER_ADDRESS) return process.env.ALIEN_PROVIDER_ADDRESS;
 
-  // Try provider.txt next to the CLI
+  // Try default-provider.txt next to the CLI
   const scriptDir = path.dirname(new URL(import.meta.url).pathname);
   try {
-    const txt = await fs.readFile(path.join(scriptDir, "provider.txt"), "utf8");
+    const txt = await fs.readFile(path.join(scriptDir, "default-provider.txt"), "utf8");
     const trimmed = txt.trim();
     if (trimmed) return trimmed;
   } catch {}
@@ -940,7 +940,7 @@ async function cmdBootstrap(flags) {
   const providerAddress = await resolveProviderAddress(flags);
   if (!providerAddress) {
     outputError(
-      "No provider address. Set --provider-address, ALIEN_PROVIDER_ADDRESS env, or create provider.txt next to the CLI.",
+      "No provider address. Set --provider-address, ALIEN_PROVIDER_ADDRESS env, or create default-provider.txt next to the CLI.",
     );
     return;
   }
@@ -1269,7 +1269,7 @@ Commands:
   vault-remove   Remove a credential from the vault
 
 Bootstrap flags:
-  --provider-address <addr>  Provider address (or ALIEN_PROVIDER_ADDRESS env / provider.txt)
+  --provider-address <addr>  Provider address (or ALIEN_PROVIDER_ADDRESS env / default-provider.txt)
 
 Common flags:
   --state-dir <path>       State directory (default: ~/.agent-id)
