@@ -215,7 +215,7 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 | `status` | Check if Agent ID exists and is bound |
 | `auth --provider-address <addr>` | Start OIDC auth, get QR page |
 | `bind` | Poll for user approval, create owner binding |
-| `git-setup` | Configure git SSH signing with agent key |
+| `git-setup` | Write SSH key files for commit signing |
 | `git-commit --message "..." [--push]` | Signed commit with trailers + audit log |
 | `git-verify [--commit <hash>]` | Verify provenance chain of a commit |
 | `sign --type T --action A --payload JSON` | Sign any operation |

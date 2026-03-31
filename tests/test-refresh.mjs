@@ -2,7 +2,7 @@
 
 // Tests for SSO session refresh flow.
 // Uses Node.js built-in test runner and a mock HTTP server.
-// Run: node --test test-refresh.mjs
+// Run: node --test tests/test-refresh.mjs
 
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -28,7 +28,7 @@ import {
   signEd25519Base64Url,
   canonicalJSONString,
   sha256Hex,
-} from "./lib.mjs";
+} from "../lib.mjs";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -662,7 +662,7 @@ describe("CLI refresh command (integration)", () => {
       const { promisify } = await import("node:util");
       const exec = promisify(execFile);
 
-      const cliPath = new URL("./cli.mjs", import.meta.url).pathname;
+      const cliPath = new URL("../cli.mjs", import.meta.url).pathname;
       const { stdout } = await exec("node", [cliPath, "refresh", "--state-dir", stateDir]);
 
       const result = JSON.parse(stdout);
@@ -700,7 +700,7 @@ describe("CLI refresh command (integration)", () => {
     const { promisify } = await import("node:util");
     const exec = promisify(execFile);
 
-    const cliPath = new URL("./cli.mjs", import.meta.url).pathname;
+    const cliPath = new URL("../cli.mjs", import.meta.url).pathname;
 
     try {
       await exec("node", [cliPath, "refresh", "--state-dir", stateDir]);
