@@ -137,7 +137,7 @@ In CI, the bootstrap will block waiting for QR approval. For attended CI (develo
 | `ALIEN_PROVIDER_ADDRESS` | Provider address (avoids `--provider-address` flag) |
 | `AGENT_ID_STATE_DIR` | Custom state directory (default: `~/.agent-id`) |
 
-The provider address can also be set in `provider.txt` next to the CLI.
+The provider address can also be set in `default-provider.txt` next to the CLI.
 
 ## SSO flow in detail
 
@@ -361,7 +361,7 @@ if (!result.ok) return res.status(401).json({ error: result.error });
 // result.timestamp — when the token was created
 ```
 
-A working demo service is included in `demo-service.mjs`.
+A working demo service is included in `examples/demo-service.mjs`.
 
 ### For external services
 
@@ -384,8 +384,8 @@ curl -H "Authorization: Bearer ghp_xxx" https://api.github.com/...
 | `AGENT-SSO.md` | This file — system documentation for humans |
 | `cli.mjs` | CLI tool — all agent operations |
 | `lib.mjs` | Core library — crypto, OIDC, vault, token verification |
-| `demo-service.mjs` | Demo HTTP service with agent authentication |
-| `provider.txt` | Default provider address |
+| `examples/demo-service.mjs` | Demo HTTP service with agent authentication |
+| `default-provider.txt` | Default provider address |
 | `package.json` | Package metadata (zero dependencies) |
 | `README.md` | Project overview |
 
@@ -416,5 +416,5 @@ node cli.mjs git-commit --message "feat: something" --push
 node cli.mjs git-verify --commit HEAD
 
 # Start the demo service
-node demo-service.mjs
+node examples/demo-service.mjs
 ```

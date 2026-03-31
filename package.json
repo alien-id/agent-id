@@ -6,6 +6,18 @@
   "bin": {
     "alien-agent-id": "./cli.mjs"
   },
+  "files": [
+    "cli.mjs",
+    "lib.mjs",
+    "qrcode.cjs",
+    "vendor",
+    "skills",
+    "default-provider.txt"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alien-id/agent-id.git"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
