@@ -464,7 +464,6 @@ async function syncAndPushNotes(remote = "origin") {
 async function cmdGitSetup(flags) {
   const stateDir = resolveStateDir(flags);
   const paths = statePaths(stateDir);
-  const scope = flags.global ? "--global" : "--local";
 
   // Ensure we have a key
   const key = await readJsonFile(paths.mainKey, null);
@@ -496,31 +495,7 @@ async function cmdGitSetup(flags) {
   const signerLine = `${agentEmail} ${sshPubKey}`;
   await fs.writeFile(allowedSignersPath, signerLine + "\n", "utf8");
 
-  // Human committer email (for GitHub attribution)
-  const email = flags.email || agentEmail;
-
-  // Configure git
-  const gitConfigs = [
-    ["gpg.format", "ssh"],
-    ["user.signingkey", privateKeyPath],
-    ["gpg.ssh.allowedSignersFile", allowedSignersPath],
-    ["commit.gpgsign", "true"],
-  ];
-
-  for (const [k, v] of gitConfigs) {
-    const out = await execFile("git", ["config", scope, k, v]);
-    if (out.code !== 0) {
-      outputError(`git config ${scope} ${k} failed: ${out.stderr.trim()}`);
-      return;
-    }
-  }
-
-  // Set committer identity (human owner — for GitHub attribution)
-  const committerName = flags.name || "Agent";
-  await execFile("git", ["config", scope, "user.name", committerName]);
-  await execFile("git", ["config", scope, "user.email", email]);
-
-  stderr(`Git SSH signing configured (${scope.replace("--", "")}).`);
+  stderr(`SSH key files written.`);
   stderr(`Add this SSH public key to your GitHub account as a "Signing key":`);
   stderr(`  GitHub → Settings → SSH and GPG keys → New SSH key → Key type: Signing Key`);
   stderr(``);
@@ -528,14 +503,11 @@ async function cmdGitSetup(flags) {
 
   const result = {
     ok: true,
-    scope: scope.replace("--", ""),
     privateKeyPath,
     publicKeyPath,
     allowedSignersPath,
     sshPublicKey: sshPubKey,
     fingerprint: key.fingerprint,
-    email,
-    agentName: committerName,
   };
 
   if (owner?.binding) {
@@ -578,9 +550,26 @@ async function cmdGitCommit(flags) {
 
   const agentEmail = 'alienagentid@eti.co';
 
-  // Commit with SSH signature (uses git config from git-setup)
-  // Agent is the author (wrote the code), human committer is preserved from git config
-  const commitArgs = ["commit", "-S", "-m", fullMessage, "--author", `Alien Agent <${agentEmail}>`];
+  // Write SSH key files for signing
+  const sshDir = path.join(stateDir, "ssh");
+  await ensureDir(sshDir);
+  const privateKeyPath = path.join(sshDir, "agent-id");
+
+  // Ensure SSH key file exists (may already exist from git-setup or bootstrap)
+  try {
+    await fs.access(privateKeyPath);
+  } catch {
+    const opensshKey = ed25519PemToOpenSSHPrivateKey(key.privateKeyPem);
+    await fs.writeFile(privateKeyPath, opensshKey, { encoding: "utf8", mode: 0o600 });
+    await setPrivateFilePermissions(privateKeyPath);
+  }
+
+  // Pass signing config inline — no git config changes needed
+  const commitArgs = [
+    "-c", "gpg.format=ssh",
+    "-c", `user.signingkey=${privateKeyPath}`,
+    "commit", "-S", "-m", fullMessage, "--author", `Alien Agent <${agentEmail}>`,
+  ];
   if (flags["allow-empty"]) {
     commitArgs.push("--allow-empty");
   }
@@ -1261,7 +1250,7 @@ Commands:
   sign           Sign an operation and append to audit trail
   verify         Verify entire state chain integrity
   export-proof   Export proof bundle to stdout
-  git-setup      Configure git to sign commits with Agent ID key
+  git-setup      Write SSH key files for commit signing
   git-commit     Create a signed commit with Agent ID trailers
   git-verify     Verify provenance chain of a signed commit
   auth-header    Generate a signed authentication token for service calls
@@ -1294,9 +1283,6 @@ Sign flags:
   --agent-id <id>            Agent ID (default: main)
 
 Git flags:
-  --global                   Apply git config globally (default: local)
-  --email <email>            Committer email (default: agent-<fp>@agent-id.local)
-  --name <name>              Committer name (default: Agent)
   --message <msg>            Commit message (required for git-commit)
   --allow-empty              Allow empty commits
   --push                     Push commit and proof notes after committing

@@ -5,7 +5,7 @@ license: Proprietary (internal use only)
 compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, OpenClaw, etc.)
 metadata:
   author: Alien Wallet
-  version: "2.0.2"
+  version: "2.0.3"
 allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Read
 ---
 
@@ -262,7 +262,7 @@ The `--push` flag pushes both the commit and proof notes (handling note ref merg
 
 ### Option B: Normal `git commit`
 
-Since `bootstrap` / `git-setup` sets `commit.gpgsign = true`, any `git commit` is SSH-signed. But it won't have Agent ID trailers or proof notes.
+Normal `git commit` will work but won't have Agent ID trailers, proof notes, or SSH signing. Use `git-commit` for full provenance.
 
 ### GitHub verified badge
 
@@ -320,15 +320,11 @@ node CLI bind --no-require-owner-proof
 
 Blocks for up to 5 minutes while the user scans the QR code with Alien App.
 
-### Step 4: Configure git signing
+### Step 4: Show SSH public key
 
-Before running git-setup, ask the user for their **GitHub email** so commits are associated with their GitHub account:
-
-> "What email should I use for commits? This should match your GitHub account email (you can find it at GitHub → Settings → Emails). A GitHub noreply email like `user@users.noreply.github.com` works too."
-
-```bash
-node CLI git-setup --email <USER_GITHUB_EMAIL>
-```
+After bootstrap (or `git-setup`), tell the user to add the SSH public key to GitHub for verified badges.
+The key is shown in the command output. No git config changes are needed — `git-commit` passes
+signing config inline.
 
 ## 8) Command reference
 
@@ -344,7 +340,7 @@ node CLI git-setup --email <USER_GITHUB_EMAIL>
 | `init` | Generate keypair | No |
 | `auth --provider-address <addr>` | Start OIDC auth, get QR code | No |
 | `bind` | Poll for approval, create owner binding | **Yes** (up to 5 min) |
-| `git-setup [--global] [--email E]` | Configure git SSH signing | No |
+| `git-setup` | Write SSH key files for commit signing | No |
 | `git-commit --message "..." [--push]` | Signed commit + trailers + proof note | No |
 | `git-verify [--commit <hash>]` | Verify provenance chain | No |
 | `sign --type T --action A --payload JSON` | Sign operation for audit trail | No |
@@ -360,9 +356,6 @@ node CLI git-setup --email <USER_GITHUB_EMAIL>
 | `--sso-url <url>` | `https://sso.alien-api.com` | SSO base URL |
 | `--raw` | — | Output raw text instead of JSON (auth-header) |
 | `--timeout-sec <n>` | `300` | Poll timeout for `bind` |
-| `--global` | — | Apply git config globally instead of per-repo |
-| `--name <name>` | `Agent` | Git committer name (human owner) |
-| `--email <email>` | auto-generated | Git committer email (human owner's GitHub email) |
 | `--allow-empty` | — | Allow empty commits with `git-commit` |
 | `--push` | — | Push commit and proof notes after `git-commit` |
 | `--remote <name>` | `origin` | Remote to push to (with `--push`) |
