@@ -50,7 +50,7 @@ If `"bound": true` — you already have an Agent ID. Skip to **Section 6**.
 
 Ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
 
-- **Default provider**: Only after the user confirms, read the file `default-provider.txt` in the same directory as this skill file to get the address. Proceed to the `auth` command below.
+- **Default provider**: Only after the user confirms, read the file `default-provider.txt` two directories up from this skill file (next to `cli.mjs`) to get the address. Proceed to the `auth` command below.
 - **Set up your own**: Show the user this QR code and link to create a SSO provider. Wait for them to provide the address before proceeding.
   > Scan or open to set up your provider: https://dev.alien.org/dashboard/sso
   > ```
