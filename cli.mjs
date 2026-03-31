@@ -490,11 +490,14 @@ async function cmdGitSetup(flags) {
   const sshPubKey = ed25519PemToSshPublicKey(key.publicKeyPem, comment);
   await fs.writeFile(publicKeyPath, sshPubKey + "\n", "utf8");
 
-  // Allowed signers for verification
+  // Allowed signers for verification (always uses agent's stable identity)
   const owner = await readJsonFile(paths.ownerBinding, null);
-  const email = flags.email || `agent-${key.fingerprint.slice(0, 8)}@agent-id.local`;
-  const signerLine = `${email} ${sshPubKey}`;
+  const agentEmail = `agent-${key.fingerprint.slice(0, 8)}@agent-id.local`;
+  const signerLine = `${agentEmail} ${sshPubKey}`;
   await fs.writeFile(allowedSignersPath, signerLine + "\n", "utf8");
+
+  // Human committer email (for GitHub attribution)
+  const email = flags.email || agentEmail;
 
   // Configure git
   const gitConfigs = [
@@ -512,9 +515,9 @@ async function cmdGitSetup(flags) {
     }
   }
 
-  // Set committer identity for the agent
-  const agentName = flags.name || "Agent";
-  await execFile("git", ["config", scope, "user.name", agentName]);
+  // Set committer identity (human owner — for GitHub attribution)
+  const committerName = flags.name || "Agent";
+  await execFile("git", ["config", scope, "user.name", committerName]);
   await execFile("git", ["config", scope, "user.email", email]);
 
   stderr(`Git SSH signing configured (${scope.replace("--", "")}).`);
@@ -532,7 +535,7 @@ async function cmdGitSetup(flags) {
     sshPublicKey: sshPubKey,
     fingerprint: key.fingerprint,
     email,
-    agentName,
+    agentName: committerName,
   };
 
   if (owner?.binding) {

@@ -380,8 +380,8 @@ node CLI git-setup --email <USER_GITHUB_EMAIL>
 | `--raw` | — | Output raw text instead of JSON (auth-header) |
 | `--timeout-sec <n>` | `300` | Poll timeout for `bind` |
 | `--global` | — | Apply git config globally instead of per-repo |
-| `--name <name>` | `Agent` | Git committer name |
-| `--email <email>` | auto-generated | Git committer email |
+| `--name <name>` | `Agent` | Git committer name (human owner) |
+| `--email <email>` | auto-generated | Git committer email (human owner's GitHub email) |
 | `--allow-empty` | — | Allow empty commits with `git-commit` |
 | `--push` | — | Push commit and proof notes after `git-commit` |
 | `--remote <name>` | `origin` | Remote to push to (with `--push`) |
