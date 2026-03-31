@@ -177,16 +177,6 @@ node CLI vault-store --service github --type api-key --credential "ghp_xxx"
 node CLI vault-get --service github
 ```
 
-This creates a commit that is:
-1. **SSH-signed** with your Ed25519 key (git verifies this)
-2. **Tagged with trailers** linking to your identity and human owner:
-   ```
-   Agent-ID-Fingerprint: 945d41991dac1187...
-   Agent-ID-Owner: 0000000301...
-   Agent-ID-Binding: uuid-here
-   ```
-3. **Logged in your audit trail** with a hash-chained signed record
-
 Use `--type` to tag what kind of credential it is:
 - `api-key` — API key / personal access token (default)
 - `password` — username + password pair (use with `--username`)
@@ -320,11 +310,14 @@ node CLI bind --no-require-owner-proof
 
 Blocks for up to 5 minutes while the user scans the QR code with Alien App.
 
-### Step 4: Show SSH public key
+### Step 4: Configure git signing
+```bash
+node CLI git-setup
+```
 
-After bootstrap (or `git-setup`), tell the user to add the SSH public key to GitHub for verified badges.
-The key is shown in the command output. No git config changes are needed — `git-commit` passes
-signing config inline.
+This writes the SSH key files for commit signing. Tell the user to add the SSH public key
+(shown in the output) to their GitHub account for verified badges:
+Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**.
 
 ## 8) Command reference
 
@@ -337,6 +330,7 @@ signing config inline.
 | `vault-get --service S` | Retrieve decrypted credential | No |
 | `vault-list` | List stored credentials (no secrets shown) | No |
 | `vault-remove --service S` | Remove a credential | No |
+| `refresh` | Refresh SSO session tokens | No |
 | `init` | Generate keypair | No |
 | `auth --provider-address <addr>` | Start OIDC auth, get QR code | No |
 | `bind` | Poll for approval, create owner binding | **Yes** (up to 5 min) |
