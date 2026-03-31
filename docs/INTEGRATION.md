@@ -179,15 +179,15 @@ import json
 import base64
 import hashlib
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 import time
 
 def verify_agent_token(token_b64, max_age_ms=300000):
     # 1. Decode
-    padding = 4 - len(token_b64) % 4
-    if padding != 4:
-        token_b64 += "=" * padding
-    raw = base64.urlsafe_b64decode(token_b64.replace("-", "+").replace("_", "/") if "+" not in token_b64 else token_b64)
+    # Add padding if needed — base64url omits trailing '='
+    token_b64 += "=" * (-len(token_b64) % 4)
+    raw = base64.urlsafe_b64decode(token_b64)
     parsed = json.loads(raw)
 
     # 2. Version
