@@ -1,5 +1,5 @@
-var QRCode = require('../../vendor/QRCode/index.cjs'),
-    QRErrorCorrectLevel = require('../../vendor/QRCode/QRErrorCorrectLevel.cjs'),
+var QRCode = require('./vendor/QRCode/index.cjs'),
+    QRErrorCorrectLevel = require('./vendor/QRCode/QRErrorCorrectLevel.cjs'),
     black = "\x1b[40m  \x1b[0m",
     white = "\x1b[47m  \x1b[0m",
     toCell = function (isBlack) {
