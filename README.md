@@ -10,7 +10,7 @@ fully verifiable: **commit → agent key → owner binding → SSO attestation �
 ## Table of Contents
 
 - [How It Works](#how-it-works)
-- [Quick Start](#quick-start)
+- [Quick Start (Claude Code)](#quick-start)
 - [What a Signed Commit Looks Like](#what-a-signed-commit-looks-like)
 - [Verifying Provenance](#verifying-provenance)
 - [Prerequisites](#prerequisites)
@@ -59,43 +59,63 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 
 ## Quick Start
 
-### 1. Tell your agent to use the skill
+### 1. Install the plugin
 
-**Claude Code** — add to your project's `.claude/settings.json` or `CLAUDE.md`:
-
-```text
-Read /path/to/agent-id/SKILL.md and follow the instructions to obtain an Agent ID before making commits.
-```
-
-Or reference it in a prompt:
+Register the repo as a plugin marketplace:
 
 ```text
-Before writing any code, read /path/to/agent-id/SKILL.md and obtain an Agent ID.
+/plugin marketplace add alien-id/agent-id
 ```
 
-**Any other agent with shell access** — the agent reads `SKILL.md`, which contains step-by-step
-instructions and exact shell commands. The agent needs:
+Install the plugin:
 
-- Shell access with Node.js 18+ and git 2.34+
-- Permission to run `node cli.mjs ...` commands
+```text
+/plugin install alien-agent-id@alien-agent-id
+```
 
-### 2. The agent does the rest
+Reload plugins:
 
-The agent follows the skill file to:
+```text
+/reload-plugins
+```
 
-1. Generate an Ed25519 keypair
-2. Start OIDC auth and show you a QR code
-3. You scan with Alien App and approve
-4. Agent creates the owner binding
-5. Agent configures git SSH signing
-6. Every commit is now signed with provenance trailers
+Sometimes the reload does not work properly the first time — restarting
+Claude usually helps.
+
+### 2. Set up your Agent ID
+
+When the plugin is loaded, run the skill:
+
+```text
+/alien-agent-id
+```
+
+Follow the instructions — the agent will generate a keypair, show a
+QR code, and wait for you to approve in the Alien App. Once done,
+your Agent ID is created and bound.
 
 ### 3. Add the signing key to GitHub
 
-The agent will output an SSH public key after `git-setup`. Add it to your GitHub account:
+The agent will output an SSH public key after setup. Add it to your
+GitHub account:
 
-Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**.
+Go to GitHub → Settings → SSH and GPG keys → New SSH key →
+Key type: **Signing Key**.
 Commits will then show a "Verified" badge.
+
+### 4. Use the skill to commit and push
+
+You can pass arguments to the skill for common operations:
+
+```text
+/alien-agent-id stage, commit and push all files in the repo, follow previous commits naming convention
+```
+
+### Other agents
+
+Any agent with shell access can use `SKILL.md` directly. The agent
+needs Node.js 18+, git 2.34+, and permission to run
+`node cli.mjs ...` commands.
 
 ---
 
