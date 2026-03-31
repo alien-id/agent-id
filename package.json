@@ -1,18 +1,16 @@
 {
   "name": "alien-agent-id",
-  "version": "1.0.0",
+  "version": "2.1.1",
   "description": "Universal Agent ID - verifiable identity for AI agents linked to human owners via Alien Network SSO",
   "type": "module",
   "bin": {
-    "alien-agent-id": "./cli.mjs"
+    "alien-agent-id": "./skills/alien-agent-id/cli.mjs"
   },
   "files": [
-    "cli.mjs",
-    "lib.mjs",
-    "qrcode.cjs",
-    "vendor",
     "skills",
-    "default-provider.txt"
+    "docs",
+    "examples",
+    "tests"
   ],
   "repository": {
     "type": "git",
@@ -21,5 +19,18 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "keywords": [
+    "agent-id",
+    "ai-agent",
+    "identity",
+    "authentication",
+    "sso",
+    "oidc",
+    "git-signing",
+    "credential-vault",
+    "claude-code",
+    "alien-network"
+  ],
+  "homepage": "https://alien.org/agent-id",
   "license": "MIT"
 }

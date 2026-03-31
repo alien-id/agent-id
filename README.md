@@ -66,23 +66,19 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 
 ## Quick Start
 
-### 1. Install the plugin
+### 1. Install the skill
 
-Register the repo as a plugin marketplace:
+```bash
+npx skills add alien-id/agent-id
+```
+
+#### Claude Code only
+
+Alternatively, install via the plugin marketplace:
 
 ```text
 /plugin marketplace add alien-id/agent-id
-```
-
-Install the plugin:
-
-```text
 /plugin install alien-agent-id@alien-agent-id
-```
-
-Reload plugins:
-
-```text
 /reload-plugins
 ```
 
