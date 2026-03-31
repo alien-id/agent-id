@@ -5,7 +5,7 @@ license: Proprietary (internal use only)
 compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, OpenClaw, etc.)
 metadata:
   author: Alien Wallet
-  version: "2.0.3"
+  version: "2.1.0"
 allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Read
 ---
 
@@ -32,7 +32,7 @@ Setting up an Agent ID requires four steps run manually (not via `bootstrap`) so
 
 ### Resolve the CLI path first
 
-The CLI tool is at `cli.mjs` two directories up from this skill file. Before running any commands, resolve the absolute path. In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
+The CLI tool is at `cli.mjs` in the same directory as this skill file. Before running any commands, resolve the absolute path. In all commands below, replace `CLI` with the resolved path: `node /absolute/path/to/cli.mjs`.
 
 ## 1) When to use
 
@@ -50,7 +50,7 @@ If `"bound": true` — you already have an Agent ID. Skip to **Section 6**.
 
 Ask the user: **"Would you like to use the default Alien provider, or set up your own?"**
 
-- **Default provider**: Only after the user confirms, read the file `default-provider.txt` two directories up from this skill file (next to `cli.mjs`) to get the address. Proceed to the `auth` command below.
+- **Default provider**: Only after the user confirms, read the file `default-provider.txt` in the same directory as this skill file (next to `cli.mjs`) to get the address. Proceed to the `auth` command below.
 - **Set up your own**: Show the user this QR code and link to create a SSO provider. Wait for them to provide the address before proceeding.
   > Scan or open to set up your provider: https://dev.alien.org/dashboard/sso
   > ```

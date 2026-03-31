@@ -28,7 +28,7 @@ import {
   signEd25519Base64Url,
   canonicalJSONString,
   sha256Hex,
-} from "../lib.mjs";
+} from "../skills/alien-agent-id/lib.mjs";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -662,7 +662,7 @@ describe("CLI refresh command (integration)", () => {
       const { promisify } = await import("node:util");
       const exec = promisify(execFile);
 
-      const cliPath = new URL("../cli.mjs", import.meta.url).pathname;
+      const cliPath = new URL("../skills/alien-agent-id/cli.mjs", import.meta.url).pathname;
       const { stdout } = await exec("node", [cliPath, "refresh", "--state-dir", stateDir]);
 
       const result = JSON.parse(stdout);
@@ -700,7 +700,7 @@ describe("CLI refresh command (integration)", () => {
     const { promisify } = await import("node:util");
     const exec = promisify(execFile);
 
-    const cliPath = new URL("../cli.mjs", import.meta.url).pathname;
+    const cliPath = new URL("../skills/alien-agent-id/cli.mjs", import.meta.url).pathname;
 
     try {
       await exec("node", [cliPath, "refresh", "--state-dir", stateDir]);

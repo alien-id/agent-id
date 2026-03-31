@@ -52,10 +52,10 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 | Path | Purpose |
 | --- | --- |
 | `skills/alien-agent-id/SKILL.md` | Instructions for AI agents — point your agent here |
-| `cli.mjs` | CLI tool — all agent operations |
-| `lib.mjs` | Portable library — crypto, OIDC, signing engine, verification (zero npm deps) |
-| `qrcode.cjs` | Vendored QR code generator (terminal output) |
-| `default-provider.txt` | Default SSO provider address |
+| `skills/alien-agent-id/cli.mjs` | CLI tool — all agent operations |
+| `skills/alien-agent-id/lib.mjs` | Portable library — crypto, OIDC, signing engine, verification (zero npm deps) |
+| `skills/alien-agent-id/qrcode.cjs` | Vendored QR code generator (terminal output) |
+| `skills/alien-agent-id/default-provider.txt` | Default SSO provider address |
 | `docs/AGENT-SSO.md` | System documentation for humans |
 | `docs/INTEGRATION.md` | Integration guide for service providers |
 | `examples/demo-service.mjs` | Reference HTTP service with agent token verification |
@@ -122,7 +122,7 @@ You can pass arguments to the skill for common operations:
 
 Any agent with shell access can use `skills/alien-agent-id/SKILL.md` directly. The agent
 needs Node.js 18+, git 2.34+, and permission to run
-`node cli.mjs ...` commands.
+`node skills/alien-agent-id/cli.mjs ...` commands.
 
 ---
 
@@ -150,7 +150,7 @@ anyone to verify the provenance chain without access to the agent's local state.
 ## Verifying Provenance
 
 ```bash
-node cli.mjs git-verify --commit HEAD
+node skills/alien-agent-id/cli.mjs git-verify --commit HEAD
 ```
 
 Verification is **self-contained** — `git-commit` attaches a proof bundle as a git note
@@ -163,7 +163,7 @@ machine.
 git fetch origin refs/notes/agent-id:refs/notes/agent-id
 
 # Verify any commit
-node cli.mjs git-verify --commit abc123
+node skills/alien-agent-id/cli.mjs git-verify --commit abc123
 ```
 
 ### Verification chain
@@ -192,11 +192,11 @@ Agents can authenticate to Alien-aware services using self-issued Ed25519 signed
 
 ```bash
 # Generate a signed auth header (valid for 5 minutes)
-node cli.mjs auth-header --raw
+node skills/alien-agent-id/cli.mjs auth-header --raw
 # → Authorization: AgentID eyJ...
 
 # Use in API calls
-AUTH=$(node cli.mjs auth-header --raw)
+AUTH=$(node skills/alien-agent-id/cli.mjs auth-header --raw)
 curl -H "$AUTH" https://service.example.com/api/whoami
 ```
 
@@ -217,21 +217,21 @@ HKDF — only the agent that stored the credential can decrypt it.
 ```bash
 # Store a credential (most secure — from file)
 echo 'ghp_xxx' > /tmp/tok && chmod 600 /tmp/tok
-node cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
+node skills/alien-agent-id/cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
 rm /tmp/tok
 
 # Store from environment variable
-node cli.mjs vault-store --service github --type api-key --credential-env GITHUB_TOKEN
+node skills/alien-agent-id/cli.mjs vault-store --service github --type api-key --credential-env GITHUB_TOKEN
 
 # Retrieve
-node cli.mjs vault-get --service github
+node skills/alien-agent-id/cli.mjs vault-get --service github
 # → {"ok": true, "service": "github", "type": "api-key", "credential": "ghp_xxx..."}
 
 # List all stored credentials (no secrets shown)
-node cli.mjs vault-list
+node skills/alien-agent-id/cli.mjs vault-list
 
 # Remove
-node cli.mjs vault-remove --service github
+node skills/alien-agent-id/cli.mjs vault-remove --service github
 ```
 
 Supported credential types: `api-key`, `password`, `oauth`, `bearer`, `custom`.
@@ -245,10 +245,10 @@ command renews the `access_token` without requiring human interaction:
 
 ```bash
 # Explicit refresh
-node cli.mjs refresh
+node skills/alien-agent-id/cli.mjs refresh
 
 # Transparent — auth-header automatically refreshes expired sessions
-node cli.mjs auth-header
+node skills/alien-agent-id/cli.mjs auth-header
 ```
 
 If the human revokes the agent's authorization via the Alien App, the refresh will fail
@@ -311,7 +311,7 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 | `verify` | Verify state chain integrity |
 | `export-proof` | Export proof bundle |
 
-Run `node cli.mjs --help` for all flags.
+Run `node skills/alien-agent-id/cli.mjs --help` for all flags.
 
 ---
 
