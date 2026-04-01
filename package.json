@@ -1,6 +1,6 @@
 {
   "name": "alien-agent-id",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Universal Agent ID - verifiable identity for AI agents linked to human owners via Alien Network SSO",
   "type": "module",
   "bin": {

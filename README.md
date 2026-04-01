@@ -138,8 +138,8 @@ Anyone can trace: **this code** → **this agent** (fingerprint) → **this huma
 → **verified AlienID holder**.
 
 Each `git-commit` also attaches a **proof bundle** as a git note (`refs/notes/agent-id`)
-containing the agent's public key, owner binding, and SSO id_token — everything needed for
-anyone to verify the provenance chain without access to the agent's local state.
+containing the agent's public key, owner binding, and base64url-encoded SSO id_token — everything
+needed for anyone to verify the provenance chain without access to the agent's local state.
 
 ---
 
@@ -150,7 +150,8 @@ node skills/alien-agent-id/cli.mjs git-verify --commit HEAD
 ```
 
 Verification is **self-contained** — `git-commit` attaches a proof bundle as a git note
-(`refs/notes/agent-id`) containing the agent's public key, owner binding, and SSO id_token. Anyone
+(`refs/notes/agent-id`) containing the agent's public key, owner binding, and base64url-encoded
+SSO id_token. Anyone
 who clones the repo and fetches the notes can verify the full chain without access to the agent's
 machine.
 

@@ -566,7 +566,7 @@ The proof bundle contains:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "agent": {
     "fingerprint": "f5d9fac4...",
     "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n..."
@@ -584,7 +584,7 @@ The proof bundle contains:
     "payloadHash": "sha256-of-canonical-payload",
     "signature": "Ed25519-base64url"
   },
-  "idToken": "eyJ...",
+  "idToken": "<base64url-encoded-id-token>",
   "ssoBaseUrl": "https://sso.alien-api.com"
 }
 ```
@@ -596,9 +596,10 @@ Verification steps:
 2. proof.ownerBinding.payload — canonical JSON matches payloadHash
 3. proof.ownerBinding.signature — Ed25519 verify with proof.agent.publicKeyPem
 4. proof.ownerBinding.payload.agentInstance.publicKeyFingerprint == token fingerprint
-5. sha256(proof.idToken) == proof.ownerBinding.payload.idTokenHash
-6. Fetch SSO JWKS from proof.ssoBaseUrl + "/.well-known/openid-configuration"
-7. Verify proof.idToken RS256 signature against JWKS
+5. Decode proof.idToken from base64url (v2) or use raw (v1)
+6. sha256(decoded idToken) == proof.ownerBinding.payload.idTokenHash
+7. Fetch SSO JWKS from proof.ssoBaseUrl + "/.well-known/openid-configuration"
+8. Verify decoded idToken RS256 signature against JWKS
 ```
 
 If all checks pass, you have cryptographic proof that:
