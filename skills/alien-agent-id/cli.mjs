@@ -612,14 +612,15 @@ async function cmdGitCommit(flags) {
   if (owner?.binding) {
     try {
       const ownerSession = await readJsonFile(paths.ownerSession, null);
+      const rawIdToken = ownerSession?.idToken || null;
       const proofBundle = {
-        version: 1,
+        version: 2,
         agent: {
           fingerprint: key.fingerprint,
           publicKeyPem: key.publicKeyPem,
         },
         ownerBinding: owner.binding,
-        idToken: ownerSession?.idToken || null,
+        idToken: rawIdToken ? Buffer.from(rawIdToken).toString("base64url") : null,
         ssoBaseUrl: ownerSession?.issuer
           ? ownerSession.issuer
           : "https://sso.alien-api.com",
@@ -733,11 +734,13 @@ async function cmdGitVerify(flags) {
   let idToken = null;
   let ssoBaseUrl = flags["sso-url"] || "https://sso.alien-api.com";
 
-  if (proof?.version === 1 && proof.ownerBinding) {
+  if ((proof?.version === 1 || proof?.version === 2) && proof.ownerBinding) {
     source = "git-note";
     agentPublicKeyPem = proof.agent?.publicKeyPem || null;
     binding = proof.ownerBinding;
-    idToken = proof.idToken || null;
+    idToken = proof.idToken
+      ? (proof.version >= 2 ? Buffer.from(proof.idToken, "base64url").toString() : proof.idToken)
+      : null;
     ssoBaseUrl = proof.ssoBaseUrl || ssoBaseUrl;
   } else {
     const paths = statePaths(stateDir);
