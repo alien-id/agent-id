@@ -1337,7 +1337,14 @@ export function createAgentToken(params) {
   };
   const canonical = canonicalJSONString(payload);
   const signature = signEd25519Base64Url(canonical, params.privateKeyPem);
-  return b64url(JSON.stringify({ ...payload, sig: signature }));
+  const token = { ...payload, sig: signature };
+  if (params.ownerBinding) {
+    token.ownerBinding = params.ownerBinding;
+  }
+  if (params.idToken) {
+    token.idToken = params.idToken;
+  }
+  return b64url(JSON.stringify(token));
 }
 
 export function verifyAgentToken(tokenB64, opts = {}) {
