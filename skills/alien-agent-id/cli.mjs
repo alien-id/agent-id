@@ -1214,12 +1214,15 @@ async function cmdAuthHeader(flags) {
   }
 
   const owner = await readJsonFile(paths.ownerBinding, null);
+  const session = await readJsonFile(paths.ownerSession, null);
 
   const token = createAgentToken({
     fingerprint: key.fingerprint,
     publicKeyPem: key.publicKeyPem,
     privateKeyPem: key.privateKeyPem,
     ownerSessionSub: owner?.binding?.payload?.ownerSessionSub || null,
+    ownerBinding: owner?.binding || null,
+    idToken: session?.idToken || null,
   });
 
   const header = `AgentID ${token}`;
