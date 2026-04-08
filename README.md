@@ -1,7 +1,13 @@
-# Alien Agent ID
+<p align="center">
+  <img src=".github/assets/logo.png" alt="Alien Agent ID" width="128">
+</p>
 
-> Verifiable cryptographic identity for AI agents, linked to human owners
-> via [Alien Network][alien] SSO.
+<h1 align="center">Alien Agent ID</h1>
+
+<p align="center">
+  Verifiable cryptographic identity for AI agents, linked to human owners<br>
+  via <a href="https://alien.org">Alien Network</a> SSO.
+</p>
 
 When an AI agent has an Alien Agent ID, every git commit it makes is SSH-signed and carries trailers
 that trace back to the specific agent and the human who authorized it. The provenance chain is
