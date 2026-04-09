@@ -64,7 +64,6 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 | `skills/alien-agent-id/default-provider.txt` | Default SSO provider address |
 | `docs/AGENT-SSO.md` | System documentation for humans |
 | `docs/INTEGRATION.md` | Integration guide for service providers |
-| `examples/demo-service.mjs` | Reference HTTP service with agent token verification |
 | `tests/test-refresh.mjs` | Test suite for session refresh flow |
 | `package.json` | Minimal metadata |
 
@@ -204,10 +203,9 @@ curl -H "$AUTH" https://service.example.com/api/whoami
 ```
 
 The token is self-contained — it includes the agent's public key, fingerprint, owner identity,
-a timestamp, and an Ed25519 signature. Services verify it inline using `verifyAgentToken()`
-from `lib.mjs` with no prior key registration needed.
-
-See `examples/demo-service.mjs` for a working reference implementation.
+owner proof chain, and an Ed25519 signature. Services verify tokens using
+[`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id) with no
+prior key registration needed.
 
 ---
 

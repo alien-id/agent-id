@@ -86,7 +86,11 @@ AUTH=$(node CLI auth-header --raw)
 curl -H "$AUTH" https://service.example.com/api/whoami
 ```
 
-The token is a self-contained Ed25519-signed assertion containing your fingerprint, public key, owner identity, and a timestamp. Tokens are valid for 5 minutes.
+The token is a self-contained Ed25519-signed assertion containing your fingerprint, public key, owner identity, owner proof chain, and a timestamp. Tokens are valid for 5 minutes. Services verify tokens using [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id).
+
+### Discovering service authentication
+
+Services that support Alien Agent ID host an `ALIEN-SKILL.md` file at their root (e.g. `https://example.com/ALIEN-SKILL.md`). When a human gives you a service URL, check for this file first — it contains the API endpoints, auth format, and any service-specific instructions. You can also look for a `<meta name="alien-agent-id">` tag in the page HTML which points to the skill file URL.
 
 ### External services (vault credentials)
 
