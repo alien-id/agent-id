@@ -5,7 +5,7 @@ license: MIT
 compatibility: Any AI agent with shell access and Node.js 18+ (Claude Code, OpenClaw, etc.)
 metadata:
   author: Alien Wallet
-  version: "2.1.2"
+  version: "2.2.0"
 allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Read
 ---
 
