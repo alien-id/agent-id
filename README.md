@@ -13,6 +13,8 @@ When an AI agent has an Alien Agent ID, every git commit it makes is SSH-signed 
 that trace back to the specific agent and the human who authorized it. The provenance chain is
 fully verifiable: **commit → agent key → owner binding → SSO attestation → verified AlienID holder**.
 
+[💻 Watch the setup demo on X](https://x.com/kirillzzy/status/2042269104359563500)
+
 ## Table of Contents
 
 - [How It Works](#how-it-works)
