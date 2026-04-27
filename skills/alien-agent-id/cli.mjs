@@ -1216,6 +1216,31 @@ async function cmdAuthHeader(flags) {
   const owner = await readJsonFile(paths.ownerBinding, null);
   const session = await readJsonFile(paths.ownerSession, null);
 
+  let aud = null;
+  if (flags.aud !== undefined) {
+    if (typeof flags.aud !== "string" || flags.aud === "") {
+      outputError("--aud requires a URL value (e.g. --aud https://api.example.com)");
+      return;
+    }
+    if (!URL.canParse(flags.aud)) {
+      outputError(`--aud is not a valid URL: ${flags.aud}`);
+      return;
+    }
+    const parsed = new URL(flags.aud);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      outputError(`--aud must use http:// or https://, got: ${parsed.protocol}//`);
+      return;
+    }
+    if (parsed.origin !== flags.aud) {
+      outputError(
+        `--aud must be a bare origin (scheme + host + port, no path/query/fragment). ` +
+          `Did you mean: ${parsed.origin}?`,
+      );
+      return;
+    }
+    aud = flags.aud;
+  }
+
   const token = createAgentToken({
     fingerprint: key.fingerprint,
     publicKeyPem: key.publicKeyPem,
@@ -1223,6 +1248,7 @@ async function cmdAuthHeader(flags) {
     ownerSessionSub: owner?.binding?.payload?.ownerSessionSub || null,
     ownerBinding: owner?.binding || null,
     idToken: session?.idToken || null,
+    aud,
   });
 
   const header = `AgentID ${token}`;
@@ -1301,6 +1327,9 @@ Git-verify flags:
 
 Auth-header flags:
   --raw                      Output raw header (not JSON) for use with curl
+  --aud <origin>             Bind token to an audience (e.g. https://api.example.com).
+                             Services must reject tokens whose aud != their own origin
+                             to prevent cross-service replay. Omit for an unbound token.
 
 Vault flags:
   --service <name>           Service name (required for store/get/remove)

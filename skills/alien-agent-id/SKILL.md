@@ -75,18 +75,29 @@ Ask the user: **"Would you like to use the default Alien provider (recommended),
 Then run:
 
 ```bash
-node CLI auth-header
+# Bind the token to the target service origin to prevent cross-service replay
+node CLI auth-header --aud https://service.example.com
 ```
 
 This returns JSON with a `token` field. Use it in HTTP requests:
 
 ```bash
 # Get the auth header for curl
-AUTH=$(node CLI auth-header --raw)
+AUTH=$(node CLI auth-header --aud https://service.example.com --raw)
 curl -H "$AUTH" https://service.example.com/api/whoami
 ```
 
-The token is a self-contained Ed25519-signed assertion containing your fingerprint, public key, owner identity, owner proof chain, and a timestamp. Tokens are valid for 5 minutes. Services verify tokens using [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id).
+Always pass `--aud` set to the service's origin (scheme + host + port,
+no path). A token without `--aud` is a bearer credential that any
+Alien-aware service can replay against any other within the 5-minute
+window — only omit it if the service's docs say unbound tokens are
+expected.
+
+The token is a self-contained Ed25519-signed assertion containing your
+fingerprint, public key, owner identity, owner proof chain, audience
+(when bound), and a timestamp. Tokens are valid for 5 minutes. Services
+verify tokens using
+[`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id).
 
 ### Discovering service authentication
 

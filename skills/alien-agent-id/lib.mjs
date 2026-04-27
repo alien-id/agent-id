@@ -1332,6 +1332,7 @@ export function createAgentToken(params) {
     fingerprint: params.fingerprint,
     publicKeyPem: params.publicKeyPem,
     owner: params.ownerSessionSub || null,
+    aud: params.aud || null,
     timestamp: nowMs(),
     nonce: randomBytes(16).toString("hex"),
   };
