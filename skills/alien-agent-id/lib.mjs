@@ -515,6 +515,9 @@ export async function exchangeAuthorizationCode(params) {
   body.set("code", params.authorizationCode);
   body.set("client_id", params.providerAddress);
   body.set("code_verifier", params.codeVerifier);
+  if (params.keyFingerprint) {
+    body.set("key_fingerprint", params.keyFingerprint);
+  }
 
   const out = await fetchJson(`${base}/oauth/token`, {
     method: "POST",
@@ -535,6 +538,9 @@ export async function refreshSession(params) {
   body.set("grant_type", "refresh_token");
   body.set("refresh_token", params.refreshToken);
   body.set("client_id", params.providerAddress);
+  if (params.keyFingerprint) {
+    body.set("key_fingerprint", params.keyFingerprint);
+  }
 
   const out = await fetchJson(`${base}/oauth/token`, {
     method: "POST",
@@ -925,10 +931,12 @@ export class SignatureEngine {
     const ssoBaseUrl = session.ssoBaseUrl || session.issuer;
     if (!ssoBaseUrl) return null;
 
+    const mainKey = this.keys.get("main");
     const fresh = await refreshSession({
       ssoBaseUrl,
       refreshToken: session.refreshToken,
       providerAddress: session.providerAddress,
+      keyFingerprint: mainKey?.fingerprint || null,
     });
 
     // Verify the refreshed token still belongs to the same owner.

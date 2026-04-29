@@ -229,12 +229,17 @@ async function cmdBind(flags) {
   });
   stderr("Authorization received. Exchanging tokens...");
 
+  // Read agent key fingerprint for id_token binding
+  const agentKey = await readJsonFile(paths.mainKey, null);
+  const keyFingerprint = agentKey?.fingerprint || null;
+
   // Exchange code for tokens
   const tokens = await exchangeAuthorizationCode({
     ssoBaseUrl: pending.ssoBaseUrl,
     providerAddress: pending.providerAddress,
     authorizationCode: poll.authorizationCode,
     codeVerifier: pending.codeVerifier,
+    keyFingerprint,
   });
 
   // Verify id_token
@@ -611,7 +616,28 @@ async function cmdGitCommit(flags) {
   let proofAttached = false;
   if (owner?.binding) {
     try {
-      const ownerSession = await readJsonFile(paths.ownerSession, null);
+      let ownerSession = await readJsonFile(paths.ownerSession, null);
+
+      // Auto-upgrade: if the stored id_token lacks key_fingerprint, refresh to get one
+      if (ownerSession?.idToken && ownerSession?.refreshToken) {
+        try {
+          const tokenParts = ownerSession.idToken.split(".");
+          const claims = JSON.parse(Buffer.from(tokenParts[1], "base64url").toString());
+          if (!claims.key_fingerprint) {
+            stderr("Upgrading id_token with key_fingerprint binding...");
+            const engine = new SignatureEngine({ baseDir: stateDir });
+            await engine.init();
+            const upgraded = await engine.ensureValidSession({ bufferSec: Infinity });
+            if (upgraded?.idToken && upgraded.idToken !== ownerSession.idToken) {
+              ownerSession = upgraded;
+              stderr("id_token upgraded successfully.");
+            }
+          }
+        } catch {
+          // Non-fatal — use existing token
+        }
+      }
+
       const rawIdToken = ownerSession?.idToken || null;
       const proofBundle = {
         version: 2,
@@ -864,6 +890,21 @@ async function cmdGitVerify(flags) {
         `SSO server signature valid (issuer: ${tokenResult.issuer}, sub: ${tokenResult.payload.sub})`,
       );
       result.ssoSignatureValid = true;
+
+      // Step 9: Verify key_fingerprint claim binds this agent
+      const tokenKeyFp = tokenResult.payload.key_fingerprint;
+      if (tokenKeyFp) {
+        if (tokenKeyFp === trailerFingerprint) {
+          result.provenance.push("id_token key_fingerprint matches agent");
+        } else {
+          result.warnings.push(
+            `id_token key_fingerprint mismatch: token=${tokenKeyFp.slice(0, 16)}... agent=${trailerFingerprint.slice(0, 16)}...`,
+          );
+          result.ok = false;
+        }
+      } else {
+        result.warnings.push("id_token missing key_fingerprint claim — token predates key binding");
+      }
     } catch (err) {
       result.warnings.push(`id_token signature verification: ${err instanceof Error ? err.message : String(err)}`);
       result.ssoSignatureValid = false;
@@ -874,9 +915,14 @@ async function cmdGitVerify(flags) {
   }
 
   // Build summary
-  if (result.provenance.length >= 3 && result.sshSignatureValid) {
+  const keyBound = result.provenance.some((p) => p.includes("key_fingerprint matches"));
+  if (result.provenance.length >= 3 && result.sshSignatureValid && keyBound) {
     const ownerLabel = result.ownerSessionSub || "unknown";
     result.summary = `Commit ${resolvedHash.slice(0, 12)} was signed by agent ${trailerFingerprint.slice(0, 16)}... owned by ${ownerLabel}`;
+  } else if (result.provenance.length >= 3 && result.sshSignatureValid && !keyBound) {
+    const ownerLabel = result.ownerSessionSub || "unknown";
+    result.summary = `Commit ${resolvedHash.slice(0, 12)} was signed by agent ${trailerFingerprint.slice(0, 16)}... owned by ${ownerLabel} (unbound key — id_token missing key_fingerprint)`;
+    result.ok = false;
   } else {
     result.summary = `Commit ${resolvedHash.slice(0, 12)} — provenance chain incomplete (see warnings)`;
     result.ok = result.sshSignatureValid && result.provenance.length > 0;
