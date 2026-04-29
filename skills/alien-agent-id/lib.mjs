@@ -99,6 +99,130 @@ export function fingerprintPublicKeyPem(publicKeyPem) {
   return createHash("sha256").update(der).digest("hex");
 }
 
+// ─── JWK helpers (RFC 8037, RFC 7638) ───────────────────────────────────────────
+//
+// Pure functions: no I/O, no global state, no time calls. Used by the DPoP
+// signer (RFC 9449) and by the agent CLI to derive `dpop_jkt` for the
+// authorize-URL hint and the `cnf.jkt` claim that the SSO emits in id_tokens.
+
+/**
+ * Convert an Ed25519 public key (PEM-encoded SPKI) to its canonical
+ * RFC 8037 JWK representation: {kty:"OKP", crv:"Ed25519", x:<base64url(raw)>}.
+ *
+ * Throws if the PEM is not an Ed25519 public key.
+ */
+export function ed25519PublicKeyToJwk(publicKeyPem) {
+  const keyObject = createPublicKey(publicKeyPem);
+  const der = keyObject.export({ format: "der", type: "spki" });
+  // SPKI for Ed25519 = 12-byte ASN.1 prefix + 32-byte raw public key.
+  if (der.length < 44) {
+    throw new Error("ed25519PublicKeyToJwk: public key DER too short");
+  }
+  const rawKey = der.subarray(der.length - 32);
+  if (rawKey.length !== 32) {
+    throw new Error("ed25519PublicKeyToJwk: expected 32-byte Ed25519 public key");
+  }
+  return {
+    kty: "OKP",
+    crv: "Ed25519",
+    x: b64url(rawKey),
+  };
+}
+
+/**
+ * RFC 7638 JWK Thumbprint. For an OKP/Ed25519 key the canonical JSON is
+ * exactly: `{"crv":"Ed25519","kty":"OKP","x":"<x>"}` — members in lexical
+ * order, no whitespace, no extra fields. SHA-256 the bytes, then base64url
+ * (no padding).
+ *
+ * Pure: no I/O, no time calls. Extra members on the input JWK are ignored.
+ */
+export function jwkThumbprint(jwk) {
+  if (!jwk || typeof jwk !== "object") {
+    throw new Error("jwkThumbprint: jwk must be an object");
+  }
+  if (jwk.kty !== "OKP") {
+    throw new Error(`jwkThumbprint: unsupported kty=${String(jwk.kty)} (only OKP/Ed25519 supported)`);
+  }
+  if (jwk.crv !== "Ed25519") {
+    throw new Error(`jwkThumbprint: unsupported crv=${String(jwk.crv)} (only Ed25519 supported)`);
+  }
+  if (typeof jwk.x !== "string" || jwk.x.length === 0) {
+    throw new Error("jwkThumbprint: jwk.x is required");
+  }
+  // RFC 7638 §3.2 canonical members for OKP keys, lexically sorted.
+  const canonical = `{"crv":"Ed25519","kty":"OKP","x":"${jwk.x}"}`;
+  return b64url(createHash("sha256").update(canonical).digest());
+}
+
+// ─── DPoP proof signer (RFC 9449) ───────────────────────────────────────────────
+
+/**
+ * Build a compact JWS DPoP proof per RFC 9449 §4.
+ *
+ *   header  = {"typ":"dpop+jwt","alg":"EdDSA","jwk":<full Ed25519 OKP JWK>}
+ *   payload = {"jti":<unique>,"htm":<method>,"htu":<target-no-query>,"iat":<unix-sec>}
+ *   signature = Ed25519 over `b64url(header) + "." + b64url(payload)`
+ *
+ * Pure: `iat` and `jti` may be injected for determinism (tests, replay-safe
+ * batched issuance). When omitted, defaults are derived from `Date.now()` and
+ * `randomUUID()` respectively.
+ */
+export function createDPoPProof(params) {
+  if (!params || typeof params !== "object") {
+    throw new Error("createDPoPProof: params required");
+  }
+  const { privateKeyPem, htm, htu } = params;
+  if (typeof privateKeyPem !== "string" || !privateKeyPem) {
+    throw new Error("createDPoPProof: privateKeyPem is required");
+  }
+  if (typeof htm !== "string" || !htm) {
+    throw new Error("createDPoPProof: htm is required");
+  }
+  if (typeof htu !== "string" || !htu) {
+    throw new Error("createDPoPProof: htu is required");
+  }
+
+  // Strip query and fragment per RFC 9449 §4.2 ("htu" claim).
+  const cleanHtu = stripUrlQueryAndFragment(htu);
+
+  // Derive the public JWK from the private key for the embedded `jwk` header.
+  const publicKey = createPublicKey(createPrivateKey(privateKeyPem));
+  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
+  const jwk = ed25519PublicKeyToJwk(publicKeyPem);
+
+  const header = { typ: "dpop+jwt", alg: "EdDSA", jwk };
+  const payload = {
+    jti: typeof params.jti === "string" && params.jti ? params.jti : randomUUID(),
+    htm,
+    htu: cleanHtu,
+    iat: typeof params.iat === "number" ? params.iat : Math.floor(Date.now() / 1000),
+  };
+
+  const headerB64 = b64url(JSON.stringify(header));
+  const payloadB64 = b64url(JSON.stringify(payload));
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const signature = sign(null, Buffer.from(signingInput), createPrivateKey(privateKeyPem));
+  return `${signingInput}.${b64url(signature)}`;
+}
+
+function stripUrlQueryAndFragment(url) {
+  // Tolerant: try URL parsing first; fall back to manual strip.
+  try {
+    const u = new URL(url);
+    u.search = "";
+    u.hash = "";
+    // Trim trailing slash only if it was not present in input — keep "/path"
+    // and "/path/" distinguishable. URL toString preserves the trailing slash
+    // already present in the path, so just return as-is.
+    return u.toString();
+  } catch {
+    const noFrag = url.split("#", 1)[0];
+    const noQuery = noFrag.split("?", 1)[0];
+    return noQuery;
+  }
+}
+
 export function signEd25519Base64Url(payload, privateKeyPem) {
   const sig = sign(null, Buffer.from(payload), createPrivateKey(privateKeyPem));
   return b64url(sig);
@@ -394,6 +518,13 @@ export async function beginOidcAuthorization(params) {
   url.searchParams.set("code_challenge", pkce.codeChallenge);
   url.searchParams.set("code_challenge_method", pkce.codeChallengeMethod);
 
+  // RFC 9449 §10: dpop_jkt advertises the public key the client will use to
+  // bind tokens via DPoP. Equal to the RFC 7638 thumbprint of the agent JWK.
+  if (typeof params.agentPublicKeyPem === "string" && params.agentPublicKeyPem) {
+    const jwk = ed25519PublicKeyToJwk(params.agentPublicKeyPem);
+    url.searchParams.set("dpop_jkt", jwkThumbprint(jwk));
+  }
+
   const headers = {};
   if (typeof params.oidcOrigin === "string" && params.oidcOrigin.trim()) {
     headers.Origin = params.oidcOrigin.trim();
@@ -516,9 +647,19 @@ export async function exchangeAuthorizationCode(params) {
   body.set("client_id", params.providerAddress);
   body.set("code_verifier", params.codeVerifier);
 
-  const out = await fetchJson(`${base}/oauth/token`, {
+  const tokenUrl = `${base}/oauth/token`;
+  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
+  if (typeof params.agentPrivateKeyPem === "string" && params.agentPrivateKeyPem) {
+    headers.DPoP = createDPoPProof({
+      privateKeyPem: params.agentPrivateKeyPem,
+      htm: "POST",
+      htu: tokenUrl,
+    });
+  }
+
+  const out = await fetchJson(tokenUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers,
     body,
   });
 
@@ -536,9 +677,19 @@ export async function refreshSession(params) {
   body.set("refresh_token", params.refreshToken);
   body.set("client_id", params.providerAddress);
 
-  const out = await fetchJson(`${base}/oauth/token`, {
+  const tokenUrl = `${base}/oauth/token`;
+  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
+  if (typeof params.agentPrivateKeyPem === "string" && params.agentPrivateKeyPem) {
+    headers.DPoP = createDPoPProof({
+      privateKeyPem: params.agentPrivateKeyPem,
+      htm: "POST",
+      htu: tokenUrl,
+    });
+  }
+
+  const out = await fetchJson(tokenUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers,
     body,
   });
 
@@ -925,10 +1076,16 @@ export class SignatureEngine {
     const ssoBaseUrl = session.ssoBaseUrl || session.issuer;
     if (!ssoBaseUrl) return null;
 
+    // Forward the agent's main keypair so the refresh request carries a DPoP
+    // proof bound to the same key the SSO advertises in `cnf.jkt`.
+    const main = await this.ensureMainKey();
+
     const fresh = await refreshSession({
       ssoBaseUrl,
       refreshToken: session.refreshToken,
       providerAddress: session.providerAddress,
+      agentPrivateKeyPem: main?.privateKeyPem,
+      agentPublicKeyPem: main?.publicKeyPem,
     });
 
     // Verify the refreshed token still belongs to the same owner.
