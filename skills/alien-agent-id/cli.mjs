@@ -150,14 +150,16 @@ async function cmdAuth(flags) {
     return;
   }
 
-  // Auto-init if needed
-  await cmdInit({ ...flags, _quiet: true });
+  // Auto-init if needed — capture the agent key so we can advertise its
+  // RFC 7638 thumbprint as `dpop_jkt` on the authorize URL.
+  const agentKey = await cmdInit({ ...flags, _quiet: true });
+  const agentPublicKeyPem = agentKey?.publicKeyPem || null;
 
   // Start OIDC authorization
   stderr(`Starting OIDC authorization against ${ssoBaseUrl}...`);
   let auth;
   try {
-    auth = await beginOidcAuthorization({ ssoBaseUrl, providerAddress, oidcOrigin });
+    auth = await beginOidcAuthorization({ ssoBaseUrl, providerAddress, oidcOrigin, agentPublicKeyPem });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (oidcOrigin !== "http://localhost" && msg.includes("Origin not allowed")) {
@@ -166,6 +168,7 @@ async function cmdAuth(flags) {
         ssoBaseUrl,
         providerAddress,
         oidcOrigin: "http://localhost",
+        agentPublicKeyPem,
       });
     } else {
       throw err;
@@ -229,12 +232,21 @@ async function cmdBind(flags) {
   });
   stderr("Authorization received. Exchanging tokens...");
 
+  // Load the agent's main key so the token request carries a DPoP proof.
+  const dpopKey = await readJsonFile(paths.mainKey, null);
+  if (!dpopKey?.privateKeyPem || !dpopKey?.publicKeyPem) {
+    outputError("No agent keypair. Run `init` or `bootstrap` first.");
+    return;
+  }
+
   // Exchange code for tokens
   const tokens = await exchangeAuthorizationCode({
     ssoBaseUrl: pending.ssoBaseUrl,
     providerAddress: pending.providerAddress,
     authorizationCode: poll.authorizationCode,
     codeVerifier: pending.codeVerifier,
+    agentPrivateKeyPem: dpopKey.privateKeyPem,
+    agentPublicKeyPem: dpopKey.publicKeyPem,
   });
 
   // Verify id_token
