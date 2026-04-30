@@ -660,20 +660,11 @@ export async function exchangeAuthorizationCode(params) {
   body.set("code_verifier", params.codeVerifier);
 
   const tokenUrl = `${base}/oauth/token`;
-  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
-  if (typeof params.agentPrivateKeyPem === "string" && params.agentPrivateKeyPem) {
-    headers.DPoP = createDPoPProof({
-      privateKeyPem: params.agentPrivateKeyPem,
-      htm: "POST",
-      htu: tokenUrl,
-    });
-  }
-
-  const out = await fetchJson(tokenUrl, {
-    method: "POST",
-    headers,
+  const out = await tokenEndpointPost(
+    tokenUrl,
     body,
-  });
+    params.agentPrivateKeyPem,
+  );
 
   if (!out.id_token || !out.access_token) {
     throw new Error("Token response missing id_token/access_token");
@@ -690,26 +681,54 @@ export async function refreshSession(params) {
   body.set("client_id", params.providerAddress);
 
   const tokenUrl = `${base}/oauth/token`;
-  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
-  if (typeof params.agentPrivateKeyPem === "string" && params.agentPrivateKeyPem) {
-    headers.DPoP = createDPoPProof({
-      privateKeyPem: params.agentPrivateKeyPem,
-      htm: "POST",
-      htu: tokenUrl,
-    });
-  }
-
-  const out = await fetchJson(tokenUrl, {
-    method: "POST",
-    headers,
+  const out = await tokenEndpointPost(
+    tokenUrl,
     body,
-  });
+    params.agentPrivateKeyPem,
+  );
 
   if (!out.access_token) {
     throw new Error("Refresh response missing access_token");
   }
 
   return out;
+}
+
+// tokenEndpointPost POSTs a form-encoded body to /oauth/token, optionally
+// attaching a DPoP proof when an Ed25519 key is provided. On a server-issued
+// nonce challenge (RFC 9449 §8) the request is retried once with the
+// supplied nonce echoed in a freshly built proof.
+async function tokenEndpointPost(tokenUrl, body, agentPrivateKeyPem) {
+  const baseHeaders = { "Content-Type": "application/x-www-form-urlencoded" };
+  const useDPoP = typeof agentPrivateKeyPem === "string" && agentPrivateKeyPem;
+
+  const buildHeaders = (nonce) => {
+    if (!useDPoP) return baseHeaders;
+    return {
+      ...baseHeaders,
+      DPoP: createDPoPProof({
+        privateKeyPem: agentPrivateKeyPem,
+        htm: "POST",
+        htu: tokenUrl,
+        ...(nonce ? { nonce } : {}),
+      }),
+    };
+  };
+
+  const res = await fetchWithDPoPNonce(
+    tokenUrl,
+    { method: "POST", body },
+    buildHeaders,
+  );
+  const { json, text } = await readJsonResponse(res);
+  if (!res.ok) {
+    const details = json && typeof json === "object" ? JSON.stringify(json) : text;
+    throw new Error(`HTTP ${res.status} from ${tokenUrl}: ${details || "no body"}`);
+  }
+  if (!json || typeof json !== "object") {
+    throw new Error(`Expected JSON response from ${tokenUrl}`);
+  }
+  return json;
 }
 
 /**
