@@ -185,6 +185,29 @@ describe("createDPoPProof()", () => {
     assert.equal(payload.htu, "https://sso.example.com/oauth/token");
   });
 
+  it("canonicalizes htu (lowercase scheme+host, default port stripped) per RFC 3986 §6.2", () => {
+    const { privateKeyPem } = generateEd25519PemPair();
+    const cases = [
+      ["HTTPS://sso.example.com/oauth/token", "https://sso.example.com/oauth/token"],
+      ["https://SSO.EXAMPLE.COM/oauth/token", "https://sso.example.com/oauth/token"],
+      ["https://sso.example.com:443/oauth/token", "https://sso.example.com/oauth/token"],
+      ["http://sso.example.com:80/oauth/token", "http://sso.example.com/oauth/token"],
+      ["HTTPS://SSO.example.com:443/oauth/token?x=1#f", "https://sso.example.com/oauth/token"],
+      ["https://sso.example.com:8443/oauth/token", "https://sso.example.com:8443/oauth/token"], // non-default port preserved
+    ];
+    for (const [input, expected] of cases) {
+      const proof = createDPoPProof({
+        privateKeyPem,
+        htm: "POST",
+        htu: input,
+        jti: "j",
+        iat: 1,
+      });
+      const payload = decodePart(proof.split(".")[1]);
+      assert.equal(payload.htu, expected, `input=${input}`);
+    }
+  });
+
   it("auto-generates a jti and iat when not provided", () => {
     const { privateKeyPem } = generateEd25519PemPair();
     const a = createDPoPProof({
