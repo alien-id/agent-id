@@ -362,13 +362,20 @@ describe("git-verify cnf.jkt binding check", () => {
 
     const out = await runGitVerify({ repoDir, commitHash, stateDir });
     // The unsigned commit means sshSignatureValid=false → result.ok will be
-    // false. The AC for the positive case is that the cnf check passes — i.e.
-    // the output reports an SSO signature as valid AND the error (if any) is
-    // not the cnf error. We confirm by checking ssoSignatureValid=true and
-    // that no cnf error string appears anywhere.
+    // false. The AC for the positive case is that the cnf check passes —
+    // ssoSignatureValid=true, no `error` field set, and no warning or error
+    // mentions cnf.jkt. (The provenance line that confirms a valid cnf.jkt
+    // binding is allowed to mention it.)
     const parsed = JSON.parse(out.stdout);
     assert.equal(parsed.ssoSignatureValid, true);
-    const blob = JSON.stringify(parsed);
-    assert.doesNotMatch(blob, /cnf\.jkt/);
+    assert.equal(parsed.error, undefined, `unexpected error: ${parsed.error}`);
+    for (const w of parsed.warnings || []) {
+      assert.doesNotMatch(w, /cnf\.jkt/);
+    }
+    // The provenance MUST include a line confirming the cnf.jkt binding.
+    assert.ok(
+      (parsed.provenance || []).some((p) => /cnf\.jkt/.test(p)),
+      "expected a provenance entry confirming cnf.jkt binding",
+    );
   });
 });

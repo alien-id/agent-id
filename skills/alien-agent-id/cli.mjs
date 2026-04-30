@@ -33,6 +33,8 @@ import {
   SignatureEngine,
   ed25519PemToSshPublicKey,
   ed25519PemToOpenSSHPrivateKey,
+  ed25519PublicKeyToJwk,
+  jwkThumbprint,
   canonicalJSONString,
   sha256Hex,
   sha256HexCanonical,
@@ -872,12 +874,41 @@ async function cmdGitVerify(flags) {
         idToken,
         ssoBaseUrl,
       });
+      result.ssoSignatureValid = true;
+
+      // Hard cutover: every accepted id_token MUST carry an RFC 7800 `cnf.jkt`
+      // claim that matches the RFC 7638 thumbprint of the agent's Ed25519
+      // public key as bound by the owner-session binding. This proves the SSO
+      // server attested the exact key the agent is wielding.  No flag, env
+      // var, or legacy mode can disable it — verifying without `cnf.jkt`
+      // would let an adversary present any id_token it managed to extract
+      // alongside its own agent key.
+      const bindingPubKey = binding?.payload?.agentInstance?.publicKeyPem;
+      if (!bindingPubKey) {
+        throw new Error("binding missing agent public key — cannot verify cnf.jkt");
+      }
+      const expectedJkt = jwkThumbprint(ed25519PublicKeyToJwk(bindingPubKey));
+      const actualJkt = tokenResult.payload?.cnf?.jkt;
+      if (typeof actualJkt !== "string" || !actualJkt) {
+        throw new Error("id_token missing cnf.jkt");
+      }
+      if (actualJkt !== expectedJkt) {
+        throw new Error(`id_token cnf.jkt mismatch: expected ${expectedJkt}, got ${actualJkt}`);
+      }
+      result.provenance.push(`id_token cnf.jkt binds agent key ${expectedJkt.slice(0, 16)}...`);
+
       result.provenance.push(
         `SSO server signature valid (issuer: ${tokenResult.issuer}, sub: ${tokenResult.payload.sub})`,
       );
-      result.ssoSignatureValid = true;
     } catch (err) {
-      result.warnings.push(`id_token signature verification: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      // cnf.jkt failures are fatal: bubble out to the top-level handler so
+      // the CLI exits non-zero with the stable error string. Other failures
+      // (signature, network) remain warnings on the result object as before.
+      if (msg.includes("cnf.jkt")) {
+        throw err;
+      }
+      result.warnings.push(`id_token signature verification: ${msg}`);
       result.ssoSignatureValid = false;
     }
   } else {
