@@ -201,6 +201,15 @@ export function createDPoPProof(params) {
     htu: cleanHtu,
     iat: typeof params.iat === "number" ? params.iat : Math.floor(Date.now() / 1000),
   };
+  // RFC 9449 §4.2: at protected resources, bind the proof to the AT.
+  if (typeof params.accessToken === "string" && params.accessToken) {
+    payload.ath = b64url(createHash("sha256").update(params.accessToken).digest());
+  }
+  // RFC 9449 §8/§9: when a server challenges via use_dpop_nonce, the client
+  // retries with the supplied nonce echoed in the proof payload.
+  if (typeof params.nonce === "string" && params.nonce) {
+    payload.nonce = params.nonce;
+  }
 
   const headerB64 = b64url(JSON.stringify(header));
   const payloadB64 = b64url(JSON.stringify(payload));
@@ -701,6 +710,80 @@ export async function refreshSession(params) {
   }
 
   return out;
+}
+
+/**
+ * Fetch the OIDC `/oauth/userinfo` claims for a DPoP-bound access token.
+ *
+ * RFC 9449 §7.1: requests carrying a DPoP-bound AT MUST use
+ * `Authorization: DPoP <token>` and a fresh DPoP proof whose `ath` claim
+ * equals base64url(SHA-256(accessToken)). On 400 + use_dpop_nonce challenge
+ * (RFC 9449 §8/§9), the request is retried once with the supplied nonce
+ * echoed in the proof.
+ */
+export async function getUserInfo(params) {
+  if (!params || typeof params !== "object") {
+    throw new Error("getUserInfo: params required");
+  }
+  const { ssoBaseUrl, accessToken, agentPrivateKeyPem } = params;
+  if (typeof ssoBaseUrl !== "string" || !ssoBaseUrl) {
+    throw new Error("getUserInfo: ssoBaseUrl is required");
+  }
+  if (typeof accessToken !== "string" || !accessToken) {
+    throw new Error("getUserInfo: accessToken is required");
+  }
+  if (typeof agentPrivateKeyPem !== "string" || !agentPrivateKeyPem) {
+    throw new Error("getUserInfo: agentPrivateKeyPem is required");
+  }
+
+  const userinfoUrl = `${withNoTrailingSlash(ssoBaseUrl)}/oauth/userinfo`;
+
+  const buildHeaders = (nonce) => ({
+    Authorization: `DPoP ${accessToken}`,
+    DPoP: createDPoPProof({
+      privateKeyPem: agentPrivateKeyPem,
+      htm: "GET",
+      htu: userinfoUrl,
+      accessToken,
+      ...(nonce ? { nonce } : {}),
+    }),
+  });
+
+  const res = await fetchWithDPoPNonce(userinfoUrl, { method: "GET" }, buildHeaders);
+  const { json, text } = await readJsonResponse(res);
+  if (!res.ok) {
+    const details = json && typeof json === "object" ? JSON.stringify(json) : text;
+    throw new Error(`HTTP ${res.status} from userinfo: ${details || "no body"}`);
+  }
+  if (!json || typeof json !== "object") {
+    throw new Error("getUserInfo: expected JSON response");
+  }
+  return json;
+}
+
+// fetchWithDPoPNonce executes a request, then on a 400 + use_dpop_nonce
+// challenge (RFC 9449 §8/§9) retries ONCE with the server-supplied nonce
+// echoed in a freshly built proof. Headers are rebuilt via buildHeaders so
+// the retry's proof has a fresh jti and iat.
+async function fetchWithDPoPNonce(url, init, buildHeaders) {
+  let res = await fetch(url, { ...init, headers: buildHeaders() });
+  if (res.status !== 400) {
+    return res;
+  }
+  const nonce = res.headers.get("dpop-nonce");
+  if (!nonce) {
+    return res;
+  }
+  let body;
+  try {
+    body = await res.clone().json();
+  } catch {
+    return res;
+  }
+  if (body && body.error === "use_dpop_nonce") {
+    res = await fetch(url, { ...init, headers: buildHeaders(nonce) });
+  }
+  return res;
 }
 
 export async function fetchOidcDiscovery(ssoBaseUrl) {
