@@ -780,17 +780,30 @@ export async function getUserInfo(params) {
   return json;
 }
 
-// fetchWithDPoPNonce executes a request, then on a 400 + use_dpop_nonce
-// challenge (RFC 9449 §8/§9) retries ONCE with the server-supplied nonce
-// echoed in a freshly built proof. Headers are rebuilt via buildHeaders so
-// the retry's proof has a fresh jti and iat.
+// dpopNonceCache stores the most-recent server-issued DPoP-Nonce per URL,
+// per RFC 9449 §8.2-1: "the client MUST use the new nonce value for the
+// next request and all subsequent requests until the server supplies a new
+// nonce." Process-local in-memory; agent-id is a short-lived CLI so this
+// is a per-invocation cache that batches multi-call flows (e.g., token
+// then userinfo then refresh) without paying a 400/retry on each step.
+const dpopNonceCache = new Map();
+
+// fetchWithDPoPNonce executes a request, pre-attaching any cached nonce
+// for `url`. If the server returns 400 + use_dpop_nonce + DPoP-Nonce
+// (RFC 9449 §8/§9), it retries ONCE with the supplied nonce echoed in a
+// freshly built proof and updates the cache. Subsequent responses bearing
+// a DPoP-Nonce header (success or failure) refresh the cache so the
+// server's rotation policy stays sticky.
 async function fetchWithDPoPNonce(url, init, buildHeaders) {
-  let res = await fetch(url, { ...init, headers: buildHeaders() });
+  const cached = dpopNonceCache.get(url);
+  let res = await fetch(url, { ...init, headers: buildHeaders(cached) });
+  rememberNonce(url, res.headers.get("dpop-nonce"));
+
   if (res.status !== 400) {
     return res;
   }
-  const nonce = res.headers.get("dpop-nonce");
-  if (!nonce) {
+  const issuedNonce = res.headers.get("dpop-nonce");
+  if (!issuedNonce) {
     return res;
   }
   let body;
@@ -800,9 +813,16 @@ async function fetchWithDPoPNonce(url, init, buildHeaders) {
     return res;
   }
   if (body && body.error === "use_dpop_nonce") {
-    res = await fetch(url, { ...init, headers: buildHeaders(nonce) });
+    res = await fetch(url, { ...init, headers: buildHeaders(issuedNonce) });
+    rememberNonce(url, res.headers.get("dpop-nonce"));
   }
   return res;
+}
+
+function rememberNonce(url, nonce) {
+  if (typeof nonce === "string" && nonce) {
+    dpopNonceCache.set(url, nonce);
+  }
 }
 
 export async function fetchOidcDiscovery(ssoBaseUrl) {
