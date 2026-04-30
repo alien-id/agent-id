@@ -592,6 +592,63 @@ describe("refreshSession with DPoP", () => {
       mock.server.close();
     }
   });
+
+  it("caches DPoP-Nonce and pre-attaches on subsequent requests (RFC 9449 §8.2-1)", async () => {
+    // RFC 9449 §8.2-1 (MUST): "the client MUST use the new nonce value for
+    // the next request and all subsequent requests until the server supplies
+    // a new nonce." A round-trip-per-call is wasteful; the client should
+    // remember the most recent nonce and pre-attach.
+    const SERVER_NONCE = "cached-nonce-zzz";
+    const proofs = [];
+    const statuses = [];
+    const mock = await createMockServer((req, res) => {
+      const dpop = req.headers["dpop"];
+      const payload = decodePart(dpop.split(".")[1]);
+      proofs.push(payload);
+      const provided = payload.nonce;
+      if (provided === SERVER_NONCE) {
+        statuses.push(200);
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ access_token: "new-at" }));
+      } else {
+        statuses.push(400);
+        res.writeHead(400, {
+          "Content-Type": "application/json",
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ error: "use_dpop_nonce" }));
+      }
+    });
+
+    try {
+      const pair = generateEd25519PemPair();
+      // First call: server challenges, client retries → 2 server hits.
+      await refreshSession({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "p",
+        refreshToken: "rt",
+        agentPrivateKeyPem: pair.privateKeyPem,
+        agentPublicKeyPem: pair.publicKeyPem,
+      });
+      // Second call: client should pre-attach the cached nonce → 1 hit only.
+      await refreshSession({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "p",
+        refreshToken: "rt",
+        agentPrivateKeyPem: pair.privateKeyPem,
+        agentPublicKeyPem: pair.publicKeyPem,
+      });
+      // 1st call: 400 (no nonce) + 200 (nonce). 2nd call: 200 only.
+      assert.deepEqual(statuses, [400, 200, 200]);
+      assert.equal(proofs[2].nonce, SERVER_NONCE,
+        "second call's first request must already carry the cached nonce");
+    } finally {
+      mock.server.close();
+    }
+  });
 });
 
 // ─── SignatureEngine forwards DPoP key on refresh ───────────────────────────────
