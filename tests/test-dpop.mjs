@@ -23,6 +23,7 @@ import {
   generateEd25519PemPair,
   fromB64url,
   b64url,
+  getUserInfo,
 } from "../skills/alien-agent-id/lib.mjs";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────────
@@ -254,6 +255,116 @@ describe("createDPoPProof()", () => {
     const signature = fromB64url(s);
     const ok = cryptoVerify(null, signingInput, createPublicKey(publicKeyPem), signature);
     assert.equal(ok, true);
+  });
+
+  it("emits ath = base64url(SHA-256(accessToken)) when accessToken is provided (RFC 9449 §4.2)", () => {
+    const { privateKeyPem } = generateEd25519PemPair();
+    const accessToken = "fake.access.token";
+    const proof = createDPoPProof({
+      privateKeyPem,
+      htm: "GET",
+      htu: "https://sso.example.com/oauth/userinfo",
+      accessToken,
+      jti: "j",
+      iat: 1,
+    });
+    const payload = decodePart(proof.split(".")[1]);
+    const expected = b64url(crypto.createHash("sha256").update(accessToken).digest());
+    assert.equal(payload.ath, expected);
+  });
+
+  it("omits ath when accessToken is not provided (token-endpoint usage)", () => {
+    const { privateKeyPem } = generateEd25519PemPair();
+    const proof = createDPoPProof({
+      privateKeyPem,
+      htm: "POST",
+      htu: "https://sso.example.com/oauth/token",
+      jti: "j",
+      iat: 1,
+    });
+    const payload = decodePart(proof.split(".")[1]);
+    assert.equal(payload.ath, undefined);
+  });
+
+  it("emits nonce claim when provided (RFC 9449 §8 server-issued nonce challenge)", () => {
+    const { privateKeyPem } = generateEd25519PemPair();
+    const proof = createDPoPProof({
+      privateKeyPem,
+      htm: "POST",
+      htu: "https://sso.example.com/oauth/token",
+      nonce: "server-nonce-abc",
+      jti: "j",
+      iat: 1,
+    });
+    const payload = decodePart(proof.split(".")[1]);
+    assert.equal(payload.nonce, "server-nonce-abc");
+  });
+});
+
+// ─── getUserInfo client ──────────────────────────────────────────────────────────
+
+describe("getUserInfo client", () => {
+  it("sends Authorization: DPoP <token> + DPoP proof with ath, parses JSON claims", async () => {
+    const pair = generateEd25519PemPair();
+    let receivedAuthHeader = null;
+    let receivedDPoPHeader = null;
+    let receivedURL = null;
+    const mock = await createMockServer((req, res) => {
+      receivedAuthHeader = req.headers["authorization"];
+      receivedDPoPHeader = req.headers["dpop"];
+      receivedURL = req.url;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ sub: "user-123", aud: "client-xyz" }));
+    });
+
+    try {
+      const claims = await getUserInfo({
+        ssoBaseUrl: mock.baseUrl,
+        accessToken: "the-access-token",
+        agentPrivateKeyPem: pair.privateKeyPem,
+      });
+      assert.deepEqual(claims, { sub: "user-123", aud: "client-xyz" });
+      assert.equal(receivedURL, "/oauth/userinfo");
+      assert.equal(receivedAuthHeader, "DPoP the-access-token");
+      assert.ok(receivedDPoPHeader, "DPoP proof header sent");
+
+      // Verify proof's ath claim hashes the access token.
+      const [, payloadB64] = receivedDPoPHeader.split(".");
+      const payload = JSON.parse(fromB64url(payloadB64).toString("utf8"));
+      assert.equal(payload.htm, "GET");
+      assert.equal(payload.htu, `${mock.baseUrl}/oauth/userinfo`);
+      const expectedATH = b64url(
+        crypto.createHash("sha256").update("the-access-token").digest(),
+      );
+      assert.equal(payload.ath, expectedATH);
+    } finally {
+      mock.server.close();
+    }
+  });
+
+  it("throws on 401 with descriptive error", async () => {
+    const pair = generateEd25519PemPair();
+    const mock = await createMockServer((_req, res) => {
+      res.writeHead(401, {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": `DPoP error="invalid_token"`,
+      });
+      res.end(JSON.stringify({ error: "Invalid or expired token" }));
+    });
+
+    try {
+      await assert.rejects(
+        () =>
+          getUserInfo({
+            ssoBaseUrl: mock.baseUrl,
+            accessToken: "expired",
+            agentPrivateKeyPem: pair.privateKeyPem,
+          }),
+        /401|userinfo|invalid_token/i,
+      );
+    } finally {
+      mock.server.close();
+    }
   });
 });
 
