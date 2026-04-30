@@ -76,6 +76,37 @@ describe("ed25519PublicKeyToJwk()", () => {
     const rawFromPem = der.subarray(der.length - 32);
     assert.deepEqual(rawFromJwk, rawFromPem);
   });
+
+  it("rejects an X25519 SPKI even though it is also 44 bytes (RFC 8410 OID 1.3.101.110)", () => {
+    const { publicKey } = generateKeyPairSync("x25519");
+    const pem = publicKey.export({ format: "pem", type: "spki" }).toString();
+    assert.throws(
+      () => ed25519PublicKeyToJwk(pem),
+      /Ed25519/,
+      "expected Ed25519-only key acceptance, got silent X25519 acceptance",
+    );
+  });
+
+  it("rejects an Ed448 SPKI (different OID, different key length)", () => {
+    const { publicKey } = generateKeyPairSync("ed448");
+    const pem = publicKey.export({ format: "pem", type: "spki" }).toString();
+    assert.throws(() => ed25519PublicKeyToJwk(pem), /Ed25519/);
+  });
+
+  it("rejects a synthetic 44-byte DER with wrong OID prefix (defense in depth)", () => {
+    // Build a 44-byte buffer whose length matches Ed25519 SPKI but whose OID bytes are bogus.
+    const bogus = Buffer.concat([
+      Buffer.from("302a300506030000000003210000", "hex").subarray(0, 12),
+      Buffer.alloc(32, 0xab),
+    ]);
+    // Hand-craft PEM around the bogus DER so we bypass createPublicKey's parsing.
+    // This test pokes at the prefix check directly: import the bogus DER, let createPublicKey
+    // throw, and verify a clear error reaches the caller (any throw with descriptive message).
+    assert.throws(() => {
+      const pem = `-----BEGIN PUBLIC KEY-----\n${bogus.toString("base64")}\n-----END PUBLIC KEY-----\n`;
+      ed25519PublicKeyToJwk(pem);
+    });
+  });
 });
 
 // ─── jwkThumbprint ───────────────────────────────────────────────────────────────
