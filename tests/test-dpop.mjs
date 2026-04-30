@@ -461,6 +461,43 @@ describe("exchangeAuthorizationCode with DPoP", () => {
       mock.server.close();
     }
   });
+
+  it("retries with nonce echoed in proof on use_dpop_nonce challenge (RFC 9449 §8)", async () => {
+    let calls = 0;
+    let secondProofPayload = null;
+    const SERVER_NONCE = "srv-issued-nonce-xyz";
+    const mock = await createMockServer((req, res) => {
+      calls++;
+      const dpop = req.headers["dpop"];
+      if (calls === 1) {
+        res.writeHead(400, {
+          "Content-Type": "application/json",
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ error: "use_dpop_nonce" }));
+        return;
+      }
+      secondProofPayload = decodePart(dpop.split(".")[1]);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ access_token: "at", id_token: "it", refresh_token: "rt" }));
+    });
+
+    try {
+      const pair = generateEd25519PemPair();
+      await exchangeAuthorizationCode({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "p",
+        authorizationCode: "code",
+        codeVerifier: "v",
+        agentPrivateKeyPem: pair.privateKeyPem,
+        agentPublicKeyPem: pair.publicKeyPem,
+      });
+      assert.equal(calls, 2, "must retry once after nonce challenge");
+      assert.equal(secondProofPayload.nonce, SERVER_NONCE);
+    } finally {
+      mock.server.close();
+    }
+  });
 });
 
 // ─── refreshSession sends DPoP header ────────────────────────────────────────────
@@ -515,6 +552,42 @@ describe("refreshSession with DPoP", () => {
       });
       assert.equal(result.access_token, "at");
       assert.equal(receivedDpop, undefined, "no DPoP header when keys not supplied");
+    } finally {
+      mock.server.close();
+    }
+  });
+
+  it("retries with nonce echoed in proof on use_dpop_nonce challenge (RFC 9449 §8)", async () => {
+    let calls = 0;
+    let secondProofPayload = null;
+    const SERVER_NONCE = "rs-nonce-abc-123";
+    const mock = await createMockServer((req, res) => {
+      calls++;
+      const dpop = req.headers["dpop"];
+      if (calls === 1) {
+        res.writeHead(400, {
+          "Content-Type": "application/json",
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ error: "use_dpop_nonce" }));
+        return;
+      }
+      secondProofPayload = decodePart(dpop.split(".")[1]);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ access_token: "new-at" }));
+    });
+
+    try {
+      const pair = generateEd25519PemPair();
+      await refreshSession({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "p",
+        refreshToken: "rt",
+        agentPrivateKeyPem: pair.privateKeyPem,
+        agentPublicKeyPem: pair.publicKeyPem,
+      });
+      assert.equal(calls, 2);
+      assert.equal(secondProofPayload.nonce, SERVER_NONCE);
     } finally {
       mock.server.close();
     }
