@@ -114,14 +114,17 @@ export function fingerprintPublicKeyPem(publicKeyPem) {
 export function ed25519PublicKeyToJwk(publicKeyPem) {
   const keyObject = createPublicKey(publicKeyPem);
   const der = keyObject.export({ format: "der", type: "spki" });
-  // SPKI for Ed25519 = 12-byte ASN.1 prefix + 32-byte raw public key.
-  if (der.length < 44) {
-    throw new Error("ed25519PublicKeyToJwk: public key DER too short");
+  if (der.length !== 44) {
+    throw new Error(
+      `ed25519PublicKeyToJwk: expected 44-byte Ed25519 SPKI, got ${der.length} bytes (likely non-Ed25519 key type)`,
+    );
   }
-  const rawKey = der.subarray(der.length - 32);
-  if (rawKey.length !== 32) {
-    throw new Error("ed25519PublicKeyToJwk: expected 32-byte Ed25519 public key");
+  if (!der.subarray(0, 12).equals(ED25519_SPKI_PREFIX)) {
+    throw new Error(
+      "ed25519PublicKeyToJwk: SPKI AlgorithmIdentifier does not match Ed25519 (OID 1.3.101.112)",
+    );
   }
+  const rawKey = der.subarray(12);
   return {
     kty: "OKP",
     crv: "Ed25519",
