@@ -28,6 +28,8 @@ import {
   generateEd25519PemPair,
   fingerprintPublicKeyPem,
   ed25519PublicKeyToJwk,
+  ed25519PemToSshPublicKey,
+  ed25519PemToOpenSSHPrivateKey,
   jwkThumbprint,
   canonicalJSONString,
   sha256Hex,
@@ -102,21 +104,21 @@ async function cleanup(dir) {
 }
 
 /**
- * Build a synthetic proof bundle and attach it as a git note on a fresh
- * commit, so cmdGitVerify reads the bundle from `refs/notes/agent-id`.
+ * Build a coherent proof-bundle fixture: agent key, id_token with the
+ * caller-specified payload, and a binding whose `idTokenHash` and signature
+ * actually match the minted id_token (so the chain verifier sees a clean
+ * structure and the test can isolate the cnf.jkt check).
  *
- * Returns `{ repoDir, commitHash }`.
+ * Returns `{ repoDir, agent, agentFingerprint, ownerSub, binding, idToken }`.
  */
-async function buildFixture({ ssoBaseUrl, idTokenCnfJkt, mismatchAgent = false }) {
+async function buildFixture({ ssoBaseUrl, rsa, idTokenPayload, idTokenCnfJkt, mismatchAgent = false }) {
   const repoDir = await makeTempGitRepo();
 
-  // Agent keypair.
   const agent = generateEd25519PemPair();
   const agentFingerprint = fingerprintPublicKeyPem(agent.publicKeyPem);
 
-  // Optionally use a different keypair for the binding's embedded public key,
-  // so the trailer fingerprint mismatches — but the `cnf.jkt` mismatch is
-  // tested by varying `idTokenCnfJkt` directly.
+  // Optionally use a different keypair for the binding's embedded public
+  // key — exercised by tests that probe pre-step-3 detection.
   const bindingAgent = mismatchAgent ? generateEd25519PemPair() : agent;
   const bindingFingerprint = mismatchAgent
     ? fingerprintPublicKeyPem(bindingAgent.publicKeyPem)
@@ -125,6 +127,23 @@ async function buildFixture({ ssoBaseUrl, idTokenCnfJkt, mismatchAgent = false }
   const ownerSub = "0xowner-sub";
   const providerAddress = "0xprovider";
 
+  // Mint the id_token. Default payload binds cnf.jkt to the agent key;
+  // tests can override `idTokenPayload` for missing/mismatched-cnf cases.
+  const defaultPayload = {
+    iss: ssoBaseUrl,
+    sub: ownerSub,
+    aud: providerAddress,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    cnf: { jkt: idTokenCnfJkt ?? jwkThumbprint(ed25519PublicKeyToJwk(agent.publicKeyPem)) },
+  };
+  const idToken = makeRs256IdToken({
+    privateKey: rsa.privateKey,
+    kid: rsa.publicKeyJwk.kid,
+    payload: idTokenPayload || defaultPayload,
+  });
+  const idTokenHash = sha256Hex(idToken);
+
   const bindingPayload = {
     version: 1,
     issuedAt: nowMs(),
@@ -132,7 +151,7 @@ async function buildFixture({ ssoBaseUrl, idTokenCnfJkt, mismatchAgent = false }
     providerAddress,
     ownerSessionSub: ownerSub,
     ownerAudience: providerAddress,
-    idTokenHash: null, // filled in once we mint the id_token below
+    idTokenHash,
     ownerSessionProof: null,
     ownerSessionProofHash: null,
     agentInstance: {
@@ -141,11 +160,6 @@ async function buildFixture({ ssoBaseUrl, idTokenCnfJkt, mismatchAgent = false }
       publicKeyPem: bindingAgent.publicKeyPem,
     },
   };
-
-  // For the AC, we just need cmdGitVerify to read the bundle and reach the
-  // cnf check; the binding signature itself doesn't need to match the
-  // id_token hash — any mismatch would only surface as a warning.
-  bindingPayload.idTokenHash = sha256Hex("placeholder-replaced-below");
   const canonical = canonicalJSONString(bindingPayload);
   const binding = {
     id: randomUUID(),
@@ -155,10 +169,10 @@ async function buildFixture({ ssoBaseUrl, idTokenCnfJkt, mismatchAgent = false }
     createdAt: nowMs(),
   };
 
-  return { repoDir, agent, agentFingerprint, ownerSub, binding };
+  return { repoDir, agent, agentFingerprint, ownerSub, binding, idToken };
 }
 
-async function attachProof({ repoDir, agent, ownerSub, binding, idToken, ssoBaseUrl, fingerprint }) {
+async function attachProof({ repoDir, agent, ownerSub, binding, idToken, ssoBaseUrl, fingerprint, signCommit = false }) {
   // Empty commit with the Agent-ID trailers so cmdGitVerify can read them.
   const trailers = [
     `Agent-ID-Fingerprint: ${fingerprint}`,
@@ -166,7 +180,22 @@ async function attachProof({ repoDir, agent, ownerSub, binding, idToken, ssoBase
     `Agent-ID-Binding: ${binding.id}`,
   ];
   const message = `test commit\n\n${trailers.join("\n")}`;
-  await exec("git", ["-C", repoDir, "commit", "--allow-empty", "-m", message]);
+
+  // For tests that exercise the full chain (positive cases), SSH-sign the
+  // commit with the agent's key. The verifier rebuilds the allowed-signers
+  // file from `proof.agent.publicKeyPem` and runs `git verify-commit`.
+  if (signCommit) {
+    // Place the signing key inside repoDir so afterEach's cleanup removes it.
+    const signKeyPath = path.join(repoDir, ".agent-id-test-key");
+    const opensshPriv = ed25519PemToOpenSSHPrivateKey(agent.privateKeyPem);
+    await fs.writeFile(signKeyPath, opensshPriv, { mode: 0o600 });
+    await exec("git", ["-C", repoDir, "config", "user.signingkey", signKeyPath]);
+    await exec("git", ["-C", repoDir, "config", "gpg.format", "ssh"]);
+    await exec("git", ["-C", repoDir, "commit", "--allow-empty", "-S", "-m", message]);
+  } else {
+    await exec("git", ["-C", repoDir, "commit", "--allow-empty", "-m", message]);
+  }
+
   const { stdout } = await exec("git", ["-C", repoDir, "rev-parse", "HEAD"]);
   const commitHash = stdout.trim();
 
@@ -254,28 +283,27 @@ describe("git-verify cnf.jkt binding check", () => {
     const rsa = generateRsaKeyPair();
     mock = await startSsoMock({ jwk: rsa.publicKeyJwk });
 
-    const fixture = await buildFixture({ ssoBaseUrl: mock.baseUrl });
-    repoDir = fixture.repoDir;
-
-    // Synthetic id_token WITHOUT cnf.
-    const idToken = makeRs256IdToken({
-      privateKey: rsa.privateKey,
-      kid: rsa.publicKeyJwk.kid,
-      payload: {
+    // id_token WITHOUT cnf — the binding inside buildFixture will record
+    // sha256(this token), so the chain reaches the cnf check legitimately.
+    const fixture = await buildFixture({
+      ssoBaseUrl: mock.baseUrl,
+      rsa,
+      idTokenPayload: {
         iss: mock.baseUrl,
-        sub: fixture.ownerSub,
+        sub: "0xowner-sub",
         aud: "0xprovider",
         iat: Math.floor(Date.now() / 1000),
         exp: Math.floor(Date.now() / 1000) + 3600,
       },
     });
+    repoDir = fixture.repoDir;
 
     const commitHash = await attachProof({
       repoDir,
       agent: fixture.agent,
       ownerSub: fixture.ownerSub,
       binding: fixture.binding,
-      idToken,
+      idToken: fixture.idToken,
       ssoBaseUrl: mock.baseUrl,
       fingerprint: fixture.agentFingerprint,
     });
@@ -291,32 +319,23 @@ describe("git-verify cnf.jkt binding check", () => {
     const rsa = generateRsaKeyPair();
     mock = await startSsoMock({ jwk: rsa.publicKeyJwk });
 
-    const fixture = await buildFixture({ ssoBaseUrl: mock.baseUrl });
-    repoDir = fixture.repoDir;
-
     // cnf.jkt that points to a DIFFERENT key than the agent's.
     const otherAgent = generateEd25519PemPair();
     const wrongJkt = jwkThumbprint(ed25519PublicKeyToJwk(otherAgent.publicKeyPem));
 
-    const idToken = makeRs256IdToken({
-      privateKey: rsa.privateKey,
-      kid: rsa.publicKeyJwk.kid,
-      payload: {
-        iss: mock.baseUrl,
-        sub: fixture.ownerSub,
-        aud: "0xprovider",
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 3600,
-        cnf: { jkt: wrongJkt },
-      },
+    const fixture = await buildFixture({
+      ssoBaseUrl: mock.baseUrl,
+      rsa,
+      idTokenCnfJkt: wrongJkt,
     });
+    repoDir = fixture.repoDir;
 
     const commitHash = await attachProof({
       repoDir,
       agent: fixture.agent,
       ownerSub: fixture.ownerSub,
       binding: fixture.binding,
-      idToken,
+      idToken: fixture.idToken,
       ssoBaseUrl: mock.baseUrl,
       fingerprint: fixture.agentFingerprint,
     });
@@ -328,54 +347,69 @@ describe("git-verify cnf.jkt binding check", () => {
     assert.match(parsed.error || "", /id_token cnf\.jkt mismatch/);
   });
 
-  it("accepts an id_token with matching cnf.jkt", async () => {
+  it("accepts a fully valid chain (cnf.jkt matches, commit SSH-signed by agent)", async () => {
     const rsa = generateRsaKeyPair();
     mock = await startSsoMock({ jwk: rsa.publicKeyJwk });
 
-    const fixture = await buildFixture({ ssoBaseUrl: mock.baseUrl });
+    const fixture = await buildFixture({ ssoBaseUrl: mock.baseUrl, rsa });
     repoDir = fixture.repoDir;
-
-    const expectedJkt = jwkThumbprint(ed25519PublicKeyToJwk(fixture.agent.publicKeyPem));
-
-    const idToken = makeRs256IdToken({
-      privateKey: rsa.privateKey,
-      kid: rsa.publicKeyJwk.kid,
-      payload: {
-        iss: mock.baseUrl,
-        sub: fixture.ownerSub,
-        aud: "0xprovider",
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 3600,
-        cnf: { jkt: expectedJkt },
-      },
-    });
 
     const commitHash = await attachProof({
       repoDir,
       agent: fixture.agent,
       ownerSub: fixture.ownerSub,
       binding: fixture.binding,
-      idToken,
+      idToken: fixture.idToken,
+      ssoBaseUrl: mock.baseUrl,
+      fingerprint: fixture.agentFingerprint,
+      signCommit: true,
+    });
+
+    const out = await runGitVerify({ repoDir, commitHash, stateDir });
+    assert.equal(out.exitCode, 0, `expected ok exit, got ${out.exitCode}: ${out.stderr}`);
+    const parsed = JSON.parse(out.stdout);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.agentFingerprint, fixture.agentFingerprint);
+    assert.equal(parsed.ownerSessionSub, fixture.ownerSub);
+    assert.equal(
+      parsed.jkt,
+      jwkThumbprint(ed25519PublicKeyToJwk(fixture.agent.publicKeyPem)),
+    );
+    assert.equal(parsed.error, undefined);
+  });
+
+  it("rejects when binding signed by a different key than proof.agent.publicKeyPem", async () => {
+    // Substitution forgery: binding's embedded key + signature are by
+    // K_victim, but the proof bundle claims K_attacker as agent.publicKeyPem.
+    // The chain verifier must refuse at step 3 (binding signature anchored
+    // to proof.agent.publicKeyPem, NOT the binding's self-embedded key).
+    const rsa = generateRsaKeyPair();
+    mock = await startSsoMock({ jwk: rsa.publicKeyJwk });
+
+    const fixture = await buildFixture({
+      ssoBaseUrl: mock.baseUrl,
+      rsa,
+      mismatchAgent: true, // binding signed by a different keypair
+    });
+    repoDir = fixture.repoDir;
+
+    const commitHash = await attachProof({
+      repoDir,
+      agent: fixture.agent,
+      ownerSub: fixture.ownerSub,
+      binding: fixture.binding,
+      idToken: fixture.idToken,
       ssoBaseUrl: mock.baseUrl,
       fingerprint: fixture.agentFingerprint,
     });
 
     const out = await runGitVerify({ repoDir, commitHash, stateDir });
-    // The unsigned commit means sshSignatureValid=false → result.ok will be
-    // false. The AC for the positive case is that the cnf check passes —
-    // ssoSignatureValid=true, no `error` field set, and no warning or error
-    // mentions cnf.jkt. (The provenance line that confirms a valid cnf.jkt
-    // binding is allowed to mention it.)
+    assert.notEqual(out.exitCode, 0);
     const parsed = JSON.parse(out.stdout);
-    assert.equal(parsed.ssoSignatureValid, true);
-    assert.equal(parsed.error, undefined, `unexpected error: ${parsed.error}`);
-    for (const w of parsed.warnings || []) {
-      assert.doesNotMatch(w, /cnf\.jkt/);
-    }
-    // The provenance MUST include a line confirming the cnf.jkt binding.
-    assert.ok(
-      (parsed.provenance || []).some((p) => /cnf\.jkt/.test(p)),
-      "expected a provenance entry confirming cnf.jkt binding",
+    assert.equal(parsed.ok, false);
+    assert.match(
+      parsed.error || "",
+      /ownerBinding signature does not verify with proof\.agent\.publicKeyPem/,
     );
   });
 });
