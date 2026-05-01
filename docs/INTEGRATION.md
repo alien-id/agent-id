@@ -589,24 +589,56 @@ The proof bundle contains:
 }
 ```
 
-Verification steps:
+### The canonical chain
+
+**Every step is fatal.** A verifier MUST refuse the proof on any failure;
+"warnings" are not a thing. The reference implementation throws
+`ChainError` on each failure and returns a structured result on success;
+SDKs in other languages should mirror that contract.
 
 ```
+0. Structural: proof.version ∈ {1, 2}; proof.agent.publicKeyPem present
 1. Token fingerprint == proof.agent.fingerprint
 2. proof.ownerBinding.payload — canonical JSON matches payloadHash
 3. proof.ownerBinding.signature — Ed25519 verify with proof.agent.publicKeyPem
-4. proof.ownerBinding.payload.agentInstance.publicKeyFingerprint == token fingerprint
-5. Decode proof.idToken from base64url (v2) or use raw (v1)
+   (NOT the binding's self-embedded key)
+4. proof.ownerBinding.payload.agentInstance.publicKeyFingerprint
+     == fingerprint(proof.agent.publicKeyPem)
+5. Decode proof.idToken from base64url (v2) or use raw (v1); MUST be present
 6. sha256(decoded idToken) == proof.ownerBinding.payload.idTokenHash
 7. Fetch SSO JWKS from proof.ssoBaseUrl + "/.well-known/openid-configuration"
 8. Verify decoded idToken RS256 signature against JWKS
+9. idToken.cnf.jkt == jwkThumbprint(proof.agent.publicKeyPem)
+   (NOT the binding's self-embedded key)
 ```
 
+**Anchoring rule (security-critical):** steps 3 and 9 both compare against
+`proof.agent.publicKeyPem` — the *claimed* agent key — never against the
+binding's self-embedded `agentInstance.publicKeyPem`. A self-embedded check
+is tautological: a binding signed with key X embedding key X always
+self-verifies, which lets an attacker stitch a victim's binding + id_token
+onto their own signed request. Anchoring to `proof.agent.publicKeyPem`
+forces the binding to have been signed by the same key the consumer's
+caller-side check (commit signature, request body signature, capability
+proof) is verifying against.
+
 If all checks pass, you have cryptographic proof that:
-- The agent holds the private key (token signature)
+- The agent holds the private key (token / commit / request signature)
 - The agent created a binding to a specific human (owner binding signature)
-- The Alien SSO server witnessed this binding (id_token RS256 signature)
+- The Alien SSO server witnessed this binding (id_token RS256 signature
+  with `cnf.jkt` = thumbprint of the proven agent key)
 - The human is a verified AlienID holder
+
+### Reference implementation
+
+The CLI ships `verifyProofChain(proof)` in `lib.mjs` as the single source
+of truth — every consumer (`git-verify`, `@alien-id/sso-agent-id`'s
+deep-verify path, future capability-proof flows) calls this function and
+layers use-case-specific checks (commit signature, request signature, etc.)
+around it. Implementations in other languages should follow the same shape:
+one function that walks all 9 steps, throws on any failure, returns
+`{ agentFingerprint, agentPublicKeyPem, ownerSessionSub, issuer, jkt,
+idTokenPayload }` on success.
 
 ### When to use deep verification
 
