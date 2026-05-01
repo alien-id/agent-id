@@ -94,20 +94,13 @@ describe("ed25519PublicKeyToJwk()", () => {
     assert.throws(() => ed25519PublicKeyToJwk(pem), /Ed25519/);
   });
 
-  it("rejects a synthetic 44-byte DER with wrong OID prefix (defense in depth)", () => {
-    // Build a 44-byte buffer whose length matches Ed25519 SPKI but whose OID bytes are bogus.
-    const bogus = Buffer.concat([
-      Buffer.from("302a300506030000000003210000", "hex").subarray(0, 12),
-      Buffer.alloc(32, 0xab),
-    ]);
-    // Hand-craft PEM around the bogus DER so we bypass createPublicKey's parsing.
-    // This test pokes at the prefix check directly: import the bogus DER, let createPublicKey
-    // throw, and verify a clear error reaches the caller (any throw with descriptive message).
-    assert.throws(() => {
-      const pem = `-----BEGIN PUBLIC KEY-----\n${bogus.toString("base64")}\n-----END PUBLIC KEY-----\n`;
-      ed25519PublicKeyToJwk(pem);
-    });
-  });
+  // Note: the X25519 and Ed448 cases above are the real coverage of the
+  // OID prefix check — both produce SPKIs that survive createPublicKey
+  // (so the bytes reach our function) but trip the prefix mismatch. A
+  // hand-crafted 44-byte buffer with a synthetic non-Ed25519 OID would
+  // be rejected by createPublicKey before our code ever runs, which is
+  // why earlier attempts at such a "defense-in-depth" test were
+  // tautological.
 });
 
 // ─── jwkThumbprint ───────────────────────────────────────────────────────────────
