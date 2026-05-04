@@ -1172,6 +1172,304 @@ function normalizeOwnerSessionProof(input) {
   };
 }
 
+// ════════════════════════════════════════════════════════════════════════════════
+// Service manifest discovery — /.well-known/alien-agent-id.json
+//
+// Trust model: the manifest is third-party data. It is parsed, schema-validated,
+// and reduced to a fixed set of fields before any value is returned. The only
+// URLs the agent will subsequently touch are those that share the same authority
+// as the user-provided service URL (exact host or a subdomain).
+// ════════════════════════════════════════════════════════════════════════════════
+
+export const SERVICE_MANIFEST_PATH = "/.well-known/alien-agent-id.json";
+export const SERVICE_MANIFEST_MAX_BYTES = 8192;
+export const SERVICE_MANIFEST_VERSION = 1;
+export const SUPPORT_SIGNAL_MAX_BYTES = 65536;
+export const SUPPORT_SIGNAL_VERSIONS = new Set(["v1"]);
+
+const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
+const ALLOWED_AUTH_SCHEMES = new Set(["AgentID", "Bearer", "none"]);
+const ALLOWED_TOP_KEYS = new Set(["version", "service", "auth", "api"]);
+const ALLOWED_SERVICE_KEYS = new Set(["name", "url"]);
+const ALLOWED_AUTH_KEYS = new Set(["header", "scheme"]);
+const ALLOWED_API_KEYS = new Set(["base"]);
+
+function rejectUnknownKeys(obj, allowed, where) {
+  for (const key of Object.keys(obj)) {
+    if (!allowed.has(key)) {
+      throw new Error(`Manifest ${where}: unknown key "${key}"`);
+    }
+  }
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isSameAuthority(host, allowedHost) {
+  if (typeof host !== "string" || !host) return false;
+  return host === allowedHost || host.endsWith(`.${allowedHost}`);
+}
+
+function validateManifestUrl(value, allowedHost, where, { allowInsecure = false } = {}) {
+  if (typeof value !== "string" || !value) {
+    throw new Error(`Manifest ${where}: must be a string URL`);
+  }
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`Manifest ${where}: invalid URL`);
+  }
+  const protoOk = url.protocol === "https:" || (allowInsecure && url.protocol === "http:");
+  if (!protoOk) {
+    throw new Error(`Manifest ${where}: must be https://`);
+  }
+  if (!isSameAuthority(url.host, allowedHost)) {
+    throw new Error(`Manifest ${where}: host "${url.host}" is not within "${allowedHost}"`);
+  }
+  return url.toString();
+}
+
+export function parseServiceManifest(raw, allowedHost, options = {}) {
+  if (!isPlainObject(raw)) {
+    throw new Error("Manifest: root must be a JSON object");
+  }
+  rejectUnknownKeys(raw, ALLOWED_TOP_KEYS, "root");
+
+  if (raw.version !== SERVICE_MANIFEST_VERSION) {
+    throw new Error(`Manifest: unsupported version ${JSON.stringify(raw.version)} (expected ${SERVICE_MANIFEST_VERSION})`);
+  }
+
+  if (!isPlainObject(raw.auth)) {
+    throw new Error("Manifest: missing required \"auth\" object");
+  }
+  if (!isPlainObject(raw.api)) {
+    throw new Error("Manifest: missing required \"api\" object");
+  }
+
+  rejectUnknownKeys(raw.auth, ALLOWED_AUTH_KEYS, "auth");
+  rejectUnknownKeys(raw.api, ALLOWED_API_KEYS, "api");
+
+  const out = { version: SERVICE_MANIFEST_VERSION };
+
+  if (raw.service !== undefined) {
+    if (!isPlainObject(raw.service)) {
+      throw new Error("Manifest: \"service\" must be an object");
+    }
+    rejectUnknownKeys(raw.service, ALLOWED_SERVICE_KEYS, "service");
+    const service = {};
+    if (raw.service.name !== undefined) {
+      if (typeof raw.service.name !== "string" || raw.service.name.length === 0 || raw.service.name.length > 80) {
+        throw new Error("Manifest service.name: must be a 1-80 char string");
+      }
+      service.name = raw.service.name;
+    }
+    if (raw.service.url !== undefined) {
+      service.url = validateManifestUrl(raw.service.url, allowedHost, "service.url", options);
+    }
+    out.service = service;
+  }
+
+  out.auth = {
+    header: (() => {
+      if (typeof raw.auth.header !== "string" || !HEADER_NAME_RE.test(raw.auth.header)) {
+        throw new Error("Manifest auth.header: must match [A-Za-z0-9-]{1,64}");
+      }
+      return raw.auth.header;
+    })(),
+    scheme: (() => {
+      if (raw.auth.scheme === undefined) return "AgentID";
+      if (typeof raw.auth.scheme !== "string" || !ALLOWED_AUTH_SCHEMES.has(raw.auth.scheme)) {
+        throw new Error(`Manifest auth.scheme: must be one of ${[...ALLOWED_AUTH_SCHEMES].join(", ")}`);
+      }
+      return raw.auth.scheme;
+    })(),
+  };
+
+  out.api = {
+    base: validateManifestUrl(raw.api.base, allowedHost, "api.base", options),
+  };
+
+  return out;
+}
+
+async function readBoundedBody(res, maxBytes) {
+  const reader = res.body?.getReader?.();
+  if (!reader) {
+    const text = await res.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) {
+      throw new Error(`Manifest exceeds ${maxBytes} bytes`);
+    }
+    return text;
+  }
+  let received = 0;
+  const chunks = [];
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    received += value.length;
+    if (received > maxBytes) {
+      try { await reader.cancel(); } catch {}
+      throw new Error(`Manifest exceeds ${maxBytes} bytes`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
+}
+
+export async function fetchServiceManifest(serviceUrl, options = {}) {
+  if (typeof serviceUrl !== "string" || !serviceUrl) {
+    throw new Error("fetchServiceManifest: serviceUrl required");
+  }
+  let parsed;
+  try {
+    parsed = new URL(serviceUrl);
+  } catch {
+    throw new Error("fetchServiceManifest: invalid serviceUrl");
+  }
+  const allowInsecure = options.allowInsecure === true;
+  if (parsed.protocol !== "https:" && !(allowInsecure && parsed.protocol === "http:")) {
+    throw new Error("fetchServiceManifest: serviceUrl must be https://");
+  }
+  const allowedHost = parsed.host;
+  const manifestUrl = `${parsed.protocol}//${parsed.host}${SERVICE_MANIFEST_PATH}`;
+
+  const controller = new AbortController();
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 5000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(manifestUrl, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      redirect: "error",
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    throw new Error(`Manifest fetch failed: HTTP ${res.status} from ${manifestUrl}`);
+  }
+  const contentType = res.headers.get("content-type") || "";
+  if (!/^application\/json\b/i.test(contentType)) {
+    throw new Error(`Manifest fetch failed: expected application/json, got "${contentType}"`);
+  }
+
+  const body = await readBoundedBody(res, SERVICE_MANIFEST_MAX_BYTES);
+  let json;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    throw new Error("Manifest fetch failed: response is not valid JSON");
+  }
+
+  const manifest = parseServiceManifest(json, allowedHost, { allowInsecure });
+  return { manifest, manifestUrl, allowedHost };
+}
+
+// Build the HTTP header pair for an API call to a service whose manifest
+// has been validated. Pure: no network, no I/O.
+export function buildServiceAuthHeader(manifest, agentToken) {
+  if (!isPlainObject(manifest) || !isPlainObject(manifest.auth)) {
+    throw new Error("buildServiceAuthHeader: invalid manifest");
+  }
+  if (typeof agentToken !== "string" || !agentToken) {
+    throw new Error("buildServiceAuthHeader: agentToken required");
+  }
+  const value = manifest.auth.scheme === "none"
+    ? agentToken
+    : `${manifest.auth.scheme} ${agentToken}`;
+  return { name: manifest.auth.header, value };
+}
+
+// Probe a page URL for the closed-enum support-signal meta tag:
+//   <meta name="alien-agent-id" content="v1">
+//
+// This is purely a hint that the service advertises Alien Agent ID support.
+// It NEVER carries the manifest path — the manifest always lives at
+// SERVICE_MANIFEST_PATH on the same host. Anything other than a known version
+// in the closed-enum content is rejected (no prose, no URLs).
+//
+// Any network/HTTP/parse failure resolves to { supported: false, version: null }
+// so callers can use this as a yes/no signal without needing error handling.
+export async function probeServiceSupportSignal(pageUrl, options = {}) {
+  if (typeof pageUrl !== "string" || !pageUrl) {
+    throw new Error("probeServiceSupportSignal: pageUrl required");
+  }
+  let parsed;
+  try { parsed = new URL(pageUrl); } catch { throw new Error("probeServiceSupportSignal: invalid pageUrl"); }
+  const allowInsecure = options.allowInsecure === true;
+  if (parsed.protocol !== "https:" && !(allowInsecure && parsed.protocol === "http:")) {
+    throw new Error("probeServiceSupportSignal: pageUrl must be https://");
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 5000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(pageUrl, {
+      method: "GET",
+      headers: { Accept: "text/html" },
+      redirect: "error",
+      signal: controller.signal,
+    });
+  } catch {
+    clearTimeout(timer);
+    return { supported: false, version: null };
+  }
+  clearTimeout(timer);
+
+  if (!res.ok) return { supported: false, version: null };
+  const contentType = res.headers.get("content-type") || "";
+  if (!/^text\/html\b/i.test(contentType)) return { supported: false, version: null };
+
+  let html;
+  try {
+    html = await readBoundedBody(res, SUPPORT_SIGNAL_MAX_BYTES);
+  } catch {
+    return { supported: false, version: null };
+  }
+
+  const tagRe = /<meta\b[^>]*>/gi;
+  const nameRe = /\bname\s*=\s*["']alien-agent-id["']/i;
+  const contentRe = /\bcontent\s*=\s*["']([^"']*)["']/i;
+  for (const m of html.matchAll(tagRe)) {
+    const tag = m[0];
+    if (!nameRe.test(tag)) continue;
+    const cm = contentRe.exec(tag);
+    if (!cm) return { supported: false, version: null };
+    const value = cm[1];
+    if (SUPPORT_SIGNAL_VERSIONS.has(value)) {
+      return { supported: true, version: value };
+    }
+    return { supported: false, version: null };
+  }
+  return { supported: false, version: null };
+}
+
+// Resolve a request path against the manifest's api.base, refusing any path
+// that escapes the base authority (e.g. "//evil.com/x" or a full https URL).
+export function resolveServiceApiUrl(manifest, requestPath) {
+  if (!isPlainObject(manifest) || !isPlainObject(manifest.api)) {
+    throw new Error("resolveServiceApiUrl: invalid manifest");
+  }
+  if (typeof requestPath !== "string" || !requestPath) {
+    throw new Error("resolveServiceApiUrl: requestPath required");
+  }
+  const base = new URL(manifest.api.base.endsWith("/") ? manifest.api.base : manifest.api.base + "/");
+  const resolved = new URL(requestPath, base);
+  if (resolved.host !== base.host || resolved.protocol !== base.protocol) {
+    throw new Error(`resolveServiceApiUrl: path "${requestPath}" escapes api.base`);
+  }
+  return resolved.toString();
+}
+
 export function resolveAgentId(ctx = {}) {
   if (ctx.agentId && typeof ctx.agentId === "string") {
     return ctx.agentId;
