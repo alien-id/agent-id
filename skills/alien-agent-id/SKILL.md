@@ -101,7 +101,7 @@ The CLI fetches `https://example.com/.well-known/alien-agent-id.json`, validates
 Manifest fields:
 
 - `auth.header` — HTTP header name (e.g. `Authorization`)
-- `auth.scheme` — `Bearer` or `none`
+- `auth.scheme` — `AgentID` (default), `Bearer`, or `none`
 - `api.base` — API base URL for subsequent requests
 - `service.name`, `service.url` — optional display metadata
 

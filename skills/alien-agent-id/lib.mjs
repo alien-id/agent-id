@@ -727,7 +727,7 @@ export const SUPPORT_SIGNAL_MAX_BYTES = 65536;
 export const SUPPORT_SIGNAL_VERSIONS = new Set(["v1"]);
 
 const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
-const ALLOWED_AUTH_SCHEMES = new Set(["Bearer", "none"]);
+const ALLOWED_AUTH_SCHEMES = new Set(["AgentID", "Bearer", "none"]);
 const ALLOWED_TOP_KEYS = new Set(["version", "service", "auth", "api"]);
 const ALLOWED_SERVICE_KEYS = new Set(["name", "url"]);
 const ALLOWED_AUTH_KEYS = new Set(["header", "scheme"]);
@@ -818,7 +818,7 @@ export function parseServiceManifest(raw, allowedHost, options = {}) {
       return raw.auth.header;
     })(),
     scheme: (() => {
-      if (raw.auth.scheme === undefined) return "Bearer";
+      if (raw.auth.scheme === undefined) return "AgentID";
       if (typeof raw.auth.scheme !== "string" || !ALLOWED_AUTH_SCHEMES.has(raw.auth.scheme)) {
         throw new Error(`Manifest auth.scheme: must be one of ${[...ALLOWED_AUTH_SCHEMES].join(", ")}`);
       }

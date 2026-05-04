@@ -35,7 +35,7 @@ function buildValidManifest(host) {
   return {
     version: 1,
     service: { name: "Acme", url: `http://${host}` },
-    auth: { header: "Authorization", scheme: "Bearer" },
+    auth: { header: "Authorization", scheme: "AgentID" },
     api: { base: `http://${host}/api/v1` },
   };
 }
@@ -84,7 +84,7 @@ function startMockService() {
     if (req.url === "/api/v1/whoami") {
       const auth = req.headers["authorization"] || "";
       state.lastAuthHeader = auth;
-      const m = /^Bearer (.+)$/.exec(auth);
+      const m = /^AgentID (.+)$/.exec(auth);
       if (!m) {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "missing-bearer" }));
@@ -160,7 +160,7 @@ describe("parseServiceManifest (pure validation)", () => {
       },
       host,
     );
-    assert.equal(out.auth.scheme, "Bearer", "scheme defaults to Bearer");
+    assert.equal(out.auth.scheme, "AgentID", "scheme defaults to AgentID");
     assert.equal(out.auth.header, "Authorization");
     assert.equal(out.api.base, `https://${host}/v1`);
     assert.equal(out.service, undefined);
@@ -359,7 +359,7 @@ describe("fetchServiceManifest (network)", () => {
     assert.equal(result.allowedHost, svc.host);
     assert.ok(result.manifestUrl.endsWith(SERVICE_MANIFEST_PATH));
     assert.equal(result.manifest.version, 1);
-    assert.equal(result.manifest.auth.scheme, "Bearer");
+    assert.equal(result.manifest.auth.scheme, "AgentID");
     assert.equal(result.manifest.api.base, `http://${svc.host}/api/v1`);
   });
 
@@ -501,7 +501,7 @@ describe("end-to-end: agent calls API with header from discovered manifest", () 
     assert.equal(res.status, 200);
     assert.equal(res.body.agent_fingerprint, agentFingerprint);
     assert.ok(res.body.service_token.startsWith("svc-token-"));
-    assert.match(svc.state.lastAuthHeader, /^Bearer /);
+    assert.match(svc.state.lastAuthHeader, /^AgentID /);
   });
 
   it("service rejects forged token (wrong key signs another agent's payload)", async () => {
@@ -656,7 +656,7 @@ describe("CLI: discover-service", () => {
     assert.equal(parsed.allowedHost, svc.host);
     assert.equal(parsed.manifest.version, 1);
     assert.equal(parsed.manifest.auth.header, "Authorization");
-    assert.equal(parsed.manifest.auth.scheme, "Bearer");
+    assert.equal(parsed.manifest.auth.scheme, "AgentID");
     assert.equal(parsed.manifest.api.base, `http://${svc.host}/api/v1`);
   });
 
