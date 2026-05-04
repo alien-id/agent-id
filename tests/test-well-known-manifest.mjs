@@ -342,6 +342,38 @@ describe("parseServiceManifest (pure validation)", () => {
   it("rejects array root", () => {
     assert.throws(() => parseServiceManifest([], host), /root must be a JSON object/);
   });
+
+  it("accepts optional api.specUrl under same authority", () => {
+    const out = parseServiceManifest(
+      {
+        version: 1,
+        auth: { header: "X" },
+        api: { base: `https://${host}/v1`, specUrl: `https://${host}/openapi.json` },
+      },
+      host,
+    );
+    assert.equal(out.api.specUrl, `https://${host}/openapi.json`);
+  });
+
+  it("omits api.specUrl from output when not provided", () => {
+    const out = parseServiceManifest(
+      { version: 1, auth: { header: "X" }, api: { base: `https://${host}/v1` } },
+      host,
+    );
+    assert.equal(out.api.specUrl, undefined);
+  });
+
+  it("rejects cross-authority api.specUrl", () => {
+    assert.throws(() =>
+      parseServiceManifest(
+        {
+          version: 1,
+          auth: { header: "X" },
+          api: { base: `https://${host}/v1`, specUrl: "https://attacker.example/openapi.json" },
+        },
+        host,
+      ), /api.specUrl.*not within/);
+  });
 });
 
 describe("fetchServiceManifest (network)", () => {

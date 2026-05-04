@@ -103,6 +103,7 @@ Manifest fields:
 - `auth.header` — HTTP header name (e.g. `Authorization`)
 - `auth.scheme` — `AgentID` (default), `Bearer`, or `none`
 - `api.base` — API base URL for subsequent requests
+- `api.specUrl` — optional URL of an OpenAPI/JSON Schema document describing the API
 - `service.name`, `service.url` — optional display metadata
 
 Call the service: `auth-header --raw` for your token, attach it to requests under `api.base` with the manifest's header and scheme. Tokens are self-contained — services verify with [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id), no registration.

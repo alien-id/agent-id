@@ -22,6 +22,7 @@ fully verifiable: **commit → agent key → owner binding → SSO attestation �
 - [What a Signed Commit Looks Like](#what-a-signed-commit-looks-like)
 - [Verifying Provenance](#verifying-provenance)
 - [Service Authentication](#service-authentication)
+- [Service Discovery](#service-discovery)
 - [Credential Vault](#credential-vault)
 - [Session Refresh](#session-refresh)
 - [Prerequisites](#prerequisites)
@@ -217,7 +218,9 @@ chain logic stays in one place. The chain anchors every key check to
 `proof.agent.publicKeyPem` (the key the request/commit was signed with),
 which is what makes it forgery-resistant.
 
-### Service discovery — `.well-known/alien-agent-id.json`
+---
+
+## Service Discovery
 
 Alien-aware services publish a JSON manifest at `https://<host>/.well-known/alien-agent-id.json`.
 Agents fetch and validate it before talking to the service:
@@ -228,16 +231,21 @@ node skills/alien-agent-id/cli.mjs discover-service --url https://example.com
 
 The CLI enforces an 8 KiB body cap, rejects redirects, requires `application/json`, and validates
 against a closed v1 schema (`version`, `auth.header`, `auth.scheme`, `api.base`, optional
-`service.name`/`service.url`). Every URL in the manifest must share the same authority as the
-service URL the user gave the agent — see `SKILL.md` for the full trust boundary. *Same authority*
-means `host[:port]` exactly, or a subdomain of it; no public-suffix-list expansion.
+`api.specUrl`, `service.name`/`service.url`). Every URL in the manifest must share the same
+authority as the service URL the user gave the agent — see `SKILL.md` for the full trust
+boundary. *Same authority* means `host[:port]` exactly, or a subdomain of it; no
+public-suffix-list expansion.
+
+Services that publish an OpenAPI / JSON Schema document can declare it via `api.specUrl`. Agents
+fetch it at runtime and refresh API knowledge without a skill update — the API contract becomes
+dynamic structured data instead of static skill prose.
 
 > **Replaces ALIEN-SKILL.md.** Earlier 2.2.0 docs proposed a Markdown file (`ALIEN-SKILL.md`) at
 > the service root for the same purpose. That format is removed: free-form Markdown is too
 > permissive a channel for a third-party server to feed an LLM. The well-known JSON manifest is
 > the only supported discovery mechanism.
 
-#### Optional support signal
+### Optional support signal
 
 Services may also publish a closed-enum HTML meta tag advertising agent-id support:
 

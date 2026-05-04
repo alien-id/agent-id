@@ -1192,7 +1192,7 @@ const ALLOWED_AUTH_SCHEMES = new Set(["AgentID", "Bearer", "none"]);
 const ALLOWED_TOP_KEYS = new Set(["version", "service", "auth", "api"]);
 const ALLOWED_SERVICE_KEYS = new Set(["name", "url"]);
 const ALLOWED_AUTH_KEYS = new Set(["header", "scheme"]);
-const ALLOWED_API_KEYS = new Set(["base"]);
+const ALLOWED_API_KEYS = new Set(["base", "specUrl"]);
 
 function rejectUnknownKeys(obj, allowed, where) {
   for (const key of Object.keys(obj)) {
@@ -1290,6 +1290,9 @@ export function parseServiceManifest(raw, allowedHost, options = {}) {
   out.api = {
     base: validateManifestUrl(raw.api.base, allowedHost, "api.base", options),
   };
+  if (raw.api.specUrl !== undefined) {
+    out.api.specUrl = validateManifestUrl(raw.api.specUrl, allowedHost, "api.specUrl", options);
+  }
 
   return out;
 }
