@@ -3,7 +3,7 @@
 // Alien Agent ID — CLI tool for agent identity management.
 // Usage: node cli.mjs <command> [flags]
 //
-// Commands: bootstrap, init, auth, bind, status, sign, verify, export-proof,
+// Commands: bootstrap, setup-owner-session, init, auth, bind, status, sign, verify, export-proof,
 //           git-setup, git-commit, git-verify, vault-store, vault-get, vault-list,
 //           vault-remove, auth-header, refresh
 
@@ -916,6 +916,72 @@ async function cmdBootstrap(flags) {
   });
 }
 
+// ─── Setup Owner Session — DPoP/cnf rebind ─────────────────────────────────────
+
+// Force a fresh OAuth flow that produces a DPoP-bound, cnf-carrying id_token.
+// Used to migrate pre-3.0 agents whose existing bindings carry cnf-less
+// id_tokens that the 3.0 verifier rejects. Keys are preserved; only the
+// owner-session and binding state files are cleared so cmdBind can rewrite.
+async function cmdSetupOwnerSession(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  const verbose = flags.verbose === true;
+
+  // Clear only the session/binding/pending-auth state. The keypair stays put —
+  // re-binding under DPoP just adds cnf.jkt for the SAME key the agent already
+  // has; rotating the key would gratuitously invalidate every signed commit.
+  let cleared = false;
+  for (const p of [paths.ownerBinding, paths.ownerSession, paths.pendingAuth]) {
+    try {
+      await fs.unlink(p);
+      cleared = true;
+    } catch (err) {
+      if (err && err.code !== "ENOENT") throw err;
+    }
+  }
+  if (cleared) {
+    stderr("Cleared existing owner-session and binding for re-bind.");
+  }
+
+  const providerAddress = await resolveProviderAddress(flags);
+  if (!providerAddress) {
+    outputError(
+      "No provider address. Set --provider-address, ALIEN_PROVIDER_ADDRESS env, or create default-provider.txt next to the CLI.",
+    );
+    return;
+  }
+  if (verbose) stderr(`Provider address: ${providerAddress}`);
+
+  // Init (no-op if keypair exists; generates one otherwise).
+  const agentKey = await cmdInit({ ...flags, _quiet: true });
+  if (verbose && agentKey?.fingerprint) {
+    stderr(`Agent fingerprint: ${agentKey.fingerprint}`);
+  }
+
+  const authResult = await cmdAuth({
+    ...flags,
+    "provider-address": providerAddress,
+    _noOutput: true,
+  });
+  stderr(`Open this link with your Alien App: ${authResult.deepLink}`);
+  if (verbose) stderr(`Polling code: ${authResult.pollingCode}`);
+
+  const bindResult = await cmdBind({ ...flags, _noOutput: true });
+
+  await cmdGitSetup({ ...flags, _quiet: true });
+
+  outputJson({
+    ok: true,
+    rebound: true,
+    fingerprint: bindResult?.fingerprint,
+    ownerSessionSub: bindResult?.ownerSessionSub,
+    bindingId: bindResult?.bindingId,
+    providerAddress,
+    stateDir,
+  });
+}
+
 // ─── Vault ──────────────────────────────────────────────────────────────────────
 
 function safeServiceName(name) {
@@ -1190,6 +1256,7 @@ Usage: node cli.mjs <command> [flags]
 
 Commands:
   bootstrap      One-command identity setup (init + auth + bind + git-setup)
+  setup-owner-session  Re-bind an existing agent (DPoP/cnf migration; preserves keypair)
   init           Generate Ed25519 keypair and initialize state directory
   auth           Start OIDC authorization (returns deep link + QR page)
   bind           Poll for user approval and create owner binding
@@ -1260,6 +1327,7 @@ All commands output JSON to stdout. Progress and errors go to stderr.
 
 const commands = {
   bootstrap: cmdBootstrap,
+  "setup-owner-session": cmdSetupOwnerSession,
   init: cmdInit,
   auth: cmdAuth,
   bind: cmdBind,
