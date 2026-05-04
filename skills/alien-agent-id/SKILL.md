@@ -44,33 +44,15 @@ node CLI status
 
 If `"bound": true` — you already have an Alien Agent ID. Skip to **Section 6**.
 
-### Step 2: Choose provider and start authentication
+### Step 2: Start authentication
 
-**IMPORTANT: You MUST ask the user before proceeding. Never silently read `default-provider.txt` and use it without asking. The user must explicitly choose their provider.**
+Use the default Alien provider — `bootstrap` resolves it from `default-provider.txt` automatically, so first-try registration works without prompting:
 
-Ask the user: **"Would you like to use the default Alien provider (recommended), or set up your own?"**
+```bash
+node CLI bootstrap
+```
 
-- **Default provider**: Only after the user confirms, read the file `default-provider.txt` in the same directory as this skill file (next to `cli.mjs`) to get the address. Proceed to the `auth` command below.
-- **Set up your own**: Show the user this QR code and link to create a SSO provider. Wait for them to provide the address before proceeding.
-  > Scan or open to set up your provider: https://dev.alien.org/dashboard/sso
-  > ```
-  > ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-  > █ ▄▄▄▄▄ █▄▄████▀ ▄▀ ▄▄█ ▄▄▄▄▄ █
-  > █ █   █ █ ▀█ ▄▄▄▄█▀█▀▄█ █   █ █
-  > █ █▄▄▄█ █▄ ▄▄▀▄▀██▄█  █ █▄▄▄█ █
-  > █▄▄▄▄▄▄▄█▄▀▄▀▄▀ ▀ ▀ ▀▄█▄▄▄▄▄▄▄█
-  > █▄▄  ▀▀▄▀▄▀███▄▄▄ ▄▄ ▀ ▀▀ ▄▄█ █
-  > █ ▄▀▄█▀▄ ▀██▀▀▀ ▀ █▀█▄▀▀  █▄▄▀█
-  > ██▀▄██ ▄█ ▄▀ █▀█  ▄█▀▄█▀▀█▄ ▀▀█
-  > ██▀▀▄▀█▄▀▄ ▄█ ▀▄███▀   █▀ █▄ ▄█
-  > ██  ▄ ▀▄█▄ █▄▀▀█▀▄█▄▄ ▄█▀▄ ▀ ██
-  > █▄█▀▀ ▄▄▄█▄ ▄ ██   ▄▀█ ▄▄▄█ ███
-  > ██▄▄▄██▄▄  █▄  ▀▄▄  █ ▄▄▄   ▀▀█
-  > █ ▄▄▄▄▄ ██  ▄▄▄████   █▄█  █ ██
-  > █ █   █ █▀  ▀ █  ▀ ██▄ ▄  ▀▄▄▀█
-  > █ █▄▄▄█ █ █▄ █▄▀█▄███ ██▄▀▀▄▀▄█
-  > █▄▄▄▄▄▄▄█▄███▄█▄█▄█▄▄▄▄█████▄██
-  > ```
+If the user explicitly asks to use their own provider, they can pass `--provider-address <addr>` (or set `ALIEN_PROVIDER_ADDRESS`); to create one they go to https://dev.alien.org/dashboard/sso. Don't volunteer this unless they bring it up.
 
 Then run:
 
@@ -308,7 +290,7 @@ This returns JSON containing a `deepLink` and a `qrCode` (Unicode text). Output 
 
 ### Step 3: Wait for approval
 ```bash
-node CLI bind --no-require-owner-proof
+node CLI bind
 ```
 
 Blocks for up to 5 minutes while the user scans the QR code with Alien App.

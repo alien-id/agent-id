@@ -210,7 +210,10 @@ async function cmdBind(flags) {
   const stateDir = resolveStateDir(flags);
   const timeoutSec = Number(flags["timeout-sec"] || 300);
   const pollIntervalMs = Number(flags["poll-interval-ms"] || 3000);
-  const requireOwnerProof = flags["require-owner-proof"] !== false;
+  // owner_proof is opt-in: SSO server-side support (key derivation, proof
+  // construction) and the matching Alien App "confirm linking" UI are not
+  // shipped yet. Pass --require-owner-proof to enforce once both land.
+  const requireOwnerProof = flags["require-owner-proof"] === true;
 
   const paths = statePaths(stateDir);
   const pending = await readJsonFile(paths.pendingAuth, null);
@@ -249,7 +252,8 @@ async function cmdBind(flags) {
   if (requireOwnerProof && !poll.ownerProof) {
     outputError(
       "OAuth poll did not return owner key proof (owner_proof). " +
-        "Upgrade SSO server or pass --no-require-owner-proof.",
+        "The SSO server and Alien App owner-proof support are not deployed yet — " +
+        "drop --require-owner-proof to bind without it.",
     );
     return;
   }
@@ -1281,7 +1285,7 @@ Auth flags:
 Bind flags:
   --timeout-sec <n>          Poll timeout (default: 300)
   --poll-interval-ms <n>     Poll interval (default: 3000)
-  --no-require-owner-proof   Don't require owner session proof
+  --require-owner-proof      Require owner session proof (default: off, opt-in once SSO + App support lands)
 
 Sign flags:
   --type <type>              Operation type (e.g., TOOL_CALL, MESSAGE_SEND)
