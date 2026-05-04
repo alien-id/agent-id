@@ -5,7 +5,7 @@
 //
 // Commands: bootstrap, init, auth, bind, status, sign, verify, export-proof,
 //           git-setup, git-commit, git-verify, vault-store, vault-get, vault-list,
-//           vault-remove, auth-header, refresh
+//           vault-remove, auth-header, discover-service, service-support, refresh
 
 import path from "node:path";
 import os from "node:os";
@@ -41,6 +41,8 @@ import {
   vaultEncrypt,
   vaultDecrypt,
   createAgentToken,
+  fetchServiceManifest,
+  probeServiceSupportSignal,
 } from "./lib.mjs";
 import qrcode from "./qrcode.cjs";
 
@@ -1240,6 +1242,37 @@ async function cmdAuthHeader(flags) {
   }
 }
 
+async function cmdServiceSupport(flags) {
+  const pageUrl = flags.url;
+  if (!pageUrl) {
+    outputError("Missing --url <page-url>");
+    return;
+  }
+  const result = await probeServiceSupportSignal(String(pageUrl), {
+    allowInsecure: flags["allow-insecure"] === true,
+    timeoutMs: flags["timeout-ms"] ? Number(flags["timeout-ms"]) : undefined,
+  });
+  outputJson({ ok: true, ...result });
+}
+
+async function cmdDiscoverService(flags) {
+  const serviceUrl = flags.url || flags.service;
+  if (!serviceUrl) {
+    outputError("Missing --url <service-url>");
+    return;
+  }
+  const result = await fetchServiceManifest(String(serviceUrl), {
+    allowInsecure: flags["allow-insecure"] === true,
+    timeoutMs: flags["timeout-ms"] ? Number(flags["timeout-ms"]) : undefined,
+  });
+  outputJson({
+    ok: true,
+    manifestUrl: result.manifestUrl,
+    allowedHost: result.allowedHost,
+    manifest: result.manifest,
+  });
+}
+
 // ─── Help ───────────────────────────────────────────────────────────────────────
 
 function printHelp() {
@@ -1261,6 +1294,8 @@ Commands:
   git-commit     Create a signed commit with Agent ID trailers
   git-verify     Verify provenance chain of a signed commit
   auth-header    Generate a signed authentication token for service calls
+  discover-service  Fetch and validate /.well-known/alien-agent-id.json
+  service-support   Probe a page for the <meta name="alien-agent-id"> support signal
   refresh        Refresh SSO session tokens (access_token / refresh_token)
   vault-store    Store an encrypted credential in the agent vault
   vault-get      Retrieve a decrypted credential from the vault
@@ -1335,6 +1370,8 @@ const commands = {
   "vault-list": cmdVaultList,
   "vault-remove": cmdVaultRemove,
   "auth-header": cmdAuthHeader,
+  "discover-service": cmdDiscoverService,
+  "service-support": cmdServiceSupport,
   refresh: cmdRefresh,
 };
 

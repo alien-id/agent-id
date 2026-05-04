@@ -209,6 +209,44 @@ owner proof chain, and an Ed25519 signature. Services verify tokens using
 [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id) with no
 prior key registration needed.
 
+### Service discovery — `.well-known/alien-agent-id.json`
+
+Alien-aware services publish a JSON manifest at `https://<host>/.well-known/alien-agent-id.json`.
+Agents fetch and validate it before talking to the service:
+
+```bash
+node skills/alien-agent-id/cli.mjs discover-service --url https://example.com
+```
+
+The CLI enforces an 8 KiB body cap, rejects redirects, requires `application/json`, and validates
+against a closed v1 schema (`version`, `auth.header`, `auth.scheme`, `api.base`, optional
+`service.name`/`service.url`). Every URL in the manifest must share the same authority as the
+service URL the user gave the agent — see `SKILL.md` for the full trust boundary. *Same authority*
+means `host[:port]` exactly, or a subdomain of it; no public-suffix-list expansion.
+
+> **Replaces ALIEN-SKILL.md.** Earlier 2.2.0 docs proposed a Markdown file (`ALIEN-SKILL.md`) at
+> the service root for the same purpose. That format is removed: free-form Markdown is too
+> permissive a channel for a third-party server to feed an LLM. The well-known JSON manifest is
+> the only supported discovery mechanism.
+
+#### Optional support signal
+
+Services may also publish a closed-enum HTML meta tag advertising agent-id support:
+
+```html
+<meta name="alien-agent-id" content="v1">
+```
+
+The tag's `content` is a closed enum (`v1`, future versions) — no URLs, no prose. It exists so
+agents and crawlers can detect support without probing every host's `/.well-known/`. The
+manifest path is fixed; the meta tag never tells the agent where to go, only *whether* a service
+claims support. Probe it with:
+
+```bash
+node skills/alien-agent-id/cli.mjs service-support --url https://example.com
+# → {"ok": true, "supported": true, "version": "v1"}
+```
+
 ---
 
 ## Credential Vault
@@ -305,6 +343,8 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 | `git-commit --message "..." [--push]` | Signed commit with trailers + proof note + audit log |
 | `git-verify [--commit <hash>]` | Verify provenance chain of a commit |
 | `auth-header [--raw]` | Generate signed auth token for service calls |
+| `discover-service --url <URL>` | Fetch + validate `/.well-known/alien-agent-id.json` |
+| `service-support --url <URL>` | Probe page for `<meta name="alien-agent-id">` support signal |
 | `refresh` | Refresh SSO session tokens |
 | `vault-store --service S` | Store encrypted credential |
 | `vault-get --service S` | Retrieve decrypted credential |
