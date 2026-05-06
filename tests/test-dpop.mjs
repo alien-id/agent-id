@@ -359,6 +359,85 @@ describe("getUserInfo client", () => {
       mock.server.close();
     }
   });
+
+  it("does NOT retry when 'use_dpop_nonce' appears outside the error parameter (RFC 9449 §9 strict)", async () => {
+    // Loose substring matching on WWW-Authenticate would false-positive
+    // here: "use_dpop_nonce" sits inside `realm`, not as the error code.
+    // A conformant client must scope the match to `error="use_dpop_nonce"`.
+    let calls = 0;
+    const mock = await createMockServer((_req, res) => {
+      calls++;
+      if (calls === 1) {
+        res.writeHead(401, {
+          "Content-Type": "application/json",
+          "WWW-Authenticate":
+            `DPoP realm="use_dpop_nonce blocklist", error="invalid_token"`,
+          "DPoP-Nonce": "would-be-nonce-if-this-were-a-real-challenge",
+        });
+        res.end(JSON.stringify({ error: "Invalid token" }));
+        return;
+      }
+      // If we ever reach here, the client erroneously retried.
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ sub: "should-not-reach" }));
+    });
+
+    try {
+      const pair = generateEd25519PemPair();
+      await assert.rejects(
+        () =>
+          getUserInfo({
+            ssoBaseUrl: mock.baseUrl,
+            accessToken: "at",
+            agentPrivateKeyPem: pair.privateKeyPem,
+          }),
+        /401|invalid_token/i,
+      );
+      assert.equal(calls, 1,
+        "must NOT retry: use_dpop_nonce is not the error code");
+    } finally {
+      mock.server.close();
+    }
+  });
+
+  it("retries on 401 + use_dpop_nonce challenge from resource server (RFC 9449 §9)", async () => {
+    let calls = 0;
+    let secondProofPayload = null;
+    const SERVER_NONCE = "rs-userinfo-nonce-789";
+    const mock = await createMockServer((req, res) => {
+      calls++;
+      const dpop = req.headers["dpop"];
+      if (calls === 1) {
+        // §9 challenge shape: 401 + WWW-Authenticate carrying error code +
+        // DPoP-Nonce header. Distinct from §8's 400 + JSON-body shape.
+        res.writeHead(401, {
+          "Content-Type": "application/json",
+          "WWW-Authenticate": `DPoP error="use_dpop_nonce", algs="EdDSA"`,
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ error: "use a fresh nonce" }));
+        return;
+      }
+      secondProofPayload = JSON.parse(fromB64url(dpop.split(".")[1]).toString("utf8"));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ sub: "user-456" }));
+    });
+
+    try {
+      const pair = generateEd25519PemPair();
+      const claims = await getUserInfo({
+        ssoBaseUrl: mock.baseUrl,
+        accessToken: "the-access-token",
+        agentPrivateKeyPem: pair.privateKeyPem,
+      });
+      assert.deepEqual(claims, { sub: "user-456" });
+      assert.equal(calls, 2, "must retry once after §9 nonce challenge");
+      assert.equal(secondProofPayload.nonce, SERVER_NONCE,
+        "retry proof must echo the server-issued nonce");
+    } finally {
+      mock.server.close();
+    }
+  });
 });
 
 // ─── beginOidcAuthorization wires dpop_jkt ────────────────────────────────────────
