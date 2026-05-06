@@ -1,107 +1,62 @@
-# Migration Guide: DPoP + cnf.jkt Binding
+# Migration — agent-id 3.0.0 (DPoP cutover)
 
-**Applies to:** alien-agent-id 3.0.0 and later
-**Audience:** existing operators upgrading from 2.x
+This is a **hard cutover** for agent-driven flows. Pre-3.0 commits stop verifying because their `id_tokens` lack the `cnf.jkt` confirmation claim that the new verifier requires. There is no `--allow-legacy` flag — every cnf-less `id_token` is a forgery primitive (see [forgery PoC](https://github.com/truehazker-eti/agent-id-forgery-poc)) and the verifier refuses to honor them.
 
-## What changed and why
+Humans signing in via "Sign in with Alien" through standard OIDC RPs are unaffected. Only Agent-ID CLI users and verifier installations need to migrate.
 
-The Agent-ID protocol now binds the agent's Ed25519 keypair into the SSO
-`id_token` itself via an [RFC 7800](https://www.rfc-editor.org/rfc/rfc7800)
-`cnf.jkt` confirmation claim. The claim carries the RFC 7638 JWK thumbprint of
-the agent's public key, is signed by the SSO under RS256, and is enforced as a
-mandatory check by the agent-side verifier. The bootstrap flow now uses
-[RFC 9449 DPoP](https://www.rfc-editor.org/rfc/rfc9449) at `/oauth/authorize`
-and `/oauth/token` so the SSO learns and commits to the agent's keypair before
-issuing an id_token. This closes the publish-and-replay attack class
-demonstrated by the [agent-id-forgery-poc](https://github.com/truehazker-eti/agent-id-forgery-poc):
-previously, anyone who could read a public repository could lift a victim's
-`id_token` from a proof note and pair it with their own Ed25519 keypair to
-produce a forged commit that passed `git-verify` end-to-end. After this change
-an `id_token` is useless without the matching private key, and forgery is
-reduced to private-key compromise — the assumed-out-of-scope baseline of every
-signature-based protocol.
+## Who needs to do what
 
-## Rebind procedure for existing operators
+| Role | Action |
+|---|---|
+| Agent operator (developer using the CLI) | Upgrade CLI → run `alien-agent-id setup-owner-session` once → re-attach proof to HEAD |
+| CI / verifier installation | Upgrade verifier package; no further config |
+| Repository maintainer | Decide on history back-fill policy (see below) |
+| OIDC RP using `/oauth/authorize` for human login | No action |
+| Miniapp using `/sso/*` | No action |
 
-1. **Upgrade the CLI to the new version.**
-   ```bash
-   npm install -g alien-agent-id@^3.0.0
-   ```
-   Or, for skill-installed deployments, re-run `npx skills add alien-id/agent-id`.
-
-2. **Run `setup-owner-session` once.**
-   ```bash
-   /alien-agent-id setup-owner-session
-   ```
-   This walks through `auth` and `bind` against the new SSO. The existing
-   Ed25519 keypair under `~/.agent-id/keys/main.json` is preserved. The
-   existing SSH signing key under `~/.agent-id/ssh/` is preserved. **GitHub
-   re-registration is NOT required** — the SSH public key on your GitHub
-   account is unchanged. The new binding overwrites
-   `~/.agent-id/owner-binding.json` and `~/.agent-id/owner-session.json`
-   with artifacts that carry the `cnf.jkt` commitment.
-
-3. **Re-attach a fresh proof note to HEAD of working repositories.**
-   ```bash
-   node skills/alien-agent-id/cli.mjs git-commit --message "chore: refresh agent-id proof note" --allow-empty
-   git push origin refs/notes/agent-id
-   ```
-   Every commit you make from this point forward carries a `cnf`-bearing
-   id_token in its proof note and verifies cleanly against the new verifier.
-
-## Back-filling history
-
-Old commits whose proof notes carry pre-cutover (cnf-less) id_tokens **become
-unverifiable under the new verifier**. This is the intended behavior — every
-cnf-less id_token is a live forgery primitive, not a historical artifact, and
-no `--allow-legacy` mode exists by design (see
-[Release Notes](RELEASE-NOTES.md) and [PRD-DPOP-POP](PRD-DPOP-POP.md)).
-
-You have two options:
-
-**Option A — back-fill notes for selected commits.** For commits you authored
-yourself and want to keep verifiable, you can re-attach a fresh proof note
-that points the cnf-bearing id_token at the same commit hash:
+## Per-developer steps
 
 ```bash
-# After running setup-owner-session above, for each commit you want to back-fill:
-node skills/alien-agent-id/cli.mjs git-attach-proof --commit <hash>
-git push origin refs/notes/agent-id
+# 1. Upgrade the CLI
+npm install -g @alien-id/agent-id@3
+
+# 2. Re-bind the agent. This will:
+#    - Generate a DPoP keypair on disk (Ed25519)
+#    - Hit /oauth/authorize with dpop_jkt
+#    - Exchange the auth code with a DPoP proof
+#    - Receive an id_token with cnf.jkt matching the keypair
+#    - Refuse to write the session if cnf is missing
+alien-agent-id setup-owner-session
+
+# 3. Re-attach a fresh proof note to the current HEAD (and back-fill if you choose)
+alien-agent-id attach-proof HEAD
 ```
 
-The replacement proof note proves provenance under the **new** keypair
-binding. It does not retroactively prove that the historical commit was made
-by that keypair — only that you, holding the private key today, vouch for it
-now. Treat back-filled notes as a soft attestation, not a cryptographic
-time-travel guarantee.
+The CLI will fail with a specific error if the SSO does not return a `cnf`-bearing `id_token`. This is the bootstrap fuse; do not bypass it.
 
-**Option B — accept that pre-cutover commits are unverifiable.** This is the
-honest answer for most repositories. `git-verify` will fail on those commits
-with `id_token missing cnf.jkt`. The signed history remains intact in git;
-only the agent-id provenance overlay no longer verifies. New commits on top
-of old history verify normally.
+## History back-fill (optional)
 
-There is no third option. We do not ship a verifier mode that accepts
-cnf-less id_tokens, because such a mode would silently re-enable the
-publish-and-replay forgery class for any environment that toggled it on.
+Old commits with cnf-less `id_tokens` will fail verification. Two policies:
 
-## Regression fixture
+1. **Don't back-fill.** Old history shows as unverifiable; new commits verify cleanly going forward. Recommended for low-stakes repos.
+2. **Back-fill.** Use `alien-agent-id attach-proof <commit-range>` to write fresh proof notes for historical commits the agent legitimately authored. The new proofs reference the new keypair and verify under 3.0. Recommended for repos under audit.
 
-The PoC repository [github.com/truehazker-eti/agent-id-forgery-poc](https://github.com/truehazker-eti/agent-id-forgery-poc)
-demonstrates the original vulnerability against an unfixed verifier. The
-forged commit `3a70d8f7cb3d1d408b76ad15945a5898d6d877ce` is now a regression
-fixture: it must fail `git-verify` under the new verifier with
-`id_token missing cnf.jkt`. If you maintain a fork of this project, run
-`git-verify` against that commit as part of your verifier acceptance suite.
+You cannot back-fill commits authored by another agent (the keypair to bind doesn't exist on your machine). That history is permanently legacy.
 
-## Operator deploy ordering
+## Verifier behavior change
 
-See [DEPLOY-DPOP.md](DEPLOY-DPOP.md) for the full server-side and agent-side
-deploy ordering. In short: SSO must be fully live in your environment before
-operators run `setup-owner-session`.
+| Input | Pre-3.0 | 3.0 |
+|---|---|---|
+| `id_token` with `cnf.jkt` matching agent JWK | ok | ok |
+| `id_token` with `cnf.jkt` mismatched | (no check) | rejected |
+| `id_token` without `cnf.jkt` | ok | rejected |
 
-## Related documents
+The check is offline — the verifier reads the `id_token` from `refs/notes/agent-id`, validates the SSO's RS256 signature against the cached JWKS, and asserts `cnf.jkt == thumbprint(agent_jwk)`. No network is required after JWKS is fetched once.
 
-- [RELEASE-NOTES.md](RELEASE-NOTES.md) — full breaking-change list and stable error strings.
-- [DEPLOY-DPOP.md](DEPLOY-DPOP.md) — operator runbook for the server + CLI rollout.
-- [PRD-DPOP-POP.md](PRD-DPOP-POP.md) — design rationale and threat model.
+## Rollback
+
+There is no clean rollback. The new `id_tokens` carry claims old verifiers don't read but tolerate. The blocking issue is the verifier itself — pinning the verifier to <3.0 reopens the forgery vulnerability. If a compatibility shim is unavoidable, the only safe one is a `--allow-legacy` flag on the verifier explicitly scoped to a known-good commit range; this is out of scope for this release and would need its own design.
+
+## Help / debugging
+
+`alien-agent-id setup-owner-session --verbose` prints the DPoP proof, the `dpop_jkt` query param, the `cnf.jkt` claim observed in the returned `id_token`, and the agent's local thumbprint. A mismatch at this stage indicates the SSO is misdeployed; raise an issue with the printed values.

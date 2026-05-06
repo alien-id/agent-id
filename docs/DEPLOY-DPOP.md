@@ -1,121 +1,75 @@
-# Deploy Runbook: DPoP + cnf.jkt cutover
+# Deploy — DPoP / cnf.jkt cutover
 
-**Audience:** SSO operators and Agent-ID operators rolling out the
-3.0.0 release.
-**Companion docs:** [MIGRATION-DPOP.md](MIGRATION-DPOP.md),
-[RELEASE-NOTES.md](RELEASE-NOTES.md), [PRD-DPOP-POP.md](PRD-DPOP-POP.md).
+Operations notes for deploying the SSO server (`alien-id/sso`) and rolling out agent-id 3.0.0.
 
-The cutover is a coordinated two-repo deploy. The order below is **load
-bearing** — flipping any step out of order can either expose a clientele to
-a server returning 4xx on capabilities it advertises, or produce
-silently-unverifiable commits.
+## Order of operations
 
-## Server-side deploy order (alien-id/sso)
+1. **SSO server first.** Deploy the DPoP-aware SSO. Existing pre-3.0 agents continue to work because DPoP at `/oauth/authorize` is opt-in — no `dpop_jkt` means no DPoP, same wire as before.
+2. **Agent-ID CLI second.** Once SSO is live, ship the 3.0 CLI. It will pass `dpop_jkt` on every authorize, sign DPoP proofs at token, and verify the returned `cnf.jkt` matches.
+3. **Verifier last.** Roll the 3.0 verifier across CI fleets. Once verifiers are upgraded, pre-3.0 commits stop verifying — coordinate this step with the org so the cutover is announced.
 
-Roll the SSO repo to your environment in this exact sequence. Each step is
-safe to deploy independently and is a no-op for plain Bearer clients.
+The SSO can be deployed independently and held for any length of time before CLI rollout. The verifier should be deployed only after enough developers have re-bound that "broken history" is the expected, communicated state.
 
-1. **Apply migrations.** Both are additive (a nullable column add and a new
-   replay-tracking table). Safe online, no backfill required, no lock on the
-   hot path.
-   - `000010_dpop.up.sql` / `000010_dpop.down.sql` — adds nullable
-     `oauth_sessions.dpop_jkt TEXT` and creates the `dpop_jti_seen`
-     replay-protection table with `jti TEXT PRIMARY KEY` and an index on
-     `expires_at`.
-   - `000011_dpop_refresh_tokens.up.sql` /
-     `000011_dpop_refresh_tokens.down.sql` — adds nullable
-     `refresh_tokens.dpop_jkt TEXT` so that DPoP-bound sessions can carry
-     their `cnf.jkt` across refresh per RFC 9449 §5. Pre-existing refresh
-     tokens have `dpop_jkt = NULL` and continue to work as plain Bearer.
+## Configuration (SSO)
 
-2. **Deploy `service.DPoPVerifier` and the `JWTService` cnf extension.**
-   The verifier is a single deep module exposing `VerifyProof(httpMethod,
-   httpURI, dpopHeader) → (thumbprint, error)`. The `JWTService` change
-   adds an optional `cnfJkt` parameter to `CreateIDToken` /
-   `CreateAccessToken`. Both are observable only when called by upstream
-   handlers, so this step is a no-op for live traffic until step 3 lands.
+No new required env vars. The DPoP path activates automatically when clients send `dpop_jkt` and `DPoP` headers.
 
-3. **Deploy the authorize / token / userinfo handler updates.** This wires
-   the verifier and the cnf-aware JWT service into the OAuth flows:
-   `/oauth/authorize` accepts `dpop_jkt`, `/oauth/token` requires DPoP for
-   DPoP-bound sessions, `/oauth/userinfo` requires fresh DPoP for
-   DPoP-bound access_tokens. After this step, agent CLIs that send
-   `dpop_jkt` will receive cnf-bearing id_tokens; agent CLIs that do not
-   continue to receive cnf-less id_tokens (which the new verifier rejects,
-   but that is the intended forcing function for re-bind).
+| Env var | Default | Purpose |
+|---|---|---|
+| `SSO_ACCESS_TOKEN_EXPIRATION_SEC` | 2592000 | Existing — DPoP-bound ATs use this same TTL. |
+| `REFRESH_TOKEN_EXPIRATION_SEC` | 2592000 | Existing — DPoP-bound RTs are non-rotating; this is their full lifetime. |
+| `SIGNATURE_MAX_AGE_SEC` | 60 | DPoP proof `iat` freshness window. |
+| `CLOCK_SKEW_TOLERANCE_SEC` | 5 | Allowance for proof `iat` slightly in the future. |
+| `OIDC_RSA_PRIVATE_KEY` | required | RS256 key that signs `id_tokens` carrying `cnf.jkt`. Already required pre-3.0; no change. |
 
-4. **Update OIDC discovery last.** Only after steps 1–3 are fully live
-   should `/.well-known/openid-configuration` be updated to advertise
-   `dpop_signing_alg_values_supported: ["EdDSA"]` and add `cnf` to
-   `claims_supported`. Updating discovery before the server can actually
-   honor DPoP causes capability negotiation to lie to clients — automated
-   OIDC clients will attempt DPoP and receive 4xx from a code path that
-   does not yet exist.
+## Database
 
-The session cleaner extension (GC for `dpop_jti_seen` rows past
-`expires_at`) ships with step 2 and runs on the existing background
-schedule. No operator action required.
+Two tables are added by migration:
 
-## Agent-side deploy order (alien-id/agent-id)
+- `dpop_jti_seen` — replay protection for proof IDs. Primary key on `(jkt, jti)`. Populated on every accepted DPoP-bound token request and userinfo call. Row TTL is `SIGNATURE_MAX_AGE_SEC + CLOCK_SKEW_TOLERANCE_SEC` (so ~65s by default). The existing background session cleaner reaps expired rows.
+- `oauth_dpop_refresh_tokens` — refresh-token-to-cnf binding for non-rotating refresh.
 
-5. **Cut the alien-agent-id 3.0.0 release.** This release contains the
-   `lib.mjs` JWK / DPoP helpers, the `cli.mjs` wiring through
-   `cmdAuth` / `cmdBind` / `cmdRefresh`, and the `cmdGitVerify` cnf
-   enforcement check. Ship it **after** the SSO is fully live (steps 1–4
-   complete) in the target environment.
+Migration files: `migrations/000010_dpop.up.sql`, `migrations/000011_dpop_refresh_tokens.up.sql`. Run on deploy. Both are idempotent; safe to re-run.
 
-6. **Operators run `setup-owner-session`.** Each operator runs the rebind
-   exactly once per environment (see
-   [MIGRATION-DPOP.md](MIGRATION-DPOP.md) for the user-facing
-   procedure). Existing Ed25519 keypair and SSH signing key are preserved;
-   GitHub re-registration is not required. The new
-   `owner-binding.json` and `owner-session.json` carry the cnf
-   commitment.
+## Capacity
 
-Operators should not run `setup-owner-session` against an environment
-where the SSO has not yet completed step 3 — the resulting
-`owner-session.json` would carry a cnf-less id_token, and the agent's own
-`git-verify` would reject every commit they produce.
+- `dpop_jti_seen` row count is bounded by `tokens_per_minute × 65s`. At 10k tokens/min, expect ~10k rows steady-state. Well within Postgres comfort zone.
+- Existing background cleaner sweeps every minute; no additional cron.
 
-## Compatibility properties this ordering preserves
+## Observability
 
-- **Plain Bearer OAuth clients** see no observable change at any step.
-  Provider redirect flows that do not pass `dpop_jkt` at authorize
-  produce byte-identical tokens to today, and `/oauth/userinfo` for plain
-  Bearer ATs is unchanged.
-- **Legacy `/sso/*` miniapp endpoints** are untouched throughout. Different
-  handler tree, different token format, different keys. No coordinated
-  migration with miniapps is required.
-- **Existing pre-deployment refresh tokens** stay plain Bearer: their
-  `refresh_tokens.dpop_jkt` is NULL. Only refresh tokens issued after
-  migration `000011` is live and after a DPoP-bound authorize+token flow
-  inherit the binding.
+DPoP failure modes log structured errors with stable codes:
+
+| Code | Meaning |
+|---|---|
+| `dpop_missing_header` | Bound session but no `DPoP` header |
+| `dpop_duplicate_header` | More than one `DPoP` header on the request |
+| `dpop_proof_invalid` | Signature, format, or alg failure |
+| `dpop_thumbprint_mismatch` | Proof's JWK thumbprint ≠ session's `dpop_jkt` |
+| `dpop_replay` | `(jkt, jti)` already in `dpop_jti_seen` |
+| `dpop_clock_skew` | `iat` outside freshness window |
+| `dpop_htu_mismatch` | Proof `htu` ≠ canonicalized request URI |
+| `dpop_htm_mismatch` | Proof `htm` ≠ request method |
+| `dpop_missing_ath` | Resource (userinfo) proof without `ath` claim |
+| `dpop_ath_mismatch` | `ath` ≠ `base64url(SHA-256(access_token))` |
+| `dpop_oversized_jti` | `jti` longer than 256 chars |
+| `dpop_jwk_has_private_key` | Proof `jwk` carries RFC 7517 private-key member |
+
+Recommend dashboards on rate-of `dpop_replay`, `dpop_proof_invalid`, `dpop_thumbprint_mismatch` — sustained spikes indicate either a misbehaving client or active probing.
+
+## OIDC discovery
+
+`/.well-known/openid-configuration` advertises:
+
+- `dpop_signing_alg_values_supported: ["EdDSA"]`
+- `cnf` in `claims_supported`
+
+Update this in your service registry / API gateway docs if those are auto-generated from a separate source.
+
+## Third-party DPoP servers (agent-id outbound)
+
+When the agent-id CLI talks to a third-party DPoP server (not our SSO), it handles `400 use_dpop_nonce` challenges automatically: receives the `DPoP-Nonce` header, retries with the nonce embedded in a fresh proof, and caches the nonce per-URL for subsequent calls. No operator config — this is a property of the client library.
 
 ## Rollback
 
-If a problem surfaces during the SSO rollout, the safe rollback is the
-inverse of the deploy order: revert handlers (step 3), revert the verifier
-and JWT extension (step 2), then revert migrations (step 1) only if
-absolutely necessary. The migrations are additive and can stay in place
-indefinitely with no observable effect — leaving them applied makes
-re-attempting the rollout cheaper.
-
-The agent CLI 3.0.0 release cannot be partially rolled back per-operator
-once an operator runs `setup-owner-session` against a DPoP-capable SSO,
-because the new `owner-binding.json` carries the cnf commitment. To
-downgrade an individual operator, restore their `~/.agent-id/` from
-backup taken before the rebind. The 3.0.0 verifier will not accept the
-restored cnf-less binding; you would also need to downgrade the CLI to
-2.x for that machine.
-
-## Verification after deploy
-
-- `curl https://<sso>/.well-known/openid-configuration | jq .dpop_signing_alg_values_supported`
-  should return `["EdDSA"]`.
-- `node skills/alien-agent-id/cli.mjs git-verify --commit <fresh-commit>`
-  should produce `id_token cnf.jkt binds agent key <prefix>...` in the
-  provenance trail.
-- `node skills/alien-agent-id/cli.mjs git-verify --commit 3a70d8f7cb3d1d408b76ad15945a5898d6d877ce`
-  (against a clone of `agent-id-forgery-poc` with notes fetched) must
-  fail with `id_token missing cnf.jkt`. This is the regression fixture
-  for the entire change.
+The SSO change is wire-compatible with pre-3.0 clients (no `dpop_jkt` → no DPoP path → same response as before). Rolling back the SSO is safe at any point if no agents have started using DPoP yet. After agents are using DPoP, rollback breaks them — they'll reject the cnf-less `id_tokens` from a downgraded SSO. Coordinate with CLI rollout state before rolling SSO back.

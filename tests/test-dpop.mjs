@@ -23,6 +23,7 @@ import {
   generateEd25519PemPair,
   fromB64url,
   b64url,
+  getUserInfo,
 } from "../skills/alien-agent-id/lib.mjs";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────────
@@ -76,6 +77,30 @@ describe("ed25519PublicKeyToJwk()", () => {
     const rawFromPem = der.subarray(der.length - 32);
     assert.deepEqual(rawFromJwk, rawFromPem);
   });
+
+  it("rejects an X25519 SPKI even though it is also 44 bytes (RFC 8410 OID 1.3.101.110)", () => {
+    const { publicKey } = generateKeyPairSync("x25519");
+    const pem = publicKey.export({ format: "pem", type: "spki" }).toString();
+    assert.throws(
+      () => ed25519PublicKeyToJwk(pem),
+      /Ed25519/,
+      "expected Ed25519-only key acceptance, got silent X25519 acceptance",
+    );
+  });
+
+  it("rejects an Ed448 SPKI (different OID, different key length)", () => {
+    const { publicKey } = generateKeyPairSync("ed448");
+    const pem = publicKey.export({ format: "pem", type: "spki" }).toString();
+    assert.throws(() => ed25519PublicKeyToJwk(pem), /Ed25519/);
+  });
+
+  // Note: the X25519 and Ed448 cases above are the real coverage of the
+  // OID prefix check — both produce SPKIs that survive createPublicKey
+  // (so the bytes reach our function) but trip the prefix mismatch. A
+  // hand-crafted 44-byte buffer with a synthetic non-Ed25519 OID would
+  // be rejected by createPublicKey before our code ever runs, which is
+  // why earlier attempts at such a "defense-in-depth" test were
+  // tautological.
 });
 
 // ─── jwkThumbprint ───────────────────────────────────────────────────────────────
@@ -154,6 +179,29 @@ describe("createDPoPProof()", () => {
     assert.equal(payload.htu, "https://sso.example.com/oauth/token");
   });
 
+  it("canonicalizes htu (lowercase scheme+host, default port stripped) per RFC 3986 §6.2", () => {
+    const { privateKeyPem } = generateEd25519PemPair();
+    const cases = [
+      ["HTTPS://sso.example.com/oauth/token", "https://sso.example.com/oauth/token"],
+      ["https://SSO.EXAMPLE.COM/oauth/token", "https://sso.example.com/oauth/token"],
+      ["https://sso.example.com:443/oauth/token", "https://sso.example.com/oauth/token"],
+      ["http://sso.example.com:80/oauth/token", "http://sso.example.com/oauth/token"],
+      ["HTTPS://SSO.example.com:443/oauth/token?x=1#f", "https://sso.example.com/oauth/token"],
+      ["https://sso.example.com:8443/oauth/token", "https://sso.example.com:8443/oauth/token"], // non-default port preserved
+    ];
+    for (const [input, expected] of cases) {
+      const proof = createDPoPProof({
+        privateKeyPem,
+        htm: "POST",
+        htu: input,
+        jti: "j",
+        iat: 1,
+      });
+      const payload = decodePart(proof.split(".")[1]);
+      assert.equal(payload.htu, expected, `input=${input}`);
+    }
+  });
+
   it("auto-generates a jti and iat when not provided", () => {
     const { privateKeyPem } = generateEd25519PemPair();
     const a = createDPoPProof({
@@ -200,6 +248,116 @@ describe("createDPoPProof()", () => {
     const signature = fromB64url(s);
     const ok = cryptoVerify(null, signingInput, createPublicKey(publicKeyPem), signature);
     assert.equal(ok, true);
+  });
+
+  it("emits ath = base64url(SHA-256(accessToken)) when accessToken is provided (RFC 9449 §4.2)", () => {
+    const { privateKeyPem } = generateEd25519PemPair();
+    const accessToken = "fake.access.token";
+    const proof = createDPoPProof({
+      privateKeyPem,
+      htm: "GET",
+      htu: "https://sso.example.com/oauth/userinfo",
+      accessToken,
+      jti: "j",
+      iat: 1,
+    });
+    const payload = decodePart(proof.split(".")[1]);
+    const expected = b64url(crypto.createHash("sha256").update(accessToken).digest());
+    assert.equal(payload.ath, expected);
+  });
+
+  it("omits ath when accessToken is not provided (token-endpoint usage)", () => {
+    const { privateKeyPem } = generateEd25519PemPair();
+    const proof = createDPoPProof({
+      privateKeyPem,
+      htm: "POST",
+      htu: "https://sso.example.com/oauth/token",
+      jti: "j",
+      iat: 1,
+    });
+    const payload = decodePart(proof.split(".")[1]);
+    assert.equal(payload.ath, undefined);
+  });
+
+  it("emits nonce claim when provided (RFC 9449 §8 server-issued nonce challenge)", () => {
+    const { privateKeyPem } = generateEd25519PemPair();
+    const proof = createDPoPProof({
+      privateKeyPem,
+      htm: "POST",
+      htu: "https://sso.example.com/oauth/token",
+      nonce: "server-nonce-abc",
+      jti: "j",
+      iat: 1,
+    });
+    const payload = decodePart(proof.split(".")[1]);
+    assert.equal(payload.nonce, "server-nonce-abc");
+  });
+});
+
+// ─── getUserInfo client ──────────────────────────────────────────────────────────
+
+describe("getUserInfo client", () => {
+  it("sends Authorization: DPoP <token> + DPoP proof with ath, parses JSON claims", async () => {
+    const pair = generateEd25519PemPair();
+    let receivedAuthHeader = null;
+    let receivedDPoPHeader = null;
+    let receivedURL = null;
+    const mock = await createMockServer((req, res) => {
+      receivedAuthHeader = req.headers["authorization"];
+      receivedDPoPHeader = req.headers["dpop"];
+      receivedURL = req.url;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ sub: "user-123", aud: "client-xyz" }));
+    });
+
+    try {
+      const claims = await getUserInfo({
+        ssoBaseUrl: mock.baseUrl,
+        accessToken: "the-access-token",
+        agentPrivateKeyPem: pair.privateKeyPem,
+      });
+      assert.deepEqual(claims, { sub: "user-123", aud: "client-xyz" });
+      assert.equal(receivedURL, "/oauth/userinfo");
+      assert.equal(receivedAuthHeader, "DPoP the-access-token");
+      assert.ok(receivedDPoPHeader, "DPoP proof header sent");
+
+      // Verify proof's ath claim hashes the access token.
+      const [, payloadB64] = receivedDPoPHeader.split(".");
+      const payload = JSON.parse(fromB64url(payloadB64).toString("utf8"));
+      assert.equal(payload.htm, "GET");
+      assert.equal(payload.htu, `${mock.baseUrl}/oauth/userinfo`);
+      const expectedATH = b64url(
+        crypto.createHash("sha256").update("the-access-token").digest(),
+      );
+      assert.equal(payload.ath, expectedATH);
+    } finally {
+      mock.server.close();
+    }
+  });
+
+  it("throws on 401 with descriptive error", async () => {
+    const pair = generateEd25519PemPair();
+    const mock = await createMockServer((_req, res) => {
+      res.writeHead(401, {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": `DPoP error="invalid_token"`,
+      });
+      res.end(JSON.stringify({ error: "Invalid or expired token" }));
+    });
+
+    try {
+      await assert.rejects(
+        () =>
+          getUserInfo({
+            ssoBaseUrl: mock.baseUrl,
+            accessToken: "expired",
+            agentPrivateKeyPem: pair.privateKeyPem,
+          }),
+        /401|userinfo|invalid_token/i,
+      );
+    } finally {
+      mock.server.close();
+    }
   });
 });
 
@@ -296,6 +454,43 @@ describe("exchangeAuthorizationCode with DPoP", () => {
       mock.server.close();
     }
   });
+
+  it("retries with nonce echoed in proof on use_dpop_nonce challenge (RFC 9449 §8)", async () => {
+    let calls = 0;
+    let secondProofPayload = null;
+    const SERVER_NONCE = "srv-issued-nonce-xyz";
+    const mock = await createMockServer((req, res) => {
+      calls++;
+      const dpop = req.headers["dpop"];
+      if (calls === 1) {
+        res.writeHead(400, {
+          "Content-Type": "application/json",
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ error: "use_dpop_nonce" }));
+        return;
+      }
+      secondProofPayload = decodePart(dpop.split(".")[1]);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ access_token: "at", id_token: "it", refresh_token: "rt" }));
+    });
+
+    try {
+      const pair = generateEd25519PemPair();
+      await exchangeAuthorizationCode({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "p",
+        authorizationCode: "code",
+        codeVerifier: "v",
+        agentPrivateKeyPem: pair.privateKeyPem,
+        agentPublicKeyPem: pair.publicKeyPem,
+      });
+      assert.equal(calls, 2, "must retry once after nonce challenge");
+      assert.equal(secondProofPayload.nonce, SERVER_NONCE);
+    } finally {
+      mock.server.close();
+    }
+  });
 });
 
 // ─── refreshSession sends DPoP header ────────────────────────────────────────────
@@ -350,6 +545,99 @@ describe("refreshSession with DPoP", () => {
       });
       assert.equal(result.access_token, "at");
       assert.equal(receivedDpop, undefined, "no DPoP header when keys not supplied");
+    } finally {
+      mock.server.close();
+    }
+  });
+
+  it("retries with nonce echoed in proof on use_dpop_nonce challenge (RFC 9449 §8)", async () => {
+    let calls = 0;
+    let secondProofPayload = null;
+    const SERVER_NONCE = "rs-nonce-abc-123";
+    const mock = await createMockServer((req, res) => {
+      calls++;
+      const dpop = req.headers["dpop"];
+      if (calls === 1) {
+        res.writeHead(400, {
+          "Content-Type": "application/json",
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ error: "use_dpop_nonce" }));
+        return;
+      }
+      secondProofPayload = decodePart(dpop.split(".")[1]);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ access_token: "new-at" }));
+    });
+
+    try {
+      const pair = generateEd25519PemPair();
+      await refreshSession({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "p",
+        refreshToken: "rt",
+        agentPrivateKeyPem: pair.privateKeyPem,
+        agentPublicKeyPem: pair.publicKeyPem,
+      });
+      assert.equal(calls, 2);
+      assert.equal(secondProofPayload.nonce, SERVER_NONCE);
+    } finally {
+      mock.server.close();
+    }
+  });
+
+  it("caches DPoP-Nonce and pre-attaches on subsequent requests (RFC 9449 §8.2-1)", async () => {
+    // RFC 9449 §8.2-1 (MUST): "the client MUST use the new nonce value for
+    // the next request and all subsequent requests until the server supplies
+    // a new nonce." A round-trip-per-call is wasteful; the client should
+    // remember the most recent nonce and pre-attach.
+    const SERVER_NONCE = "cached-nonce-zzz";
+    const proofs = [];
+    const statuses = [];
+    const mock = await createMockServer((req, res) => {
+      const dpop = req.headers["dpop"];
+      const payload = decodePart(dpop.split(".")[1]);
+      proofs.push(payload);
+      const provided = payload.nonce;
+      if (provided === SERVER_NONCE) {
+        statuses.push(200);
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ access_token: "new-at" }));
+      } else {
+        statuses.push(400);
+        res.writeHead(400, {
+          "Content-Type": "application/json",
+          "DPoP-Nonce": SERVER_NONCE,
+        });
+        res.end(JSON.stringify({ error: "use_dpop_nonce" }));
+      }
+    });
+
+    try {
+      const pair = generateEd25519PemPair();
+      // First call: server challenges, client retries → 2 server hits.
+      await refreshSession({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "p",
+        refreshToken: "rt",
+        agentPrivateKeyPem: pair.privateKeyPem,
+        agentPublicKeyPem: pair.publicKeyPem,
+      });
+      // Second call: client should pre-attach the cached nonce → 1 hit only.
+      await refreshSession({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "p",
+        refreshToken: "rt",
+        agentPrivateKeyPem: pair.privateKeyPem,
+        agentPublicKeyPem: pair.publicKeyPem,
+      });
+      // 1st call: 400 (no nonce) + 200 (nonce). 2nd call: 200 only.
+      assert.deepEqual(statuses, [400, 200, 200]);
+      assert.equal(proofs[2].nonce, SERVER_NONCE,
+        "second call's first request must already carry the cached nonce");
     } finally {
       mock.server.close();
     }

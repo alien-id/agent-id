@@ -209,6 +209,14 @@ owner proof chain, and an Ed25519 signature. Services verify tokens using
 [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id) with no
 prior key registration needed.
 
+For deep verification (the full provenance chain back to the human owner),
+the canonical 9-step algorithm is documented in [docs/INTEGRATION.md](docs/INTEGRATION.md#the-canonical-chain).
+Every consumer — `git-verify`, the SDK's deep-verify path, future
+capability-proof flows — runs the same `verifyProofChain` function so the
+chain logic stays in one place. The chain anchors every key check to
+`proof.agent.publicKeyPem` (the key the request/commit was signed with),
+which is what makes it forgery-resistant.
+
 ---
 
 ## Credential Vault

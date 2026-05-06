@@ -27,18 +27,13 @@ import {
   pollForAuthorizationCode,
   exchangeAuthorizationCode,
   verifyIdToken,
-  verifyIdTokenSignatureOnly,
   verifyOwnerSessionProof,
   verifyState,
+  verifyProofChain,
+  ChainError,
   SignatureEngine,
   ed25519PemToSshPublicKey,
   ed25519PemToOpenSSHPrivateKey,
-  ed25519PublicKeyToJwk,
-  jwkThumbprint,
-  canonicalJSONString,
-  sha256Hex,
-  sha256HexCanonical,
-  verifyEd25519Base64Url,
   deriveVaultKey,
   vaultEncrypt,
   vaultDecrypt,
@@ -705,7 +700,7 @@ async function cmdGitVerify(flags) {
   const stateDir = resolveStateDir(flags);
   const commitHash = flags.commit || "HEAD";
 
-  // Step 1: Resolve commit hash
+  // Resolve commit hash.
   const revResult = await execFile("git", ["rev-parse", commitHash]);
   if (revResult.code !== 0) {
     outputError(`Cannot resolve commit: ${commitHash}`);
@@ -713,87 +708,49 @@ async function cmdGitVerify(flags) {
   }
   const resolvedHash = revResult.stdout.trim();
 
-  // Step 2: Read commit message to extract trailers
+  // Read commit message trailers.
   const logResult = await execFile("git", ["log", "-1", "--format=%B", resolvedHash]);
   const commitMessage = logResult.stdout.trim();
-
   const trailerFingerprint = extractTrailer(commitMessage, "Agent-ID-Fingerprint");
   const trailerOwner = extractTrailer(commitMessage, "Agent-ID-Owner");
   const trailerBinding = extractTrailer(commitMessage, "Agent-ID-Binding");
-
   if (!trailerFingerprint) {
     outputError(`Commit ${resolvedHash.slice(0, 12)} has no Agent-ID-Fingerprint trailer`);
     return;
   }
 
-  // Step 3: Try to read proof bundle from git note (self-contained, works anywhere)
-  let proof = null;
-  const noteResult = await execFile(
-    "git",
-    ["notes", "--ref=agent-id", "show", resolvedHash],
-    { timeout: 10000 },
-  );
-  if (noteResult.code === 0 && noteResult.stdout.trim()) {
-    try {
-      proof = JSON.parse(noteResult.stdout.trim());
-    } catch {
-      // Malformed note — fall through to local state
-    }
+  // Build a v2-shaped proof bundle from either the git note or local state.
+  // verifyProofChain is the single source of truth for chain validation;
+  // git-verify just provides the bundle and layers SSH-signature checks
+  // and trailer-fingerprint equality on top of the chain output.
+  const proof = await loadProofBundle({ commitHash: resolvedHash, stateDir, flags });
+  if (!proof) {
+    outputError(
+      `Commit ${resolvedHash.slice(0, 12)} — no proof found (no git note refs/notes/agent-id and no local state)`,
+    );
+    return;
   }
 
-  // Step 4: Fall back to local state if no git note
-  let source = "none";
-  let agentPublicKeyPem = null;
-  let binding = null;
-  let idToken = null;
-  let ssoBaseUrl = flags["sso-url"] || "https://sso.alien-api.com";
+  // Run the universal chain verifier. Throws ChainError on any chain step
+  // failure; the top-level CLI handler catches it and emits {ok:false,error}.
+  const chain = await verifyProofChain(proof);
 
-  if ((proof?.version === 1 || proof?.version === 2) && proof.ownerBinding) {
-    source = "git-note";
-    agentPublicKeyPem = proof.agent?.publicKeyPem || null;
-    binding = proof.ownerBinding;
-    idToken = proof.idToken
-      ? (proof.version >= 2 ? Buffer.from(proof.idToken, "base64url").toString() : proof.idToken)
-      : null;
-    ssoBaseUrl = proof.ssoBaseUrl || ssoBaseUrl;
-  } else {
-    const paths = statePaths(stateDir);
-    const key = await readJsonFile(paths.mainKey, null);
-    const ownerRecord = await readJsonFile(paths.ownerBinding, null);
-    const ownerSession = await readJsonFile(paths.ownerSession, null);
-    if (key || ownerRecord || ownerSession) {
-      source = "local-state";
-      agentPublicKeyPem = key?.publicKeyPem || null;
-      binding = ownerRecord?.binding || null;
-      idToken = ownerSession?.idToken || null;
-    }
+  // Trailer fingerprint must match the chain-verified agent key. Any
+  // mismatch means the trailer claims a key the chain doesn't anchor.
+  if (trailerFingerprint !== chain.agentFingerprint) {
+    throw new ChainError(
+      `Agent-ID-Fingerprint trailer ${trailerFingerprint.slice(0, 16)}... does not match chain-verified agent ${chain.agentFingerprint.slice(0, 16)}...`,
+    );
   }
 
-  const result = {
-    ok: true,
-    commit: resolvedHash,
-    source,
-    agentFingerprint: trailerFingerprint,
-    ownerSessionSub: trailerOwner || null,
-    bindingId: trailerBinding || null,
-    provenance: [],
-    warnings: [],
-  };
-
-  if (source === "none") {
-    result.warnings.push("No proof found — no git note (refs/notes/agent-id) and no local state");
-  }
-
-  // Step 5: Verify SSH signature
-  // To verify against the note's public key, write a temporary allowed_signers file
-  let sshSignatureValid = false;
-  if (agentPublicKeyPem) {
-    const sshPub = ed25519PemToSshPublicKey(agentPublicKeyPem);
-    const tmpSignersPath = path.join(os.tmpdir(), `agent-id-signers-${randomUUID()}`);
-    const signerEmail = `agent-${trailerFingerprint.slice(0, 8)}@agent-id.local`;
-    await fs.writeFile(tmpSignersPath, `${signerEmail} ${sshPub}\n`, "utf8");
-
-    // Configure temporary allowed signers for verification
+  // SSH commit signature against chain.agentPublicKeyPem — proves the
+  // commit was made by the holder of the chain-anchored agent key.
+  const sshPub = ed25519PemToSshPublicKey(chain.agentPublicKeyPem);
+  const tmpSignersPath = path.join(os.tmpdir(), `agent-id-signers-${randomUUID()}`);
+  const signerEmail = `agent-${trailerFingerprint.slice(0, 8)}@agent-id.local`;
+  await fs.writeFile(tmpSignersPath, `${signerEmail} ${sshPub}\n`, "utf8");
+  let sshOk = false;
+  try {
     const verifyResult = await execFile(
       "git",
       [
@@ -802,133 +759,73 @@ async function cmdGitVerify(flags) {
       ],
       { timeout: 10000 },
     );
-    sshSignatureValid = verifyResult.code === 0;
+    sshOk = verifyResult.code === 0;
+  } finally {
     await fs.unlink(tmpSignersPath).catch(() => {});
-  } else {
-    // Try without — uses whatever git config has
-    const verifyResult = await execFile("git", ["verify-commit", "--raw", resolvedHash], { timeout: 10000 });
-    sshSignatureValid = verifyResult.code === 0;
+  }
+  if (!sshOk) {
+    throw new ChainError(
+      `SSH commit signature verification failed for ${resolvedHash.slice(0, 12)} against agent key ${chain.agentFingerprint.slice(0, 16)}...`,
+    );
   }
 
-  result.sshSignatureValid = sshSignatureValid;
-  if (sshSignatureValid) {
-    result.provenance.push("SSH commit signature valid");
-  } else {
-    result.warnings.push("SSH commit signature verification failed");
-  }
+  outputJson({
+    ok: true,
+    commit: resolvedHash,
+    agentFingerprint: chain.agentFingerprint,
+    ownerSessionSub: chain.ownerSessionSub,
+    issuer: chain.issuer,
+    jkt: chain.jkt,
+    bindingId: trailerBinding || null,
+    summary: `Commit ${resolvedHash.slice(0, 12)} signed by agent ${chain.agentFingerprint.slice(0, 16)}... owned by ${chain.ownerSessionSub}`,
+  });
+}
 
-  // Step 6: Verify agent fingerprint matches embedded public key
-  if (agentPublicKeyPem) {
-    const computedFingerprint = fingerprintPublicKeyPem(agentPublicKeyPem);
-    if (computedFingerprint === trailerFingerprint) {
-      result.provenance.push(`Agent public key matches trailer fingerprint (${trailerFingerprint.slice(0, 16)}...)`);
-    } else {
-      result.warnings.push(`Fingerprint mismatch: trailer=${trailerFingerprint.slice(0, 16)}... key=${computedFingerprint.slice(0, 16)}...`);
-    }
-  }
-
-  // Step 7: Verify owner binding signature
-  if (binding) {
-    const bindingPayload = binding.payload;
-    const payloadCanonical = canonicalJSONString(bindingPayload);
-    const payloadHash = sha256HexCanonical(payloadCanonical);
-    const signerPem = bindingPayload.agentInstance?.publicKeyPem;
-    const bindingSigOk =
-      payloadHash === binding.payloadHash &&
-      signerPem &&
-      verifyEd25519Base64Url(payloadCanonical, binding.signature, signerPem);
-
-    if (bindingSigOk) {
-      result.provenance.push(`Owner binding signature valid (binding: ${binding.id})`);
-    } else {
-      result.warnings.push("Owner binding signature verification failed");
-    }
-
-    if (bindingPayload.agentInstance?.publicKeyFingerprint === trailerFingerprint) {
-      result.provenance.push(
-        `Binding links agent ${trailerFingerprint.slice(0, 16)}... to owner ${bindingPayload.ownerSessionSub}`,
-      );
-    } else {
-      result.warnings.push("Binding agent fingerprint does not match commit trailer");
-    }
-
-    result.ownerSessionSub = bindingPayload.ownerSessionSub;
-    result.issuer = bindingPayload.issuer;
-    result.providerAddress = bindingPayload.providerAddress;
-  }
-
-  // Step 8: Verify id_token server signature against SSO JWKS
-  if (idToken) {
-    // Verify the id_token hash matches what's in the binding
-    if (binding?.payload?.idTokenHash) {
-      const actualHash = sha256Hex(idToken);
-      if (actualHash === binding.payload.idTokenHash) {
-        result.provenance.push("id_token hash matches binding");
-      } else {
-        result.warnings.push("id_token hash does not match binding");
-      }
-    }
-
+/**
+ * Build a v2-shaped proof bundle from either a git note (preferred,
+ * self-contained) or the local agent state files. Returns null if neither
+ * source has enough material for `verifyProofChain` to start.
+ */
+async function loadProofBundle({ commitHash, stateDir, flags }) {
+  // Prefer git note — self-contained, works on any clone of the repo.
+  const noteResult = await execFile(
+    "git",
+    ["notes", "--ref=agent-id", "show", commitHash],
+    { timeout: 10000 },
+  );
+  if (noteResult.code === 0 && noteResult.stdout.trim()) {
     try {
-      const tokenResult = await verifyIdTokenSignatureOnly({
-        idToken,
-        ssoBaseUrl,
-      });
-      result.ssoSignatureValid = true;
-
-      // Hard cutover: every accepted id_token MUST carry an RFC 7800 `cnf.jkt`
-      // claim that matches the RFC 7638 thumbprint of the agent's Ed25519
-      // public key as bound by the owner-session binding. This proves the SSO
-      // server attested the exact key the agent is wielding.  No flag, env
-      // var, or legacy mode can disable it — verifying without `cnf.jkt`
-      // would let an adversary present any id_token it managed to extract
-      // alongside its own agent key.
-      const bindingPubKey = binding?.payload?.agentInstance?.publicKeyPem;
-      if (!bindingPubKey) {
-        throw new Error("binding missing agent public key — cannot verify cnf.jkt");
+      const fromNote = JSON.parse(noteResult.stdout.trim());
+      if (fromNote && (fromNote.version === 1 || fromNote.version === 2)) {
+        return fromNote;
       }
-      const expectedJkt = jwkThumbprint(ed25519PublicKeyToJwk(bindingPubKey));
-      const actualJkt = tokenResult.payload?.cnf?.jkt;
-      if (typeof actualJkt !== "string" || !actualJkt) {
-        throw new Error("id_token missing cnf.jkt");
-      }
-      if (actualJkt !== expectedJkt) {
-        throw new Error(`id_token cnf.jkt mismatch: expected ${expectedJkt}, got ${actualJkt}`);
-      }
-      result.provenance.push(`id_token cnf.jkt binds agent key ${expectedJkt.slice(0, 16)}...`);
-
-      result.provenance.push(
-        `SSO server signature valid (issuer: ${tokenResult.issuer}, sub: ${tokenResult.payload.sub})`,
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // cnf.jkt failures are fatal: bubble out to the top-level handler so
-      // the CLI exits non-zero with the stable error string. Other failures
-      // (signature, network) remain warnings on the result object as before.
-      if (msg.includes("cnf.jkt")) {
-        throw err;
-      }
-      result.warnings.push(`id_token signature verification: ${msg}`);
-      result.ssoSignatureValid = false;
+    } catch {
+      // Malformed note — fall through to local state.
     }
-  } else {
-    result.warnings.push("No id_token available — cannot verify SSO attestation");
-    result.ssoSignatureValid = false;
   }
 
-  // Build summary
-  if (result.provenance.length >= 3 && result.sshSignatureValid) {
-    const ownerLabel = result.ownerSessionSub || "unknown";
-    result.summary = `Commit ${resolvedHash.slice(0, 12)} was signed by agent ${trailerFingerprint.slice(0, 16)}... owned by ${ownerLabel}`;
-  } else {
-    result.summary = `Commit ${resolvedHash.slice(0, 12)} — provenance chain incomplete (see warnings)`;
-    result.ok = result.sshSignatureValid && result.provenance.length > 0;
+  // Fall back to local state.
+  const paths = statePaths(stateDir);
+  const key = await readJsonFile(paths.mainKey, null);
+  const ownerRecord = await readJsonFile(paths.ownerBinding, null);
+  const ownerSession = await readJsonFile(paths.ownerSession, null);
+  if (!key?.publicKeyPem || !ownerRecord?.binding || !ownerSession?.idToken) {
+    return null;
   }
-
-  outputJson(result);
-  if (!result.ok) {
-    process.exitCode = 1;
-  }
+  const ssoBaseUrl =
+    ownerRecord.binding.payload?.issuer ||
+    flags["sso-url"] ||
+    "https://sso.alien-api.com";
+  return {
+    version: 2,
+    agent: {
+      fingerprint: fingerprintPublicKeyPem(key.publicKeyPem),
+      publicKeyPem: key.publicKeyPem,
+    },
+    ownerBinding: ownerRecord.binding,
+    idToken: Buffer.from(ownerSession.idToken).toString("base64url"),
+    ssoBaseUrl,
+  };
 }
 
 function extractTrailer(message, key) {

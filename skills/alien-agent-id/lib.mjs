@@ -114,14 +114,17 @@ export function fingerprintPublicKeyPem(publicKeyPem) {
 export function ed25519PublicKeyToJwk(publicKeyPem) {
   const keyObject = createPublicKey(publicKeyPem);
   const der = keyObject.export({ format: "der", type: "spki" });
-  // SPKI for Ed25519 = 12-byte ASN.1 prefix + 32-byte raw public key.
-  if (der.length < 44) {
-    throw new Error("ed25519PublicKeyToJwk: public key DER too short");
+  if (der.length !== 44) {
+    throw new Error(
+      `ed25519PublicKeyToJwk: expected 44-byte Ed25519 SPKI, got ${der.length} bytes (likely non-Ed25519 key type)`,
+    );
   }
-  const rawKey = der.subarray(der.length - 32);
-  if (rawKey.length !== 32) {
-    throw new Error("ed25519PublicKeyToJwk: expected 32-byte Ed25519 public key");
+  if (!der.subarray(0, 12).equals(ED25519_SPKI_PREFIX)) {
+    throw new Error(
+      "ed25519PublicKeyToJwk: SPKI AlgorithmIdentifier does not match Ed25519 (OID 1.3.101.112)",
+    );
   }
+  const rawKey = der.subarray(12);
   return {
     kty: "OKP",
     crv: "Ed25519",
@@ -198,6 +201,15 @@ export function createDPoPProof(params) {
     htu: cleanHtu,
     iat: typeof params.iat === "number" ? params.iat : Math.floor(Date.now() / 1000),
   };
+  // RFC 9449 §4.2: at protected resources, bind the proof to the AT.
+  if (typeof params.accessToken === "string" && params.accessToken) {
+    payload.ath = b64url(createHash("sha256").update(params.accessToken).digest());
+  }
+  // RFC 9449 §8/§9: when a server challenges via use_dpop_nonce, the client
+  // retries with the supplied nonce echoed in the proof payload.
+  if (typeof params.nonce === "string" && params.nonce) {
+    payload.nonce = params.nonce;
+  }
 
   const headerB64 = b64url(JSON.stringify(header));
   const payloadB64 = b64url(JSON.stringify(payload));
@@ -648,20 +660,11 @@ export async function exchangeAuthorizationCode(params) {
   body.set("code_verifier", params.codeVerifier);
 
   const tokenUrl = `${base}/oauth/token`;
-  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
-  if (typeof params.agentPrivateKeyPem === "string" && params.agentPrivateKeyPem) {
-    headers.DPoP = createDPoPProof({
-      privateKeyPem: params.agentPrivateKeyPem,
-      htm: "POST",
-      htu: tokenUrl,
-    });
-  }
-
-  const out = await fetchJson(tokenUrl, {
-    method: "POST",
-    headers,
+  const out = await tokenEndpointPost(
+    tokenUrl,
     body,
-  });
+    params.agentPrivateKeyPem,
+  );
 
   if (!out.id_token || !out.access_token) {
     throw new Error("Token response missing id_token/access_token");
@@ -678,26 +681,148 @@ export async function refreshSession(params) {
   body.set("client_id", params.providerAddress);
 
   const tokenUrl = `${base}/oauth/token`;
-  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
-  if (typeof params.agentPrivateKeyPem === "string" && params.agentPrivateKeyPem) {
-    headers.DPoP = createDPoPProof({
-      privateKeyPem: params.agentPrivateKeyPem,
-      htm: "POST",
-      htu: tokenUrl,
-    });
-  }
-
-  const out = await fetchJson(tokenUrl, {
-    method: "POST",
-    headers,
+  const out = await tokenEndpointPost(
+    tokenUrl,
     body,
-  });
+    params.agentPrivateKeyPem,
+  );
 
   if (!out.access_token) {
     throw new Error("Refresh response missing access_token");
   }
 
   return out;
+}
+
+// tokenEndpointPost POSTs a form-encoded body to /oauth/token, optionally
+// attaching a DPoP proof when an Ed25519 key is provided. On a server-issued
+// nonce challenge (RFC 9449 §8) the request is retried once with the
+// supplied nonce echoed in a freshly built proof.
+async function tokenEndpointPost(tokenUrl, body, agentPrivateKeyPem) {
+  const baseHeaders = { "Content-Type": "application/x-www-form-urlencoded" };
+  const useDPoP = typeof agentPrivateKeyPem === "string" && agentPrivateKeyPem;
+
+  const buildHeaders = (nonce) => {
+    if (!useDPoP) return baseHeaders;
+    return {
+      ...baseHeaders,
+      DPoP: createDPoPProof({
+        privateKeyPem: agentPrivateKeyPem,
+        htm: "POST",
+        htu: tokenUrl,
+        ...(nonce ? { nonce } : {}),
+      }),
+    };
+  };
+
+  const res = await fetchWithDPoPNonce(
+    tokenUrl,
+    { method: "POST", body },
+    buildHeaders,
+  );
+  const { json, text } = await readJsonResponse(res);
+  if (!res.ok) {
+    const details = json && typeof json === "object" ? JSON.stringify(json) : text;
+    throw new Error(`HTTP ${res.status} from ${tokenUrl}: ${details || "no body"}`);
+  }
+  if (!json || typeof json !== "object") {
+    throw new Error(`Expected JSON response from ${tokenUrl}`);
+  }
+  return json;
+}
+
+/**
+ * Fetch the OIDC `/oauth/userinfo` claims for a DPoP-bound access token.
+ *
+ * RFC 9449 §7.1: requests carrying a DPoP-bound AT MUST use
+ * `Authorization: DPoP <token>` and a fresh DPoP proof whose `ath` claim
+ * equals base64url(SHA-256(accessToken)). On 400 + use_dpop_nonce challenge
+ * (RFC 9449 §8/§9), the request is retried once with the supplied nonce
+ * echoed in the proof.
+ */
+export async function getUserInfo(params) {
+  if (!params || typeof params !== "object") {
+    throw new Error("getUserInfo: params required");
+  }
+  const { ssoBaseUrl, accessToken, agentPrivateKeyPem } = params;
+  if (typeof ssoBaseUrl !== "string" || !ssoBaseUrl) {
+    throw new Error("getUserInfo: ssoBaseUrl is required");
+  }
+  if (typeof accessToken !== "string" || !accessToken) {
+    throw new Error("getUserInfo: accessToken is required");
+  }
+  if (typeof agentPrivateKeyPem !== "string" || !agentPrivateKeyPem) {
+    throw new Error("getUserInfo: agentPrivateKeyPem is required");
+  }
+
+  const userinfoUrl = `${withNoTrailingSlash(ssoBaseUrl)}/oauth/userinfo`;
+
+  const buildHeaders = (nonce) => ({
+    Authorization: `DPoP ${accessToken}`,
+    DPoP: createDPoPProof({
+      privateKeyPem: agentPrivateKeyPem,
+      htm: "GET",
+      htu: userinfoUrl,
+      accessToken,
+      ...(nonce ? { nonce } : {}),
+    }),
+  });
+
+  const res = await fetchWithDPoPNonce(userinfoUrl, { method: "GET" }, buildHeaders);
+  const { json, text } = await readJsonResponse(res);
+  if (!res.ok) {
+    const details = json && typeof json === "object" ? JSON.stringify(json) : text;
+    throw new Error(`HTTP ${res.status} from userinfo: ${details || "no body"}`);
+  }
+  if (!json || typeof json !== "object") {
+    throw new Error("getUserInfo: expected JSON response");
+  }
+  return json;
+}
+
+// dpopNonceCache stores the most-recent server-issued DPoP-Nonce per URL,
+// per RFC 9449 §8.2-1: "the client MUST use the new nonce value for the
+// next request and all subsequent requests until the server supplies a new
+// nonce." Process-local in-memory; agent-id is a short-lived CLI so this
+// is a per-invocation cache that batches multi-call flows (e.g., token
+// then userinfo then refresh) without paying a 400/retry on each step.
+const dpopNonceCache = new Map();
+
+// fetchWithDPoPNonce executes a request, pre-attaching any cached nonce
+// for `url`. If the server returns 400 + use_dpop_nonce + DPoP-Nonce
+// (RFC 9449 §8/§9), it retries ONCE with the supplied nonce echoed in a
+// freshly built proof and updates the cache. Subsequent responses bearing
+// a DPoP-Nonce header (success or failure) refresh the cache so the
+// server's rotation policy stays sticky.
+async function fetchWithDPoPNonce(url, init, buildHeaders) {
+  const cached = dpopNonceCache.get(url);
+  let res = await fetch(url, { ...init, headers: buildHeaders(cached) });
+  rememberNonce(url, res.headers.get("dpop-nonce"));
+
+  if (res.status !== 400) {
+    return res;
+  }
+  const issuedNonce = res.headers.get("dpop-nonce");
+  if (!issuedNonce) {
+    return res;
+  }
+  let body;
+  try {
+    body = await res.clone().json();
+  } catch {
+    return res;
+  }
+  if (body && body.error === "use_dpop_nonce") {
+    res = await fetch(url, { ...init, headers: buildHeaders(issuedNonce) });
+    rememberNonce(url, res.headers.get("dpop-nonce"));
+  }
+  return res;
+}
+
+function rememberNonce(url, nonce) {
+  if (typeof nonce === "string" && nonce) {
+    dpopNonceCache.set(url, nonce);
+  }
 }
 
 export async function fetchOidcDiscovery(ssoBaseUrl) {
@@ -809,6 +934,153 @@ export async function verifyIdTokenSignatureOnly(params) {
     payload: parsed.payload,
     header: parsed.header,
     keyId: kid,
+  };
+}
+
+/**
+ * ChainError marks a chain-step failure so callers can distinguish it from
+ * unrelated runtime errors (network, parse, programming bugs). Every step
+ * of `verifyProofChain` throws this exact type.
+ */
+export class ChainError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ChainError";
+  }
+}
+
+/**
+ * Decode the id_token from a proof bundle, handling both v1 (raw string) and
+ * v2 (base64url-encoded) shapes. Returns the raw compact JWS string, or null
+ * if the bundle has no id_token.
+ */
+function decodeProofIdToken(proof) {
+  if (!proof.idToken) return null;
+  if (proof.version >= 2) {
+    return Buffer.from(proof.idToken, "base64url").toString("utf8");
+  }
+  return proof.idToken;
+}
+
+/**
+ * Verify the universal Agent-ID provenance chain documented in
+ * `docs/INTEGRATION.md`.
+ *
+ * Sole entry point for chain validation. Consumers — `git-verify`,
+ * `@alien-id/sso-agent-id`'s deep-verify path, future signed-message and
+ * capability-proof flows — call this function and layer use-case-specific
+ * checks (SSH commit signature, request-body signature, …) around it.
+ *
+ * Every step is fatal. Failures throw `ChainError`; success returns the
+ * verified chain output for the caller's policy logic.
+ *
+ * Anchoring rule (the security-critical invariant): every step that needs
+ * an agent key compares against `proof.agent.publicKeyPem`, not against the
+ * binding's self-embedded `agentInstance.publicKeyPem`. This is what
+ * prevents the substitution forgery — an attacker cannot stitch a victim's
+ * binding + id_token onto their own signed request because the binding
+ * signature would no longer verify.
+ *
+ * @param {Object} proof — v1 or v2 proof bundle (see INTEGRATION.md)
+ * @returns {Object} { agentFingerprint, agentPublicKeyPem, ownerSessionSub,
+ *                     issuer, jkt, idTokenPayload }
+ * @throws {ChainError} on any failed check
+ */
+export async function verifyProofChain(proof) {
+  // 0. Structural sanity.
+  if (!proof || typeof proof !== "object") {
+    throw new ChainError("proof bundle missing");
+  }
+  if (proof.version !== 1 && proof.version !== 2) {
+    throw new ChainError(`unsupported proof version ${String(proof.version)}`);
+  }
+  const agentPubKey = proof.agent?.publicKeyPem;
+  if (typeof agentPubKey !== "string" || !agentPubKey) {
+    throw new ChainError("proof.agent.publicKeyPem missing");
+  }
+
+  // 1. Agent fingerprint matches the embedded public key.
+  const agentFingerprint = fingerprintPublicKeyPem(agentPubKey);
+  if (proof.agent.fingerprint !== agentFingerprint) {
+    throw new ChainError(
+      `proof.agent.fingerprint=${String(proof.agent.fingerprint)} does not match publicKeyPem (computed=${agentFingerprint})`,
+    );
+  }
+
+  // 2. Owner binding canonical hash.
+  const binding = proof.ownerBinding;
+  if (!binding || typeof binding !== "object" || !binding.payload || !binding.signature) {
+    throw new ChainError("proof.ownerBinding malformed or missing");
+  }
+  const canonical = canonicalJSONString(binding.payload);
+  if (sha256HexCanonical(canonical) !== binding.payloadHash) {
+    throw new ChainError("ownerBinding payloadHash does not match canonical payload");
+  }
+
+  // 3. Owner binding signature — verify with proof.agent.publicKeyPem (the
+  //    claimed agent key), NOT the binding's self-embedded key. A binding
+  //    that was signed with a different key fails here.
+  if (!verifyEd25519Base64Url(canonical, binding.signature, agentPubKey)) {
+    throw new ChainError(
+      "ownerBinding signature does not verify with proof.agent.publicKeyPem",
+    );
+  }
+
+  // 4. Binding's embedded fingerprint must equal the agent fingerprint.
+  //    Defense-in-depth: even if a future refactor weakens step 3, this
+  //    still blocks a substituted binding.
+  const embeddedFingerprint = binding.payload.agentInstance?.publicKeyFingerprint;
+  if (embeddedFingerprint !== agentFingerprint) {
+    throw new ChainError(
+      `ownerBinding agentInstance.publicKeyFingerprint=${String(embeddedFingerprint)} does not match agent fingerprint ${agentFingerprint}`,
+    );
+  }
+
+  // 5. Decode the id_token (v1: raw, v2: base64url).
+  const idToken = decodeProofIdToken(proof);
+  if (!idToken) {
+    throw new ChainError("proof.idToken missing");
+  }
+
+  // 6. id_token bytewise hash must match the hash recorded in the binding.
+  if (sha256Hex(idToken) !== binding.payload.idTokenHash) {
+    throw new ChainError("id_token hash does not match ownerBinding.payload.idTokenHash");
+  }
+
+  // 7-8. SSO RS256 signature against discovered JWKS. exp/iss/aud are
+  //      intentionally NOT checked — see verifyIdTokenSignatureOnly's
+  //      contract (post-hoc provenance: token may have expired).
+  let tokenResult;
+  try {
+    tokenResult = await verifyIdTokenSignatureOnly({
+      idToken,
+      ssoBaseUrl: proof.ssoBaseUrl,
+    });
+  } catch (err) {
+    throw new ChainError(`id_token SSO signature verification failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // 9. cnf.jkt — must equal thumbprint(proof.agent.publicKeyPem). Same
+  //    anchoring rule as step 3: tied to the claimed agent key, not the
+  //    binding's self-embedded key.
+  const expectedJkt = jwkThumbprint(ed25519PublicKeyToJwk(agentPubKey));
+  const actualJkt = tokenResult.payload?.cnf?.jkt;
+  if (typeof actualJkt !== "string" || !actualJkt) {
+    throw new ChainError("id_token missing cnf.jkt");
+  }
+  if (actualJkt !== expectedJkt) {
+    throw new ChainError(
+      `id_token cnf.jkt mismatch: expected ${expectedJkt}, got ${actualJkt}`,
+    );
+  }
+
+  return {
+    agentFingerprint,
+    agentPublicKeyPem: agentPubKey,
+    ownerSessionSub: binding.payload.ownerSessionSub,
+    issuer: tokenResult.issuer,
+    jkt: expectedJkt,
+    idTokenPayload: tokenResult.payload,
   };
 }
 
