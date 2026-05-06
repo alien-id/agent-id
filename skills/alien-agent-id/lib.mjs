@@ -554,6 +554,210 @@ export async function fetchOidcDiscovery(ssoBaseUrl) {
   return await fetchJson(`${base}/.well-known/openid-configuration`, { method: "GET" });
 }
 
+// ════════════════════════════════════════════════════════════════════════════════
+// Service Discovery (/.well-known/alien-agent-id)
+// ════════════════════════════════════════════════════════════════════════════════
+
+const DISCOVER_MAX_BYTES = 64 * 1024;
+const DISCOVER_TIMEOUT_MS = 60_000;
+
+function assertSafeHttpsUrl(value, label) {
+  let parsed;
+  try {
+    parsed = new URL(String(value));
+  } catch {
+    throw new Error(`${label} is not a valid URL`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(`${label} must use https://`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(`${label} must not include userinfo`);
+  }
+  if (parsed.hash) {
+    throw new Error(`${label} must not include a fragment`);
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    throw new Error(`${label} must not resolve to localhost`);
+  }
+  // Bare IP host: IPv4 dotted-quad or IPv6 (always contains ':').
+  if (/^\d/.test(host) || host.includes(":")) {
+    throw new Error(`${label} must be a domain name, not an IP address`);
+  }
+  return parsed;
+}
+
+const ENDPOINT_MAX_COUNT = 100;
+const ENDPOINT_PATH_MAX = 256;
+const ENDPOINT_DESC_MAX = 1000;
+const ENDPOINT_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+const ENDPOINT_AUTH = new Set(["required", "optional", "none"]);
+
+function validateEndpoint(raw, idx) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`endpoints[${idx}] must be an object`);
+  }
+  const path = raw.path;
+  if (
+    typeof path !== "string" ||
+    path.length === 0 ||
+    path.length > ENDPOINT_PATH_MAX ||
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    path.includes("..") ||
+    /[\x00-\x1f\x7f]/.test(path)
+  ) {
+    throw new Error(`endpoints[${idx}].path is not a safe relative path`);
+  }
+  if (!ENDPOINT_METHODS.has(raw.method)) {
+    throw new Error(`endpoints[${idx}].method must be one of ${[...ENDPOINT_METHODS].join("/")}`);
+  }
+  if (!ENDPOINT_AUTH.has(raw.auth)) {
+    throw new Error(`endpoints[${idx}].auth must be one of ${[...ENDPOINT_AUTH].join("/")}`);
+  }
+  const out = { path, method: raw.method, auth: raw.auth };
+  if (raw.description !== undefined) {
+    const description = raw.description;
+    if (
+      typeof description !== "string" ||
+      description.length === 0 ||
+      description.length > ENDPOINT_DESC_MAX ||
+      /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(description)
+    ) {
+      throw new Error(
+        `endpoints[${idx}].description must be 1..${ENDPOINT_DESC_MAX} chars, no control characters except CR/LF/tab`,
+      );
+    }
+    out.description = description;
+  }
+  return out;
+}
+
+function validateEndpoints(input) {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input)) {
+    throw new Error("endpoints must be an array");
+  }
+  if (input.length > ENDPOINT_MAX_COUNT) {
+    throw new Error(`endpoints exceeds ${ENDPOINT_MAX_COUNT} entries`);
+  }
+  return input.map((e, i) => validateEndpoint(e, i));
+}
+
+// Heuristic: last two labels. Loose for multi-label public suffixes
+// (.co.uk etc) — accepted to avoid bundling a PSL dataset.
+function registrableDomain(host) {
+  const labels = host.toLowerCase().split(".").filter(Boolean);
+  if (labels.length < 2) {
+    return host.toLowerCase();
+  }
+  return labels.slice(-2).join(".");
+}
+
+async function readBoundedUtf8(res, maxBytes) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.byteLength;
+    if (total > maxBytes) {
+      throw new Error(`Response exceeds ${maxBytes} bytes`);
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+export async function discoverServiceAuth(serviceUrl) {
+  const origin = assertSafeHttpsUrl(serviceUrl, "service URL");
+  const wellKnownUrl = `${origin.protocol}//${origin.host}/.well-known/alien-agent-id`;
+
+  // Single controller covers headers + body — body read must inherit the timeout.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DISCOVER_TIMEOUT_MS);
+  let body;
+  try {
+    let res;
+    try {
+      res = await fetch(wellKnownUrl, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        redirect: "error",
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        throw new Error(`Timed out fetching ${wellKnownUrl}`);
+      }
+      throw err;
+    }
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} fetching ${wellKnownUrl}`);
+    }
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("application/json")) {
+      throw new Error(`Unexpected Content-Type "${contentType}" — expected application/json`);
+    }
+
+    try {
+      body = await readBoundedUtf8(res, DISCOVER_MAX_BYTES);
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        throw new Error(`Timed out reading body from ${wellKnownUrl}`);
+      }
+      throw err;
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  let doc;
+  try {
+    doc = JSON.parse(body);
+  } catch (err) {
+    throw new Error(`Invalid JSON in /.well-known/alien-agent-id: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new Error("Discovery document must be a JSON object");
+  }
+
+  if (doc.version !== 1) {
+    throw new Error(`Unsupported discovery version: ${JSON.stringify(doc.version)} (expected 1)`);
+  }
+
+  const authEndpoint = assertSafeHttpsUrl(doc.auth_endpoint, "auth_endpoint");
+  const apiBaseUrl = assertSafeHttpsUrl(doc.api_base_url, "api_base_url");
+
+  const headerName = doc.header_name;
+  if (typeof headerName !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(headerName)) {
+    throw new Error("header_name must match ^[A-Za-z0-9-]{1,64}$");
+  }
+
+  const originDomain = registrableDomain(origin.hostname.toLowerCase());
+  for (const [label, parsed] of [
+    ["auth_endpoint", authEndpoint],
+    ["api_base_url", apiBaseUrl],
+  ]) {
+    const fieldDomain = registrableDomain(parsed.hostname.toLowerCase());
+    if (fieldDomain !== originDomain) {
+      throw new Error(
+        `${label} is on a different registrable domain (${fieldDomain}) than the service URL (${originDomain})`,
+      );
+    }
+  }
+
+  const endpoints = validateEndpoints(doc.endpoints);
+
+  return {
+    version: 1,
+    authEndpoint: authEndpoint.toString(),
+    headerName,
+    apiBaseUrl: apiBaseUrl.toString(),
+    ...(endpoints !== undefined ? { endpoints } : {}),
+  };
+}
+
 export async function fetchJwks(jwksUri) {
   const out = await fetchJson(jwksUri, { method: "GET" });
   if (!Array.isArray(out.keys)) {

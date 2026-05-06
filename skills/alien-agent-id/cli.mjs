@@ -41,6 +41,7 @@ import {
   vaultEncrypt,
   vaultDecrypt,
   createAgentToken,
+  discoverServiceAuth,
 } from "./lib.mjs";
 import qrcode from "./qrcode.cjs";
 
@@ -1240,6 +1241,16 @@ async function cmdAuthHeader(flags) {
   }
 }
 
+async function cmdDiscover(flags) {
+  const url = flags.url;
+  if (typeof url !== "string" || !url) {
+    outputError("Missing --url. Usage: discover --url https://service.example.com");
+    return;
+  }
+  const result = await discoverServiceAuth(url);
+  outputJson({ ok: true, ...result });
+}
+
 // ─── Help ───────────────────────────────────────────────────────────────────────
 
 function printHelp() {
@@ -1266,6 +1277,7 @@ Commands:
   vault-get      Retrieve a decrypted credential from the vault
   vault-list     List all stored credentials
   vault-remove   Remove a credential from the vault
+  discover       Fetch and validate a service's /.well-known/alien-agent-id document
 
 Bootstrap flags:
   --provider-address <addr>  Provider address (or ALIEN_PROVIDER_ADDRESS env / default-provider.txt)
@@ -1302,6 +1314,9 @@ Git-verify flags:
 Auth-header flags:
   --raw                      Output raw header (not JSON) for use with curl
 
+Discover flags:
+  --url <url>                Service URL (origin used for /.well-known/alien-agent-id)
+
 Vault flags:
   --service <name>           Service name (required for store/get/remove)
   --type <type>              Credential type: api-key, password, oauth, bearer (default: api-key)
@@ -1336,6 +1351,7 @@ const commands = {
   "vault-remove": cmdVaultRemove,
   "auth-header": cmdAuthHeader,
   refresh: cmdRefresh,
+  discover: cmdDiscover,
 };
 
 async function main() {

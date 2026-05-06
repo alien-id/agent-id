@@ -305,6 +305,7 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 | `git-commit --message "..." [--push]` | Signed commit with trailers + proof note + audit log |
 | `git-verify [--commit <hash>]` | Verify provenance chain of a commit |
 | `auth-header [--raw]` | Generate signed auth token for service calls |
+| `discover --url <serviceUrl>` | Fetch and validate a service's `/.well-known/alien-agent-id` |
 | `refresh` | Refresh SSO session tokens |
 | `vault-store --service S` | Store encrypted credential |
 | `vault-get --service S` | Retrieve decrypted credential |
