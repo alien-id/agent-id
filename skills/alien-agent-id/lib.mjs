@@ -801,30 +801,56 @@ export async function getUserInfo(params) {
 const dpopNonceCache = new Map();
 
 // fetchWithDPoPNonce executes a request, pre-attaching any cached nonce
-// for `url`. If the server returns 400 + use_dpop_nonce + DPoP-Nonce
-// (RFC 9449 §8/§9), it retries ONCE with the supplied nonce echoed in a
-// freshly built proof and updates the cache. Subsequent responses bearing
-// a DPoP-Nonce header (success or failure) refresh the cache so the
-// server's rotation policy stays sticky.
+// for `url`. Two challenge shapes are recognized per RFC 9449:
+//
+//   §8 (authorization server, e.g. /oauth/token):
+//     400 + JSON body `{"error":"use_dpop_nonce"}` + `DPoP-Nonce` header.
+//
+//   §9 (resource server, e.g. /oauth/userinfo):
+//     401 + `WWW-Authenticate: DPoP error="use_dpop_nonce"` + `DPoP-Nonce`.
+//
+// In either case the helper retries ONCE with the supplied nonce echoed in
+// a freshly built proof and updates the cache. Subsequent responses
+// bearing a DPoP-Nonce header (success or failure) refresh the cache so
+// the server's rotation policy stays sticky.
 async function fetchWithDPoPNonce(url, init, buildHeaders) {
   const cached = dpopNonceCache.get(url);
   let res = await fetch(url, { ...init, headers: buildHeaders(cached) });
   rememberNonce(url, res.headers.get("dpop-nonce"));
 
-  if (res.status !== 400) {
+  if (res.status !== 400 && res.status !== 401) {
     return res;
   }
   const issuedNonce = res.headers.get("dpop-nonce");
   if (!issuedNonce) {
     return res;
   }
-  let body;
-  try {
-    body = await res.clone().json();
-  } catch {
-    return res;
+
+  // Detect the challenge in the right place per status code: §8 puts it in
+  // the JSON body, §9 puts it in WWW-Authenticate.
+  let challenged = false;
+  if (res.status === 400) {
+    try {
+      const body = await res.clone().json();
+      challenged = body && body.error === "use_dpop_nonce";
+    } catch {
+      challenged = false;
+    }
+  } else {
+    const wwwAuth = res.headers.get("www-authenticate") || "";
+    // RFC 6749 §3 / RFC 7235 §2.2: WWW-Authenticate parameter values are
+    // either token or quoted-string. Match the `error` parameter
+    // structurally so that the literal string "use_dpop_nonce" appearing
+    // inside some other parameter's value (e.g. realm) does not
+    // false-positive into a spurious retry.
+    const m = wwwAuth.match(/\berror\s*=\s*(?:"([^"]*)"|([^,\s]+))/i);
+    if (m) {
+      const value = m[1] !== undefined ? m[1] : m[2];
+      challenged = value.toLowerCase() === "use_dpop_nonce";
+    }
   }
-  if (body && body.error === "use_dpop_nonce") {
+
+  if (challenged) {
     res = await fetch(url, { ...init, headers: buildHeaders(issuedNonce) });
     rememberNonce(url, res.headers.get("dpop-nonce"));
   }
