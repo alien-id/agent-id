@@ -279,6 +279,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
       res.end(
         JSON.stringify({
           access_token: newFreshToken,
+          token_type: "DPoP",
           refresh_token: "new-rt",
         }),
       );
@@ -318,6 +319,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
       res.end(
         JSON.stringify({
           access_token: makeFreshJwt(),
+          token_type: "DPoP",
           refresh_token: "rotated-rt",
         }),
       );
@@ -353,6 +355,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
       res.end(
         JSON.stringify({
           access_token: makeFreshJwt(),
+          token_type: "DPoP",
           // no refresh_token in response
         }),
       );
@@ -389,6 +392,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
       res.end(
         JSON.stringify({
           access_token: makeFreshJwt(),
+          token_type: "DPoP",
           id_token: newIdToken,
         }),
       );
@@ -461,7 +465,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
   it("treats opaque (non-JWT) access_token as expired and refreshes", async () => {
     const mock = await createMockSsoServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ access_token: makeFreshJwt() }));
+      res.end(JSON.stringify({ access_token: makeFreshJwt(), token_type: "DPoP" }));
     });
 
     try {
@@ -515,7 +519,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
     const mock = await createMockSsoServer((req, res) => {
       called = true;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ access_token: makeFreshJwt() }));
+      res.end(JSON.stringify({ access_token: makeFreshJwt(), token_type: "DPoP" }));
     });
 
     try {
@@ -558,7 +562,7 @@ describe("Security hardening", () => {
 
     const mock = await createMockSsoServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ access_token: wrongSubToken }));
+      res.end(JSON.stringify({ access_token: wrongSubToken, token_type: "DPoP" }));
     });
 
     try {
@@ -587,7 +591,7 @@ describe("Security hardening", () => {
 
     const mock = await createMockSsoServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ access_token: correctSubToken }));
+      res.end(JSON.stringify({ access_token: correctSubToken, token_type: "DPoP" }));
     });
 
     try {
@@ -645,6 +649,7 @@ describe("CLI refresh command (integration)", () => {
       res.end(
         JSON.stringify({
           access_token: makeFreshJwt(),
+          token_type: "DPoP",
           refresh_token: "cli-new-rt",
         }),
       );

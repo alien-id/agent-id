@@ -422,6 +422,7 @@ describe("exchangeAuthorizationCode with DPoP", () => {
       res.end(
         JSON.stringify({
           access_token: "at",
+          token_type: "DPoP",
           id_token: "it",
           refresh_token: "rt",
         }),
@@ -472,7 +473,7 @@ describe("exchangeAuthorizationCode with DPoP", () => {
       }
       secondProofPayload = decodePart(dpop.split(".")[1]);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ access_token: "at", id_token: "it", refresh_token: "rt" }));
+      res.end(JSON.stringify({ access_token: "at", token_type: "DPoP", id_token: "it", refresh_token: "rt" }));
     });
 
     try {
@@ -501,7 +502,7 @@ describe("refreshSession with DPoP", () => {
     const mock = await createMockServer((req, res) => {
       receivedDpop = req.headers["dpop"];
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ access_token: "new-at" }));
+      res.end(JSON.stringify({ access_token: "new-at", token_type: "DPoP" }));
     });
 
     try {
@@ -567,7 +568,7 @@ describe("refreshSession with DPoP", () => {
       }
       secondProofPayload = decodePart(dpop.split(".")[1]);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ access_token: "new-at" }));
+      res.end(JSON.stringify({ access_token: "new-at", token_type: "DPoP" }));
     });
 
     try {
@@ -605,7 +606,7 @@ describe("refreshSession with DPoP", () => {
           "Content-Type": "application/json",
           "DPoP-Nonce": SERVER_NONCE,
         });
-        res.end(JSON.stringify({ access_token: "new-at" }));
+        res.end(JSON.stringify({ access_token: "new-at", token_type: "DPoP" }));
       } else {
         statuses.push(400);
         res.writeHead(400, {
@@ -686,6 +687,7 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
       res.end(
         JSON.stringify({
           access_token: `${header}.${payload}.sig`,
+          token_type: "DPoP",
           refresh_token: "new-rt",
         }),
       );
