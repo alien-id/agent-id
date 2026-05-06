@@ -38,7 +38,17 @@ import {
   nowMs,
 } from "../skills/alien-agent-id/lib.mjs";
 
-const exec = promisify(execFileCb);
+// Hermetic git env: ignore the developer's global/system config so tests
+// don't pick up `gpg.ssh.program`, `commit.gpgsign`, or other settings that
+// would invoke 1Password / a hardware signer for the test's ephemeral keys.
+const HERMETIC_GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+};
+const execRaw = promisify(execFileCb);
+const exec = (file, args, opts = {}) =>
+  execRaw(file, args, { ...opts, env: { ...HERMETIC_GIT_ENV, ...(opts.env || {}) } });
 const CLI_PATH = new URL("../skills/alien-agent-id/cli.mjs", import.meta.url).pathname;
 
 // ─── Fixture helpers ─────────────────────────────────────────────────────────────
