@@ -728,6 +728,18 @@ async function tokenEndpointPost(tokenUrl, body, agentPrivateKeyPem) {
   if (!json || typeof json !== "object") {
     throw new Error(`Expected JSON response from ${tokenUrl}`);
   }
+  // RFC 9449 §5: when the client presents a DPoP proof, it MUST discard the
+  // response unless `token_type` is "DPoP" (case-insensitive per RFC 6749
+  // §5.1). Catches a downgrade or misbehaving AS that returns Bearer for a
+  // DPoP-bound request.
+  if (useDPoP) {
+    const tokenType = typeof json.token_type === "string" ? json.token_type : "";
+    if (tokenType.toLowerCase() !== "dpop") {
+      throw new Error(
+        `RFC 9449 §5: expected token_type="DPoP", got ${JSON.stringify(json.token_type)}`,
+      );
+    }
+  }
   return json;
 }
 
