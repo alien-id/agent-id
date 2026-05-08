@@ -87,26 +87,25 @@ When `SSO_URL` is set, the script does **not** spawn `examples/dev-sso.mjs` and 
 
 ## L3 — real Alien SSO (manual gate)
 
-### Where the SSO is actually deployed (recorded 2026-05-08)
+### Confirming an SSO environment has the cutover
 
-There are **four** Alien SSO environments. Each is its own EC2 ASG behind its own ALB (`alien-alb-{env}`), backed by its own Postgres (`alien-shared-1-{env}` or `alien-sso-{env}`):
-
-| Env | URL | DPoP cutover | Backend |
-|---|---|---|---|
-| **prod** | `sso.alien-api.com` | ❌ not yet | ✅ healthy (2 instances) |
-| **staging** | `sso.staging.alien-api.com` | ✅ deployed | ✅ healthy (1 instance) |
-| **develop** | `sso.develop.alien-api.com` | ✅ deployed | ✅ healthy (1 instance) |
-| **testnt** | `sso.testnt.alien-api.com` | (unknown) | ⚠️ 502 — operator action needed |
-
-The cutover landed on develop+staging via launch-template `lt-099a17b58fb7fd1e4` v11 on 2026-05-06. Production rolls behind develop+staging by design (see `docs/DEPLOY-DPOP.md` "Order of operations") and will follow once App-side and verifier rollouts are validated.
-
-A clean way to confirm the discovery doc state for any environment:
+The four public Alien SSO environments are `sso.alien-api.com` (prod),
+`sso.staging.alien-api.com`, `sso.develop.alien-api.com`, and
+`sso.testnt.alien-api.com`. The DPoP cutover rolls out per environment;
+the discovery doc is the canonical signal:
 
 ```bash
 curl -s https://sso.<env>.alien-api.com/.well-known/openid-configuration \
   | jq '{ cnf_supported: (.claims_supported | index("cnf") != null),
           dpop_algs: .dpop_signing_alg_values_supported }'
 ```
+
+When `cnf_supported: true` and `dpop_algs: ["EdDSA"]`, that environment is
+ready for L3. Operator-internal deployment status (which AWS resources back
+each env, which envs are currently broken, etc.) lives in the platform's
+internal documentation, not this repo. The integration script handles a
+non-cutover SSO with a clear error before it tries to bind, so probing
+isn't strictly necessary — but it's a one-line sanity check.
 
 ### Running L3 against develop
 
@@ -147,10 +146,6 @@ SSO_URL=https://sso.alien-api.com \
 PROVIDER="$(cat skills/alien-agent-id/default-provider.txt)" \
   bash tests/integration/full-stack.sh
 ```
-
-### testnt (currently broken)
-
-`sso.testnt.alien-api.com` returns 502 — the active EC2 target is failing health checks while a previous one is mid-deregistration. This looks like an in-progress deploy that didn't stabilize. Until the operator either rolls forward or rolls back, treat testnt as offline. Do not waste cycles debugging the agent against it.
 
 ## Adding tests
 
