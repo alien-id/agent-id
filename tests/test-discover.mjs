@@ -535,6 +535,89 @@ describe("discoverServiceAuth()", () => {
     );
   });
 
+  it("accepts valid same-domain openapi URL", async () => {
+    stubFetch(async () =>
+      makeResponse({
+        body: JSON.stringify({
+          ...validDoc,
+          openapi: "https://service.example.com/api/openapi.json",
+        }),
+      }),
+    );
+    const result = await discoverServiceAuth("https://service.example.com");
+    assert.equal(result.openapi, "https://service.example.com/api/openapi.json");
+  });
+
+  it("accepts openapi URL on a subdomain of the same registrable domain", async () => {
+    stubFetch(async () =>
+      makeResponse({
+        body: JSON.stringify({
+          ...validDoc,
+          openapi: "https://docs.example.com/openapi.json",
+        }),
+      }),
+    );
+    const result = await discoverServiceAuth("https://service.example.com");
+    assert.equal(result.openapi, "https://docs.example.com/openapi.json");
+  });
+
+  it("omits openapi from result when not in doc", async () => {
+    stubFetch(async () => makeResponse({ body: JSON.stringify(validDoc) }));
+    const result = await discoverServiceAuth("https://service.example.com");
+    assert.equal("openapi" in result, false);
+  });
+
+  it("rejects cross-domain openapi", async () => {
+    stubFetch(async () =>
+      makeResponse({
+        body: JSON.stringify({ ...validDoc, openapi: "https://evil.com/openapi.json" }),
+      }),
+    );
+    await assert.rejects(
+      () => discoverServiceAuth("https://service.example.com"),
+      /different registrable domain/,
+    );
+  });
+
+  it("rejects http:// openapi", async () => {
+    stubFetch(async () =>
+      makeResponse({
+        body: JSON.stringify({
+          ...validDoc,
+          openapi: "http://service.example.com/openapi.json",
+        }),
+      }),
+    );
+    await assert.rejects(
+      () => discoverServiceAuth("https://service.example.com"),
+      /must use https/,
+    );
+  });
+
+  it("rejects openapi pointing at localhost", async () => {
+    stubFetch(async () =>
+      makeResponse({
+        body: JSON.stringify({ ...validDoc, openapi: "https://localhost/openapi.json" }),
+      }),
+    );
+    await assert.rejects(
+      () => discoverServiceAuth("https://service.example.com"),
+      /localhost/,
+    );
+  });
+
+  it("rejects openapi pointing at a bare IP", async () => {
+    stubFetch(async () =>
+      makeResponse({
+        body: JSON.stringify({ ...validDoc, openapi: "https://203.0.113.5/openapi.json" }),
+      }),
+    );
+    await assert.rejects(
+      () => discoverServiceAuth("https://service.example.com"),
+      /not an IP address/,
+    );
+  });
+
   it("ignores extra endpoint fields not in whitelist", async () => {
     stubFetch(async () =>
       makeResponse({

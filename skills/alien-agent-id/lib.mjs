@@ -735,10 +735,19 @@ export async function discoverServiceAuth(serviceUrl) {
   }
 
   const originDomain = registrableDomain(origin.hostname.toLowerCase());
-  for (const [label, parsed] of [
+  const sameDomainFields = [
     ["auth_endpoint", authEndpoint],
     ["api_base_url", apiBaseUrl],
-  ]) {
+  ];
+
+  let openapi;
+  if (doc.openapi !== undefined) {
+    const parsed = assertSafeHttpsUrl(doc.openapi, "openapi");
+    sameDomainFields.push(["openapi", parsed]);
+    openapi = parsed.toString();
+  }
+
+  for (const [label, parsed] of sameDomainFields) {
     const fieldDomain = registrableDomain(parsed.hostname.toLowerCase());
     if (fieldDomain !== originDomain) {
       throw new Error(
@@ -754,6 +763,7 @@ export async function discoverServiceAuth(serviceUrl) {
     authEndpoint: authEndpoint.toString(),
     headerName,
     apiBaseUrl: apiBaseUrl.toString(),
+    ...(openapi !== undefined ? { openapi } : {}),
     ...(endpoints !== undefined ? { endpoints } : {}),
   };
 }
