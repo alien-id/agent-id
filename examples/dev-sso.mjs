@@ -218,6 +218,31 @@ function verifyDPoPProof({ proof, htm, htu, accessToken: at }) {
 }
 
 // Sign an RS256 JWT with the dev RSA key. Used for id_token issuance.
+//
+// id_token verifier contract this dev-sso satisfies — forward-compat with the
+// hardened verifier landing in agent-id Wave 1 PR-A11 (RFC 7515/7518/7519/8725
+// + OIDC §3.1.3.7 + RFC 9449 §6.1):
+//
+//   header: { alg: "RS256" | "EdDSA", typ: "JWT", kid }
+//     · alg in {RS256, EdDSA}            (RFC 7515 §10.7 allowlist)
+//     · crit absent or empty             (RFC 7515 §4.1.11)
+//     · typ === "JWT"                    (RFC 8725 §3.11 typ-confusion guard)
+//
+//   payload: { iss, sub, aud, iat, exp, cnf: { jkt }, [nbf], [nonce] }
+//     · iss equals discovery.issuer      (RFC 7519 §4.1.1)
+//     · aud equals providerAddress       (single-value; multi-aud requires azp)
+//     · iat present, NumericDate         (RFC 7519 §4.1.6)
+//     · exp present, in the future       (RFC 7519 §4.1.4)
+//     · nbf OPTIONAL; if present must be in the past (RFC 7519 §4.1.5)
+//     · cnf.jkt MUST equal jwkThumbprint(agent_jwk) when caller supplies key
+//                                        (RFC 9449 §6.1 + RFC 7800)
+//     · nonce checked only when caller passes expectedNonce (OIDC §3.1.3.7)
+//
+//   ssoBaseUrl scheme: https:// in production, http:// permitted only on
+//                      loopback (localhost / 127.0.0.1) (RFC 6749 §10 carve-out).
+//
+// If a future verifier change adds a required claim, surface it here first
+// before flipping behavior server-side.
 function signRs256Jwt(payload) {
   const header = { alg: "RS256", typ: "JWT", kid: rsaKid };
   const headerB = b64url(JSON.stringify(header));
