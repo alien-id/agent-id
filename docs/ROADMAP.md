@@ -21,6 +21,21 @@ attributes that need cryptographic sender-binding to be trustworthy.
 
 ---
 
+## Resolved decisions
+
+Decisions made by the tech lead that bind the implementation. Update this log
+as more land; refer to it from PR descriptions and ADRs.
+
+| # | Decision | Resolution | Date |
+|---|---|---|---|
+| 5 | Selective-disclosure wire format (Phase D) | **SD-JWT-VC** ([draft-ietf-oauth-sd-jwt-vc](https://datatracker.ietf.org/doc/draft-ietf-oauth-sd-jwt-vc/)). Phase C MUST design claim names and structures that SD-JWT-VC can selectively disclose. Holder binding will reuse the Phase A `cnf.jkt` thumbprint — they compose without rework. | 2026-05-08 |
+
+Decisions still open: 1 (scope policy), 2 (scope namespacing), 3 (trust chain),
+4 (claim freshness), 6 (manifest versioning). See "Decisions for the tech
+lead" at the bottom.
+
+---
+
 ## Phase B — Scopes & consent surface
 
 **Goal:** services declare what permissions they need; agents request them;
@@ -157,18 +172,14 @@ containing **every claim the agent has been granted**. Calling Service A
 with `requiredClaims: [age.band]` leaks `geo.country` and `identity.*` too.
 For sensitive attributes this is unacceptable.
 
-### Design space
+### Format: SD-JWT-VC (resolved 2026-05-08)
 
-| Approach | Pro | Con |
-|---|---|---|
-| **Per-service token re-minting** | Simple; no new crypto | Online dependency on SSO for every service call. Defeats the offline-verification property of the AgentID token. |
-| **SD-JWT-VC** ([draft-ietf-oauth-sd-jwt-vc](https://datatracker.ietf.org/doc/draft-ietf-oauth-sd-jwt-vc/)) | Standardized; growing tooling; agent stays offline | Requires SHA-256 disclosure-digest plumbing in token mint + verifier. Not a small lift but well-trodden. |
-| **BBS+ signatures** | Strongest privacy (zero-knowledge proofs of claim values, not just selective reveal) | Bleeding-edge; libraries less mature; verifier complexity ↑ a lot. |
-| **mdoc / ISO 18013-5** | Aligned with mDL ecosystem; CBOR not JSON | Different wire format; dual codepaths in verifier. |
-
-Recommend **SD-JWT-VC**. It's the OIDC + SD-JWT direction the IETF is moving;
-it composes cleanly with our existing JWT/JWKS plumbing; the verifier package
-gains a `presentation: ["age.band"]` API and the rest stays JSON.
+| Approach | Status |
+|---|---|
+| **SD-JWT-VC** ([draft-ietf-oauth-sd-jwt-vc](https://datatracker.ietf.org/doc/draft-ietf-oauth-sd-jwt-vc/)) | ✓ **Chosen.** Standardized direction; composes cleanly with existing JWT/JWKS plumbing; verifier package gains a `presentation: [...]` API and the rest stays JSON. Holder binding via Phase A's `cnf.jkt` is the right primitive (RFC 7800 + SD-JWT-VC compose without rework). |
+| Per-service token re-minting | Rejected — online dependency on SSO for every service call defeats the offline-verification property of the AgentID token. |
+| BBS+ signatures | Rejected — bleeding-edge; libraries less mature; verifier complexity ↑ a lot. Reconsider only if a future regulatory regime mandates zero-knowledge claim proofs. |
+| mdoc / ISO 18013-5 | Rejected — CBOR wire format would force dual codepaths in the verifier. Possible bridge later if mDL ecosystem interop is requested. |
 
 ### Scope of change
 
@@ -205,10 +216,13 @@ gains a `presentation: ["age.band"]` API and the rest stays JSON.
 - Phase D is **independent of the App** — selective disclosure happens at
   the agent ↔ service layer. The App still consents on the full scope set;
   the agent decides per-call which claims to present.
-- Phase D's wire choice (SD-JWT-VC vs. alternatives) should be made before
-  Phase C ships, even if Phase D itself ships later. Choosing SD-JWT-VC
-  early lets Phase C use claim names + structures that SD-JWT-VC will
-  later happily disclose.
+- **Phase C MUST design SD-JWT-VC-compatible claim shapes from day one.**
+  Specifically: claims must be JSON-serializable, addressable by JSON Pointer
+  paths (so SD-JWT-VC's `_sd` digest list can target them), and grouped
+  under `vct`-typed envelopes (e.g. one `vct` for identity claims, one for
+  geo). Avoid claim shapes that depend on whole-token signature semantics
+  (e.g. computed claims, claims that reference other claims by index) —
+  those don't survive selective disclosure.
 
 ---
 
@@ -306,10 +320,12 @@ implementation. Worth resolving before starting Phase B:
    verifier complexity for years.
 4. **Claim freshness regimes per claim type** (Phase C #2). Affects manifest
    schema and verifier API.
-5. **SD-JWT-VC commitment timing** (Phase D §dependency edges). Affects
-   Phase C claim shapes.
+5. ~~**SD-JWT-VC commitment timing** (Phase D §dependency edges).~~
+   ✓ Resolved 2026-05-08 — see Resolved decisions log.
 6. **Manifest versioning strategy** (Cross-cutting §Manifest versioning).
    Affects every future schema change.
 
 Pick a forum (eng meeting, ADR, RFC) to resolve each. Each one ships better
-when the decision precedes the code.
+when the decision precedes the code. Move resolved items to the "Resolved
+decisions" log near the top so future readers see committed direction at
+first read.
