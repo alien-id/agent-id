@@ -6,6 +6,10 @@
   "bin": {
     "alien-agent-id": "./skills/alien-agent-id/cli.mjs"
   },
+  "scripts": {
+    "test": "node --test tests/test-*.mjs",
+    "test:integration": "bash tests/integration/full-stack.sh"
+  },
   "files": [
     "skills",
     "docs",
