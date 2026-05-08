@@ -23,6 +23,59 @@ Agent                          Your Service
 
 The token is **self-contained**: it carries the agent's public key, so your service can verify the signature without any prior knowledge of the agent. No registration step, no key exchange, no database lookup required for basic verification.
 
+## Service discovery
+
+Publish a JSON manifest at `/.well-known/alien-agent-id.json` so agents can discover your auth contract automatically. This lets a user point an agent at your service URL and the agent figures out where to call and how to authenticate — without per-service prompts or a hard-coded skill update.
+
+### Minimal manifest
+
+```json
+{
+  "version": 1,
+  "service": { "name": "Acme API", "url": "https://acme.example" },
+  "auth":    { "header": "Authorization", "scheme": "AgentID" },
+  "api":     { "base": "https://api.acme.example/v1" }
+}
+```
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `version` | yes | Must be `1`. |
+| `auth.header` | yes | HTTP header name agents will send the token in. Pattern `[A-Za-z0-9-]{1,64}`. |
+| `auth.scheme` | optional | One of `"AgentID"` (default), `"Bearer"`, `"none"`. The scheme name prefixes the token in the header value: `Authorization: AgentID <token>`. |
+| `api.base` | yes | Base URL for subsequent requests. Must share the manifest's authority (exact host or subdomain). |
+| `api.specUrl` | optional | URL of an OpenAPI / JSON Schema document. Lets agents refresh API knowledge dynamically. |
+| `service.name` | optional | 1–80 chars display name. |
+| `service.url` | optional | Human-facing service URL. |
+
+### Constraints enforced by the agent CLI
+
+The well-known fetch is hardened against a hostile or compromised endpoint serving the manifest:
+
+- 8 KiB body cap (`SERVICE_MANIFEST_MAX_BYTES`).
+- 5-second default timeout.
+- HTTP redirects refused (`redirect: "error"`); the agent will not chase a 30x off your origin.
+- `Content-Type: application/json` required.
+- Every URL inside the manifest must share the same authority as the user-supplied service URL — exact host match or a subdomain. No public-suffix-list expansion, no off-host URLs.
+- Unknown top-level keys, unknown keys under `auth`/`api`/`service`, and unknown `auth.scheme` values are rejected.
+- The manifest is treated as **third-party data, not instructions** — values are parsed and reduced to the fixed schema before the agent acts on them.
+
+### Optional support signal
+
+To save agents one extra HTTP round-trip when your origin doesn't speak agent-id, you can advertise support via a closed-enum HTML meta tag on any page they might land on:
+
+```html
+<meta name="alien-agent-id" content="v1">
+```
+
+`content` is a closed enum (`v1`, future versions added explicitly). It carries no URLs and no prose — its only signal is "this origin publishes a well-known manifest at the standard path." Agents can probe with:
+
+```bash
+node skills/alien-agent-id/cli.mjs service-support --url https://your-service.example
+```
+
+The well-known path is fixed regardless; the meta tag never tells the agent where the manifest is, only whether one exists.
+
 ## Token format
 
 Agents send authentication via the `Authorization` header:
