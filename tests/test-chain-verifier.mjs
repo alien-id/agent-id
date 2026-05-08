@@ -386,3 +386,95 @@ describe("verifyProofChain", () => {
     );
   });
 });
+
+// RFC 8725 §3.8 / OIDC Core 1.0 §3.1.3.7 step 2 — the chain pins id_token
+// signature verification to `binding.payload.issuer`, the issuer the agent
+// recorded at bind time. The bundle's redundant `proof.ssoBaseUrl` field
+// (when present) MUST agree with that; the verifier inside also requires
+// `id_token.iss == discovery.issuer`. Together these prevent a malicious
+// proof bundle from steering verification at an attacker-controlled
+// discovery endpoint.
+describe("verifyProofChain — issuer pinning (HIGH)", () => {
+  let mock = null;
+  let rsa = null;
+
+  beforeEach(async () => {
+    rsa = generateRsaKeyPair();
+    mock = await startSsoMock({ jwk: rsa.publicKeyJwk });
+  });
+
+  afterEach(() => {
+    if (mock) {
+      mock.server.close();
+      mock = null;
+    }
+  });
+
+  it("rejects when proof.ssoBaseUrl disagrees with ownerBinding.payload.issuer", async () => {
+    const { proof } = buildValidChain({ rsa, ssoBaseUrl: mock.baseUrl });
+    proof.ssoBaseUrl = "https://attacker.example";
+    await assert.rejects(
+      () => verifyProofChain(proof),
+      /proof\.ssoBaseUrl.*does not match ownerBinding\.payload\.issuer/,
+    );
+  });
+
+  it("rejects when ownerBinding.payload.issuer is missing", async () => {
+    const knownAgent = generateEd25519PemPair();
+    const { proof } = buildValidChain({
+      rsa,
+      ssoBaseUrl: mock.baseUrl,
+      agentOverride: knownAgent,
+    });
+    delete proof.ownerBinding.payload.issuer;
+    const c = canonicalJSONString(proof.ownerBinding.payload);
+    proof.ownerBinding.payloadHash = sha256HexCanonical(c);
+    proof.ownerBinding.signature = signEd25519Base64Url(c, knownAgent.privateKeyPem);
+    await assert.rejects(
+      () => verifyProofChain(proof),
+      /ownerBinding\.payload\.issuer missing/,
+    );
+  });
+
+  it("verifies id_token signature against binding.payload.issuer (not proof.ssoBaseUrl)", async () => {
+    // Build a chain where binding.payload.issuer == mock.baseUrl (truth)
+    // but proof.ssoBaseUrl is omitted entirely. Verification still succeeds
+    // because the chain pins to the binding-recorded issuer.
+    const { proof, agent, cnfJkt } = buildValidChain({ rsa, ssoBaseUrl: mock.baseUrl });
+    delete proof.ssoBaseUrl;
+    const result = await verifyProofChain(proof);
+    assert.equal(result.agentPublicKeyPem, agent.publicKeyPem);
+    assert.equal(result.jkt, cnfJkt);
+  });
+
+  it("rejects id_token whose iss claim disagrees with discovery.issuer (verifyIdTokenSignatureOnly)", async () => {
+    // Mint an id_token whose iss claim points at an attacker host but the
+    // signature is from the legitimate SSO. The chain pins to the binding's
+    // issuer (mock), discovery returns mock as issuer, but the token's iss
+    // is wrong. The verifier rejects.
+    const knownAgent = generateEd25519PemPair();
+    const cnfJkt = jwkThumbprint(ed25519PublicKeyToJwk(knownAgent.publicKeyPem));
+    const idToken = makeRs256IdToken({
+      privateKey: rsa.privateKey,
+      kid: rsa.publicKeyJwk.kid,
+      payload: {
+        iss: "https://attacker.example",
+        sub: "0xowner-sub",
+        aud: "0xprovider",
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        cnf: { jkt: cnfJkt },
+      },
+    });
+    const { proof } = buildValidChain({ rsa, ssoBaseUrl: mock.baseUrl, agentOverride: knownAgent });
+    proof.idToken = Buffer.from(idToken).toString("base64url");
+    proof.ownerBinding.payload.idTokenHash = sha256Hex(idToken);
+    const c = canonicalJSONString(proof.ownerBinding.payload);
+    proof.ownerBinding.payloadHash = sha256HexCanonical(c);
+    proof.ownerBinding.signature = signEd25519Base64Url(c, knownAgent.privateKeyPem);
+    await assert.rejects(
+      () => verifyProofChain(proof),
+      /id_token issuer mismatch/,
+    );
+  });
+});

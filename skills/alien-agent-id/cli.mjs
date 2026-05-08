@@ -31,6 +31,7 @@ import {
   verifyState,
   verifyProofChain,
   ChainError,
+  AuthRevokedError,
   SignatureEngine,
   ed25519PemToSshPublicKey,
   ed25519PemToOpenSSHPrivateKey,
@@ -174,11 +175,17 @@ async function cmdAuth(flags) {
     }
   }
 
-  // Persist pending auth state (includes PKCE code_verifier)
+  // Persist pending auth state. Includes the PKCE code_verifier (RFC 7636),
+  // the OAuth `state` (RFC 6749 §10.12), and the OIDC `nonce` (OIDC Core
+  // §3.1.3.7) so cmdBind can correlate the polled response and verify the
+  // id_token against the value originally sent on the authorize URL.
   const paths = statePaths(stateDir);
   await writeJsonFile(paths.pendingAuth, {
     pollingCode: auth.pollingCode,
     codeVerifier: auth.codeVerifier,
+    state: auth.state,
+    nonce: auth.nonce,
+    issuer: auth.issuer,
     deepLink: auth.deepLink,
     expiredAt: auth.expiredAt,
     providerAddress,
@@ -221,11 +228,14 @@ async function cmdBind(flags) {
     return;
   }
 
-  // Poll for authorization
+  // Poll for authorization. Pass the previously-recorded state so the AS's
+  // echoed value (when present) is checked per RFC 6749 §10.12.
   stderr(`Polling for authorization (timeout ${timeoutSec}s)...`);
   const poll = await pollForAuthorizationCode({
     ssoBaseUrl: pending.ssoBaseUrl,
     pollingCode: pending.pollingCode,
+    expectedState: pending.state || null,
+    expectedIssuer: pending.issuer || null,
     pollIntervalMs,
     timeoutSec,
   });
@@ -245,14 +255,18 @@ async function cmdBind(flags) {
     authorizationCode: poll.authorizationCode,
     codeVerifier: pending.codeVerifier,
     agentPrivateKeyPem: dpopKey.privateKeyPem,
-    agentPublicKeyPem: dpopKey.publicKeyPem,
   });
 
-  // Verify id_token
+  // Verify id_token. Pass the agent public key so verifyIdToken enforces
+  // RFC 9449 §6.1 cnf.jkt binding at bind time, not only at chain verify.
+  // Pass the originally-sent nonce so OIDC §3.1.3.7 step 11 is enforced
+  // (replay protection for the authorization-code flow).
   const id = await verifyIdToken({
     ssoBaseUrl: pending.ssoBaseUrl,
     providerAddress: pending.providerAddress,
     idToken: tokens.id_token,
+    agentPublicKeyPem: dpopKey.publicKeyPem,
+    expectedNonce: pending.nonce || undefined,
   });
   stderr(`Verified id_token: sub=${id.payload.sub}`);
 
@@ -848,7 +862,11 @@ async function resolveProviderAddress(flags) {
     const txt = await fs.readFile(path.join(scriptDir, "default-provider.txt"), "utf8");
     const trimmed = txt.trim();
     if (trimmed) return trimmed;
-  } catch {}
+  } catch (err) {
+    // ENOENT is the expected case (no default-provider.txt). Other errors
+    // (EACCES, EIO, …) indicate something the user should know about.
+    if (err && err.code !== "ENOENT") throw err;
+  }
   return null;
 }
 
@@ -1187,14 +1205,13 @@ async function cmdRefresh(flags) {
       providerAddress: session.providerAddress,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("401") || msg.includes("403") || msg.includes("invalid_grant")) {
+    if (err instanceof AuthRevokedError) {
       outputError(
-        `Session refresh failed (authorization may have been revoked): ${msg}. Run \`bootstrap\` to re-authenticate.`,
+        `Session refresh failed (authorization revoked: ${err.errorCode || "HTTP " + err.status}): ${err.message}. Run \`bootstrap\` to re-authenticate.`,
       );
-    } else {
-      throw err;
+      return;
     }
+    throw err;
   }
 }
 
