@@ -28,6 +28,8 @@ import {
   signEd25519Base64Url,
   canonicalJSONString,
   sha256Hex,
+  ed25519PublicKeyToJwk,
+  jwkThumbprint,
 } from "../skills/alien-agent-id/lib.mjs";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────
@@ -147,6 +149,56 @@ function createMockSsoServer(handler) {
       resolve({ server, baseUrl: `http://127.0.0.1:${port}` });
     });
   });
+}
+
+// SSO mock that ALSO serves /.well-known/openid-configuration and /jwks so
+// that refresh-time `verifyIdToken` calls can re-validate a rotated id_token
+// (RFC 9449 §6.1: rotated tokens remain DPoP-bound; verifying the new
+// id_token catches a compromised/buggy AS that rotates sub or cnf.jkt).
+function generateRsaSsoSigner() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return {
+    privateKey,
+    publicKeyJwk: {
+      ...publicKey.export({ format: "jwk" }),
+      use: "sig",
+      alg: "RS256",
+      kid: "test-sso-kid",
+    },
+  };
+}
+
+function makeRs256IdToken({ privateKey, kid, payload }) {
+  const header = { alg: "RS256", typ: "JWT", kid };
+  const headerB64 = b64url(JSON.stringify(header));
+  const payloadB64 = b64url(JSON.stringify(payload));
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const sig = crypto.sign("RSA-SHA256", Buffer.from(signingInput), privateKey);
+  return `${signingInput}.${b64url(sig)}`;
+}
+
+// Wraps createMockSsoServer with discovery + JWKS endpoints; the caller
+// supplies a /oauth/token handler.
+async function createRsaSsoMock({ rsa, tokenHandler }) {
+  const mock = await createMockSsoServer((req, res, body) => {
+    if (req.url === "/.well-known/openid-configuration") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          issuer: mock.baseUrl,
+          jwks_uri: `${mock.baseUrl}/jwks`,
+        }),
+      );
+      return;
+    }
+    if (req.url === "/jwks") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ keys: [rsa.publicKeyJwk] }));
+      return;
+    }
+    tokenHandler(req, res, body);
+  });
+  return mock;
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────────
@@ -385,32 +437,187 @@ describe("SignatureEngine.ensureValidSession()", () => {
   });
 
   it("updates id_token when refresh returns one", async () => {
-    const newIdToken = makeFreshJwt({ sub: "test-owner-sub", fresh: true });
-
-    const mock = await createMockSsoServer((req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          access_token: makeFreshJwt(),
-          token_type: "DPoP",
-          id_token: newIdToken,
-        }),
-      );
+    // After RFC 9449 §6.1 hardening, a rotated id_token MUST be re-verified
+    // before persistence. Use a real RS256-signed token with matching iss/aud
+    // and a cnf.jkt bound to the test agent key.
+    const rsa = generateRsaSsoSigner();
+    const stateInit = await writeTestState(stateDir, {
+      accessToken: makeExpiredJwt(),
+      refreshToken: "rt",
+      ssoBaseUrl: "placeholder", // overwritten below
+      providerAddress: "test-provider",
     });
+    const agentJkt = jwkThumbprint(ed25519PublicKeyToJwk(stateInit.pair.publicKeyPem));
+
+    let mock;
+    const mintIdToken = (overrides = {}) => {
+      const now = Math.floor(Date.now() / 1000);
+      return makeRs256IdToken({
+        privateKey: rsa.privateKey,
+        kid: rsa.publicKeyJwk.kid,
+        payload: {
+          iss: mock.baseUrl,
+          sub: "test-owner-sub",
+          aud: "test-provider",
+          iat: now,
+          exp: now + 3600,
+          cnf: { jkt: agentJkt },
+          ...overrides,
+        },
+      });
+    };
+
+    let newIdToken;
+    mock = await createRsaSsoMock({
+      rsa,
+      tokenHandler: (req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: makeFreshJwt(),
+            token_type: "DPoP",
+            id_token: newIdToken,
+          }),
+        );
+      },
+    });
+    newIdToken = mintIdToken({ fresh: true });
+
+    // Re-point the persisted session at the just-bound mock URL.
+    const sessionFile = stateInit.paths.ownerSession;
+    const sessionData = await readJsonFile(sessionFile, null);
+    sessionData.ssoBaseUrl = mock.baseUrl;
+    sessionData.issuer = mock.baseUrl;
+    await writeJsonFile(sessionFile, sessionData);
 
     try {
-      await writeTestState(stateDir, {
-        accessToken: makeExpiredJwt(),
-        refreshToken: "rt",
-        ssoBaseUrl: mock.baseUrl,
-        providerAddress: "test-provider",
-      });
-
       const engine = new SignatureEngine({ baseDir: stateDir });
       await engine.init();
 
       const session = await engine.ensureValidSession();
       assert.equal(session.idToken, newIdToken);
+    } finally {
+      mock.server.close();
+      await cleanupDir(stateDir);
+    }
+  });
+
+  it("rejects refresh whose id_token has mismatched sub (RFC 9449 §6.1)", async () => {
+    const rsa = generateRsaSsoSigner();
+    const stateInit = await writeTestState(stateDir, {
+      accessToken: makeExpiredJwt(),
+      refreshToken: "rt",
+      ssoBaseUrl: "placeholder",
+      providerAddress: "test-provider",
+    });
+    const agentJkt = jwkThumbprint(ed25519PublicKeyToJwk(stateInit.pair.publicKeyPem));
+
+    let mock;
+    let attackerIdToken;
+    mock = await createRsaSsoMock({
+      rsa,
+      tokenHandler: (req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: makeFreshJwt({ sub: "test-owner-sub" }),
+            token_type: "DPoP",
+            id_token: attackerIdToken,
+          }),
+        );
+      },
+    });
+    const now = Math.floor(Date.now() / 1000);
+    attackerIdToken = makeRs256IdToken({
+      privateKey: rsa.privateKey,
+      kid: rsa.publicKeyJwk.kid,
+      payload: {
+        iss: mock.baseUrl,
+        sub: "attacker-sub", // <-- different owner
+        aud: "test-provider",
+        iat: now,
+        exp: now + 3600,
+        cnf: { jkt: agentJkt },
+      },
+    });
+
+    const sessionFile = stateInit.paths.ownerSession;
+    const sessionData = await readJsonFile(sessionFile, null);
+    sessionData.ssoBaseUrl = mock.baseUrl;
+    sessionData.issuer = mock.baseUrl;
+    await writeJsonFile(sessionFile, sessionData);
+
+    try {
+      const engine = new SignatureEngine({ baseDir: stateDir });
+      await engine.init();
+      await assert.rejects(
+        () => engine.ensureValidSession(),
+        /id_token sub|owner.*mismatch/i,
+      );
+
+      // The on-disk session must NOT have been updated.
+      const onDisk = await readJsonFile(sessionFile, null);
+      assert.equal(onDisk.idToken, "fake-id-token", "stale id_token kept on disk after rejection");
+    } finally {
+      mock.server.close();
+      await cleanupDir(stateDir);
+    }
+  });
+
+  it("rejects refresh whose id_token has mismatched cnf.jkt (RFC 9449 §6.1)", async () => {
+    const rsa = generateRsaSsoSigner();
+    const stateInit = await writeTestState(stateDir, {
+      accessToken: makeExpiredJwt(),
+      refreshToken: "rt",
+      ssoBaseUrl: "placeholder",
+      providerAddress: "test-provider",
+    });
+    // Compute a wrong jkt — different agent keypair.
+    const otherAgent = generateEd25519PemPair();
+    const wrongJkt = jwkThumbprint(ed25519PublicKeyToJwk(otherAgent.publicKeyPem));
+
+    let mock;
+    let badJktIdToken;
+    mock = await createRsaSsoMock({
+      rsa,
+      tokenHandler: (req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: makeFreshJwt({ sub: "test-owner-sub" }),
+            token_type: "DPoP",
+            id_token: badJktIdToken,
+          }),
+        );
+      },
+    });
+    const now = Math.floor(Date.now() / 1000);
+    badJktIdToken = makeRs256IdToken({
+      privateKey: rsa.privateKey,
+      kid: rsa.publicKeyJwk.kid,
+      payload: {
+        iss: mock.baseUrl,
+        sub: "test-owner-sub",
+        aud: "test-provider",
+        iat: now,
+        exp: now + 3600,
+        cnf: { jkt: wrongJkt }, // <-- bound to a different agent
+      },
+    });
+
+    const sessionFile = stateInit.paths.ownerSession;
+    const sessionData = await readJsonFile(sessionFile, null);
+    sessionData.ssoBaseUrl = mock.baseUrl;
+    sessionData.issuer = mock.baseUrl;
+    await writeJsonFile(sessionFile, sessionData);
+
+    try {
+      const engine = new SignatureEngine({ baseDir: stateDir });
+      await engine.init();
+      await assert.rejects(
+        () => engine.ensureValidSession(),
+        /cnf\.jkt|jkt mismatch/i,
+      );
     } finally {
       mock.server.close();
       await cleanupDir(stateDir);

@@ -54,6 +54,15 @@ export function sha256HexCanonical(value) {
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
+// RFC 9110 §5.6.2 token = 1*tchar; tchar = "!" / "#" / "$" / "%" / "&" / "'"
+// / "*" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA.
+const HTTP_TOKEN_REGEX = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+// RFC 4648 §5 / RFC 7515 §2: base64url has the alphabet [A-Za-z0-9_-]; JOSE
+// strips trailing '=' padding. Reject any character outside the canonical
+// alphabet (in particular whitespace, '+', '/', '=') so RFC 7519 §7.2 holds.
+const BASE64URL_REGEX = /^[A-Za-z0-9_-]*$/;
+
 export function b64url(input) {
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(input);
   return buf
@@ -64,9 +73,24 @@ export function b64url(input) {
 }
 
 export function fromB64url(value) {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const pad = normalized.length % 4;
-  const padded = pad === 0 ? normalized : normalized + "=".repeat(4 - pad);
+  if (typeof value !== "string") {
+    throw new Error("fromB64url: input must be a string");
+  }
+  // RFC 7515 §2 / RFC 7519 §7.2: the JOSE encoding is strict base64url with
+  // no padding. Whitespace, '+'/'/' (standard base64), and '=' (padding) are
+  // not part of the canonical alphabet and must cause the JWS to be
+  // considered invalid — Node's Buffer.from(*, "base64") would silently
+  // tolerate them.
+  if (!BASE64URL_REGEX.test(value)) {
+    throw new Error("fromB64url: input contains characters outside RFC 4648 §5 base64url alphabet");
+  }
+  const pad = value.length % 4;
+  // RFC 4648 §5: a 4-char group decodes to 3 bytes; a residue of length 1
+  // is never produced by canonical encoding and indicates corruption.
+  if (pad === 1) {
+    throw new Error("fromB64url: invalid base64url length");
+  }
+  const padded = pad === 0 ? value : value + "=".repeat(4 - pad);
   return Buffer.from(padded, "base64");
 }
 
@@ -182,6 +206,15 @@ export function createDPoPProof(params) {
   if (typeof htm !== "string" || !htm) {
     throw new Error("createDPoPProof: htm is required");
   }
+  // RFC 9110 §5.6.2 / §9.1: an HTTP method is a `token` (1*tchar). RFC 9449
+  // §4.2 carries the literal method text in `htm`, and §4.3 verifies it
+  // against the request method by exact (case-sensitive) string compare —
+  // standard methods are uppercase, but registered extension methods (e.g.
+  // WebDAV `PROPFIND`) and arbitrary tokens are case-sensitive. Validate
+  // shape and preserve case so the proof matches the wire request.
+  if (!HTTP_TOKEN_REGEX.test(htm)) {
+    throw new Error(`createDPoPProof: htm must be an RFC 9110 token, got ${JSON.stringify(htm)}`);
+  }
   if (typeof htu !== "string" || !htu) {
     throw new Error("createDPoPProof: htu is required");
   }
@@ -197,6 +230,9 @@ export function createDPoPProof(params) {
   const header = { typ: "dpop+jwt", alg: "EdDSA", jwk };
   const payload = {
     jti: typeof params.jti === "string" && params.jti ? params.jti : randomUUID(),
+    // RFC 9449 §4.2 / §4.3: htm is the literal method, compared bytewise
+    // against the request method. Preserve the caller's case so extension
+    // method tokens round-trip exactly as sent on the wire.
     htm,
     htu: cleanHtu,
     iat: typeof params.iat === "number" ? params.iat : Math.floor(Date.now() / 1000),
@@ -268,10 +304,28 @@ export function verifyEd25519HexMessage(message, signatureHex, publicKeyHex) {
   return verify(null, Buffer.from(message), publicKey, signature);
 }
 
+// RFC 7518 §3.3 / RFC 8725 §3.5: RS256 keys MUST be ≥ 2048 bits. The JWK
+// `n` parameter is the unsigned modulus encoded base64url with no leading
+// zero byte (RFC 7518 §6.3.1), so 256 bytes corresponds to exactly 2048
+// bits.
+const MIN_RSA_MODULUS_BYTES = 256;
+
 export function verifyJwtRs256Signature(params) {
   const { signingInput, signatureB64url, jwk } = params;
+  if (typeof jwk?.n !== "string" || fromB64url(jwk.n).length < MIN_RSA_MODULUS_BYTES) {
+    throw new Error("RS256 JWK modulus is shorter than RFC 7518 §3.3 minimum (2048 bits)");
+  }
   const publicKey = createPublicKey({ format: "jwk", key: jwk });
   return verify("RSA-SHA256", Buffer.from(signingInput), publicKey, fromB64url(signatureB64url));
+}
+
+// RFC 8037 §2 + RFC 7515 §10.7: verify an EdDSA (Ed25519) JWS signature
+// against an OKP JWK. Mirrors verifyJwtRs256Signature so the verifier can
+// dispatch by `alg` against a JWKS that publishes both keys.
+export function verifyJwtEdDsaSignature(params) {
+  const { signingInput, signatureB64url, jwk } = params;
+  const publicKey = createPublicKey({ format: "jwk", key: jwk });
+  return verify(null, Buffer.from(signingInput), publicKey, fromB64url(signatureB64url));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -464,8 +518,31 @@ function parseOwnerProof(raw) {
   };
 }
 
+// All current callers pass an SSO base URL — chokepoint for the RFC 6749 §10
+// TLS guard so every flow (authorize, token, refresh, userinfo, discovery,
+// id_token verification) inherits it.
 function withNoTrailingSlash(value) {
+  assertSsoBaseUrlSafe(value);
   return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+// RFC 6749 §10: bearer credentials and refresh tokens MUST be transmitted
+// over TLS. Allow plain http:// only for loopback hosts (development).
+function assertSsoBaseUrlSafe(ssoBaseUrl) {
+  if (typeof ssoBaseUrl !== "string" || !ssoBaseUrl) {
+    throw new Error("ssoBaseUrl is required");
+  }
+  let url;
+  try {
+    url = new URL(ssoBaseUrl);
+  } catch {
+    throw new Error(`ssoBaseUrl is not a valid URL: ${ssoBaseUrl}`);
+  }
+  if (url.protocol === "https:") return;
+  if (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]")) {
+    return;
+  }
+  throw new Error(`ssoBaseUrl must use https:// (got ${url.protocol}//${url.host})`);
 }
 
 async function readJsonResponse(res) {
@@ -492,8 +569,16 @@ async function fetchJson(url, init) {
 }
 
 function parseJwt(token) {
+  if (typeof token !== "string" || !token) {
+    throw new Error("Invalid JWT format");
+  }
+  // RFC 7519 §7.2 step 1: the JWS Compact Serialization is exactly three
+  // base64url segments separated by '.'. fromB64url enforces the strict
+  // alphabet on each segment, which catches embedded whitespace, padding,
+  // and standard-base64 alphabet leakage. The split-length check + each
+  // segment non-empty is the structural complement.
   const parts = token.split(".");
-  if (parts.length !== 3) {
+  if (parts.length !== 3 || parts.some((p) => p.length === 0)) {
     throw new Error("Invalid JWT format");
   }
   const [headerPart, payloadPart, sigPart] = parts;
@@ -502,6 +587,9 @@ function parseJwt(token) {
     throw new Error("Unsigned JWTs (alg: none) are not accepted");
   }
   const payload = JSON.parse(fromB64url(payloadPart).toString("utf8"));
+  // Pre-decode the signature segment to surface RFC 7515 §2 violations at
+  // parse time rather than at signature-verify time.
+  fromB64url(sigPart);
   return {
     token,
     parts,
@@ -520,7 +608,23 @@ export function generatePkcePair() {
 
 export async function beginOidcAuthorization(params) {
   const base = withNoTrailingSlash(params.ssoBaseUrl);
+  // RFC 9207 §2.4 requires comparing any AS-supplied `iss` on the
+  // authorization response against the AS's discovered issuer to defeat
+  // mix-up attacks. Discover once here and propagate to the poll step.
+  const discovery = await fetchOidcDiscovery(base);
+  const expectedIssuer = discovery.issuer;
+  if (typeof expectedIssuer !== "string" || !expectedIssuer) {
+    throw new Error("Discovery response missing issuer");
+  }
   const pkce = generatePkcePair();
+
+  // RFC 6749 §4.1.1 / §10.12: `state` is an opaque value that lets the
+  // client correlate the authorization response with the request and
+  // mitigate cross-site request forgery. OIDC Core §3.1.3.7: `nonce` is
+  // bound into the id_token and verified on receipt to mitigate replay.
+  // 256 bits of CSPRNG entropy is the standard choice for both.
+  const state = b64url(randomBytes(32));
+  const nonce = b64url(randomBytes(32));
 
   const url = new URL(`${base}/oauth/authorize`);
   url.searchParams.set("response_type", "code");
@@ -529,6 +633,8 @@ export async function beginOidcAuthorization(params) {
   url.searchParams.set("scope", "openid");
   url.searchParams.set("code_challenge", pkce.codeChallenge);
   url.searchParams.set("code_challenge_method", pkce.codeChallengeMethod);
+  url.searchParams.set("state", state);
+  url.searchParams.set("nonce", nonce);
 
   // RFC 9449 §10: dpop_jkt advertises the public key the client will use to
   // bind tokens via DPoP. Equal to the RFC 7638 thumbprint of the agent JWK.
@@ -553,11 +659,30 @@ export async function beginOidcAuthorization(params) {
     throw new Error("Authorize response missing deep_link/polling_code/expired_at");
   }
 
+  // RFC 6749 §10.12: when the AS echoes `state` (e.g., on the authorize
+  // response itself), require it to round-trip. Servers that don't yet
+  // surface the value here are tolerated (state is also re-checked on the
+  // poll response).
+  if (typeof out.state === "string" && out.state !== state) {
+    throw new Error("Authorize response state mismatch (RFC 6749 §10.12)");
+  }
+  // RFC 9207 §2.4: when the AS surfaces `iss` here, it MUST equal the
+  // discovered issuer. Tolerated when absent (legacy AS surfaces the
+  // value only on the poll response).
+  if (typeof out.iss === "string" && out.iss !== expectedIssuer) {
+    throw new Error(
+      `Authorize response issuer mismatch (RFC 9207 §2.4): expected ${expectedIssuer}, got ${out.iss}`,
+    );
+  }
+
   return {
     deepLink,
     pollingCode,
     expiredAt,
     codeVerifier: pkce.codeVerifier,
+    state,
+    nonce,
+    issuer: expectedIssuer,
   };
 }
 
@@ -565,6 +690,12 @@ export async function pollForAuthorizationCode(params) {
   const base = withNoTrailingSlash(params.ssoBaseUrl);
   const started = Date.now();
   const timeoutMs = params.timeoutSec * 1000;
+  const expectedState = typeof params.expectedState === "string" && params.expectedState
+    ? params.expectedState
+    : null;
+  const expectedIssuer = typeof params.expectedIssuer === "string" && params.expectedIssuer
+    ? params.expectedIssuer
+    : null;
 
   while (Date.now() - started < timeoutMs) {
     const out = await fetchJson(`${base}/oauth/poll`, {
@@ -577,6 +708,21 @@ export async function pollForAuthorizationCode(params) {
     if (status === "authorized") {
       if (!out.authorization_code) {
         throw new Error("Poll status authorized but authorization_code is missing");
+      }
+      // RFC 6749 §10.12: when the AS echoes `state` on the authorization
+      // response, the client MUST verify it equals the value sent. If the
+      // server does not echo `state` (legacy), skip — the polling design
+      // already binds the response to the polling_code we created.
+      if (expectedState && typeof out.state === "string" && out.state !== expectedState) {
+        throw new Error("Authorization response state mismatch (RFC 6749 §10.12)");
+      }
+      // RFC 9207 §2.4: when the AS surfaces `iss` on the authorization
+      // response, it MUST equal the AS's discovered issuer. Tolerated when
+      // absent for legacy AS that have not yet adopted RFC 9207.
+      if (expectedIssuer && typeof out.iss === "string" && out.iss !== expectedIssuer) {
+        throw new Error(
+          `Authorization response issuer mismatch (RFC 9207 §2.4): expected ${expectedIssuer}, got ${out.iss}`,
+        );
       }
       return {
         authorizationCode: out.authorization_code,
@@ -723,6 +869,19 @@ async function tokenEndpointPost(tokenUrl, body, agentPrivateKeyPem) {
   const { json, text } = await readJsonResponse(res);
   if (!res.ok) {
     const details = json && typeof json === "object" ? JSON.stringify(json) : text;
+    const errorCode = json && typeof json === "object" && typeof json.error === "string"
+      ? json.error
+      : null;
+    // RFC 6749 §5.2: invalid_grant signals revoked/expired/already-used
+    // credentials. 401/403 are the bearer-level rejection codes. Surface
+    // these distinctly so callers can prompt re-auth without substring
+    // matching on error.message.
+    if (res.status === 401 || res.status === 403 || errorCode === "invalid_grant") {
+      throw new AuthRevokedError(
+        `HTTP ${res.status} from ${tokenUrl}: ${details || "no body"}`,
+        { status: res.status, errorCode },
+      );
+    }
     throw new Error(`HTTP ${res.status} from ${tokenUrl}: ${details || "no body"}`);
   }
   if (!json || typeof json !== "object") {
@@ -876,10 +1035,35 @@ export async function fetchJwks(jwksUri) {
   return out;
 }
 
+// RFC 7515 §10.7: applications anchor on a curated alg allowlist. SSO
+// publishes RS256 today and may rotate to EdDSA (RFC 8037); accept either.
+const ID_TOKEN_ALG_KTY = { RS256: "RSA", EdDSA: "OKP" };
+
+// RFC 8725 §3.11 / OIDC Core §2: id_tokens are typed JWTs. Cross-JWT confusion
+// (an `at+jwt` access token or `dpop+jwt` proof reused as an id_token) is
+// blocked here. Missing/non-string `typ` is tolerated for legacy tokens that
+// preceded the §3.11 guidance. RFC 6838 §4.2 — media types compare
+// case-insensitively, so the comparison lowercases first.
+function assertIdTokenTyp(rawTyp) {
+  if (typeof rawTyp !== "string" || rawTyp.length === 0) return;
+  const typ = rawTyp.toLowerCase();
+  if (typ === "jwt" || typ === "application/jwt") return;
+  throw new Error(`Unsupported id_token typ: ${rawTyp}`);
+}
+
 export async function verifyIdToken(params) {
+  assertSsoBaseUrlSafe(params.ssoBaseUrl);
   const parsed = parseJwt(params.idToken);
-  if (parsed.header.alg !== "RS256") {
-    throw new Error(`Unsupported id_token alg: ${String(parsed.header.alg)}`);
+  // RFC 7515 §4.1.11 / RFC 7519 §7.2: any non-empty `crit` array names
+  // extensions the verifier MUST understand. We support none.
+  if (Array.isArray(parsed.header.crit) && parsed.header.crit.length > 0) {
+    throw new Error(`id_token contains unsupported crit extensions: ${parsed.header.crit.join(",")}`);
+  }
+  assertIdTokenTyp(parsed.header.typ);
+  const alg = parsed.header.alg;
+  const expectedKty = ID_TOKEN_ALG_KTY[alg];
+  if (!expectedKty) {
+    throw new Error(`Unsupported id_token alg: ${String(alg)}`);
   }
 
   const discovery = await fetchOidcDiscovery(params.ssoBaseUrl);
@@ -891,12 +1075,13 @@ export async function verifyIdToken(params) {
 
   const jwks = await fetchJwks(jwksUri);
   const kid = parsed.header.kid;
-  const key = jwks.keys.find((k) => k.kid === kid && k.kty === "RSA");
+  const key = jwks.keys.find((k) => k.kid === kid && k.kty === expectedKty);
   if (!key) {
-    throw new Error(`Unable to find RSA JWK for kid=${String(kid)}`);
+    throw new Error(`Unable to find ${expectedKty} JWK for kid=${String(kid)}`);
   }
 
-  const validSig = verifyJwtRs256Signature({
+  const verifier = alg === "RS256" ? verifyJwtRs256Signature : verifyJwtEdDsaSignature;
+  const validSig = verifier({
     signingInput: parsed.signingInput,
     signatureB64url: parsed.signatureB64url,
     jwk: key,
@@ -916,11 +1101,57 @@ export async function verifyIdToken(params) {
   if (!audOk) {
     throw new Error("id_token audience mismatch");
   }
+  // OIDC Core §3.1.3.7.6/.7: multi-aud id_token MUST carry azp == client_id;
+  // when azp is present at all, it MUST equal client_id.
+  const audIsMulti = Array.isArray(aud) && aud.length > 1;
+  if (audIsMulti && payload.azp === undefined) {
+    throw new Error("id_token has multiple audiences but no azp claim");
+  }
+  if (payload.azp !== undefined && payload.azp !== params.providerAddress) {
+    throw new Error(`id_token azp mismatch: expected ${params.providerAddress}, got ${String(payload.azp)}`);
+  }
+  // RFC 7519 §4.1.6: `iat` is OPTIONAL but, when present, MUST be a number
+  // (NumericDate). A non-numeric `iat` (string, object, …) is a malformed
+  // claim and the token MUST be rejected.
+  if ("iat" in payload && typeof payload.iat !== "number") {
+    throw new Error("id_token iat is not a NumericDate");
+  }
+  // RFC 7519 §4.1.5: when present, current time MUST be ≥ nbf. The claim
+  // itself MUST be a NumericDate when present.
+  if ("nbf" in payload && typeof payload.nbf !== "number") {
+    throw new Error("id_token nbf is not a NumericDate");
+  }
+  if (typeof payload.nbf === "number" && payload.nbf > nowSec) {
+    throw new Error("id_token not yet valid");
+  }
   if (typeof payload.exp !== "number" || payload.exp <= nowSec) {
     throw new Error("id_token is expired");
   }
   if (typeof payload.sub !== "string" || !payload.sub) {
     throw new Error("id_token sub is missing");
+  }
+  // OIDC Core §3.1.3.7 step 11: if the caller sent a `nonce` in the
+  // authorization request, the id_token MUST carry the same value. The
+  // comparison is exact-string. Refresh-token flows do not send a nonce,
+  // so callers omit `expectedNonce` there; in that case any nonce the AS
+  // chose to carry forward is accepted as opaque.
+  if (typeof params.expectedNonce === "string" && params.expectedNonce) {
+    if (typeof payload.nonce !== "string" || payload.nonce !== params.expectedNonce) {
+      throw new Error("id_token nonce mismatch");
+    }
+  }
+  // RFC 9449 §6.1 + RFC 7800 §3.1: when caller supplies the agent's public
+  // key, surface a cnf.jkt mismatch immediately rather than deferring to
+  // later proof-chain verification.
+  if (typeof params.agentPublicKeyPem === "string" && params.agentPublicKeyPem) {
+    const expectedJkt = jwkThumbprint(ed25519PublicKeyToJwk(params.agentPublicKeyPem));
+    const actualJkt = payload.cnf?.jkt;
+    if (typeof actualJkt !== "string" || !actualJkt) {
+      throw new Error("id_token missing cnf.jkt");
+    }
+    if (actualJkt !== expectedJkt) {
+      throw new Error(`id_token cnf.jkt mismatch: expected ${expectedJkt}, got ${actualJkt}`);
+    }
   }
 
   return {
@@ -938,9 +1169,13 @@ export async function verifyIdToken(params) {
  * signature remains valid proof that the SSO server attested the binding.
  */
 export async function verifyIdTokenSignatureOnly(params) {
+  assertSsoBaseUrlSafe(params.ssoBaseUrl);
   const parsed = parseJwt(params.idToken);
-  if (parsed.header.alg !== "RS256") {
-    throw new Error(`Unsupported id_token alg: ${String(parsed.header.alg)}`);
+  assertIdTokenTyp(parsed.header.typ);
+  const alg = parsed.header.alg;
+  const expectedKty = ID_TOKEN_ALG_KTY[alg];
+  if (!expectedKty) {
+    throw new Error(`Unsupported id_token alg: ${String(alg)}`);
   }
 
   const discovery = await fetchOidcDiscovery(params.ssoBaseUrl);
@@ -948,15 +1183,25 @@ export async function verifyIdTokenSignatureOnly(params) {
   if (!jwksUri) {
     throw new Error("Discovery response missing jwks_uri");
   }
+  // OIDC Core §3.1.3.7 step 2: id_token MUST carry `iss` matching the
+  // discovered issuer. Without this gate, an attacker-controlled discovery
+  // endpoint can mint a self-consistent token whose `iss` claim points
+  // anywhere — defeating the trust this function exposes to chain consumers.
+  if (parsed.payload?.iss !== discovery.issuer) {
+    throw new Error(
+      `id_token issuer mismatch: expected ${discovery.issuer}, got ${String(parsed.payload?.iss)}`,
+    );
+  }
 
   const jwks = await fetchJwks(jwksUri);
   const kid = parsed.header.kid;
-  const key = jwks.keys.find((k) => k.kid === kid && k.kty === "RSA");
+  const key = jwks.keys.find((k) => k.kid === kid && k.kty === expectedKty);
   if (!key) {
-    throw new Error(`Unable to find RSA JWK for kid=${String(kid)}`);
+    throw new Error(`Unable to find ${expectedKty} JWK for kid=${String(kid)}`);
   }
 
-  const validSig = verifyJwtRs256Signature({
+  const verifier = alg === "RS256" ? verifyJwtRs256Signature : verifyJwtEdDsaSignature;
+  const validSig = verifier({
     signingInput: parsed.signingInput,
     signatureB64url: parsed.signatureB64url,
     jwk: key,
@@ -984,6 +1229,34 @@ export class ChainError extends Error {
   constructor(message) {
     super(message);
     this.name = "ChainError";
+  }
+}
+
+/**
+ * SubjectMismatchError marks a refresh-time security failure: the refreshed
+ * token claims a different `sub` than the bound owner session. Callers use
+ * `instanceof` to distinguish a security-relevant mismatch from incidental
+ * parse errors on opaque tokens.
+ */
+export class SubjectMismatchError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SubjectMismatchError";
+  }
+}
+
+/**
+ * AuthRevokedError marks a token-endpoint failure where the AS has rejected
+ * the supplied credential — HTTP 401, HTTP 403, or RFC 6749 §5.2
+ * `invalid_grant`. Callers can catch this distinctly from network/parse
+ * errors and prompt the user to re-authenticate.
+ */
+export class AuthRevokedError extends Error {
+  constructor(message, { status, errorCode } = {}) {
+    super(message);
+    this.name = "AuthRevokedError";
+    this.status = status ?? null;
+    this.errorCode = errorCode ?? null;
   }
 }
 
@@ -1085,14 +1358,28 @@ export async function verifyProofChain(proof) {
     throw new ChainError("id_token hash does not match ownerBinding.payload.idTokenHash");
   }
 
-  // 7-8. SSO RS256 signature against discovered JWKS. exp/iss/aud are
+  // 7-8. SSO RS256 signature against discovered JWKS. exp/aud are
   //      intentionally NOT checked — see verifyIdTokenSignatureOnly's
-  //      contract (post-hoc provenance: token may have expired).
+  //      contract (post-hoc provenance: token may have expired). `iss` is
+  //      checked: the verifier requires id_token.iss == discovery.issuer,
+  //      and we pin discovery to the issuer the agent recorded at bind
+  //      time (binding.payload.issuer). The redundant proof.ssoBaseUrl
+  //      field, when present, MUST agree — otherwise the bundle is
+  //      internally inconsistent.
+  const trustedIssuer = binding.payload.issuer;
+  if (typeof trustedIssuer !== "string" || !trustedIssuer) {
+    throw new ChainError("ownerBinding.payload.issuer missing");
+  }
+  if (typeof proof.ssoBaseUrl === "string" && proof.ssoBaseUrl && proof.ssoBaseUrl !== trustedIssuer) {
+    throw new ChainError(
+      `proof.ssoBaseUrl=${proof.ssoBaseUrl} does not match ownerBinding.payload.issuer=${trustedIssuer}`,
+    );
+  }
   let tokenResult;
   try {
     tokenResult = await verifyIdTokenSignatureOnly({
       idToken,
-      ssoBaseUrl: proof.ssoBaseUrl,
+      ssoBaseUrl: trustedIssuer,
     });
   } catch (err) {
     throw new ChainError(`id_token SSO signature verification failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1394,8 +1681,7 @@ export class SignatureEngine {
       ssoBaseUrl,
       refreshToken: session.refreshToken,
       providerAddress: session.providerAddress,
-      agentPrivateKeyPem: main?.privateKeyPem,
-      agentPublicKeyPem: main?.publicKeyPem,
+      agentPrivateKeyPem: main.privateKeyPem,
     });
 
     // Verify the refreshed token still belongs to the same owner.
@@ -1403,13 +1689,31 @@ export class SignatureEngine {
       try {
         const freshPayload = parseJwt(fresh.access_token).payload;
         if (freshPayload.sub && freshPayload.sub !== session.ownerSessionSub) {
-          throw new Error(
+          throw new SubjectMismatchError(
             `Refreshed token subject mismatch: expected ${session.ownerSessionSub}, got ${freshPayload.sub}`,
           );
         }
       } catch (err) {
-        if (err instanceof Error && err.message.includes("subject mismatch")) throw err;
+        if (err instanceof SubjectMismatchError) throw err;
         // Non-JWT or unparseable — skip subject check (opaque tokens have no sub).
+      }
+    }
+
+    // RFC 9449 §6.1 + RFC 6749 §6: when the AS rotates the id_token, re-run
+    // the full claim+signature+cnf.jkt check before persistence. A
+    // compromised or buggy AS that rotates `sub` or `cnf.jkt` is caught
+    // here rather than at the next chain verification.
+    if (fresh.id_token) {
+      const verified = await verifyIdToken({
+        ssoBaseUrl,
+        providerAddress: session.providerAddress,
+        idToken: fresh.id_token,
+        agentPublicKeyPem: main.publicKeyPem,
+      });
+      if (session.ownerSessionSub && verified.payload.sub !== session.ownerSessionSub) {
+        throw new SubjectMismatchError(
+          `Refreshed id_token sub mismatch: expected ${session.ownerSessionSub}, got ${verified.payload.sub}`,
+        );
       }
     }
 
@@ -1793,6 +2097,9 @@ export function vaultDecrypt(key, entry) {
 // Agent Auth Token — Self-contained signed assertions for service authentication
 // ════════════════════════════════════════════════════════════════════════════════
 
+// Tokens carry `timestamp` only; verifiers (e.g. `@alien-id/sso-agent-id`)
+// enforce a 5-minute freshness window per SKILL.md §12. Issuing here without
+// an `exp` keeps the wire shape minimal and the window policy in one place.
 export function createAgentToken(params) {
   const payload = {
     v: 1,

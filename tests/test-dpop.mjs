@@ -202,6 +202,47 @@ describe("createDPoPProof()", () => {
     }
   });
 
+  it("preserves htm case per RFC 9110 §5.6.2 / §9.1 (method tokens are case-sensitive)", () => {
+    // RFC 9449 §4.2/§4.3: htm carries the request method literally and the
+    // verifier compares it bytewise. Standard methods are uppercase, but
+    // registered extension methods (e.g. WebDAV PROPFIND, MKCALENDAR) and
+    // custom tokens are case-sensitive — uppercasing would corrupt them.
+    const { privateKeyPem } = generateEd25519PemPair();
+    const cases = ["GET", "POST", "DELETE", "PROPFIND", "MKCALENDAR"];
+    for (const method of cases) {
+      const proof = createDPoPProof({
+        privateKeyPem,
+        htm: method,
+        htu: "https://x.example/y",
+        jti: "j",
+        iat: 1,
+      });
+      const payload = decodePart(proof.split(".")[1]);
+      assert.equal(payload.htm, method, `input=${method}`);
+    }
+  });
+
+  it("rejects htm that is not an RFC 9110 token (whitespace / invalid chars)", () => {
+    // RFC 9110 §5.6.2 token = 1*tchar; tchar excludes whitespace, '/', '@',
+    // ':', and other separators. A malformed htm cannot match the request
+    // line and would trip §4.3 verification at the resource server.
+    const { privateKeyPem } = generateEd25519PemPair();
+    for (const bad of ["", " GET", "GET ", "GE T", "GET/", "G@T"]) {
+      assert.throws(
+        () =>
+          createDPoPProof({
+            privateKeyPem,
+            htm: bad,
+            htu: "https://x.example/y",
+            jti: "j",
+            iat: 1,
+          }),
+        /htm/i,
+        `expected throw for htm=${JSON.stringify(bad)}`,
+      );
+    }
+  });
+
   it("auto-generates a jti and iat when not provided", () => {
     const { privateKeyPem } = generateEd25519PemPair();
     const a = createDPoPProof({
@@ -445,6 +486,22 @@ describe("getUserInfo client", () => {
 function createMockServer(handler) {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      // Short-circuit discovery requests so every test inherits a valid
+      // `.well-known/openid-configuration` document. RFC 9207 §2.4 makes the
+      // production code call discovery from `beginOidcAuthorization`; this
+      // keeps existing test handlers focused on the endpoint they actually
+      // exercise.
+      if (req.url === "/.well-known/openid-configuration") {
+        const port = server.address().port;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            issuer: `http://127.0.0.1:${port}`,
+            jwks_uri: `http://127.0.0.1:${port}/jwks`,
+          }),
+        );
+        return;
+      }
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", () => handler(req, res, body));
@@ -484,6 +541,79 @@ describe("beginOidcAuthorization with DPoP", () => {
       assert.ok(receivedUrl, "mock received a request");
       const u = new URL(receivedUrl, mock.baseUrl);
       assert.equal(u.searchParams.get("dpop_jkt"), expectedThumbprint);
+    } finally {
+      mock.server.close();
+    }
+  });
+
+  // RFC 6749 §4.1.1 / §10.12 + OIDC Core §3.1.3.7: the client SHOULD send
+  // `state` (CSRF correlation) and MUST send `nonce` (replay protection)
+  // when scope=openid is requested. Both are unguessable, single-use values.
+  it("appends state and nonce to the authorize URL (RFC 6749 §10.12 + OIDC §3.1.3.7)", async () => {
+    let receivedUrl = null;
+    const mock = await createMockServer((req, res) => {
+      receivedUrl = req.url;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          deep_link: "alien://x",
+          polling_code: "p",
+          expired_at: Date.now() + 60000,
+        }),
+      );
+    });
+
+    try {
+      const result = await beginOidcAuthorization({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "test-provider",
+      });
+
+      assert.ok(receivedUrl, "mock received a request");
+      const u = new URL(receivedUrl, mock.baseUrl);
+      const state = u.searchParams.get("state");
+      const nonce = u.searchParams.get("nonce");
+      assert.ok(state, "state must be set on authorize URL");
+      assert.ok(nonce, "nonce must be set on authorize URL");
+      // RFC 6749 §10.10: state SHOULD be ≥128 bits of entropy. b64url(32B)
+      // = 43 chars after padding strip, so the wire form is well over the
+      // OWASP-recommended threshold.
+      assert.ok(state.length >= 22, `state too short: ${state}`);
+      assert.ok(nonce.length >= 22, `nonce too short: ${nonce}`);
+      assert.notEqual(state, nonce, "state and nonce must be independent");
+
+      // The function returns the same values for the caller to persist and
+      // verify against the polled response / id_token.
+      assert.equal(result.state, state);
+      assert.equal(result.nonce, nonce);
+    } finally {
+      mock.server.close();
+    }
+  });
+
+  it("generates a fresh state/nonce on every call (no caching across requests)", async () => {
+    const mock = await createMockServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          deep_link: "alien://x",
+          polling_code: "p",
+          expired_at: Date.now() + 60000,
+        }),
+      );
+    });
+
+    try {
+      const a = await beginOidcAuthorization({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "test-provider",
+      });
+      const b = await beginOidcAuthorization({
+        ssoBaseUrl: mock.baseUrl,
+        providerAddress: "test-provider",
+      });
+      assert.notEqual(a.state, b.state, "state must be unguessable per request");
+      assert.notEqual(a.nonce, b.nonce, "nonce must be unguessable per request");
     } finally {
       mock.server.close();
     }
