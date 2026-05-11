@@ -1363,7 +1363,11 @@ export const SUPPORT_SIGNAL_MAX_BYTES = 65536;
 export const SUPPORT_SIGNAL_VERSIONS = new Set(["v1"]);
 
 const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
-const ALLOWED_AUTH_SCHEMES = new Set(["AgentID", "Bearer", "none"]);
+// RFC 9449 §7.1: protected resources advertise the `DPoP` scheme. `Bearer`
+// kept for non-Alien services. `none` for services that put the credential
+// in a custom header. The legacy custom `AgentID` JSON envelope was removed
+// in the 3.0.0 DPoP cutover — see artifacts/rfc9449-dpop-cutover.md.
+const ALLOWED_AUTH_SCHEMES = new Set(["DPoP", "Bearer", "none"]);
 const ALLOWED_TOP_KEYS = new Set(["version", "service", "auth", "api"]);
 const ALLOWED_SERVICE_KEYS = new Set(["name", "url"]);
 const ALLOWED_AUTH_KEYS = new Set(["header", "scheme"]);
@@ -1454,7 +1458,7 @@ export function parseServiceManifest(raw, allowedHost, options = {}) {
       return raw.auth.header;
     })(),
     scheme: (() => {
-      if (raw.auth.scheme === undefined) return "AgentID";
+      if (raw.auth.scheme === undefined) return "DPoP";
       if (typeof raw.auth.scheme !== "string" || !ALLOWED_AUTH_SCHEMES.has(raw.auth.scheme)) {
         throw new Error(`Manifest auth.scheme: must be one of ${[...ALLOWED_AUTH_SCHEMES].join(", ")}`);
       }
