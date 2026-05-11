@@ -28,7 +28,6 @@ import { parseArgs } from "node:util";
 
 import {
   b64url,
-  fromB64url,
   parseJwt,
   jwkThumbprint,
   verifyJwtRs256Signature,
@@ -140,7 +139,8 @@ async function verifyDPoPRequest(req) {
   if (Array.isArray(authHeader) || typeof authHeader !== "string" || !authHeader) {
     return { ok: false, status: 401, code: "missing_authorization", reason: "Missing or duplicate Authorization header" };
   }
-  const authMatch = /^DPoP\s+(\S+)$/.exec(authHeader);
+  // RFC 7235 §2.1: Authorization scheme names are case-insensitive.
+  const authMatch = /^DPoP\s+(\S+)$/i.exec(authHeader);
   if (!authMatch) {
     return { ok: false, status: 401, code: "invalid_scheme", reason: "Expected `Authorization: DPoP <access_token>`" };
   }
@@ -205,9 +205,25 @@ async function verifyDPoPRequest(req) {
 
   // §4.3 step 9: htu matches the request URL with query+fragment stripped.
   // Demo binds directly to HOST:PORT — no reverse proxy to honor here.
-  const requestHtu = `${ORIGIN}${(req.url || "").split("?", 1)[0].split("#", 1)[0]}`;
-  if (proof.payload.htu !== requestHtu) {
-    return { ok: false, status: 401, code: "bad_proof_htu", reason: `Proof htu ${String(proof.payload.htu)} != request URL ${requestHtu}` };
+  // Normalize both sides via URL parsing so percent-encoding, default-port
+  // elision, and case-folding of scheme/host are symmetric with the agent's
+  // `createDPoPProof` (which calls `new URL(htu).toString()`).
+  let requestHtu;
+  let claimedHtu;
+  try {
+    const ru = new URL(`${ORIGIN}${req.url || "/"}`);
+    ru.search = "";
+    ru.hash = "";
+    requestHtu = ru.toString();
+    const cu = new URL(String(proof.payload.htu));
+    cu.search = "";
+    cu.hash = "";
+    claimedHtu = cu.toString();
+  } catch {
+    return { ok: false, status: 401, code: "bad_proof_htu", reason: "Proof htu is not a parseable URL" };
+  }
+  if (claimedHtu !== requestHtu) {
+    return { ok: false, status: 401, code: "bad_proof_htu", reason: `Proof htu ${claimedHtu} != request URL ${requestHtu}` };
   }
 
   // §4.3 step 11: iat within an acceptable window. Allow small clock skew
@@ -239,11 +255,14 @@ async function verifyDPoPRequest(req) {
   } catch (err) {
     return { ok: false, status: 401, code: "malformed_access_token", reason: `access_token not a JWS: ${String(err.message || err)}` };
   }
-  // RFC 9068 §2.1: access tokens carry `typ:"at+jwt"`. Tolerate plain `jwt`
-  // for legacy issuers; reject the obvious confusion vectors.
+  // RFC 9068 §2.1 + §4: access tokens MUST carry `typ:"at+jwt"` (or
+  // `application/at+jwt`). Resource servers MUST verify; missing/wrong typ
+  // means the token is NOT a compliant access token and MUST be rejected
+  // — this is the cross-JWT-confusion gate against id_tokens and DPoP
+  // proofs presented as access tokens.
   const atTyp = typeof at.header.typ === "string" ? at.header.typ.toLowerCase() : "";
-  if (atTyp && atTyp !== "at+jwt" && atTyp !== "application/at+jwt" && atTyp !== "jwt" && atTyp !== "application/jwt") {
-    return { ok: false, status: 401, code: "bad_access_token_typ", reason: `access_token typ must be 'at+jwt', got ${String(at.header.typ)}` };
+  if (atTyp !== "at+jwt" && atTyp !== "application/at+jwt") {
+    return { ok: false, status: 401, code: "bad_access_token_typ", reason: `access_token typ must be 'at+jwt' (RFC 9068 §4), got ${String(at.header.typ)}` };
   }
 
   let keys;
