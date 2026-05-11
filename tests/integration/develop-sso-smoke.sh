@@ -115,21 +115,33 @@ node skills/alien-agent-id/cli.mjs status --state-dir "$STATE_DIR" >/tmp/dsm.sta
 assert "bound==true" \
   bash -c 'jq -e ".bound == true" /tmp/dsm.status.json >/dev/null'
 
-blue "▸ Step 8: spawn demo-service, call /api/v1/whoami with agent token"
-node examples/demo-service.mjs --port "$DEMO_PORT" >/tmp/dsm.demo.log 2>&1 &
+blue "▸ Step 8: spawn demo-service, call /api/v1/whoami with RFC 9449 DPoP headers"
+node examples/demo-service.mjs --port "$DEMO_PORT" --sso-url "$SSO_URL" \
+  >/tmp/dsm.demo.log 2>&1 &
 DEMO_PID=$!
 for i in {1..30}; do
   curl -fsS "http://127.0.0.1:$DEMO_PORT/.well-known/alien-agent-id.json" >/dev/null 2>&1 && break
   sleep 0.1
 done
 
-HDR=$(node skills/alien-agent-id/cli.mjs auth-header --state-dir "$STATE_DIR" --raw)
+WHOAMI_URL="http://127.0.0.1:$DEMO_PORT/api/v1/whoami"
+node skills/alien-agent-id/cli.mjs auth-header --state-dir "$STATE_DIR" \
+  --url "$WHOAMI_URL" --method GET --raw >/tmp/dsm.headers.txt
+AUTH_HDR=$(grep '^Authorization:' /tmp/dsm.headers.txt | sed 's/^Authorization: //')
+DPOP_HDR=$(grep '^DPoP:'         /tmp/dsm.headers.txt | sed 's/^DPoP: //')
+assert "auth-header emits DPoP scheme" \
+  bash -c "[[ '$AUTH_HDR' == DPoP\ * ]]"
+assert "auth-header emits a DPoP proof" \
+  bash -c "[[ -n '$DPOP_HDR' ]]"
+
 HTTP_CODE=$(curl -s -o /tmp/dsm.whoami.json -w '%{http_code}' \
-  -H "$HDR" "http://127.0.0.1:$DEMO_PORT/api/v1/whoami")
+  -H "Authorization: $AUTH_HDR" -H "DPoP: $DPOP_HDR" "$WHOAMI_URL")
 assert "service returns 200 against develop-SSO-bound token" \
   bash -c "[[ '$HTTP_CODE' = '200' ]]"
-assert "agent_fingerprint matches bound state" \
-  bash -c 'test "$(jq -r .agent_fingerprint /tmp/dsm.whoami.json)" = "$(jq -r .fingerprint /tmp/dsm.bind.json)"'
+assert "owner_sub returned by service" \
+  bash -c 'jq -e ".owner_sub | type == \"string\"" /tmp/dsm.whoami.json >/dev/null'
+assert "agent_jkt matches id_token cnf.jkt" \
+  bash -c "test \"\$(jq -r .agent_jkt /tmp/dsm.whoami.json)\" = '$JKT'"
 
 green ""
 green "All 8 develop-SSO smoke steps passed against $SSO_URL."
