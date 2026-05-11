@@ -2213,38 +2213,3 @@ export function vaultDecrypt(key, entry) {
   return decrypted.toString("utf8");
 }
 
-// ════════════════════════════════════════════════════════════════════════════════
-// Agent Auth Token — DEPRECATED, scheduled for deletion
-// ════════════════════════════════════════════════════════════════════════════════
-
-// @deprecated The custom AgentID Authorization scheme is being removed in
-// favor of RFC 9449 DPoP. The `auth-header` CLI no longer calls this — it
-// emits `Authorization: DPoP <access_token>` + `DPoP: <proof JWT>` via
-// `createDPoPProof` instead. This function is kept temporarily because
-// `tests/test-well-known-manifest.mjs` and `examples/demo-service.mjs`
-// still reference it; both will switch to the DPoP scheme and this
-// function will be deleted in a follow-up pass.
-//
-// Do NOT call this from new code. The custom JSON envelope duplicates
-// claims the access_token already carries (sub, cnf.jkt) — exactly the
-// kind of parallel envelope dropped from owner_proof.
-export function createAgentToken(params) {
-  const payload = {
-    v: 1,
-    fingerprint: params.fingerprint,
-    publicKeyPem: params.publicKeyPem,
-    owner: params.ownerSessionSub || null,
-    timestamp: nowMs(),
-    nonce: randomBytes(16).toString("hex"),
-  };
-  const canonical = canonicalJSONString(payload);
-  const signature = signEd25519Base64Url(canonical, params.privateKeyPem);
-  const token = { ...payload, sig: signature };
-  if (params.ownerBinding) {
-    token.ownerBinding = params.ownerBinding;
-  }
-  if (params.idToken) {
-    token.idToken = params.idToken;
-  }
-  return b64url(JSON.stringify(token));
-}
