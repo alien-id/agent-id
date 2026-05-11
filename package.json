@@ -13,9 +13,15 @@
   },
   "files": [
     "skills",
-    "docs",
     "examples",
-    "tests"
+    "tests",
+    "docs/AGENT-SSO.md",
+    "docs/DEPLOY-DPOP.md",
+    "docs/INTEGRATION.md",
+    "docs/MIGRATION-DPOP.md",
+    "docs/PRD-DPOP-POP.md",
+    "docs/RELEASE-NOTES.md",
+    "docs/TESTING.md"
   ],
   "repository": {
     "type": "git",
