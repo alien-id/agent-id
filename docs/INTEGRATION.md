@@ -1,31 +1,47 @@
 # Integrating Alien Agent SSO into Your Service
 
-This guide shows how to add AI agent authentication to any web service. After integration, agents with an Alien Agent ID can authenticate to your service using cryptographically signed tokens — no API keys, no shared secrets, no pre-registration.
+This guide shows how to add AI agent authentication to any web service. After integration, agents
+with an Alien Agent ID can authenticate to your service using RFC 9449 DPoP — no API keys, no
+shared secrets, no pre-registration.
 
 ## How it works
 
 ```
-Agent                          Your Service
-  │                                │
-  │  1. Generate signed token      │
-  │     (Ed25519, 5-min validity)  │
-  │                                │
-  │  2. HTTP request ─────────────►│
-  │     Authorization: AgentID … │
-  │                                │  3. Decode token
-  │                                │  4. Verify Ed25519 signature
-  │                                │  5. Check timestamp freshness
-  │                                │  6. Check fingerprint matches key
-  │                                │  7. (optional) verify provenance
-  │                                │
-  │◄──────────── response ─────────│
+Agent                                  Your Service
+  │                                         │
+  │  1. Mint per-request DPoP proof JWT     │
+  │     (Ed25519, signed by agent key)      │
+  │                                         │
+  │  2. HTTP request ──────────────────────►│
+  │     Authorization: DPoP <access_token>  │
+  │     DPoP:          <proof JWT>          │  3. Verify proof signature (RFC 9449 §4.3)
+  │                                         │  4. Check htm/htu/iat/jti
+  │                                         │  5. Verify access_token (RFC 9068)
+  │                                         │  6. Confirm cnf.jkt == jwkThumbprint(proof.jwk)
+  │                                         │  7. Confirm ath == sha256(access_token)
+  │                                         │
+  │◄────────────── response ────────────────│
 ```
 
-The token is **self-contained**: it carries the agent's public key, so your service can verify the signature without any prior knowledge of the agent. No registration step, no key exchange, no database lookup required for basic verification.
+The access_token is an Alien SSO-issued `at+jwt` (RFC 9068) that carries standard claims:
+
+| Claim | What it attests |
+|---|---|
+| `iss` | `https://sso.alien-api.com` |
+| `sub` | Owner's AlienID address (the human) |
+| `aud` | Target service identifier |
+| `exp` | Access-token expiry |
+| `cnf.jkt` | JWK SHA-256 thumbprint of the agent's Ed25519 public key (RFC 7800 §3.1) |
+
+The DPoP proof binds each individual request to the agent key whose thumbprint is pinned in
+`cnf.jkt`. Together these provide cryptographic proof that **a specific human authorized a
+specific agent to make a specific request** — verified using only standard JWT/JWS primitives and
+the SSO's published JWKS. No custom envelope, no pre-registration.
 
 ## Service discovery
 
-Publish a JSON manifest at `/.well-known/alien-agent-id.json` so agents can discover your auth contract automatically. This lets a user point an agent at your service URL and the agent figures out where to call and how to authenticate — without per-service prompts or a hard-coded skill update.
+Publish a JSON manifest at `/.well-known/alien-agent-id.json` so agents can discover your auth
+contract automatically.
 
 ### Minimal manifest
 
@@ -33,7 +49,7 @@ Publish a JSON manifest at `/.well-known/alien-agent-id.json` so agents can disc
 {
   "version": 1,
   "service": { "name": "Acme API", "url": "https://acme.example" },
-  "auth":    { "header": "Authorization", "scheme": "AgentID" },
+  "auth":    { "header": "Authorization", "scheme": "DPoP" },
   "api":     { "base": "https://api.acme.example/v1" }
 }
 ```
@@ -41,8 +57,8 @@ Publish a JSON manifest at `/.well-known/alien-agent-id.json` so agents can disc
 | Field | Required | Notes |
 | --- | --- | --- |
 | `version` | yes | Must be `1`. |
-| `auth.header` | yes | HTTP header name agents will send the token in. Pattern `[A-Za-z0-9-]{1,64}`. |
-| `auth.scheme` | optional | One of `"AgentID"` (default), `"Bearer"`, `"none"`. The scheme name prefixes the token in the header value: `Authorization: AgentID <token>`. |
+| `auth.header` | yes | HTTP header name for the access_token. Pattern `[A-Za-z0-9-]{1,64}`. |
+| `auth.scheme` | optional | One of `"DPoP"` (default), `"Bearer"`, `"none"`. The scheme prefixes the access_token: `Authorization: DPoP <at>`. Agents using `"DPoP"` also send a `DPoP: <proof>` header per RFC 9449. |
 | `api.base` | yes | Base URL for subsequent requests. Must share the manifest's authority (exact host or subdomain). |
 | `api.specUrl` | optional | URL of an OpenAPI / JSON Schema document. Lets agents refresh API knowledge dynamically. |
 | `service.name` | optional | 1–80 chars display name. |
@@ -76,343 +92,142 @@ node skills/alien-agent-id/cli.mjs service-support --url https://your-service.ex
 
 The well-known path is fixed regardless; the meta tag never tells the agent where the manifest is, only whether one exists.
 
-## Token format
+## Wire format
 
-Agents send authentication via the `Authorization` header:
+Each authenticated request carries two headers:
 
 ```
-Authorization: AgentID <base64url-encoded-json>
+Authorization: DPoP <access_token>
+DPoP:          <proof JWT>
 ```
 
-Decoded token payload:
+### `<access_token>` — RFC 9068 at+jwt issued by Alien SSO
+
+A signed JWS (`typ=at+jwt`, `alg=RS256` or `EdDSA`) whose payload includes:
 
 ```json
 {
-  "v": 1,
-  "fingerprint": "f5d9fac49457e9e359078815f7c1c568a56207a4a5c0b05a11ce3cf54bc8d4f8",
-  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA...\n-----END PUBLIC KEY-----\n",
-  "owner": "00000003010000000000539c741e0df8",
-  "timestamp": 1774531517000,
-  "nonce": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
-  "sig": "<Ed25519-base64url-signature>"
+  "iss": "https://sso.alien-api.com",
+  "sub": "00000003010000000000539c741e0df8",
+  "aud": "your-service-audience",
+  "exp": 1774535117,
+  "iat": 1774531517,
+  "cnf": { "jkt": "wEf6o2ux8sBAUG4oQYhP284gfpZwUJMTxXDPH5XxthY" }
 }
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `v` | number | Token version (always `1`) |
-| `fingerprint` | string | SHA-256 hash of the agent's public key DER encoding (64 hex chars) |
-| `publicKeyPem` | string | Agent's Ed25519 public key in SPKI PEM format |
-| `owner` | string or null | AlienID address of the human who authorized this agent. Null if agent is unbound |
-| `timestamp` | number | Unix timestamp in milliseconds when the token was created |
-| `nonce` | string | Random 128-bit hex string (replay resistance) |
-| `sig` | string | Ed25519 signature (base64url) over the canonical JSON of all fields except `sig` |
+You verify the signature against the SSO's JWKS (`https://sso.alien-api.com/.well-known/jwks.json`,
+typically discovered via `/.well-known/openid-configuration`).
 
-### Signature computation
+### `<proof JWT>` — RFC 9449 DPoP proof minted per request
 
-The signature is computed over **canonical JSON** of the payload (all fields except `sig`, keys sorted alphabetically, no whitespace):
+A JWS signed by the agent's Ed25519 key. The JOSE header carries the full public JWK; the
+payload binds the proof to one specific request:
 
+```json
+// header
+{ "typ": "dpop+jwt", "alg": "EdDSA",
+  "jwk": { "kty": "OKP", "crv": "Ed25519", "x": "..." } }
+
+// payload
+{
+  "htm": "POST",                                       // request method
+  "htu": "https://api.acme.example/v1/orders",         // request URI (no query, no fragment)
+  "iat": 1774531517,                                   // proof creation time
+  "jti": "01HXYZ...",                                  // unique per proof
+  "ath": "<base64url(sha256(access_token))>"           // RFC 9449 §4.3 step 10
+}
 ```
-canonical = JSON.stringify(sortKeysRecursively({ v, fingerprint, publicKeyPem, owner, timestamp, nonce }))
-sig = Ed25519.sign(canonical, agentPrivateKey)
-```
+
+The `cnf.jkt` claim in the access_token equals `jwkThumbprint(proof.header.jwk)` (RFC 7800 §3.1),
+which is what binds the SSO's attestation of the owner to the agent key that signed *this*
+request.
 
 ## Integration options
 
-### Option A: Use `lib.mjs` directly (Node.js)
+### Option A: Use an Alien SDK (preferred)
 
-The simplest path. Copy `lib.mjs` into your project or import it directly. Zero dependencies — it uses only Node.js built-in `crypto` module.
+The Alien SSO SDKs ship a complete RFC 9449 verifier. The same logic, error codes, and option
+shape are available in both runtimes — port between them with confidence.
 
-```javascript
-import { verifyAgentToken } from "./lib.mjs";
+| Runtime | Package | Verifier |
+|---|---|---|
+| Node.js / browsers | [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id) | `verifyDPoPRequest(req, opts)` |
+| Python | [`alien-sso-agent-id`](https://pypi.org/project/alien-sso-agent-id/) | `verify_dpop_request(req, opts)` |
 
-function authenticateAgent(req) {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith("AgentID ")) {
-    return { ok: false, error: "Missing Authorization: AgentID <token>" };
-  }
-  return verifyAgentToken(header.slice(8).trim());
-}
-```
+Read each package's README for the canonical integration walk-through, framework wiring
+(Express/Fastify/Next.js, FastAPI/Flask), and the full rejection-reason catalogue. The examples in
+this document focus on the wire contract and access-control patterns that are SDK-independent.
 
-#### `verifyAgentToken(tokenB64, opts?)` — API reference
+### Option B: Implement verification yourself
 
-**Parameters:**
+If you need a verifier in a runtime not covered by an SDK, the algorithm is fully specified in:
 
-- `tokenB64` (string) — The base64url-encoded token from the Authorization header (everything after `"AgentID "`)
-- `opts.maxAgeMs` (number, optional) — Maximum token age in milliseconds. Default: `300000` (5 minutes)
+- **RFC 9449** — DPoP wire format and §4.3 verifier walk
+- **RFC 9068** — JWT profile for OAuth 2.0 access tokens (`at+jwt` typ enforcement)
+- **RFC 7800 §3.1** — JWK thumbprint confirmation (`cnf.jkt`)
+- **RFC 7235 §2.1** — `WWW-Authenticate` challenge header semantics
 
-**Returns on success:**
+The reference implementation is `examples/demo-service.mjs` in this repo — a ~340-line
+self-contained Node verifier with no SDK dependency, suitable as a template for porting.
 
-```javascript
-{
-  ok: true,
-  fingerprint: "f5d9fac4...",   // Agent identity (stable across sessions)
-  publicKeyPem: "-----BEGIN...", // Agent's Ed25519 public key
-  owner: "0000000301...",        // Human owner's AlienID address (or null)
-  timestamp: 1774531517000,      // When the token was created
-  nonce: "a1b2c3d4..."          // Unique per token
-}
-```
+#### Verifier checklist
 
-**Returns on failure:**
+Implementations MUST perform all of the following. Any failure is a fatal 401 with
+`WWW-Authenticate: DPoP error="invalid_token", error_description="<code>"` (RFC 9449 §7.1).
 
-```javascript
-{
-  ok: false,
-  error: "Token expired (age: 312s)"  // Human-readable error
-}
-```
+1. Exactly one `Authorization: DPoP <at>` header and one `DPoP: <proof>` header.
+2. Proof JWS shape: three base64url parts, valid JSON header + payload.
+3. Proof header: `typ == "dpop+jwt"`, `alg == "EdDSA"`, `jwk` is OKP/Ed25519 with no private `d`.
+4. EdDSA signature over the proof's signing input verifies against the embedded JWK.
+5. `htm` matches the request method byte-for-byte.
+6. `htu` matches the reconstructed `<origin><pathname>` (no query, no fragment). When sitting behind a trusted proxy, honor `X-Forwarded-Proto` / `X-Forwarded-Host` only if the connection's remote address is inside a configured trusted-proxy CIDR list.
+7. `iat` is within ±`PROOF_MAX_AGE_SEC` (default 30s) of `now`.
+8. `jti` has not been seen before (FIFO-evicting `Map<jti, iat>` keyed on jti is sufficient; size cap defends against memory blowup).
+9. Access-token shape: `typ` ∈ {`at+jwt`, `jwt`, `application/at+jwt`, `application/jwt`}; `alg` ∈ {`RS256`, `EdDSA`}.
+10. Fetch SSO JWKS once and cache; verify access-token signature against it.
+11. Claim checks: `iss == expectedIss`, optional `aud` allow-list, `exp > now`, non-empty `sub`.
+12. RFC 9449 §6.1: `at.cnf.jkt === jwkThumbprint(proof.header.jwk)`.
+13. RFC 9449 §4.3 step 10: `proof.ath === b64url(sha256(<access_token raw string>))`.
+14. (Optional) admin-pin: `at.cnf.jkt` is in an allow-list of expected agent thumbprints.
 
-**Possible errors:**
-
-| Error | Meaning |
-|---|---|
-| `Invalid token encoding` | Token is not valid base64url JSON |
-| `Unsupported token version: N` | Unknown token version |
-| `Token expired (age: Ns)` | Token is older than `maxAgeMs` |
-| `Invalid public key in token` | The `publicKeyPem` field is not a valid Ed25519 public key |
-| `Fingerprint does not match public key` | The `fingerprint` field doesn't match SHA-256(publicKeyDER) |
-| `Signature verification failed` | Ed25519 signature is invalid — token was tampered with |
-| `Signature verification error` | Crypto error during verification |
-
-### Option B: Implement verification yourself (any language)
-
-The verification algorithm is straightforward to implement in any language with Ed25519 and SHA-256 support.
-
-#### Step-by-step verification
-
-```
-1. DECODE
-   raw = base64url_decode(token)
-   parsed = JSON.parse(raw)
-
-2. CHECK VERSION
-   assert parsed.v == 1
-
-3. CHECK TIMESTAMP
-   age = now_ms() - parsed.timestamp
-   assert age >= 0 AND age <= 300000     # 5 minutes
-
-4. VERIFY FINGERPRINT
-   der = parse_spki_pem(parsed.publicKeyPem)
-   computed = hex(sha256(der))
-   assert computed == parsed.fingerprint
-
-5. VERIFY SIGNATURE
-   payload = { v, fingerprint, publicKeyPem, owner, timestamp, nonce }
-   canonical = canonical_json(payload)    # sorted keys, no whitespace
-   sig_bytes = base64url_decode(parsed.sig)
-   pubkey = parse_ed25519_public_key(parsed.publicKeyPem)
-   assert ed25519_verify(canonical, sig_bytes, pubkey)
-```
-
-#### Canonical JSON
-
-The signature is computed over **canonical JSON**: keys sorted alphabetically at every nesting level, no whitespace, no trailing commas. This is the same as `JSON.stringify(sortKeysRecursively(obj))`.
-
-Example — given:
-
-```json
-{ "timestamp": 123, "fingerprint": "abc", "v": 1 }
-```
-
-Canonical form:
-
-```json
-{"fingerprint":"abc","timestamp":123,"v":1}
-```
-
-#### Reference implementations
-
-**Python:**
-
-```python
-import json
-import base64
-import hashlib
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
-import time
-
-def verify_agent_token(token_b64, max_age_ms=300000):
-    # 1. Decode
-    # Add padding if needed — base64url omits trailing '='
-    token_b64 += "=" * (-len(token_b64) % 4)
-    raw = base64.urlsafe_b64decode(token_b64)
-    parsed = json.loads(raw)
-
-    # 2. Version
-    assert parsed["v"] == 1, f"Unsupported version: {parsed['v']}"
-
-    # 3. Timestamp
-    age = int(time.time() * 1000) - parsed["timestamp"]
-    assert 0 <= age <= max_age_ms, f"Token expired (age: {age // 1000}s)"
-
-    # 4. Fingerprint
-    pubkey_obj = load_pem_public_key(parsed["publicKeyPem"].encode())
-    der = pubkey_obj.public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    computed_fp = hashlib.sha256(der).hexdigest()
-    assert computed_fp == parsed["fingerprint"], "Fingerprint mismatch"
-
-    # 5. Signature
-    sig = parsed.pop("sig")
-    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
-    sig_bytes = base64.urlsafe_b64decode(sig + "==")
-    pubkey_obj.verify(sig_bytes, canonical.encode())
-
-    return {
-        "fingerprint": parsed["fingerprint"],
-        "owner": parsed["owner"],
-        "timestamp": parsed["timestamp"],
-    }
-```
-
-**Go:**
-
-```go
-package agentid
-
-import (
-    "crypto/ed25519"
-    "crypto/sha256"
-    "crypto/x509"
-    "encoding/base64"
-    "encoding/hex"
-    "encoding/json"
-    "encoding/pem"
-    "fmt"
-    "time"
-)
-
-type TokenPayload struct {
-    V            int    `json:"v"`
-    Fingerprint  string `json:"fingerprint"`
-    PublicKeyPem string `json:"publicKeyPem"`
-    Owner        string `json:"owner"`
-    Timestamp    int64  `json:"timestamp"`
-    Nonce        string `json:"nonce"`
-    Sig          string `json:"sig"`
-}
-
-type VerifyResult struct {
-    OK          bool
-    Fingerprint string
-    Owner       string
-    Timestamp   int64
-    Error       string
-}
-
-func VerifyAgentToken(tokenB64 string, maxAgeMs int64) VerifyResult {
-    if maxAgeMs == 0 {
-        maxAgeMs = 300000
-    }
-
-    // 1. Decode
-    raw, err := base64.RawURLEncoding.DecodeString(tokenB64)
-    if err != nil {
-        return VerifyResult{Error: "Invalid token encoding"}
-    }
-
-    var parsed TokenPayload
-    if err := json.Unmarshal(raw, &parsed); err != nil {
-        return VerifyResult{Error: "Invalid token JSON"}
-    }
-
-    // 2. Version
-    if parsed.V != 1 {
-        return VerifyResult{Error: fmt.Sprintf("Unsupported version: %d", parsed.V)}
-    }
-
-    // 3. Timestamp
-    age := time.Now().UnixMilli() - parsed.Timestamp
-    if age < 0 || age > maxAgeMs {
-        return VerifyResult{Error: fmt.Sprintf("Token expired (age: %ds)", age/1000)}
-    }
-
-    // 4. Fingerprint
-    block, _ := pem.Decode([]byte(parsed.PublicKeyPem))
-    if block == nil {
-        return VerifyResult{Error: "Invalid public key PEM"}
-    }
-    pubkeyInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
-    if err != nil {
-        return VerifyResult{Error: "Invalid public key"}
-    }
-    pubkey, ok := pubkeyInterface.(ed25519.PublicKey)
-    if !ok {
-        return VerifyResult{Error: "Not an Ed25519 key"}
-    }
-    hash := sha256.Sum256(block.Bytes)
-    if hex.EncodeToString(hash[:]) != parsed.Fingerprint {
-        return VerifyResult{Error: "Fingerprint mismatch"}
-    }
-
-    // 5. Signature
-    sigBytes, err := base64.RawURLEncoding.DecodeString(parsed.Sig)
-    if err != nil {
-        return VerifyResult{Error: "Invalid signature encoding"}
-    }
-
-    // Canonical JSON: marshal without sig field
-    payload := map[string]interface{}{
-        "v": parsed.V, "fingerprint": parsed.Fingerprint,
-        "publicKeyPem": parsed.PublicKeyPem, "owner": parsed.Owner,
-        "timestamp": parsed.Timestamp, "nonce": parsed.Nonce,
-    }
-    canonical, _ := json.Marshal(payload) // json.Marshal sorts keys
-
-    if !ed25519.Verify(pubkey, canonical, sigBytes) {
-        return VerifyResult{Error: "Signature verification failed"}
-    }
-
-    return VerifyResult{
-        OK: true, Fingerprint: parsed.Fingerprint,
-        Owner: parsed.Owner, Timestamp: parsed.Timestamp,
-    }
-}
-```
+When you parse the access_token's payload, reject any value whose `iat`/`exp`/`nbf` is not a
+finite number — non-standard JSON `NaN` / `Infinity` constants can compare false to every
+freshness threshold and silently bypass step 11 in runtimes whose JSON parsers accept them.
 
 ## Framework examples
+
+These examples use `@alien-id/sso-agent-id` directly; substitute `alien-sso-agent-id` (Python) or
+your own verifier as appropriate.
 
 ### Express (Node.js)
 
 ```javascript
 import express from "express";
-import { verifyAgentToken } from "./lib.mjs";
+import { verifyDPoPRequest } from "@alien-id/sso-agent-id";
+import { fetchSsoJwks } from "./sso.mjs"; // your JWKS cache loader
 
 const app = express();
+const jwks = await fetchSsoJwks();
 
-// Middleware
-function requireAgent(req, res, next) {
-  const auth = req.headers.authorization;
-  if (!auth?.startsWith("AgentID ")) {
-    return res.status(401).json({ error: "Authorization: AgentID <token> required" });
-  }
-  const result = verifyAgentToken(auth.slice(8).trim());
+async function requireAgent(req, res, next) {
+  const result = verifyDPoPRequest(
+    { method: req.method, url: req.protocol + "://" + req.get("host") + req.originalUrl, headers: req.headers },
+    { jwks, expectedAudience: process.env.SERVICE_AUDIENCE },
+  );
   if (!result.ok) {
-    return res.status(401).json({ error: result.error });
+    res.set("WWW-Authenticate", `DPoP error="invalid_token", error_description="${result.code}"`);
+    return res.status(401).json(result);
   }
   req.agent = result;
   next();
 }
 
-// Public route
-app.get("/api/status", (req, res) => {
-  res.json({ ok: true, service: "my-service" });
-});
-
-// Protected route
 app.get("/api/data", requireAgent, (req, res) => {
   res.json({
     ok: true,
-    data: "sensitive information",
-    agent: req.agent.fingerprint,
-    owner: req.agent.owner,
+    owner_sub: req.agent.owner_sub,
+    agent_jkt: req.agent.agent_jkt,
   });
 });
 
@@ -423,136 +238,117 @@ app.listen(3000);
 
 ```javascript
 import Fastify from "fastify";
-import { verifyAgentToken } from "./lib.mjs";
+import { verifyDPoPRequest } from "@alien-id/sso-agent-id";
 
 const fastify = Fastify();
+const jwks = await fetchSsoJwks();
 
 fastify.decorate("verifyAgent", async (request, reply) => {
-  const auth = request.headers.authorization;
-  if (!auth?.startsWith("AgentID ")) {
-    return reply.code(401).send({ error: "Agent authentication required" });
-  }
-  const result = verifyAgentToken(auth.slice(8).trim());
+  const result = verifyDPoPRequest(
+    { method: request.method, url: `${request.protocol}://${request.hostname}${request.url}`, headers: request.headers },
+    { jwks, expectedAudience: process.env.SERVICE_AUDIENCE },
+  );
   if (!result.ok) {
-    return reply.code(401).send({ error: result.error });
+    reply
+      .code(401)
+      .header("WWW-Authenticate", `DPoP error="invalid_token", error_description="${result.code}"`)
+      .send(result);
+    return reply;
   }
   request.agent = result;
 });
 
 fastify.get("/api/data", { preHandler: [fastify.verifyAgent] }, async (request) => {
-  return { ok: true, agent: request.agent.fingerprint };
+  return { ok: true, owner_sub: request.agent.owner_sub };
 });
 
 fastify.listen({ port: 3000 });
 ```
 
-### Flask (Python)
+### FastAPI (Python)
 
 ```python
-from flask import Flask, request, jsonify
-from functools import wraps
-# Use the verify_agent_token function from the Python example above
+from fastapi import FastAPI, Depends
+from alien_sso_agent_id import build_require_dpop
+from .sso import load_jwks  # your JWKS cache loader
 
-app = Flask(__name__)
+app = FastAPI()
+require_dpop = build_require_dpop(jwks=load_jwks(), expected_audience="my-service")
 
-def require_agent(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("AgentID "):
-            return jsonify({"error": "Agent authentication required"}), 401
-        try:
-            result = verify_agent_token(auth[8:].strip())
-        except Exception as e:
-            return jsonify({"error": str(e)}), 401
-        request.agent = result
-        return f(*args, **kwargs)
-    return decorated
-
-@app.route("/api/data")
-@require_agent
-def get_data():
-    return jsonify({
-        "ok": True,
-        "agent": request.agent["fingerprint"],
-        "owner": request.agent["owner"],
-    })
+@app.get("/api/data")
+def get_data(agent = Depends(require_dpop)):
+    return {"ok": True, "owner_sub": agent.owner_sub, "agent_jkt": agent.agent_jkt}
 ```
 
 ### Go (net/http)
 
+Go has no first-party Alien SDK; port the verifier from `examples/demo-service.mjs`. The
+high-level shape:
+
 ```go
-func AgentAuthMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        auth := r.Header.Get("Authorization")
-        if !strings.HasPrefix(auth, "AgentID ") {
-            http.Error(w, `{"error":"Agent authentication required"}`, 401)
-            return
-        }
-        result := VerifyAgentToken(strings.TrimSpace(auth[8:]), 0)
-        if !result.OK {
-            http.Error(w, fmt.Sprintf(`{"error":"%s"}`, result.Error), 401)
-            return
-        }
-        ctx := context.WithValue(r.Context(), "agent", result)
-        next.ServeHTTP(w, r.WithContext(ctx))
-    })
+func DPoPMiddleware(jwks *Jwks, expectedAud string) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            result, err := VerifyDPoPRequest(r, jwks, expectedAud)
+            if err != nil {
+                w.Header().Set("WWW-Authenticate", fmt.Sprintf(`DPoP error="invalid_token", error_description="%s"`, err.Code))
+                http.Error(w, err.Error(), 401)
+                return
+            }
+            ctx := context.WithValue(r.Context(), "agent", result)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
 }
 ```
 
 ## Access control patterns
 
-### Allow any verified agent
+The verifier returns:
 
-The simplest policy — accept any agent with a valid token:
-
-```javascript
-function requireAgent(req, res, next) {
-  const result = verifyAgent(req);
-  if (!result.ok) return res.status(401).json({ error: result.error });
-  req.agent = result;
-  next();
+```ts
+{
+  ok: true,
+  owner_sub: string,        // human owner's AlienID address (access_token.sub)
+  agent_jkt: string,        // agent key thumbprint (access_token.cnf.jkt)
+  service_token: AccessTokenClaims, // full verified access_token payload
 }
 ```
+
+`owner_sub` is the **SSO-attested** human owner — there's no separate "deep verification" step,
+the chain is enforced as part of every verification. `agent_jkt` uniquely identifies the
+agent instance.
+
+### Allow any verified agent
+
+Simplest policy — `verifyDPoPRequest` returning `ok: true` already proves a real owner authorized
+a real agent for this audience.
 
 ### Require human-owned agents only
 
-Reject agents that don't have a human owner (unbound agents):
-
-```javascript
-function requireOwnedAgent(req, res, next) {
-  const result = verifyAgent(req);
-  if (!result.ok) return res.status(401).json({ error: result.error });
-  if (!result.owner) return res.status(403).json({ error: "Human-owned agent required" });
-  req.agent = result;
-  next();
-}
-```
+Unbound agents have no SSO-issued access_token, so they cannot pass verification at all. No
+additional check needed.
 
 ### Allow-list specific agents
 
-Pre-register known agent fingerprints:
-
 ```javascript
-const ALLOWED_AGENTS = new Set([
-  "f5d9fac49457e9e359078815f7c1c568a56207a4a5c0b05a11ce3cf54bc8d4f8",
-  "42fbde2a3f7ca6dfdc61fc74e54227c84ff0a6e85f1a838052d9aa60ca2b527f",
+const ALLOWED_AGENT_JKTS = new Set([
+  "wEf6o2ux8sBAUG4oQYhP284gfpZwUJMTxXDPH5XxthY",
+  "Pq4...",
 ]);
 
 function requireKnownAgent(req, res, next) {
-  const result = verifyAgent(req);
-  if (!result.ok) return res.status(401).json({ error: result.error });
-  if (!ALLOWED_AGENTS.has(result.fingerprint)) {
+  if (!ALLOWED_AGENT_JKTS.has(req.agent.agent_jkt)) {
     return res.status(403).json({ error: "Agent not authorized for this service" });
   }
-  req.agent = result;
   next();
 }
 ```
 
-### Allow-list by owner
+This is `--strict-jkt` admin pinning — equivalent to OAuth client allow-listing but keyed on the
+agent's per-instance key thumbprint, so revocation is just removing the jkt from the set.
 
-Trust any agent owned by specific humans:
+### Allow-list by owner
 
 ```javascript
 const ALLOWED_OWNERS = new Set([
@@ -561,36 +357,30 @@ const ALLOWED_OWNERS = new Set([
 ]);
 
 function requireAuthorizedOwner(req, res, next) {
-  const result = verifyAgent(req);
-  if (!result.ok) return res.status(401).json({ error: result.error });
-  if (!result.owner || !ALLOWED_OWNERS.has(result.owner)) {
+  if (!ALLOWED_OWNERS.has(req.agent.owner_sub)) {
     return res.status(403).json({ error: "Agent owner not authorized" });
   }
-  req.agent = result;
   next();
 }
 ```
 
 ### Rate limiting by agent
 
-Use the fingerprint as a rate-limit key:
-
 ```javascript
-const rateLimits = new Map();  // fingerprint → { count, windowStart }
+const rateLimits = new Map();  // agent_jkt → { count, windowStart }
 
 function rateLimit(maxRequests, windowMs) {
   return (req, res, next) => {
-    const fp = req.agent.fingerprint;
+    const key = req.agent.agent_jkt;
     const now = Date.now();
-    const entry = rateLimits.get(fp) || { count: 0, windowStart: now };
+    const entry = rateLimits.get(key) || { count: 0, windowStart: now };
 
     if (now - entry.windowStart > windowMs) {
       entry.count = 0;
       entry.windowStart = now;
     }
-
     entry.count++;
-    rateLimits.set(fp, entry);
+    rateLimits.set(key, entry);
 
     if (entry.count > maxRequests) {
       return res.status(429).json({ error: "Rate limit exceeded" });
@@ -598,191 +388,102 @@ function rateLimit(maxRequests, windowMs) {
     next();
   };
 }
-
-// 100 requests per minute per agent
-app.use("/api", requireAgent, rateLimit(100, 60000));
 ```
-
-## Deep verification (optional)
-
-Basic token verification confirms that the agent holds the private key corresponding to the public key in the token. For higher-security scenarios, you can verify the full provenance chain back to the human owner.
-
-### Verifying the owner binding
-
-The agent can provide its proof bundle (from `export-proof` or git notes) as an additional header:
-
-```
-X-Agent-Proof: <base64url-encoded-proof-bundle>
-```
-
-The proof bundle contains:
-
-```json
-{
-  "version": 2,
-  "agent": {
-    "fingerprint": "f5d9fac4...",
-    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n..."
-  },
-  "ownerBinding": {
-    "id": "uuid",
-    "payload": {
-      "ownerSessionSub": "00000003...",
-      "idTokenHash": "sha256-of-id-token",
-      "agentInstance": {
-        "publicKeyFingerprint": "f5d9fac4...",
-        "publicKeyPem": "..."
-      }
-    },
-    "payloadHash": "sha256-of-canonical-payload",
-    "signature": "Ed25519-base64url"
-  },
-  "idToken": "<base64url-encoded-id-token>",
-  "ssoBaseUrl": "https://sso.alien-api.com"
-}
-```
-
-### The canonical chain
-
-**Every step is fatal.** A verifier MUST refuse the proof on any failure;
-"warnings" are not a thing. The reference implementation throws
-`ChainError` on each failure and returns a structured result on success;
-SDKs in other languages should mirror that contract.
-
-```
-0. Structural: proof.version ∈ {1, 2}; proof.agent.publicKeyPem present
-1. Token fingerprint == proof.agent.fingerprint
-2. proof.ownerBinding.payload — canonical JSON matches payloadHash
-3. proof.ownerBinding.signature — Ed25519 verify with proof.agent.publicKeyPem
-   (NOT the binding's self-embedded key)
-4. proof.ownerBinding.payload.agentInstance.publicKeyFingerprint
-     == fingerprint(proof.agent.publicKeyPem)
-5. Decode proof.idToken from base64url (v2) or use raw (v1); MUST be present
-6. sha256(decoded idToken) == proof.ownerBinding.payload.idTokenHash
-7. Fetch SSO JWKS from proof.ssoBaseUrl + "/.well-known/openid-configuration"
-8. Verify decoded idToken RS256 signature against JWKS
-9. idToken.cnf.jkt == jwkThumbprint(proof.agent.publicKeyPem)
-   (NOT the binding's self-embedded key)
-```
-
-**Anchoring rule (security-critical):** steps 3 and 9 both compare against
-`proof.agent.publicKeyPem` — the *claimed* agent key — never against the
-binding's self-embedded `agentInstance.publicKeyPem`. A self-embedded check
-is tautological: a binding signed with key X embedding key X always
-self-verifies, which lets an attacker stitch a victim's binding + id_token
-onto their own signed request. Anchoring to `proof.agent.publicKeyPem`
-forces the binding to have been signed by the same key the consumer's
-caller-side check (commit signature, request body signature, capability
-proof) is verifying against.
-
-If all checks pass, you have cryptographic proof that:
-- The agent holds the private key (token / commit / request signature)
-- The agent created a binding to a specific human (owner binding signature)
-- The Alien SSO server witnessed this binding (id_token RS256 signature
-  with `cnf.jkt` = thumbprint of the proven agent key)
-- The human is a verified AlienID holder
-
-### Reference implementation
-
-The CLI ships `verifyProofChain(proof)` in `lib.mjs` as the single source
-of truth — every consumer (`git-verify`, `@alien-id/sso-agent-id`'s
-deep-verify path, future capability-proof flows) calls this function and
-layers use-case-specific checks (commit signature, request signature, etc.)
-around it. Implementations in other languages should follow the same shape:
-one function that walks all 9 steps, throws on any failure, returns
-`{ agentFingerprint, agentPublicKeyPem, ownerSessionSub, issuer, jkt,
-idTokenPayload }` on success.
-
-### When to use deep verification
-
-| Scenario | Basic token | Deep verification |
-|---|---|---|
-| Read-only API access | Sufficient | Not needed |
-| Write operations | Sufficient | Recommended |
-| Financial transactions | Not sufficient | Required |
-| Audit-sensitive operations | Sufficient | Recommended |
-| First-time agent registration | Not sufficient | Required |
 
 ## Testing your integration
 
 ### Start the demo service as a reference
 
 ```bash
-node examples/demo-service.mjs --port 3141
+node examples/demo-service.mjs \
+  --port 3141 \
+  --sso-url https://sso.alien-api.com \
+  --expected-aud my-service
 ```
 
-### Generate a test token
+### Generate a fresh DPoP-bound request
 
 ```bash
-# As JSON (for programmatic use)
-node cli.mjs auth-header
+# Emit both headers for a specific request — proof is bound to method + URL
+node skills/alien-agent-id/cli.mjs auth-header \
+  --url http://localhost:3141/api/whoami --method GET --shell > /tmp/dpop-env
 
-# As raw header (for curl)
-node cli.mjs auth-header --raw
-```
-
-### Make authenticated requests
-
-```bash
-# Using --raw output directly
-curl -H "$(node cli.mjs auth-header --raw)" http://localhost:3141/api/whoami
-
-# Using JSON output
-TOKEN=$(node cli.mjs auth-header | jq -r .token)
-curl -H "Authorization: AgentID $TOKEN" http://localhost:3141/api/whoami
+source /tmp/dpop-env
+curl -H "Authorization: $AUTHORIZATION" -H "DPoP: $DPOP" \
+  http://localhost:3141/api/whoami
 ```
 
 ### Test error cases
 
 ```bash
-# No auth header
+# No headers
 curl http://localhost:3141/api/whoami
-# → 401: {"error": "Missing header: Authorization: AgentID <token>"}
+# → 401: WWW-Authenticate: DPoP error="invalid_token", error_description="missing_auth_header"
 
-# Invalid token
-curl -H "Authorization: AgentID invalid" http://localhost:3141/api/whoami
-# → 401: {"error": "Invalid token encoding"}
+# Wrong scheme
+curl -H "Authorization: Bearer foo" http://localhost:3141/api/whoami
+# → 401: error_description="bad_auth_scheme"
 
-# Expired token (wait 5+ minutes after generating)
-curl -H "Authorization: AgentID $OLD_TOKEN" http://localhost:3141/api/whoami
-# → 401: {"error": "Token expired (age: 312s)"}
+# DPoP header missing
+curl -H "Authorization: DPoP $AT" http://localhost:3141/api/whoami
+# → 401: error_description="missing_dpop_header"
 
-# Tampered token (flip a character in the payload)
-TAMPERED=$(echo $TOKEN | python3 -c "import sys; t=sys.stdin.read().strip(); print(t[:10]+('A' if t[10]!='A' else 'B')+t[11:])")
-curl -H "Authorization: AgentID $TAMPERED" http://localhost:3141/api/whoami
-# → 401: {"error": "Invalid token encoding"} (corrupted JSON)
-#    or: {"error": "Signature verification failed"} (valid JSON but bad signature)
+# Proof not bound to this URL (mint with --url for a different endpoint)
+# → 401: error_description="htu_mismatch"
+
+# Proof not bound to this method (mint with --method GET, send POST)
+# → 401: error_description="htm_mismatch"
+
+# Replay (send the same DPoP header twice)
+# → 401: error_description="jti_replay"
+
+# Stale proof (wait > PROOF_MAX_AGE_SEC, default 30s)
+# → 401: error_description="proof_stale"
 ```
+
+The full rejection-reason catalogue is enumerated in the SDK package READMEs.
 
 ## Security considerations
 
-### What the token proves
+### What a verified request proves
 
-- The agent **holds the Ed25519 private key** at the time of signing
-- The token was created **within the last 5 minutes** (configurable)
-- The agent claims a specific **owner** (AlienID address) — verified only via deep verification
-
-### What it does not prove (without deep verification)
-
-- That the owner field is truthful (the agent self-asserts it)
-- That the agent is currently authorized by the owner (the binding could be revoked)
-- That the human owner is a real, unique person (that requires chain verification)
+- The agent **holds the Ed25519 private key** corresponding to the JWK in the proof header (proof signature verification + `cnf.jkt` binding).
+- The Alien SSO **witnessed an owner authorization** of this specific agent key (access_token signature over `cnf.jkt`).
+- The request **was not replayed** (jti single-use, iat freshness window).
+- The proof is **bound to this exact method + URL** (htm/htu).
+- The access_token is **not expired** (`exp > now`) and was issued for **this service** (`aud` check, optional but recommended).
 
 ### Replay protection
 
-- Tokens include a random `nonce` and a `timestamp`
-- The 5-minute expiry window limits replay
-- For stricter replay protection, track seen nonces per agent fingerprint
+DPoP gives you two layers:
+
+1. `jti` is single-use within the proof freshness window — store seen jtis in a FIFO Map sized
+   to roughly `peak_qps × PROOF_MAX_AGE_SEC × safety_factor`.
+2. `iat` ±`PROOF_MAX_AGE_SEC` bounds how stale a captured proof can be. Default 30 s; tighten if
+   your environment has tight clock sync, loosen carefully.
+
+The access_token itself is *not* a bearer token in the classic sense — without a fresh DPoP proof
+signed by the matching agent key, a leaked access_token is useless. This is the entire point of
+RFC 9449.
 
 ### Clock skew
 
-- Tokens use the agent's local clock
-- The default 5-minute window accommodates reasonable clock drift
-- Adjust `maxAgeMs` if your environment has known clock skew issues
-- Reject tokens with negative age (timestamp in the future)
+- Proof `iat` uses the agent's local clock.
+- The default ±30 s window absorbs reasonable clock drift but rejects long-stored captures.
+- Reject proofs with `iat > now + skew` (future) and `iat < now - max_age` (stale). The SDK does both.
 
 ### Transport security
 
-- Always use HTTPS in production
-- The token is a bearer credential — anyone who captures it can replay it within the validity window
-- Consider binding tokens to specific endpoints if your threat model requires it
+- Always use HTTPS in production. The proof binds to URL scheme as part of `htu`.
+- DPoP makes captured headers useless without the agent's private key — but the access_token's
+  `sub` and `cnf.jkt` are still privacy-sensitive metadata. Treat the headers as you would any
+  bearer credential.
+
+### Trusted-proxy CIDR list
+
+If your service sits behind an ALB or other L7 proxy, the `htu` claim must reconstruct against the
+**external** URL the agent signed, not the internal scheme/host. The reference verifier honors
+`X-Forwarded-Proto` and `X-Forwarded-Host` only when the connection's remote address is inside a
+configured `TRUSTED_PROXY_CIDRS` list. Without the proxy CIDR set, `htu` reconstruction will use
+the internal `http://internal-host` URL and reject every proof. (See agent-id repo
+`internal/handler/oauth_helpers.go:dpopHTU` for the canonical implementation.)

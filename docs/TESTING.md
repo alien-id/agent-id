@@ -55,7 +55,7 @@ npm run test:integration   # bash tests/integration/full-stack.sh
 | Process | Source | Port | Role |
 |---|---|---|---|
 | `dev-sso` | `examples/dev-sso.mjs` | 5050 | Local OIDC + DPoP; auto-approves every authorize call. RS256-signed id_tokens with `cnf.jkt` derived from the agent's `dpop_jkt`. |
-| `demo-service` | `examples/demo-service.mjs` | 3141 | Publishes `/.well-known/alien-agent-id.json`, hosts `<meta name="alien-agent-id" content="v1">`, verifies `Authorization: AgentID <token>` headers. |
+| `demo-service` | `examples/demo-service.mjs` | 3141 | Publishes `/.well-known/alien-agent-id.json`, hosts `<meta name="alien-agent-id" content="v1">`, verifies RFC 9449 `Authorization: DPoP <access_token>` + `DPoP: <proof>` header pairs. |
 
 ### Override knobs
 

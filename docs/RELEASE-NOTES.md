@@ -36,13 +36,13 @@ The previous protocol bound nothing to the agent's keypair. An attacker who coul
 
 This release also lands the well-known service-manifest discovery channel. Alien-aware services advertise their auth contract at a fixed path, parsed against a closed v1 schema before any agent attempts to call them.
 
-- **Manifest schema (v1).** Required `version: 1`, `auth.header`, `api.base`. Optional `auth.scheme` (default `"AgentID"`; also `"Bearer"`, `"none"`), `api.specUrl`, `service.name`, `service.url`. All URLs must share the same authority as the user-supplied service URL (exact host or subdomain).
+- **Manifest schema (v1).** Required `version: 1`, `auth.header`, `api.base`. Optional `auth.scheme` (default `"DPoP"`; also `"Bearer"`, `"none"`), `api.specUrl`, `service.name`, `service.url`. All URLs must share the same authority as the user-supplied service URL (exact host or subdomain).
 - **Hardened fetch.** 8 KiB body cap, 5s default timeout, redirects refused, `application/json` required, all derived URLs same-authority.
 - **Trust boundary.** The manifest is third-party data, not instructions. The CLI parses, validates, and reduces it to a fixed field set before returning anything to the agent.
 - **HTML support signal.** Closed-enum meta tag `<meta name="alien-agent-id" content="v1">` lets agents and crawlers detect support without probing every host's well-known path.
 - **New CLI commands.** `discover-service --url <URL>` (fetch + validate manifest), `service-support --url <URL>` (probe meta tag).
 - **New `lib.mjs` exports.** `parseServiceManifest`, `fetchServiceManifest`, `buildServiceAuthHeader`, `resolveServiceApiUrl`, `probeServiceSupportSignal`, plus constants `SERVICE_MANIFEST_PATH`, `SERVICE_MANIFEST_MAX_BYTES`, `SUPPORT_SIGNAL_MAX_BYTES`.
-- **Wire scheme on the service edge.** Unchanged from main: `Authorization: AgentID <self-contained-token>`. The DPoP cutover binds the `id_token` *embedded inside* the AgentID token (via `cnf.jkt`); the outer transport scheme between agent and third-party service stays `AgentID` per RFC 7235 (custom token format → custom scheme name). Per-request DPoP-style binding for service calls (companion `DPoP:` proof header on each call to `api.base/<path>`) is a follow-up — tracked but not in this release.
+- **Wire scheme on the service edge.** Standard RFC 9449 DPoP: each authenticated request to a third-party service carries `Authorization: DPoP <access_token>` and a per-request `DPoP: <proof>` header. The agent's access_token is the SSO-issued `at+jwt` (RFC 9068) and carries the standard `sub` (owner), `aud`, `exp`, and `cnf.jkt` (RFC 7800 §3.1) — no custom envelope. The custom `Authorization: AgentID <self-contained-token>` envelope that earlier 3.0 drafts retained has been removed (cutover policy 401; no grace window).
 
 ## Security properties preserved / added
 
