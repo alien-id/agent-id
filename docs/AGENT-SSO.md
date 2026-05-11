@@ -46,8 +46,8 @@ AI agents (Claude Code, OpenClaw, Cursor, Copilot, custom scripts) operate witho
 │                                                                 │
 │  ~/.agent-id/                                                   │
 │  ├── keys/main.json          Ed25519 keypair (0600)             │
-│  ├── owner-binding.json      Cryptographic human↔agent link     │
-│  ├── owner-session.json      SSO tokens (0600)                  │
+│  ├── owner-session.json      SSO tokens — id_token IS the       │
+│  │                           chain attestation (0600)           │
 │  ├── vault/                  Encrypted credentials (0600)       │
 │  │   ├── github.json                                            │
 │  │   ├── aws.json                                               │

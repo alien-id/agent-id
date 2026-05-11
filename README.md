@@ -137,17 +137,16 @@ needs Node.js 18+, git 2.34+, and permission to run
 
 feat: implement auth flow
 
-Agent-ID-Fingerprint: 945d41991dac118776409673019ed0fba36e13fc9d6b5534145f9e31128a3ec6
+Agent-ID-JKT: wEf6o2ux8sBAUG4oQYhP284gfpZwUJMTxXDPH5XxthY
 Agent-ID-Owner: 00000003010000000000539c741e0df8
-Agent-ID-Binding: a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
 
-Anyone can trace: **this code** → **this agent** (fingerprint) → **this human** (owner session)
+Anyone can trace: **this code** → **this agent** (JKT) → **this human** (id_token `sub`)
 → **verified AlienID holder**.
 
-Each `git-commit` also attaches a **proof bundle** as a git note (`refs/notes/agent-id`)
-containing the agent's public key, owner binding, and base64url-encoded SSO id_token — everything
-needed for anyone to verify the provenance chain without access to the agent's local state.
+Each `git-commit` also attaches a **v3 proof bundle** as a git note (`refs/notes/agent-id`)
+containing the SSO-signed id_token and the agent's public JWK — everything a verifier needs to
+prove the provenance chain without access to the agent's local state.
 
 ---
 
@@ -157,11 +156,9 @@ needed for anyone to verify the provenance chain without access to the agent's l
 node skills/alien-agent-id/cli.mjs git-verify --commit HEAD
 ```
 
-Verification is **self-contained** — `git-commit` attaches a proof bundle as a git note
-(`refs/notes/agent-id`) containing the agent's public key, owner binding, and base64url-encoded
-SSO id_token. Anyone
-who clones the repo and fetches the notes can verify the full chain without access to the agent's
-machine.
+Verification is **self-contained**: the v3 git-note bundle is `{ version: 3, id_token, agent_jwk }`.
+Anyone who clones the repo and fetches the notes can verify the chain without access to the
+agent's machine.
 
 ```bash
 # Fetch proof notes from remote
@@ -171,21 +168,25 @@ git fetch origin refs/notes/agent-id:refs/notes/agent-id
 node skills/alien-agent-id/cli.mjs git-verify --commit abc123
 ```
 
-### Verification chain
+### Verification chain (v3)
 
 ```mermaid
 flowchart LR
-    A[SSH Signature] --> B[Agent Fingerprint]
-    B --> C[Owner Binding]
-    C --> D[id_token Hash]
-    D --> E[SSO Attestation]
+    A[SSH commit signature] --> B[agent_jwk]
+    B --> C["id_token cnf.jkt"]
+    C --> D[SSO RS256 signature]
+    D --> E[Trailer JKT match]
 ```
 
-1. **SSH signature** — commit is signed, verified against the agent's public key from the proof note
-2. **Agent fingerprint** — public key hash matches the `Agent-ID-Fingerprint` trailer
-3. **Owner binding** — Ed25519-signed by the agent, links agent to human owner
-4. **id_token hash** — binding contains the hash of the SSO id_token, proving they're linked
-5. **SSO attestation** — id_token RS256 signature verified against Alien SSO's JWKS
+1. **id_token signature** — RS256 verified against Alien SSO's JWKS (`iss` matches discovery)
+2. **`cnf.jkt` anchor** — id_token's RFC 7800 §3.1 confirmation claim binds the SSO-attested
+   owner to a specific Ed25519 key thumbprint
+3. **agent_jwk thumbprint** — bundle's `agent_jwk` thumbprint (RFC 7638) must equal `cnf.jkt`
+   and the `Agent-ID-JKT` trailer
+4. **SSH commit signature** — git's native SSH signature must verify against `agent_jwk`
+
+Pre-v3 (legacy `Agent-ID-Fingerprint` / `Agent-ID-Binding`) commits are **intentionally not
+supported** — see `commit-signing-cleanup.md`.
 
 Falls back to the agent's local state (`~/.agent-id/`) if no git note is found.
 
@@ -335,8 +336,7 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 │   ├── github.json
 │   ├── aws.json
 │   └── ...
-├── owner-binding.json       # Cryptographic human ↔ agent link
-├── owner-session.json       # SSO tokens (mode 0600)
+├── owner-session.json       # SSO tokens — id_token IS the chain attestation (mode 0600)
 ├── nonces.json              # Per-agent nonce tracking
 ├── sequence.json            # Operation sequence counter
 └── audit/operations.jsonl   # Hash-chained signed operation log

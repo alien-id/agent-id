@@ -380,8 +380,7 @@ Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **S
 │   ├── slack.json
 │   └── ...
 ├── audit/operations.jsonl     # Hash-chained signed operation log
-├── owner-binding.json         # Owner binding (human ↔ agent link)
-├── owner-session.json         # Session tokens (mode 0600) — NEVER commit
+├── owner-session.json         # Session tokens — id_token IS the chain attestation (mode 0600) — NEVER commit
 ├── nonces.json                # Per-agent nonce tracking
 ├── sequence.json              # Sequence counter
 ```

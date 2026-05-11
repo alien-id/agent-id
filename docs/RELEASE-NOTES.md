@@ -26,6 +26,28 @@ The previous protocol bound nothing to the agent's keypair. An attacker who coul
 
 - `setup-owner-session` now generates a DPoP proof at token exchange and verifies the resulting `id_token` carries `cnf.jkt` matching the agent's JWK thumbprint. Bootstrap fails loudly if the SSO returns a token without `cnf`.
 - Verifier rejects `id_tokens` without `cnf.jkt`. **Existing pre-3.0 commits no longer verify** — this is intentional; their `id_tokens` are forgery primitives.
+
+## Commit-attestation bundle: v3
+
+The offline commit-attestation surface drops the agent-self-signed `ownerBinding` envelope. Same antipattern as the runtime `owner_proof` / `ownerBinding` drops earlier in this release: every field of the old envelope was a parallel re-statement of facts the SSO already attests on `id_token` (sub, aud, iss, exp, **cnf.jkt**).
+
+- **Bundle shape** (`refs/notes/agent-id`):
+
+  ```json
+  { "version": 3, "id_token": "<base64url JWS>", "agent_jwk": { "kty": "OKP", "crv": "Ed25519", "x": "…" } }
+  ```
+
+  No `agent.publicKeyPem`. No `ownerBinding`. No `ssoBaseUrl` (read it from `id_token.iss`).
+
+- **Commit trailers** — `Agent-ID-JKT: <RFC 7638 thumbprint>` + `Agent-ID-Owner: <id_token.sub>` + `Co-Authored-By: …`. Drops `Agent-ID-Fingerprint` (replaced by `Agent-ID-JKT` — canonical encoding) and `Agent-ID-Binding` (no binding id exists anymore).
+
+- **`git-verify` walk** — id_token JWS signature against SSO JWKS → claim checks (`iss`, `sub` matches trailer, `cnf.jkt` present) → `agent_jwk` thumbprint binding (RFC 7638 — equals both `cnf.jkt` and `Agent-ID-JKT` trailer) → SSH commit signature against `agent_jwk`.
+
+- **Pre-v3 commits are intentionally unsupported.** `git-verify` rejects bundles where `version !== 3` with a clear error. Pre-DPoP id_tokens lack `cnf.jkt` and can't anchor the chain anyway.
+
+- **Local state simplification.** `owner-binding.json` is gone. The SSO-signed `id_token` (in `owner-session.json`) IS the chain attestation; there's no longer a separate agent-self-signed file. The audit log re-anchors on `id_token.jti` (RFC 7519 §4.1.7) for chain-consistency. `cmdSetupOwnerSession` unlinks any stale `owner-binding.json` from pre-v3 agents.
+
+- **Deleted from `lib.mjs`:** `verifyProofChain`, `ChainError`, `verifyOwnerBindingRecord`, `paths.ownerBinding`, `SessionEngine.ownerBinding/loadOwnerBinding/hasOwnerBinding/getOwnerBinding`.
 - New public exports in `lib.mjs`:
   - `createDPoPProof({privateKeyPem, htm, htu, accessToken?, nonce?})`
   - `getUserInfo({ssoBaseUrl, accessToken, agentPrivateKeyPem})`
