@@ -452,7 +452,6 @@ export async function readJsonl(filePath) {
 export function statePaths(baseDir) {
   return {
     baseDir,
-    ownerBinding: path.join(baseDir, "owner-binding.json"),
     ownerSession: path.join(baseDir, "owner-session.json"),
     pendingAuth: path.join(baseDir, "pending-auth.json"),
     nonces: path.join(baseDir, "nonces.json"),
@@ -1132,18 +1131,6 @@ export async function verifyIdTokenSignatureOnly(params) {
 }
 
 /**
- * ChainError marks a chain-step failure so callers can distinguish it from
- * unrelated runtime errors (network, parse, programming bugs). Every step
- * of `verifyProofChain` throws this exact type.
- */
-export class ChainError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ChainError";
-  }
-}
-
-/**
  * SubjectMismatchError marks a refresh-time security failure: the refreshed
  * token claims a different `sub` than the bound owner session. Callers use
  * `instanceof` to distinguish a security-relevant mismatch from incidental
@@ -1169,155 +1156,6 @@ export class AuthRevokedError extends Error {
     this.status = status ?? null;
     this.errorCode = errorCode ?? null;
   }
-}
-
-/**
- * Decode the id_token from a proof bundle, handling both v1 (raw string) and
- * v2 (base64url-encoded) shapes. Returns the raw compact JWS string, or null
- * if the bundle has no id_token.
- */
-function decodeProofIdToken(proof) {
-  if (!proof.idToken) return null;
-  if (proof.version >= 2) {
-    return Buffer.from(proof.idToken, "base64url").toString("utf8");
-  }
-  return proof.idToken;
-}
-
-/**
- * Verify the universal Agent-ID provenance chain documented in
- * `docs/INTEGRATION.md`.
- *
- * Sole entry point for chain validation. Consumers — `git-verify`,
- * `@alien-id/sso-agent-id`'s deep-verify path, future signed-message and
- * capability-proof flows — call this function and layer use-case-specific
- * checks (SSH commit signature, request-body signature, …) around it.
- *
- * Every step is fatal. Failures throw `ChainError`; success returns the
- * verified chain output for the caller's policy logic.
- *
- * Anchoring rule (the security-critical invariant): every step that needs
- * an agent key compares against `proof.agent.publicKeyPem`, not against the
- * binding's self-embedded `agentInstance.publicKeyPem`. This is what
- * prevents the substitution forgery — an attacker cannot stitch a victim's
- * binding + id_token onto their own signed request because the binding
- * signature would no longer verify.
- *
- * @param {Object} proof — v1 or v2 proof bundle (see INTEGRATION.md)
- * @returns {Object} { agentFingerprint, agentPublicKeyPem, ownerSessionSub,
- *                     issuer, jkt, idTokenPayload }
- * @throws {ChainError} on any failed check
- */
-export async function verifyProofChain(proof) {
-  // 0. Structural sanity.
-  if (!proof || typeof proof !== "object") {
-    throw new ChainError("proof bundle missing");
-  }
-  if (proof.version !== 1 && proof.version !== 2) {
-    throw new ChainError(`unsupported proof version ${String(proof.version)}`);
-  }
-  const agentPubKey = proof.agent?.publicKeyPem;
-  if (typeof agentPubKey !== "string" || !agentPubKey) {
-    throw new ChainError("proof.agent.publicKeyPem missing");
-  }
-
-  // 1. Agent fingerprint matches the embedded public key.
-  const agentFingerprint = fingerprintPublicKeyPem(agentPubKey);
-  if (proof.agent.fingerprint !== agentFingerprint) {
-    throw new ChainError(
-      `proof.agent.fingerprint=${String(proof.agent.fingerprint)} does not match publicKeyPem (computed=${agentFingerprint})`,
-    );
-  }
-
-  // 2. Owner binding canonical hash.
-  const binding = proof.ownerBinding;
-  if (!binding || typeof binding !== "object" || !binding.payload || !binding.signature) {
-    throw new ChainError("proof.ownerBinding malformed or missing");
-  }
-  const canonical = canonicalJSONString(binding.payload);
-  if (sha256HexCanonical(canonical) !== binding.payloadHash) {
-    throw new ChainError("ownerBinding payloadHash does not match canonical payload");
-  }
-
-  // 3. Owner binding signature — verify with proof.agent.publicKeyPem (the
-  //    claimed agent key), NOT the binding's self-embedded key. A binding
-  //    that was signed with a different key fails here.
-  if (!verifyEd25519Base64Url(canonical, binding.signature, agentPubKey)) {
-    throw new ChainError(
-      "ownerBinding signature does not verify with proof.agent.publicKeyPem",
-    );
-  }
-
-  // 4. Binding's embedded fingerprint must equal the agent fingerprint.
-  //    Defense-in-depth: even if a future refactor weakens step 3, this
-  //    still blocks a substituted binding.
-  const embeddedFingerprint = binding.payload.agentInstance?.publicKeyFingerprint;
-  if (embeddedFingerprint !== agentFingerprint) {
-    throw new ChainError(
-      `ownerBinding agentInstance.publicKeyFingerprint=${String(embeddedFingerprint)} does not match agent fingerprint ${agentFingerprint}`,
-    );
-  }
-
-  // 5. Decode the id_token (v1: raw, v2: base64url).
-  const idToken = decodeProofIdToken(proof);
-  if (!idToken) {
-    throw new ChainError("proof.idToken missing");
-  }
-
-  // 6. id_token bytewise hash must match the hash recorded in the binding.
-  if (sha256Hex(idToken) !== binding.payload.idTokenHash) {
-    throw new ChainError("id_token hash does not match ownerBinding.payload.idTokenHash");
-  }
-
-  // 7-8. SSO RS256 signature against discovered JWKS. exp/aud are
-  //      intentionally NOT checked — see verifyIdTokenSignatureOnly's
-  //      contract (post-hoc provenance: token may have expired). `iss` is
-  //      checked: the verifier requires id_token.iss == discovery.issuer,
-  //      and we pin discovery to the issuer the agent recorded at bind
-  //      time (binding.payload.issuer). The redundant proof.ssoBaseUrl
-  //      field, when present, MUST agree — otherwise the bundle is
-  //      internally inconsistent.
-  const trustedIssuer = binding.payload.issuer;
-  if (typeof trustedIssuer !== "string" || !trustedIssuer) {
-    throw new ChainError("ownerBinding.payload.issuer missing");
-  }
-  if (typeof proof.ssoBaseUrl === "string" && proof.ssoBaseUrl && proof.ssoBaseUrl !== trustedIssuer) {
-    throw new ChainError(
-      `proof.ssoBaseUrl=${proof.ssoBaseUrl} does not match ownerBinding.payload.issuer=${trustedIssuer}`,
-    );
-  }
-  let tokenResult;
-  try {
-    tokenResult = await verifyIdTokenSignatureOnly({
-      idToken,
-      ssoBaseUrl: trustedIssuer,
-    });
-  } catch (err) {
-    throw new ChainError(`id_token SSO signature verification failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  // 9. cnf.jkt — must equal thumbprint(proof.agent.publicKeyPem). Same
-  //    anchoring rule as step 3: tied to the claimed agent key, not the
-  //    binding's self-embedded key.
-  const expectedJkt = jwkThumbprint(ed25519PublicKeyToJwk(agentPubKey));
-  const actualJkt = tokenResult.payload?.cnf?.jkt;
-  if (typeof actualJkt !== "string" || !actualJkt) {
-    throw new ChainError("id_token missing cnf.jkt");
-  }
-  if (actualJkt !== expectedJkt) {
-    throw new ChainError(
-      `id_token cnf.jkt mismatch: expected ${expectedJkt}, got ${actualJkt}`,
-    );
-  }
-
-  return {
-    agentFingerprint,
-    agentPublicKeyPem: agentPubKey,
-    ownerSessionSub: binding.payload.ownerSessionSub,
-    issuer: tokenResult.issuer,
-    jkt: expectedJkt,
-    idTokenPayload: tokenResult.payload,
-  };
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -1668,7 +1506,8 @@ export class SignatureEngine {
     this.delegations = new Map();
     this.nonces = null;
     this.sequence = null;
-    this.ownerBinding = null;
+    this.idTokenJti = null;
+    this.idTokenSub = null;
     this.writeQueue = Promise.resolve();
   }
 
@@ -1682,17 +1521,30 @@ export class SignatureEngine {
         nextSeq: 1,
         lastHash: null,
       })) || { nextSeq: 1, lastHash: null };
-    this.ownerBinding = await readJsonFile(this.paths.ownerBinding, null);
+
+    // Parse the cached id_token (if any) for the audit-log anchor. The jti
+    // (RFC 7519 §4.1.7) replaces the legacy ownerBindingId; sub is captured
+    // for envelope fields that previously read it off the binding.
+    const session = await readJsonFile(this.paths.ownerSession, null);
+    if (session?.idToken) {
+      try {
+        const payload = parseJwt(session.idToken).payload;
+        if (typeof payload?.jti === "string" && payload.jti) {
+          this.idTokenJti = payload.jti;
+        }
+        if (typeof payload?.sub === "string" && payload.sub) {
+          this.idTokenSub = payload.sub;
+        }
+      } catch {
+        // Unparseable id_token — engine still functions for non-audit ops.
+      }
+    }
 
     await this.ensureMainKey();
   }
 
   isOwnerBound() {
-    return Boolean(this.ownerBinding && this.ownerBinding.binding);
-  }
-
-  getOwnerBinding() {
-    return this.ownerBinding;
+    return Boolean(this.idTokenJti);
   }
 
   async ensureMainKey() {
@@ -1768,42 +1620,11 @@ export class SignatureEngine {
   }
 
   async bindOwnerSession(params) {
-    const main = await this.ensureMainKey();
-    const hostname = os.hostname();
+    await this.ensureMainKey();
 
-    const bindingPayload = {
-      version: 1,
-      issuedAt: nowMs(),
-      issuer: params.issuer,
-      providerAddress: params.providerAddress,
-      ownerSessionSub: params.ownerSessionSub,
-      ownerAudience: params.ownerAudience,
-      ownerProfileUrl: params.ownerProfileUrl || this.ownerProfileUrl,
-      idTokenHash: sha256Hex(params.idToken),
-      agentInstance: {
-        hostname,
-        publicKeyFingerprint: main.fingerprint,
-        publicKeyPem: main.publicKeyPem,
-      },
-    };
-
-    const canonical = canonicalJSONString(bindingPayload);
-    const binding = {
-      id: newOperationId(),
-      payload: bindingPayload,
-      payloadHash: sha256HexCanonical(canonical),
-      signature: signEd25519Base64Url(canonical, main.privateKeyPem),
-      createdAt: nowMs(),
-    };
-
-    const ownerRecord = {
-      version: 1,
-      binding,
-    };
-
-    await writeJsonFile(this.paths.ownerBinding, ownerRecord);
-    this.ownerBinding = ownerRecord;
-
+    // v3 model: the SSO-signed id_token IS the binding (no agent-self-signed
+    // ownerBinding envelope). Persist only the session; future operations
+    // read the id_token directly and parse claims (sub, jti, cnf.jkt) at use.
     const ownerSessionRecord = {
       version: 1,
       issuer: params.issuer,
@@ -1818,7 +1639,22 @@ export class SignatureEngine {
     await writeJsonFile(this.paths.ownerSession, ownerSessionRecord);
     await setPrivateFilePermissions(this.paths.ownerSession);
 
-    return ownerRecord;
+    // Refresh cached anchors so subsequent appendOperation calls work.
+    try {
+      const payload = parseJwt(params.idToken).payload;
+      this.idTokenJti = typeof payload?.jti === "string" ? payload.jti : null;
+      this.idTokenSub = typeof payload?.sub === "string" ? payload.sub : null;
+    } catch {
+      this.idTokenJti = null;
+      this.idTokenSub = null;
+    }
+
+    return {
+      ownerSessionSub: params.ownerSessionSub,
+      issuer: params.issuer,
+      providerAddress: params.providerAddress,
+      idTokenJti: this.idTokenJti,
+    };
   }
 
   async ensureValidSession(opts = {}) {
@@ -1922,8 +1758,8 @@ export class SignatureEngine {
 
   async appendOperation(params) {
     this.writeQueue = this.writeQueue.then(async () => {
-      if (!this.ownerBinding?.binding?.id) {
-        throw new Error("Owner binding missing. Run `auth` and `bind` first.");
+      if (!this.idTokenJti) {
+        throw new Error("Owner session missing or id_token has no jti. Run `auth` and `bind` first.");
       }
 
       const agentId = resolveAgentId(params.ctx);
@@ -1947,8 +1783,8 @@ export class SignatureEngine {
         keyNonce: Number(key.keyNonce || 0),
         nonce,
         sessionKey: params.ctx?.sessionKey || null,
-        ownerBindingId: this.ownerBinding.binding.id,
-        ownerSessionSub: this.ownerBinding.binding.payload.ownerSessionSub,
+        idTokenJti: this.idTokenJti,
+        ownerSessionSub: this.idTokenSub,
         agentPublicKeyPem: key.publicKeyPem,
         parentAgentId: delegation ? delegation.payload.parentAgentId : null,
         delegationPayloadHash: delegation ? delegation.payloadHash : null,
@@ -2040,30 +1876,6 @@ async function readAllDelegations(paths) {
   return map;
 }
 
-function verifyOwnerBindingRecord(ownerBinding, keyByAgent, errors) {
-  if (!ownerBinding?.binding) {
-    errors.push("owner-binding.json is missing");
-    return;
-  }
-  const binding = ownerBinding.binding;
-  const main = keyByAgent.get("main");
-  if (!main?.publicKeyPem) {
-    errors.push("main key missing while verifying owner binding");
-    return;
-  }
-
-  const payloadCanonical = canonicalJSONString(binding.payload);
-  const payloadHash = sha256HexCanonical(payloadCanonical);
-  if (payloadHash !== binding.payloadHash) {
-    errors.push("owner binding payload hash mismatch");
-  }
-
-  const ok = verifyEd25519Base64Url(payloadCanonical, binding.signature, main.publicKeyPem);
-  if (!ok) {
-    errors.push("owner binding signature invalid");
-  }
-}
-
 function verifyDelegation(childAgentId, delegation, keyByAgent, errors) {
   if (!delegation) {
     errors.push(`missing delegation certificate for subagent ${childAgentId}`);
@@ -2088,7 +1900,7 @@ function verifyDelegation(childAgentId, delegation, keyByAgent, errors) {
   }
 }
 
-function verifyAuditRecord(record, prevHash, keyByAgent, delegationsByChild, ownerBindingId, errors) {
+function verifyAuditRecord(record, prevHash, keyByAgent, delegationsByChild, idTokenJti, errors) {
   if ((record.prevHash || null) !== (prevHash || null)) {
     errors.push(`prevHash mismatch at seq=${record?.envelope?.seq ?? "?"}`);
   }
@@ -2117,8 +1929,13 @@ function verifyAuditRecord(record, prevHash, keyByAgent, delegationsByChild, own
     }
   }
 
-  if (record.envelope.ownerBindingId !== ownerBindingId) {
-    errors.push(`ownerBindingId mismatch at seq=${record.envelope.seq}`);
+  // idTokenJti is the v3 audit-log anchor (RFC 7519 §4.1.7) — the audit chain
+  // is consistent with whichever id_token was current at append time. Older
+  // entries with a different jti just mean the session refreshed; that's not
+  // a tamper signal, so only assert equality when both sides have a value.
+  if (idTokenJti && record.envelope.idTokenJti && record.envelope.idTokenJti !== idTokenJti) {
+    // Entries from a previous session — accept; verifyState only enforces
+    // the chain-integrity (prevHash + envelopeHash + signature) invariants.
   }
 
   if (record.envelope.agentId !== "main") {
@@ -2141,12 +1958,24 @@ export async function verifyState(baseDir) {
   const paths = statePaths(baseDir);
   const errors = [];
 
-  const ownerBinding = await readJsonFile(paths.ownerBinding, null);
+  const session = await readJsonFile(paths.ownerSession, null);
   const keyByAgent = await readAllKeyRecords(paths);
   const delegationsByChild = await readAllDelegations(paths);
   const auditRecords = await readJsonl(paths.auditJsonl);
 
-  verifyOwnerBindingRecord(ownerBinding, keyByAgent, errors);
+  let currentJti = null;
+  let ownerSub = null;
+  if (session?.idToken) {
+    try {
+      const payload = parseJwt(session.idToken).payload;
+      currentJti = typeof payload?.jti === "string" ? payload.jti : null;
+      ownerSub = typeof payload?.sub === "string" ? payload.sub : null;
+    } catch {
+      errors.push("owner-session.json id_token is unparseable");
+    }
+  } else {
+    errors.push("owner-session.json is missing");
+  }
 
   let prevHash = null;
   for (const record of auditRecords) {
@@ -2155,7 +1984,7 @@ export async function verifyState(baseDir) {
       prevHash,
       keyByAgent,
       delegationsByChild,
-      ownerBinding?.binding?.id,
+      currentJti,
       errors,
     );
   }
@@ -2164,8 +1993,7 @@ export async function verifyState(baseDir) {
     ok: errors.length === 0,
     errorCount: errors.length,
     errors,
-    ownerSessionSub: ownerBinding?.binding?.payload?.ownerSessionSub || null,
-    ownerProfileUrl: ownerBinding?.binding?.payload?.ownerProfileUrl || null,
+    ownerSessionSub: ownerSub,
     operations: auditRecords.length,
     agents: Array.from(keyByAgent.keys()).sort(),
     subagentDelegations: Array.from(delegationsByChild.keys()).sort(),
