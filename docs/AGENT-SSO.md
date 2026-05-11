@@ -310,52 +310,70 @@ Agent's Ed25519 private key (PKCS8 DER)
 
 ### For Alien-aware services
 
-Services that integrate with Agent SSO verify agents using Ed25519 token assertions. The agent generates a token:
+Services verify agents with RFC 9449 DPoP. Per request the agent sends two headers:
+
+```
+Authorization: DPoP <access_token>
+DPoP: <proof JWT>
+```
+
+The access_token (RFC 9068 `at+jwt`) is issued by Alien SSO and carries the standard claims that
+attest the owner ↔ agent chain:
+
+| Claim | Meaning |
+|---|---|
+| `sub` | Owner's AlienID address |
+| `aud` | Target service identifier |
+| `iss` | `https://sso.alien-api.com` |
+| `exp` | Access-token expiry |
+| `cnf.jkt` | JWK SHA-256 thumbprint of the agent's Ed25519 public key (RFC 7800 §3.1) |
+
+The agent generates the per-request proof for a specific method and URL:
 
 ```bash
-node cli.mjs auth-header
-# → Authorization: AgentID eyJ...
+node cli.mjs auth-header --url https://service.example.com/api/whoami --method GET
+# → Authorization: DPoP <access_token>
+# → DPoP: <proof JWT>
 ```
 
-The token contains:
+Service-side verification walks RFC 9449 §4.3:
 
-```json
-{
-  "v": 1,
-  "fingerprint": "f5d9fac4...",
-  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n...",
-  "owner": "00000003010000000000539c741e0df8",
-  "timestamp": 1774531517000,
-  "nonce": "random-hex",
-  "sig": "Ed25519-signature-over-all-above-fields"
-}
-```
+1. Exactly one `Authorization: DPoP <at>` and one `DPoP: <proof>` header.
+2. Proof is a JWS with `typ=dpop+jwt`, `alg=EdDSA`, and an OKP/Ed25519 `jwk` (no private `d`) in the header.
+3. EdDSA signature over the proof verifies against the embedded JWK.
+4. `htm` equals the request method byte-for-byte; `htu` equals the reconstructed `<origin><pathname>` (no query, no fragment).
+5. `iat` is within ±`PROOF_MAX_AGE_SEC` (default 30s); `jti` not seen before.
+6. Parse access_token; validate `typ`/`alg`, verify signature against SSO JWKS.
+7. Claim checks: `iss == expectedIss`, optional `aud` allow-list, `exp > now`, non-empty `sub`.
+8. RFC 9449 §6.1: `at.cnf.jkt === jwkThumbprint(proof.header.jwk)`.
+9. RFC 9449 §4.3 step 10: `proof.ath === b64url(sha256(access_token))`.
 
-The service verifies the token by:
-1. Checking the Ed25519 signature against the embedded public key
-2. Confirming the fingerprint matches the public key hash
-3. Checking the timestamp is within 5 minutes
-4. Optionally verifying the full provenance chain (owner binding → id_token → SSO JWKS)
-
-No pre-registration needed. The token is self-contained.
+Owner identity, agent identity, and proof-of-possession come from signed standard claims. No
+custom envelope, no key pre-registration.
 
 ### For services to integrate
 
-Import the verification function:
+Use `verifyDPoPRequest` from
+[`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id):
 
 ```javascript
-import { verifyAgentToken } from "./lib.mjs";
+import { verifyDPoPRequest } from "@alien-id/sso-agent-id";
 
 // In your HTTP handler:
-const auth = req.headers.authorization;
-if (!auth?.startsWith("AgentID ")) return res.status(401).json({ error: "Unauthorized" });
+const result = verifyDPoPRequest(
+  { method: req.method, url: req.url, headers: req.headers },
+  { jwks: await getSsoJwks(), expectedAudience: process.env.SERVICE_AUDIENCE },
+);
+if (!result.ok) {
+  return res
+    .status(401)
+    .set("WWW-Authenticate", `DPoP error="invalid_token", error_description="${result.code}"`)
+    .json(result);
+}
 
-const result = verifyAgentToken(auth.slice(8));
-if (!result.ok) return res.status(401).json({ error: result.error });
-
-// result.fingerprint — agent identity
-// result.owner — human owner's AlienID address
-// result.timestamp — when the token was created
+// result.owner_sub  — owner's AlienID address (from access_token.sub)
+// result.agent_jkt  — agent key thumbprint (from access_token.cnf.jkt)
+// result.service_token — verified access_token claims
 ```
 
 A working demo service is included in `examples/demo-service.mjs`.

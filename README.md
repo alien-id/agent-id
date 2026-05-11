@@ -193,30 +193,28 @@ Falls back to the agent's local state (`~/.agent-id/`) if no git note is found.
 
 ## Service Authentication
 
-Agents can authenticate to Alien-aware services using self-issued Ed25519 signed tokens:
+Agents authenticate to Alien-aware services with RFC 9449 DPoP. The agent presents the SSO-issued
+access_token in the `Authorization` header and a fresh per-request proof JWT (signed by the agent's
+Ed25519 key) in the `DPoP` header:
 
 ```bash
-# Generate a signed auth header (valid for 5 minutes)
-node skills/alien-agent-id/cli.mjs auth-header --raw
-# → Authorization: AgentID eyJ...
+# Generate the two-header pair for a specific request (URL and method are bound into the proof)
+node skills/alien-agent-id/cli.mjs auth-header \
+  --url https://service.example.com/api/whoami --method GET
+# → Authorization: DPoP <access_token>
+# → DPoP: <proof JWT>
 
 # Use in API calls
-AUTH=$(node skills/alien-agent-id/cli.mjs auth-header --raw)
-curl -H "$AUTH" https://service.example.com/api/whoami
+eval $(node skills/alien-agent-id/cli.mjs auth-header \
+  --url https://service.example.com/api/whoami --method GET --shell)
+curl -H "Authorization: $AUTHORIZATION" -H "DPoP: $DPOP" https://service.example.com/api/whoami
 ```
 
-The token is self-contained — it includes the agent's public key, fingerprint, owner identity,
-owner proof chain, and an Ed25519 signature. Services verify tokens using
-[`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id) with no
-prior key registration needed.
-
-For deep verification (the full provenance chain back to the human owner),
-the canonical 9-step algorithm is documented in [docs/INTEGRATION.md](docs/INTEGRATION.md#the-canonical-chain).
-Every consumer — `git-verify`, the SDK's deep-verify path, future
-capability-proof flows — runs the same `verifyProofChain` function so the
-chain logic stays in one place. The chain anchors every key check to
-`proof.agent.publicKeyPem` (the key the request/commit was signed with),
-which is what makes it forgery-resistant.
+Owner ↔ agent binding lives entirely in standard claims: the access_token carries `sub` (owner),
+`aud`, `iss`, and `cnf.jkt` (the agent key thumbprint, RFC 7800 §3.1). The DPoP proof binds the
+request to that same key per RFC 9449 §6.1. Services verify with
+[`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id)'s
+`verifyDPoPRequest` — no custom envelope, no key registration.
 
 ---
 

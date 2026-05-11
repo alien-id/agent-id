@@ -37,7 +37,7 @@ import {
   deriveVaultKey,
   vaultEncrypt,
   vaultDecrypt,
-  createAgentToken,
+  createDPoPProof,
   fetchServiceManifest,
   probeServiceSupportSignal,
 } from "./lib.mjs";
@@ -1200,42 +1200,57 @@ async function cmdAuthHeader(flags) {
     return;
   }
 
-  // Transparently refresh the SSO session if the access_token is expired.
+  // Refresh the SSO session first — the access_token is the bearer credential
+  // we attach to the request and the AS rotates it on a tight cadence.
   const engine = new SignatureEngine({ baseDir: stateDir });
   await engine.init();
   try {
     await engine.ensureValidSession();
   } catch {
-    // Non-fatal: auth-header uses the local keypair, not the access_token.
-    // Log but don't block.
-    stderr("Warning: SSO session refresh failed. Local auth tokens still work.");
+    stderr("Warning: SSO session refresh failed.");
   }
 
-  const owner = await readJsonFile(paths.ownerBinding, null);
   const session = await readJsonFile(paths.ownerSession, null);
+  if (!session?.accessToken) {
+    outputError("No bound session with access_token. Run `bootstrap` or `bind` first.");
+    return;
+  }
 
-  const token = createAgentToken({
-    fingerprint: key.fingerprint,
-    publicKeyPem: key.publicKeyPem,
+  // RFC 9449 §4.2: the DPoP proof binds to a specific request, so the agent
+  // MUST be told the target method + URL up front. Per-request proof, single-
+  // use jti, fresh signature. No long-lived envelope.
+  if (!flags.url) {
+    outputError("--url is required. The DPoP proof's `htu` claim binds to a specific request target (RFC 9449 §4.2).");
+    return;
+  }
+  const htm = String(flags.method || "GET").toUpperCase();
+  const htu = String(flags.url);
+
+  const proof = createDPoPProof({
     privateKeyPem: key.privateKeyPem,
-    ownerSessionSub: owner?.binding?.payload?.ownerSessionSub || null,
-    ownerBinding: owner?.binding || null,
-    idToken: session?.idToken || null,
+    htm,
+    htu,
+    // RFC 9449 §4.2: bind the proof to the access token via `ath` (sha256
+    // of the access token). Defends against proof reuse with a different
+    // token even if both were captured.
+    accessToken: session.accessToken,
   });
 
-  const header = `AgentID ${token}`;
+  const authorization = `DPoP ${session.accessToken}`;
+  const dpopHeader = proof;
 
   if (flags.raw) {
-    process.stdout.write(`Authorization: ${header}\n`);
-  } else {
-    outputJson({
-      ok: true,
-      header: `Authorization: ${header}`,
-      token,
-      fingerprint: key.fingerprint,
-      owner: owner?.binding?.payload?.ownerSessionSub || null,
-    });
+    process.stdout.write(`Authorization: ${authorization}\n`);
+    process.stdout.write(`DPoP: ${dpopHeader}\n`);
+    return;
   }
+  outputJson({
+    ok: true,
+    authorization,
+    dpop: dpopHeader,
+    method: htm,
+    url: htu,
+  });
 }
 
 async function cmdServiceSupport(flags) {
@@ -1290,7 +1305,8 @@ Commands:
   git-setup      Write SSH key files for commit signing
   git-commit     Create a signed commit with Agent ID trailers
   git-verify     Verify provenance chain of a signed commit
-  auth-header    Generate a signed authentication token for service calls
+  auth-header    Emit RFC 9449 DPoP Authorization + DPoP headers for a request
+                 (requires --url, optional --method, defaults to GET)
   discover-service  Fetch and validate /.well-known/alien-agent-id.json
   service-support   Probe a page for the <meta name="alien-agent-id"> support signal
   refresh        Refresh SSO session tokens (access_token / refresh_token)
