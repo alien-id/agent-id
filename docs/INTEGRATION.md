@@ -226,8 +226,8 @@ async function requireAgent(req, res, next) {
 app.get("/api/data", requireAgent, (req, res) => {
   res.json({
     ok: true,
-    owner_sub: req.agent.owner_sub,
-    agent_jkt: req.agent.agent_jkt,
+    sub: req.agent.sub,
+    jkt: req.agent.jkt,
   });
 });
 
@@ -259,7 +259,7 @@ fastify.decorate("verifyAgent", async (request, reply) => {
 });
 
 fastify.get("/api/data", { preHandler: [fastify.verifyAgent] }, async (request) => {
-  return { ok: true, owner_sub: request.agent.owner_sub };
+  return { ok: true, sub: request.agent.sub };
 });
 
 fastify.listen({ port: 3000 });
@@ -277,7 +277,7 @@ require_dpop = build_require_dpop(jwks=load_jwks(), expected_audience="my-servic
 
 @app.get("/api/data")
 def get_data(agent = Depends(require_dpop)):
-    return {"ok": True, "owner_sub": agent.owner_sub, "agent_jkt": agent.agent_jkt}
+    return {"ok": True, "sub": agent.sub, "jkt": agent.jkt}
 ```
 
 ### Go (net/http)
@@ -309,14 +309,17 @@ The verifier returns:
 ```ts
 {
   ok: true,
-  owner_sub: string,        // human owner's AlienID address (access_token.sub)
-  agent_jkt: string,        // agent key thumbprint (access_token.cnf.jkt)
-  service_token: AccessTokenClaims, // full verified access_token payload
+  sub: string,                                 // human owner's AlienID address (access_token.sub)
+  jkt: string,                                 // agent key thumbprint (access_token.cnf.jkt)
+  accessTokenClaims: Record<string, unknown>,  // full verified access_token payload
+  proofClaims: Record<string, unknown>,        // full verified DPoP proof payload
 }
 ```
 
-`owner_sub` is the **SSO-attested** human owner — there's no separate "deep verification" step,
-the chain is enforced as part of every verification. `agent_jkt` uniquely identifies the
+(Python returns the same shape with snake_case: `access_token_claims`, `proof_claims`.)
+
+`sub` is the **SSO-attested** human owner — there's no separate "deep verification" step,
+the chain is enforced as part of every verification. `jkt` uniquely identifies the
 agent instance.
 
 ### Allow any verified agent
@@ -338,7 +341,7 @@ const ALLOWED_AGENT_JKTS = new Set([
 ]);
 
 function requireKnownAgent(req, res, next) {
-  if (!ALLOWED_AGENT_JKTS.has(req.agent.agent_jkt)) {
+  if (!ALLOWED_AGENT_JKTS.has(req.agent.jkt)) {
     return res.status(403).json({ error: "Agent not authorized for this service" });
   }
   next();
@@ -357,7 +360,7 @@ const ALLOWED_OWNERS = new Set([
 ]);
 
 function requireAuthorizedOwner(req, res, next) {
-  if (!ALLOWED_OWNERS.has(req.agent.owner_sub)) {
+  if (!ALLOWED_OWNERS.has(req.agent.sub)) {
     return res.status(403).json({ error: "Agent owner not authorized" });
   }
   next();
@@ -367,11 +370,11 @@ function requireAuthorizedOwner(req, res, next) {
 ### Rate limiting by agent
 
 ```javascript
-const rateLimits = new Map();  // agent_jkt → { count, windowStart }
+const rateLimits = new Map();  // jkt → { count, windowStart }
 
 function rateLimit(maxRequests, windowMs) {
   return (req, res, next) => {
-    const key = req.agent.agent_jkt;
+    const key = req.agent.jkt;
     const now = Date.now();
     const entry = rateLimits.get(key) || { count: 0, windowStart: now };
 

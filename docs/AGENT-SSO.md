@@ -371,9 +371,10 @@ if (!result.ok) {
     .json(result);
 }
 
-// result.owner_sub  — owner's AlienID address (from access_token.sub)
-// result.agent_jkt  — agent key thumbprint (from access_token.cnf.jkt)
-// result.service_token — verified access_token claims
+// result.sub               — owner's AlienID address (from access_token.sub)
+// result.jkt               — agent key thumbprint (from access_token.cnf.jkt)
+// result.accessTokenClaims — full verified access_token payload
+// result.proofClaims       — full verified DPoP proof payload
 ```
 
 A working demo service is included in `examples/demo-service.mjs`.
