@@ -485,39 +485,6 @@ function normalizeOptionalString(value) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function parseOwnerProof(raw) {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-
-  const sessionAddress = normalizeOptionalString(raw.session_address);
-  const sessionSignature = normalizeOptionalString(raw.session_signature);
-  const sessionSignatureSeed = normalizeOptionalString(raw.session_signature_seed);
-  const sessionPublicKey = normalizeOptionalString(raw.session_public_key);
-  const providerAddress = normalizeOptionalString(raw.provider_address);
-
-  const anyPresent =
-    sessionAddress || sessionSignature || sessionSignatureSeed || sessionPublicKey || providerAddress;
-  if (!anyPresent) {
-    return null;
-  }
-
-  if (!sessionAddress || !sessionSignature || !sessionSignatureSeed || !sessionPublicKey) {
-    throw new Error(
-      "Poll response owner_proof is missing required session_address/session_signature/session_signature_seed/session_public_key",
-    );
-  }
-
-  return {
-    sessionAddress,
-    sessionSignature,
-    sessionSignatureSeed,
-    sessionPublicKey,
-    providerAddress,
-    signatureVerifiedAt: Number(raw.signature_verified_at || 0) || 0,
-  };
-}
-
 // All current callers pass an SSO base URL — chokepoint for the RFC 6749 §10
 // TLS guard so every flow (authorize, token, refresh, userinfo, discovery,
 // id_token verification) inherits it.
@@ -726,7 +693,6 @@ export async function pollForAuthorizationCode(params) {
       }
       return {
         authorizationCode: out.authorization_code,
-        ownerProof: parseOwnerProof(out.owner_proof),
       };
     }
     if (status === "rejected") {
@@ -740,61 +706,6 @@ export async function pollForAuthorizationCode(params) {
   }
 
   throw new Error("Timed out waiting for Alien SSO authorization");
-}
-
-export function verifyOwnerSessionProof(params) {
-  const proof = params?.proof;
-  if (!proof || typeof proof !== "object") {
-    return { ok: false, reason: "owner proof is missing" };
-  }
-
-  const sessionAddress = normalizeOptionalString(proof.sessionAddress);
-  const sessionSignature = normalizeOptionalString(proof.sessionSignature);
-  const sessionSignatureSeed = normalizeOptionalString(proof.sessionSignatureSeed);
-  const sessionPublicKey = normalizeOptionalString(proof.sessionPublicKey);
-  const providerAddress = normalizeOptionalString(proof.providerAddress);
-
-  if (!sessionAddress || !sessionSignature || !sessionSignatureSeed || !sessionPublicKey) {
-    return { ok: false, reason: "owner proof fields are incomplete" };
-  }
-
-  const expectedSessionAddress = normalizeOptionalString(params.expectedSessionAddress);
-  if (expectedSessionAddress && sessionAddress !== expectedSessionAddress) {
-    return {
-      ok: false,
-      reason: `owner proof session mismatch: expected ${expectedSessionAddress}, got ${sessionAddress}`,
-    };
-  }
-
-  const expectedProviderAddress = normalizeOptionalString(params.expectedProviderAddress);
-  if (expectedProviderAddress && providerAddress && providerAddress !== expectedProviderAddress) {
-    return {
-      ok: false,
-      reason: `owner proof provider mismatch: expected ${expectedProviderAddress}, got ${providerAddress}`,
-    };
-  }
-
-  const message = `${sessionAddress}${sessionSignatureSeed}`;
-  try {
-    const sigOk = verifyEd25519HexMessage(message, sessionSignature, sessionPublicKey);
-    if (!sigOk) {
-      return { ok: false, reason: "owner proof signature verification failed" };
-    }
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
-  }
-
-  return {
-    ok: true,
-    proof: {
-      sessionAddress,
-      sessionSignature,
-      sessionSignatureSeed,
-      sessionPublicKey,
-      providerAddress: providerAddress || null,
-      signatureVerifiedAt: Number(proof.signatureVerifiedAt || 0) || 0,
-    },
-  };
 }
 
 export async function exchangeAuthorizationCode(params) {
@@ -1436,29 +1347,6 @@ function delegationFile(baseDir, childAgentId) {
   return path.join(baseDir, "delegations", `${safeName(childAgentId)}.json`);
 }
 
-function normalizeOwnerSessionProof(input) {
-  if (!input || typeof input !== "object") {
-    return null;
-  }
-  const asString = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
-  const sessionAddress = asString(input.sessionAddress);
-  const sessionSignature = asString(input.sessionSignature);
-  const sessionSignatureSeed = asString(input.sessionSignatureSeed);
-  const sessionPublicKey = asString(input.sessionPublicKey);
-  const providerAddress = asString(input.providerAddress);
-  if (!sessionAddress || !sessionSignature || !sessionSignatureSeed || !sessionPublicKey) {
-    return null;
-  }
-  return {
-    sessionAddress,
-    sessionSignature,
-    sessionSignatureSeed,
-    sessionPublicKey,
-    providerAddress,
-    signatureVerifiedAt: Number(input.signatureVerifiedAt || 0) || 0,
-  };
-}
-
 // ════════════════════════════════════════════════════════════════════════════════
 // Service manifest discovery — /.well-known/alien-agent-id.json
 //
@@ -1878,20 +1766,6 @@ export class SignatureEngine {
   async bindOwnerSession(params) {
     const main = await this.ensureMainKey();
     const hostname = os.hostname();
-    const ownerSessionProof = normalizeOwnerSessionProof(params.ownerSessionProof);
-    if (ownerSessionProof?.sessionAddress && ownerSessionProof.sessionAddress !== params.ownerSessionSub) {
-      throw new Error(
-        `owner session proof mismatch: expected ${params.ownerSessionSub}, got ${ownerSessionProof.sessionAddress}`,
-      );
-    }
-    if (
-      ownerSessionProof?.providerAddress &&
-      ownerSessionProof.providerAddress !== params.providerAddress
-    ) {
-      throw new Error(
-        `owner session proof provider mismatch: expected ${params.providerAddress}, got ${ownerSessionProof.providerAddress}`,
-      );
-    }
 
     const bindingPayload = {
       version: 1,
@@ -1902,8 +1776,6 @@ export class SignatureEngine {
       ownerAudience: params.ownerAudience,
       ownerProfileUrl: params.ownerProfileUrl || this.ownerProfileUrl,
       idTokenHash: sha256Hex(params.idToken),
-      ownerSessionProof: ownerSessionProof || null,
-      ownerSessionProofHash: ownerSessionProof ? sha256HexCanonical(ownerSessionProof) : null,
       agentInstance: {
         hostname,
         publicKeyFingerprint: main.fingerprint,
@@ -1937,7 +1809,6 @@ export class SignatureEngine {
       idToken: params.idToken,
       accessToken: params.accessToken,
       refreshToken: params.refreshToken,
-      ownerSessionProof: ownerSessionProof || null,
       savedAt: nowMs(),
     };
     await writeJsonFile(this.paths.ownerSession, ownerSessionRecord);
@@ -2186,62 +2057,6 @@ function verifyOwnerBindingRecord(ownerBinding, keyByAgent, errors) {
   const ok = verifyEd25519Base64Url(payloadCanonical, binding.signature, main.publicKeyPem);
   if (!ok) {
     errors.push("owner binding signature invalid");
-  }
-
-  verifyOwnerSessionProofInBinding(binding.payload, errors);
-}
-
-function verifyOwnerSessionProofInBinding(payload, errors) {
-  const proof = payload?.ownerSessionProof;
-  if (!proof || typeof proof !== "object") {
-    // ownerSessionProof is optional — some Alien App versions don't return it.
-    // The binding is still valid via the id_token server signature.
-    return;
-  }
-
-  const required = [
-    "sessionAddress",
-    "sessionSignature",
-    "sessionSignatureSeed",
-    "sessionPublicKey",
-  ];
-  for (const field of required) {
-    if (typeof proof[field] !== "string" || !proof[field]) {
-      errors.push(`owner session proof missing ${field}`);
-      return;
-    }
-  }
-
-  const message = `${proof.sessionAddress}${proof.sessionSignatureSeed}`;
-  let sigOk = false;
-  try {
-    sigOk = verifyEd25519HexMessage(message, proof.sessionSignature, proof.sessionPublicKey);
-  } catch (err) {
-    errors.push(`owner session proof parse error: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-
-  if (!sigOk) {
-    errors.push("owner session proof signature invalid");
-  }
-
-  if (payload.ownerSessionSub && payload.ownerSessionSub !== proof.sessionAddress) {
-    errors.push(
-      `owner session proof subject mismatch: binding=${payload.ownerSessionSub} proof=${proof.sessionAddress}`,
-    );
-  }
-
-  if (payload.providerAddress && proof.providerAddress && payload.providerAddress !== proof.providerAddress) {
-    errors.push(
-      `owner session proof provider mismatch: binding=${payload.providerAddress} proof=${proof.providerAddress}`,
-    );
-  }
-
-  if (payload.ownerSessionProofHash) {
-    const proofHash = sha256HexCanonical(canonicalJSONString(proof));
-    if (proofHash !== payload.ownerSessionProofHash) {
-      errors.push("owner session proof hash mismatch");
-    }
   }
 }
 

@@ -39,7 +39,7 @@ AI agents (Claude Code, OpenClaw, Cursor, Copilot, custom scripts) operate witho
 │  Refresh tokens allow agents to maintain sessions indefinitely  │
 │  without further human interaction.                             │
 └────────────┬────────────────────────────────────────────────────┘
-             │ id_token + access_token + owner_proof
+             │ id_token + access_token
              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Agent (Claude Code, OpenClaw, any AI with shell access)        │
@@ -163,7 +163,6 @@ Agent                              Alien SSO                    Human
   │  5. POST /oauth/poll ────────────►│                           │
   │     (repeats every 3s, up to 5m)  │                           │
   │◄──── authorization_code ──────────│                           │
-  │      + owner_proof (Ed25519 sig)  │                           │
   │                                   │                           │
   │  6. POST /oauth/token ───────────►│                           │
   │     code + PKCE verifier          │                           │
@@ -171,17 +170,15 @@ Agent                              Alien SSO                    Human
   │      access_token, refresh_token  │                           │
   │                                   │                           │
   │  7. Verify id_token signature     │                           │
-  │     against SSO JWKS              │                           │
+  │     against SSO JWKS (RFC 7519,   │                           │
+  │     RFC 9449 §6.1 cnf.jkt)        │                           │
   │                                   │                           │
-  │  8. Verify owner_proof            │                           │
-  │     (Ed25519 session signature)   │                           │
-  │                                   │                           │
-  │  9. Create owner binding:         │                           │
+  │  8. Create owner binding:         │                           │
   │     Sign {agent_key, owner_sub,   │                           │
   │     id_token_hash, hostname}      │                           │
   │     with agent's Ed25519 key      │                           │
   │                                   │                           │
-  │  10. Configure git SSH signing    │                           │
+  │  9. Configure git SSH signing     │                           │
   │                                   │                           │
   │  ✓ Done. Agent has identity.      │                           │
 ```

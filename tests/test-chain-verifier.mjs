@@ -124,8 +124,6 @@ function buildValidChain({ rsa, ssoBaseUrl, agentOverride, bindingSignerOverride
     ownerSessionSub: "0xowner-sub",
     ownerAudience: "0xprovider",
     idTokenHash,
-    ownerSessionProof: null,
-    ownerSessionProofHash: null,
     agentInstance: {
       hostname: "test-host",
       publicKeyFingerprint: bindingSignerFingerprint,

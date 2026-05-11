@@ -12,8 +12,6 @@
 //     `dpop_jkt` query param from /oauth/authorize (RFC 9449 §10).
 //   - Verifies the `DPoP` proof header on /oauth/token and /oauth/userinfo.
 //   - Emits `token_type: "DPoP"` on token responses (RFC 9449 §5).
-//   - Emits a synthetic owner_proof (Ed25519-signed by a fixture owner key)
-//     so cmdBind can verify the chain.
 //
 // What this is NOT:
 //   - The real Alien SSO. There's no Alien App callback, no TON/Solana
@@ -45,7 +43,6 @@ import {
   createSign,
   randomBytes,
   createHash,
-  sign as cryptoSign,
   verify as cryptoVerify,
 } from "node:crypto";
 import { parseArgs } from "node:util";
@@ -255,29 +252,6 @@ function signRs256Jwt(payload) {
   return `${signingInput}.${b64url(sig)}`;
 }
 
-// Build the synthetic owner_proof. The agent verifies sessionSignature against
-// a message of `${sessionAddress}${sessionSignatureSeed}`, signed with the
-// owner's Ed25519 key (hex-encoded raw 32-byte public key).
-function buildOwnerProof(providerAddress) {
-  const seed = b64url(randomBytes(16));
-  const message = `${OWNER_SESSION_ADDRESS}${seed}`;
-  const sig = cryptoSign(null, Buffer.from(message, "utf8"), {
-    key: ownerKeys.privateKeyPem,
-  });
-  // The agent's verifier accepts hex pubkey; pull the raw 32-byte Ed25519 key
-  // out of the SPKI PEM via the JWK conversion.
-  const jwk = ed25519PublicKeyToJwk(ownerKeys.publicKeyPem);
-  const pubHex = Buffer.from(jwk.x, "base64url").toString("hex");
-  return {
-    session_address: OWNER_SESSION_ADDRESS,
-    session_signature_seed: seed,
-    session_signature: sig.toString("hex"),
-    session_public_key: pubHex,
-    provider_address: providerAddress,
-    signature_verified_at: nowSec(),
-  };
-}
-
 // ─── Routes ────────────────────────────────────────────────────────────────
 
 const ISSUER = `http://${HOST}:${PORT}`;
@@ -379,7 +353,6 @@ async function routePoll(req, res) {
   send(res, 200, {
     status: "authorized",
     authorization_code: session.authorizationCode,
-    owner_proof: buildOwnerProof(session.clientId),
   });
 }
 

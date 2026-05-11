@@ -928,8 +928,6 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
         ownerSessionSub: "test-owner-sub",
         ownerAudience: "p",
         idTokenHash: sha256Hex("fake-id-token"),
-        ownerSessionProof: null,
-        ownerSessionProofHash: null,
         agentInstance: { hostname: os.hostname(), publicKeyFingerprint: fingerprint, publicKeyPem: pair.publicKeyPem },
       };
       const canonical = canonicalJSONString(bindingPayload);
@@ -958,7 +956,6 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
         idToken: "fake-id-token",
         accessToken: `${expiredHeader}.${expiredPayload}.sig`,
         refreshToken: "old-rt",
-        ownerSessionProof: null,
         savedAt: nowMs(),
       });
       await ensureDir(pathMod.dirname(paths.auditJsonl));

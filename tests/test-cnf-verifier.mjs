@@ -162,8 +162,6 @@ async function buildFixture({ ssoBaseUrl, rsa, idTokenPayload, idTokenCnfJkt, mi
     ownerSessionSub: ownerSub,
     ownerAudience: providerAddress,
     idTokenHash,
-    ownerSessionProof: null,
-    ownerSessionProofHash: null,
     agentInstance: {
       hostname: "test-host",
       publicKeyFingerprint: bindingFingerprint,

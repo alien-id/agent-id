@@ -315,7 +315,7 @@ This returns JSON containing a `deepLink` and a `qrCode` (Unicode text). Output 
 
 ### Step 3: Wait for approval
 ```bash
-node CLI bind --no-require-owner-proof
+node CLI bind
 ```
 
 Blocks for up to 5 minutes while the user scans the QR code with Alien App.

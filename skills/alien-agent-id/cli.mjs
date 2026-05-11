@@ -27,7 +27,6 @@ import {
   pollForAuthorizationCode,
   exchangeAuthorizationCode,
   verifyIdToken,
-  verifyOwnerSessionProof,
   verifyState,
   verifyProofChain,
   ChainError,
@@ -219,7 +218,6 @@ async function cmdBind(flags) {
   const stateDir = resolveStateDir(flags);
   const timeoutSec = Number(flags["timeout-sec"] || 300);
   const pollIntervalMs = Number(flags["poll-interval-ms"] || 3000);
-  const requireOwnerProof = flags["require-owner-proof"] !== false;
 
   const paths = statePaths(stateDir);
   const pending = await readJsonFile(paths.pendingAuth, null);
@@ -270,33 +268,9 @@ async function cmdBind(flags) {
   });
   stderr(`Verified id_token: sub=${id.payload.sub}`);
 
-  // Verify owner session proof
-  if (requireOwnerProof && !poll.ownerProof) {
-    outputError(
-      "OAuth poll did not return owner key proof (owner_proof). " +
-        "Upgrade SSO server or pass --no-require-owner-proof.",
-    );
-    return;
-  }
-
-  let ownerSessionProof = null;
-  if (poll.ownerProof) {
-    const proofCheck = verifyOwnerSessionProof({
-      proof: poll.ownerProof,
-      expectedSessionAddress: id.payload.sub,
-      expectedProviderAddress: pending.providerAddress,
-    });
-    if (!proofCheck.ok) {
-      outputError(`Owner session proof verification failed: ${proofCheck.reason}`);
-      return;
-    }
-    ownerSessionProof = proofCheck.proof;
-    stderr(
-      `Owner proof verified: session=${ownerSessionProof.sessionAddress} pub=${ownerSessionProof.sessionPublicKey.slice(0, 16)}...`,
-    );
-  }
-
-  // Create engine and bind
+  // Create engine and bind. The id_token IS the chain attestation
+  // (signed by the SSO server, RFC-7519 §7.2 verified above), so no
+  // separate owner-key proof is required at bind time.
   const engine = new SignatureEngine({ baseDir: stateDir });
   await engine.init();
   const owner = await engine.bindOwnerSession({
@@ -308,7 +282,6 @@ async function cmdBind(flags) {
     idToken: tokens.id_token,
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
-    ownerSessionProof,
   });
 
   // Clean up pending auth
@@ -1340,7 +1313,6 @@ Auth flags:
 Bind flags:
   --timeout-sec <n>          Poll timeout (default: 300)
   --poll-interval-ms <n>     Poll interval (default: 3000)
-  --no-require-owner-proof   Don't require owner session proof
 
 Sign flags:
   --type <type>              Operation type (e.g., TOOL_CALL, MESSAGE_SEND)

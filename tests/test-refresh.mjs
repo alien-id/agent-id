@@ -95,8 +95,6 @@ async function writeTestState(stateDir, { accessToken, refreshToken, ssoBaseUrl,
     ownerSessionSub: "test-owner-sub",
     ownerAudience: providerAddress,
     idTokenHash: sha256Hex("fake-id-token"),
-    ownerSessionProof: null,
-    ownerSessionProofHash: null,
     agentInstance: {
       hostname: os.hostname(),
       publicKeyFingerprint: fingerprint,
@@ -123,7 +121,6 @@ async function writeTestState(stateDir, { accessToken, refreshToken, ssoBaseUrl,
     idToken: "fake-id-token",
     accessToken,
     refreshToken,
-    ownerSessionProof: null,
     savedAt: nowMs(),
   });
 

@@ -9,11 +9,6 @@
 # (developer-portal/src/app/api/mock-callback/route.ts) to bypass the
 # Alien App's signing step, so this runs CI-friendly without a phone.
 #
-# Why --no-require-owner-proof: the mock-callback shortcut signs with a
-# fixed test session; there is no real owner-side key behind it, so SSO
-# returns no owner_proof on /oauth/poll. Real Alien App approval supplies
-# a real owner_proof and this flag isn't needed in production flows.
-#
 # Usage:    bash tests/integration/develop-sso-smoke.sh
 # Override: STATE_DIR / SSO_URL / PROVIDER / SHORTENER / DEMO_PORT
 #           BIND_TIMEOUT_SEC / SUPER_OPTIMISTIC
@@ -98,7 +93,6 @@ assert "SSO accepted mock signature (200)" bash -c "[[ '$HTTP_CODE' = '200' ]]"
 
 blue "▸ Step 5: bind (poll → DPoP token exchange → cnf.jkt verify)"
 node skills/alien-agent-id/cli.mjs bind --state-dir "$STATE_DIR" \
-  --no-require-owner-proof \
   --timeout-sec "$BIND_TIMEOUT_SEC" --poll-interval-ms 500 >/tmp/dsm.bind.json
 assert "binding created" \
   bash -c 'jq -e ".bindingId | type == \"string\"" /tmp/dsm.bind.json >/dev/null'
