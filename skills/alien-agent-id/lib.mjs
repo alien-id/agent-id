@@ -535,7 +535,7 @@ async function fetchJson(url, init) {
   return json;
 }
 
-function parseJwt(token) {
+export function parseJwt(token) {
   if (typeof token !== "string" || !token) {
     throw new Error("Invalid JWT format");
   }
