@@ -86,30 +86,8 @@ async function writeTestState(stateDir, { accessToken, refreshToken, ssoBaseUrl,
     fingerprint,
   });
 
-  // Create a minimal owner binding
-  const bindingPayload = {
-    version: 1,
-    issuedAt: nowMs(),
-    issuer: ssoBaseUrl,
-    providerAddress,
-    ownerSessionSub: "test-owner-sub",
-    ownerAudience: providerAddress,
-    idTokenHash: sha256Hex("fake-id-token"),
-    agentInstance: {
-      hostname: os.hostname(),
-      publicKeyFingerprint: fingerprint,
-      publicKeyPem: pair.publicKeyPem,
-    },
-  };
-  const canonical = canonicalJSONString(bindingPayload);
-  const binding = {
-    id: crypto.randomUUID(),
-    payload: bindingPayload,
-    payloadHash: sha256Hex(canonical),
-    signature: signEd25519Base64Url(canonical, pair.privateKeyPem),
-    createdAt: nowMs(),
-  };
-  await writeJsonFile(paths.ownerBinding, { version: 1, binding });
+  // v3 model: no owner-binding.json — the id_token IS the binding. Tests
+  // that need an audit-log anchor should mint an id_token with a jti claim.
 
   // Create owner session with the provided tokens
   await writeJsonFile(paths.ownerSession, {

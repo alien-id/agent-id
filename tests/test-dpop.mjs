@@ -919,28 +919,8 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
         fingerprint,
       });
 
-      // Minimal binding so the engine can init.
-      const bindingPayload = {
-        version: 1,
-        issuedAt: nowMs(),
-        issuer: mock.baseUrl,
-        providerAddress: "p",
-        ownerSessionSub: "test-owner-sub",
-        ownerAudience: "p",
-        idTokenHash: sha256Hex("fake-id-token"),
-        agentInstance: { hostname: os.hostname(), publicKeyFingerprint: fingerprint, publicKeyPem: pair.publicKeyPem },
-      };
-      const canonical = canonicalJSONString(bindingPayload);
-      await writeJsonFile(paths.ownerBinding, {
-        version: 1,
-        binding: {
-          id: crypto.randomUUID(),
-          payload: bindingPayload,
-          payloadHash: sha256Hex(canonical),
-          signature: signEd25519Base64Url(canonical, pair.privateKeyPem),
-          createdAt: nowMs(),
-        },
-      });
+      // v3 model: no owner-binding.json. The engine reads ownerSession.idToken
+      // and parses jti/sub for the audit-log anchor.
 
       // Expired access token so refresh fires.
       const expiredHeader = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
