@@ -14,7 +14,7 @@ This walks through creating a fresh Alien Agent ID and binding it to a human own
 
 ## Step 1 — choose a provider
 
-Ask the user which provider to use. Do not silently read `default-provider.txt`.
+This is your **first** user-facing message — no preamble, no "want me to start?" confirmation. Just ask the provider question. Do not silently read `default-provider.txt`.
 
 > "Would you like to use the default Alien provider (recommended), or set up your own?"
 

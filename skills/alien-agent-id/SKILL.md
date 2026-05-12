@@ -31,7 +31,7 @@ node CLI status
 
 If `"bound": true`, skip to **Authenticate with services** or **Commit signed code**.
 
-If not bound, bootstrap a new identity. The flow requires the user to scan a QR code in the Alien App, so the steps run individually (not `bootstrap`, which blocks before the QR can be shown). See [reference/bootstrap.md](reference/bootstrap.md).
+If not bound, **start bootstrap immediately** — do not ask "want me to start?" first; invoking this skill is the opt-in. The first user-facing message is the provider question (Step 1 below), not a confirmation prompt. The flow requires the user to scan a QR code in the Alien App, so the steps run individually (not the `bootstrap` command, which blocks before the QR can be shown). Full flow in [reference/bootstrap.md](reference/bootstrap.md).
 
 ## Authenticate with services
 
