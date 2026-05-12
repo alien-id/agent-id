@@ -42,6 +42,7 @@ import {
   createDPoPProof,
   fetchServiceManifest,
   probeServiceSupportSignal,
+  renderCapabilities,
 } from "./lib.mjs";
 import qrcode from "./qrcode.cjs";
 
@@ -1417,6 +1418,70 @@ async function cmdDiscoverService(flags) {
   });
 }
 
+const CAPABILITIES_FORMATS = new Set(["markdown", "anthropic", "openai", "mcp"]);
+
+async function cmdCapabilities(flags) {
+  const serviceUrl = flags.url || flags.service;
+  if (!serviceUrl) {
+    outputError("Missing --url <service-url>");
+    return;
+  }
+  const format = String(flags.format || "markdown").toLowerCase();
+  if (!CAPABILITIES_FORMATS.has(format)) {
+    outputError(`Unknown --format ${JSON.stringify(format)}. Use one of: ${[...CAPABILITIES_FORMATS].join(", ")}.`);
+    return;
+  }
+  const result = await fetchServiceManifest(String(serviceUrl), {
+    allowInsecure: flags["allow-insecure"] === true,
+    timeoutMs: flags["timeout-ms"] ? Number(flags["timeout-ms"]) : undefined,
+  });
+  const manifest = result.manifest;
+  const ops = manifest.api?.operations ?? [];
+
+  if (format === "markdown") {
+    const md = renderCapabilities(manifest);
+    process.stdout.write(md.endsWith("\n") ? md : md + "\n");
+    return;
+  }
+  if (format === "anthropic") {
+    outputJson(ops.map(op => ({
+      name: op.name,
+      description: op.description,
+      input_schema: op.inputSchema ?? { type: "object", properties: {} },
+    })));
+    return;
+  }
+  if (format === "openai") {
+    outputJson(ops.map(op => {
+      const schema = op.inputSchema ?? { type: "object", properties: {} };
+      const propCount = Object.keys(schema.properties ?? {}).length;
+      const reqCount = (schema.required ?? []).length;
+      const canStrict = schema.additionalProperties === false && reqCount === propCount;
+      return {
+        type: "function",
+        function: {
+          name: op.name,
+          description: op.description,
+          parameters: schema,
+          ...(canStrict ? { strict: true } : {}),
+        },
+      };
+    }));
+    return;
+  }
+  if (format === "mcp") {
+    const tools = ops.map(op => {
+      const t = { name: op.name, description: op.description };
+      if (op.inputSchema) t.inputSchema = op.inputSchema;
+      if (op.outputSchema) t.outputSchema = op.outputSchema;
+      if (op.annotations) t.annotations = op.annotations;
+      return t;
+    });
+    outputJson({ jsonrpc: "2.0", id: 1, result: { tools } });
+    return;
+  }
+}
+
 // ─── Help ───────────────────────────────────────────────────────────────────────
 
 function printHelp() {
@@ -1445,6 +1510,10 @@ Commands:
                  (requires --url, optional --method, defaults to GET).
                  Prefer 'call' unless you specifically need to drive curl.
   discover-service  Fetch and validate /.well-known/alien-agent-id.json
+  capabilities   Render a discovered manifest's api.operations[] as markdown
+                 or as a provider tool-use array.
+                 Flags: --url <U> [--format markdown|anthropic|openai|mcp]
+                        (default: markdown)
   service-support   Probe a page for the <meta name="alien-agent-id"> support signal
   refresh        Refresh SSO session tokens (access_token / refresh_token)
   vault-store    Store an encrypted credential in the agent vault
@@ -1530,6 +1599,7 @@ const commands = {
   "auth-header": cmdAuthHeader,
   call: cmdCall,
   "discover-service": cmdDiscoverService,
+  capabilities: cmdCapabilities,
   "service-support": cmdServiceSupport,
   refresh: cmdRefresh,
 };

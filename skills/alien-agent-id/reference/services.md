@@ -14,11 +14,43 @@ The CLI validates the response against the v1 schema (size cap, closed key set, 
 
 | Field | Meaning |
 |---|---|
+| `version` | `1` or `2`. Operations are only allowed under `version: 2`. |
 | `service.name`, `service.url` | Optional display metadata. |
 | `auth.header` | HTTP header name (e.g. `Authorization`). |
 | `auth.scheme` | `DPoP` (default), `Bearer`, or `none`. |
 | `api.base` | API base URL for subsequent requests. |
-| `api.specUrl` | Optional OpenAPI / JSON Schema describing the API. If present, read it before calling any endpoint — that is exactly the source of truth that prevents probing field names against a live service. |
+| `api.specUrl` | Optional OpenAPI / JSON Schema URL describing the API. Read this before calling any endpoint if `operations[]` is absent — it is the source of truth that prevents probing field names against a live service. |
+| `api.operations[]` | Optional inline capability catalog (≤50). Each entry: `name`, `description`, `method`, `path`, optional `title`, `auth` (`required`/`optional`/`none`, default `required`), `inputSchema`, `outputSchema`, `annotations`. |
+
+### `api.operations[]` — the agent-facing capability catalog
+
+When `operations[]` is present, you can read every callable endpoint in one shot:
+
+```bash
+node CLI capabilities --url https://example.com
+```
+
+Output is markdown — one heading per operation, with the exact `node CLI call …` invocation for each, plus a `⚠ destructive` note when the publisher set `annotations.destructiveHint: true`.
+
+For tool-use API integration, the same data renders as a provider-shaped array:
+
+```bash
+node CLI capabilities --url https://example.com --format anthropic   # Messages API tools[]
+node CLI capabilities --url https://example.com --format openai      # Chat Completions tools[]
+node CLI capabilities --url https://example.com --format mcp         # JSON-RPC tools/list response
+```
+
+#### Operation schema constraints
+
+`inputSchema` / `outputSchema` are a deliberately small subset of JSON Schema 2020-12:
+
+- Root MUST be `type: "object"`.
+- `properties` ≤ 20 entries; each property `type` is one of `string`, `number`, `integer`, `boolean`, `array`. No nested objects.
+- For arrays, `items` is a scalar type name (e.g. `"string"`), not a schema.
+- Per-property `description` ≤ 200 chars, `enum` ≤ 32 values, `maxLength` ≤ 100000.
+- Rejected: `$ref`, `$dynamicRef`, `$comment`, `examples`, `default`, `pattern`, `title`, `minimum`, `maximum`, nested `properties`.
+
+A publisher with a richer schema drops to `api.specUrl` (OpenAPI 3.1).
 
 ### Optional support-signal probe
 
