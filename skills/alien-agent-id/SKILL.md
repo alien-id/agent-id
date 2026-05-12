@@ -5,7 +5,7 @@ license: MIT
 metadata:
   author: Alien Wallet
   version: "3.0.2"
-allowed-tools: Bash(node:*) Bash(git:*) Bash(curl:*) Bash(jq:*) Read
+allowed-tools: Bash(node *alien-agent-id/cli.mjs:*) Bash(git:*) Bash(curl:*) Bash(jq:*) Read
 ---
 
 # Alien Agent ID
