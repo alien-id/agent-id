@@ -4,7 +4,7 @@ description: Gives the agent a cryptographic Alien Agent ID linked to a verified
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "3.1.0"
+  version: "3.1.1"
 allowed-tools: Bash(node *alien-agent-id/cli.mjs:*) Bash(git:*) Bash(curl:*) Bash(jq:*) Read
 ---
 

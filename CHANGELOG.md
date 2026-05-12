@@ -2,6 +2,24 @@
 
 All notable changes are documented here.
 
+## [3.1.1] — 2026-05-12
+
+Patch release. Fixes a CLI failure on machines with a custom global SSH signing program (most
+commonly 1Password's git integration, which routes `gpg.ssh.program` through `op-ssh-sign`).
+
+### Fixed
+
+- `git-commit` and `git-verify` now pin `gpg.ssh.program=ssh-keygen` inline on the underlying
+  `git` invocations. Previously, with `git config --global gpg.ssh.program` set to
+  1Password's `op-ssh-sign`, every signed-commit attempt failed with
+  `1Password: invalid ssh public key` because op-ssh-sign refuses to sign with keys it doesn't
+  manage — and the agent-id key is intentionally not in 1Password. `git-verify` had the
+  symmetric failure, since most custom SSH signers don't implement `ssh-keygen -Y verify`.
+  The pin is a no-op for users without a custom signer (`ssh-keygen` is git's documented
+  default for `gpg.ssh.program`); it only changes behavior when the user has configured a
+  custom signer globally, and in that case the override is correct — the agent-id key is the
+  agent's, not the user's.
+
 ## [3.1.0] — 2026-05-12
 
 Minor release. Manifest v2 with inline operation catalogs, two new CLI subcommands (`call`,
