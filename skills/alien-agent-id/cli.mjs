@@ -42,6 +42,7 @@ import {
   createDPoPProof,
   fetchServiceManifest,
   probeServiceSupportSignal,
+  renderCapabilities,
 } from "./lib.mjs";
 import qrcode from "./qrcode.cjs";
 
@@ -1417,6 +1418,20 @@ async function cmdDiscoverService(flags) {
   });
 }
 
+async function cmdCapabilities(flags) {
+  const serviceUrl = flags.url || flags.service;
+  if (!serviceUrl) {
+    outputError("Missing --url <service-url>");
+    return;
+  }
+  const result = await fetchServiceManifest(String(serviceUrl), {
+    allowInsecure: flags["allow-insecure"] === true,
+    timeoutMs: flags["timeout-ms"] ? Number(flags["timeout-ms"]) : undefined,
+  });
+  const md = renderCapabilities(result.manifest);
+  process.stdout.write(md.endsWith("\n") ? md : md + "\n");
+}
+
 // ─── Help ───────────────────────────────────────────────────────────────────────
 
 function printHelp() {
@@ -1445,6 +1460,8 @@ Commands:
                  (requires --url, optional --method, defaults to GET).
                  Prefer 'call' unless you specifically need to drive curl.
   discover-service  Fetch and validate /.well-known/alien-agent-id.json
+  capabilities   Fetch a manifest and render api.operations[] as markdown.
+                 Flags: --url <U>
   service-support   Probe a page for the <meta name="alien-agent-id"> support signal
   refresh        Refresh SSO session tokens (access_token / refresh_token)
   vault-store    Store an encrypted credential in the agent vault
@@ -1530,6 +1547,7 @@ const commands = {
   "auth-header": cmdAuthHeader,
   call: cmdCall,
   "discover-service": cmdDiscoverService,
+  capabilities: cmdCapabilities,
   "service-support": cmdServiceSupport,
   refresh: cmdRefresh,
 };

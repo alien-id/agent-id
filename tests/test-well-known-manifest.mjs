@@ -234,12 +234,20 @@ describe("parseServiceManifest (pure validation)", () => {
     assert.equal(out.api.base, `https://api.${host}/v1`);
   });
 
-  it("rejects wrong version", () => {
+  it("rejects unsupported version", () => {
     assert.throws(() =>
       parseServiceManifest(
-        { version: 2, auth: { header: "X" }, api: { base: `https://${host}/` } },
+        { version: 99, auth: { header: "X" }, api: { base: `https://${host}/` } },
         host,
       ), /unsupported version/);
+  });
+
+  it("accepts version 2", () => {
+    const out = parseServiceManifest(
+      { version: 2, auth: { header: "Authorization" }, api: { base: `https://${host}/v1` } },
+      host,
+    );
+    assert.equal(out.version, 2);
   });
 
   it("rejects unknown top-level key", () => {
@@ -427,6 +435,277 @@ describe("parseServiceManifest (pure validation)", () => {
         },
         host,
       ), /api.specUrl.*not within/);
+  });
+});
+
+describe("parseServiceManifest — api.operations[] (v2)", () => {
+  const host = "acme.test";
+  const baseManifest = () => ({
+    version: 2,
+    auth: { header: "Authorization", scheme: "DPoP" },
+    api: { base: `https://${host}/api` },
+  });
+
+  it("accepts a minimal operation", () => {
+    const m = baseManifest();
+    m.api.operations = [{ name: "listPosts", description: "List posts.", method: "GET", path: "/posts" }];
+    const out = parseServiceManifest(m, host);
+    assert.equal(out.api.operations.length, 1);
+    assert.equal(out.api.operations[0].name, "listPosts");
+    assert.equal(out.api.operations[0].auth, "required");
+  });
+
+  it("accepts a richer operation with inputSchema and annotations", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "createPost",
+      description: "Create a post.",
+      method: "POST",
+      path: "/posts",
+      inputSchema: {
+        type: "object",
+        required: ["title"],
+        properties: { title: { type: "string", maxLength: 300, description: "Post title" } },
+      },
+      annotations: { destructiveHint: true, idempotentHint: false },
+    }];
+    const out = parseServiceManifest(m, host);
+    const op = out.api.operations[0];
+    assert.equal(op.inputSchema.properties.title.maxLength, 300);
+    assert.equal(op.annotations.destructiveHint, true);
+  });
+
+  it("rejects operations under version 1", () => {
+    const m = baseManifest();
+    m.version = 1;
+    m.api.operations = [{ name: "x", description: "y", method: "GET", path: "/" }];
+    assert.throws(() => parseServiceManifest(m, host), /requires version 2/);
+  });
+
+  it("rejects unknown key inside an operation", () => {
+    const m = baseManifest();
+    m.api.operations = [{ name: "x", description: "y", method: "GET", path: "/", executes: "rm -rf" }];
+    assert.throws(() => parseServiceManifest(m, host), /api\.operations\[0\]: unknown key "executes"/);
+  });
+
+  it("rejects bad name", () => {
+    const m = baseManifest();
+    m.api.operations = [{ name: "2fa-check", description: "y", method: "GET", path: "/" }];
+    assert.throws(() => parseServiceManifest(m, host), /api\.operations\[0\]\.name/);
+  });
+
+  it("rejects bad path", () => {
+    const m = baseManifest();
+    m.api.operations = [{ name: "x", description: "y", method: "GET", path: "/posts?sort=top" }];
+    assert.throws(() => parseServiceManifest(m, host), /api\.operations\[0\]\.path/);
+  });
+
+  it("rejects bad method", () => {
+    const m = baseManifest();
+    m.api.operations = [{ name: "x", description: "y", method: "OPTIONS", path: "/" }];
+    assert.throws(() => parseServiceManifest(m, host), /api\.operations\[0\]\.method/);
+  });
+
+  it("rejects path placeholder missing from inputSchema.properties", () => {
+    const m = baseManifest();
+    m.api.operations = [{ name: "deletePost", description: "y", method: "DELETE", path: "/posts/{id}" }];
+    assert.throws(() => parseServiceManifest(m, host), /placeholder \{id\}/);
+  });
+
+  it("accepts path placeholder when matched by inputSchema.properties", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "deletePost",
+      description: "Delete one of your posts.",
+      method: "DELETE",
+      path: "/posts/{id}",
+      inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+    }];
+    const out = parseServiceManifest(m, host);
+    assert.equal(out.api.operations[0].path, "/posts/{id}");
+  });
+
+  it("rejects $ref in inputSchema", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "x", description: "y", method: "POST", path: "/x",
+      inputSchema: { type: "object", $ref: "#/foo" },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /unknown key "\$ref"/);
+  });
+
+  it("rejects nested object property type", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "x", description: "y", method: "POST", path: "/x",
+      inputSchema: { type: "object", properties: { nested: { type: "object" } } },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /properties\["nested"\]\.type/);
+  });
+
+  it("rejects pattern in property", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "x", description: "y", method: "POST", path: "/x",
+      inputSchema: { type: "object", properties: { slug: { type: "string", pattern: "^[a-z]+$" } } },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /unknown key "pattern"/);
+  });
+
+  it("rejects items as an object schema (must be a scalar type name)", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "x", description: "y", method: "POST", path: "/x",
+      inputSchema: { type: "object", properties: { tags: { type: "array", items: { type: "string" } } } },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /items/);
+  });
+
+  it("rejects items on non-array type", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "x", description: "y", method: "POST", path: "/x",
+      inputSchema: { type: "object", properties: { name: { type: "string", items: "string" } } },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /only valid when type is "array"/);
+  });
+
+  it("rejects oversize description", () => {
+    const m = baseManifest();
+    m.api.operations = [{ name: "x", description: "a".repeat(1025), method: "GET", path: "/" }];
+    assert.throws(() => parseServiceManifest(m, host), /description/);
+  });
+
+  it("rejects control characters in description", () => {
+    const m = baseManifest();
+    m.api.operations = [{ name: "x", description: "hi\x00there", method: "GET", path: "/" }];
+    assert.throws(() => parseServiceManifest(m, host), /control characters/);
+  });
+
+  it("rejects > 20 properties", () => {
+    const m = baseManifest();
+    const properties = {};
+    for (let i = 0; i < 21; i++) properties[`p${i}`] = { type: "string" };
+    m.api.operations = [{
+      name: "x", description: "y", method: "POST", path: "/x",
+      inputSchema: { type: "object", properties },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /max 20 entries/);
+  });
+
+  it("rejects > 50 operations", () => {
+    const m = baseManifest();
+    m.api.operations = Array.from({ length: 51 }, (_, i) => ({
+      name: `op${i}`, description: "y", method: "GET", path: "/",
+    }));
+    assert.throws(() => parseServiceManifest(m, host), /max 50 entries/);
+  });
+
+  it("rejects duplicate operation names", () => {
+    const m = baseManifest();
+    m.api.operations = [
+      { name: "x", description: "y", method: "GET", path: "/" },
+      { name: "x", description: "y", method: "POST", path: "/" },
+    ];
+    assert.throws(() => parseServiceManifest(m, host), /duplicate name "x"/);
+  });
+
+  it("rejects unknown annotation key", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "x", description: "y", method: "GET", path: "/",
+      annotations: { costHint: true },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /annotations.*unknown key/);
+  });
+
+  it("rejects non-boolean annotation value", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "x", description: "y", method: "GET", path: "/",
+      annotations: { destructiveHint: "yes" },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /destructiveHint/);
+  });
+
+  it("rejects required[] referencing a non-existent property", () => {
+    const m = baseManifest();
+    m.api.operations = [{
+      name: "x", description: "y", method: "POST", path: "/x",
+      inputSchema: { type: "object", required: ["ghost"], properties: { real: { type: "string" } } },
+    }];
+    assert.throws(() => parseServiceManifest(m, host), /"ghost" not in properties/);
+  });
+});
+
+describe("renderCapabilities", () => {
+  const host = "acme.test";
+
+  it("falls back to specUrl message when operations[] is absent", async () => {
+    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const md = renderCapabilities({
+      service: { name: "Acme" },
+      auth: { header: "Authorization", scheme: "DPoP" },
+      api: { base: `https://${host}/api`, specUrl: `https://${host}/openapi.json` },
+    });
+    assert.match(md, /No inline operations/);
+    assert.match(md, /openapi\.json/);
+  });
+
+  it("renders the Call: line with the absolute URL and method", async () => {
+    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const manifest = parseServiceManifest(
+      {
+        version: 2,
+        service: { name: "Acme" },
+        auth: { header: "Authorization" },
+        api: {
+          base: `https://${host}/api`,
+          operations: [{
+            name: "createPost",
+            description: "Create a post.",
+            method: "POST",
+            path: "/posts",
+            inputSchema: {
+              type: "object",
+              required: ["title"],
+              properties: { title: { type: "string", maxLength: 300, description: "Post title" } },
+            },
+            annotations: { destructiveHint: true },
+          }],
+        },
+      },
+      host,
+    );
+    const md = renderCapabilities(manifest);
+    assert.match(md, /Call: `node CLI call --url https:\/\/acme\.test\/api\/posts --method POST --body-file/);
+    assert.match(md, /destructive — confirm before calling/);
+    assert.match(md, /- `title` \(string, required, max 300\): Post title/);
+  });
+
+  it("preserves {param} placeholders in the Call: URL", async () => {
+    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const manifest = parseServiceManifest(
+      {
+        version: 2,
+        service: { name: "Acme" },
+        auth: { header: "Authorization" },
+        api: {
+          base: `https://${host}/api`,
+          operations: [{
+            name: "deletePost",
+            description: "Delete one of your posts.",
+            method: "DELETE",
+            path: "/posts/{id}",
+            inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+            annotations: { destructiveHint: true },
+          }],
+        },
+      },
+      host,
+    );
+    const md = renderCapabilities(manifest);
+    assert.match(md, /Call: `node CLI call --url https:\/\/acme\.test\/api\/posts\/\{id\} --method DELETE`/);
   });
 });
 
