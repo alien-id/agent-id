@@ -2,7 +2,9 @@
 
 All notable changes are documented here.
 
-## Unreleased
+## [3.0.2] — 2026-05-12
+
+Patch release. No runtime behavior change. Documentation cleanup and version-stamp bump.
 
 ### Documentation
 
@@ -13,10 +15,21 @@ All notable changes are documented here.
 - Rewrote `docs/AGENT-SSO.md` to drop residual v2 "owner binding" prose; the SSO-signed
   `id_token` (with `cnf.jkt`, RFC 7800 §3.1) is the chain attestation in v3.
 - Converted ASCII diagrams in `docs/AGENT-SSO.md` and `docs/INTEGRATION.md` to Mermaid.
+- Fixed Mermaid parse errors: sequence-diagram messages and flowchart edge labels no longer
+  embed `<br/>` (GitHub's Mermaid lexer interprets it as a NEWLINE token mid-arrow). Flowchart
+  node labels still use `<br/>` where appropriate.
+- Restored the README's original centered-logo HTML header (`<p align="center">` / centered
+  `<h1>` / centered tagline) that a prior pass had converted to plain markdown.
 - Fact-checked claims against `skills/alien-agent-id/lib.mjs` and `cli.mjs`: corrected the
   `examples/demo-service.mjs` size reference, fixed a stale cross-repo path in `INTEGRATION.md`,
   and aligned the file-layout table in `AGENT-SSO.md` with the actual `skills/alien-agent-id/`
   tree.
+
+### Why a 3.0.2 instead of re-stamping 3.0.1
+
+The `v3.0.1` tag on origin points at an orphaned commit because a GitHub tag-protection rule
+blocked the rewrite when the underlying commit was re-signed. `3.0.2` cleanly supersedes it
+with the same intended content plus the doc cleanup above.
 
 ## [3.0.1] — 2026-05-12
 
