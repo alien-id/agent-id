@@ -1,5 +1,5 @@
 {
   "name": "alien-agent-id",
   "description": "Verifiable cryptographic identity for AI agents — SSH-signed git commits, owner binding via Alien Network SSO, and hash-chained audit logs",
-  "version": "3.0.1"
+  "version": "3.0.2"
 }
