@@ -6,7 +6,7 @@ Three layers, each catching a different class of regression.
 ┌─────────────────────────────────────────────────────────────────────┐
 │  L1  Unit / integration (mocked)                                    │
 │      node --test tests/test-*.mjs                                   │
-│      • 115 tests, ~1.3s                                             │
+│      • 158 tests, ~1.3s                                             │
 │      • In-process HTTP mocks for SSO / service                      │
 │      • Pure-function tests for crypto, schema, hardening            │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -98,7 +98,7 @@ There are **four** Alien SSO environments. Each is its own EC2 ASG behind its ow
 | **develop** | `sso.develop.alien-api.com` | ✅ deployed | ✅ healthy (1 instance) |
 | **testnt** | `sso.testnt.alien-api.com` | (unknown) | ⚠️ 502 — operator action needed |
 
-The cutover landed on develop+staging via launch-template `lt-099a17b58fb7fd1e4` v11 on 2026-05-06. Production rolls behind develop+staging by design (see `docs/DEPLOY-DPOP.md` "Order of operations") and will follow once App-side and verifier rollouts are validated.
+The cutover landed on develop+staging via launch-template `lt-099a17b58fb7fd1e4` v11 on 2026-05-06. Production rolls behind develop+staging by design and will follow once App-side and verifier rollouts are validated.
 
 A clean way to confirm the discovery doc state for any environment:
 

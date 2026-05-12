@@ -1,6 +1,6 @@
 {
   "name": "alien-agent-id",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Universal Agent ID - verifiable identity for AI agents linked to human owners via Alien Network SSO",
   "type": "module",
   "bin": {
@@ -15,11 +15,10 @@
     "skills",
     "examples",
     "tests",
+    "CHANGELOG.md",
     "docs/AGENT-SSO.md",
-    "docs/DEPLOY-DPOP.md",
     "docs/INTEGRATION.md",
     "docs/MIGRATION-DPOP.md",
-    "docs/PRD-DPOP-POP.md",
     "docs/RELEASE-NOTES.md",
     "docs/TESTING.md"
   ],
