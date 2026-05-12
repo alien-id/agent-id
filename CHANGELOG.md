@@ -25,12 +25,6 @@ Patch release. No runtime behavior change. Documentation cleanup and version-sta
   and aligned the file-layout table in `AGENT-SSO.md` with the actual `skills/alien-agent-id/`
   tree.
 
-### Why a 3.0.2 instead of re-stamping 3.0.1
-
-The `v3.0.1` tag on origin points at an orphaned commit because a GitHub tag-protection rule
-blocked the rewrite when the underlying commit was re-signed. `3.0.2` cleanly supersedes it
-with the same intended content plus the doc cleanup above.
-
 ## [3.0.1] — 2026-05-12
 
 Patch release. No runtime behavior change.
