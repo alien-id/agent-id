@@ -18,7 +18,7 @@ The CLI validates the response against the v1 schema (size cap, closed key set, 
 | `auth.header` | HTTP header name (e.g. `Authorization`). |
 | `auth.scheme` | `DPoP` (default), `Bearer`, or `none`. |
 | `api.base` | API base URL for subsequent requests. |
-| `api.specUrl` | Optional OpenAPI / JSON Schema describing the API. **If present, read it before calling any endpoint** — that is exactly the source of truth that prevents probing field names against a live service. |
+| `api.specUrl` | Optional OpenAPI / JSON Schema describing the API. If present, read it before calling any endpoint — that is exactly the source of truth that prevents probing field names against a live service. |
 
 ### Optional support-signal probe
 
@@ -56,7 +56,7 @@ Flags:
 
 ### Manual — `auth-header` + curl
 
-Use this when you specifically need to drive `curl` (streaming, retries, custom flags). DPoP requires **two** headers (`Authorization: DPoP <jwt>` and `DPoP: <proof>`), the `htu` / `htm` claims bind to one specific URL+method, and the `jti` is single-use. Regenerate per request:
+Use this when you specifically need to drive `curl` (streaming, retries, custom flags). DPoP requires two headers (`Authorization: DPoP <jwt>` and `DPoP: <proof>`), the `htu` / `htm` claims bind to one specific URL+method, and the `jti` is single-use. Regenerate per request:
 
 ```bash
 HEADERS=$(node CLI auth-header --url https://example.com/api/whoami --method GET)

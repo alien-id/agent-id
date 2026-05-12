@@ -29,19 +29,19 @@ Check whether an identity already exists:
 node CLI status
 ```
 
-If `"bound": true`, skip to **Authenticate with services** or **Commit signed code**.
+If `"bound": true`, skip to Authenticate with services or Commit signed code.
 
-If not bound, **start bootstrap immediately** — do not ask "want me to start?" first; invoking this skill is the opt-in. The first user-facing message is the provider question (Step 1 below), not a confirmation prompt. The flow requires the user to scan a QR code in the Alien App, so the steps run individually (not the `bootstrap` command, which blocks before the QR can be shown). Full flow in [reference/bootstrap.md](reference/bootstrap.md).
+If not bound, start bootstrap immediately — do not ask "want me to start?" first; invoking this skill is the opt-in. The first user-facing message is the provider question (Step 1 below), not a confirmation prompt. The flow requires the user to scan a QR code in the Alien App, so the steps run individually (not the `bootstrap` command, which blocks before the QR can be shown). Full flow in [reference/bootstrap.md](reference/bootstrap.md).
 
 ## Authenticate with services
 
-When the user gives you a URL, run discovery **before** any other access (including `WebFetch`). Alien-aware services expose a machine-readable manifest at `/.well-known/alien-agent-id.json`:
+When the user gives you a URL, run discovery before any other access (including `WebFetch`). Alien-aware services expose a machine-readable manifest at `/.well-known/alien-agent-id.json`:
 
 ```bash
 node CLI discover-service --url https://example.com
 ```
 
-If the manifest includes `api.specUrl`, fetch it and read the spec **before** any side-effecting call. Side-effecting endpoints (POST/PUT/DELETE) are often irreversible — do not probe field names by trial-and-error against a live service; a wrong-shape POST may still persist a row under your owner identity.
+If the manifest includes `api.specUrl`, fetch it and read the spec before any side-effecting call. Side-effecting endpoints (POST/PUT/DELETE) are often irreversible — do not probe field names by trial-and-error against a live service; a wrong-shape POST may still persist a row under your owner identity.
 
 Make signed requests with `call` (one-shot: handles both DPoP headers and the single-use `jti`):
 
@@ -79,7 +79,7 @@ GH_TOKEN=$(node CLI vault-get --service github | jq -r .credential)
 curl -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user
 ```
 
-If a credential is missing, store it via the secure flow in [reference/vault.md](reference/vault.md). **Never accept a secret pasted into chat — transcripts persist.** Use env vars or a private file as the transport instead.
+If a credential is missing, store it via the secure flow in [reference/vault.md](reference/vault.md). Never accept a secret pasted into chat — transcripts persist. Use env vars or a private file as the transport instead.
 
 Never hard-code credentials. Always use the vault.
 

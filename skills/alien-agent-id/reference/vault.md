@@ -40,17 +40,17 @@ If it returns the credential, use it. Otherwise continue.
 
 ### Step 2 — ask the user out-of-band
 
-**Never accept a secret pasted into chat — transcripts persist.** Give the user out-of-band options:
+Never accept a secret pasted into chat — transcripts persist. Give the user out-of-band options:
 
-> "I need a GitHub personal access token. **Do not paste it into this chat.** Choose one:
+> "I need a GitHub personal access token. Do not paste it into this chat. Choose one:
 >
-> **Option A (recommended)** — load it into your shell as an env var, then restart this agent:
+> Option A (recommended) — load it into your shell as an env var, then restart this agent:
 > ```bash
 > read -rs GITHUB_TOKEN && export GITHUB_TOKEN
 > ```
 > Paste the token at the prompt (the terminal will not echo it, and `read` does not write to history). Then tell me 'done'.
 >
-> **Option B (CI / non-interactive)** — write it to a private file:
+> Option B (CI / non-interactive) — write it to a private file:
 > ```bash
 > umask 077 && touch /tmp/gh-token && chmod 600 /tmp/gh-token
 > # then put the token into /tmp/gh-token
@@ -80,7 +80,7 @@ your-secret-source | node CLI vault-store --service github --type api-key
 | `--type <type>` | no (default `api-key`) | One of `api-key`, `password`, `oauth`, `bearer`, `custom`. Use `password` with `--username`. |
 | `--credential-env <VAR>` | one of these required | Read the secret from env var `VAR` — most agent-friendly. |
 | `--credential-file <path>` | | Read the secret from a file (best for CI; delete after). |
-| `--credential <value>` | | Pass the secret inline. **Avoid** — visible in `ps` and shell history. |
+| `--credential <value>` | | Pass the secret inline. Avoid — visible in `ps` and shell history. |
 | stdin pipe | | If none of the above is set, the secret is read from stdin. |
 | `--username <name>` | no | Account/login this credential belongs to. Stored as metadata; required by convention with `--type password`. |
 | `--url <url>` | no | Service URL stored as metadata. Useful when one credential is tenant-specific. |

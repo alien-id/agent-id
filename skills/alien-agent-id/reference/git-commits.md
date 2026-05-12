@@ -8,10 +8,10 @@ node CLI git-commit --message "feat: implement auth flow"
 
 The result is a commit that is:
 
-1. **SSH-signed** with the agent's Ed25519 key.
-2. **Tagged with trailers** linking to the agent identity and human owner.
-3. **Logged** in the hash-chained audit trail at `~/.agent-id/audit/operations.jsonl`.
-4. **Proof-bundled** as a git note for external verification.
+1. SSH-signed with the agent's Ed25519 key.
+2. Tagged with trailers linking to the agent identity and human owner.
+3. Logged in the hash-chained audit trail at `~/.agent-id/audit/operations.jsonl`.
+4. Proof-bundled as a git note for external verification.
 
 Push the commit and its proof note in one step:
 
@@ -31,15 +31,15 @@ A plain `git commit` still works — but skips the Agent ID trailers, proof note
 node CLI git-verify --commit HEAD
 ```
 
-Traces the full chain: SSH signature → agent key → owner binding → SSO attestation. When the commit has a proof note, verification is **fully self-contained** — works without access to the agent's state directory or any external service.
+Traces the full chain: SSH signature → agent key → owner binding → SSO attestation. When the commit has a proof note, verification is fully self-contained — works without access to the agent's state directory or any external service.
 
 ## GitHub *Verified* badge
 
-To get the *Verified* badge on GitHub for these commits, the agent's SSH public key must be registered on the GitHub account as a **Signing Key** (not just an authentication key).
+To get the *Verified* badge on GitHub for these commits, the agent's SSH public key must be registered on the GitHub account as a Signing Key (not just an authentication key).
 
 1. The SSH public key is printed by `git-setup` and also lives at `~/.agent-id/ssh/agent-id.pub`.
 2. GitHub → Settings → SSH and GPG keys → New SSH key.
-3. Set **Key type** to *Signing Key*.
+3. Set Key type to *Signing Key*.
 
 ## Sign other operations
 

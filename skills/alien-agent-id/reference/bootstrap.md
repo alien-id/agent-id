@@ -4,9 +4,9 @@ This walks through creating a fresh Alien Agent ID and binding it to a human own
 
 ## Prerequisites
 
-- **Node.js 18+** and **git 2.34+** in `$PATH`.
-- The user has the **Alien App** installed with a verified AlienID.
-- A **provider address** (resolved in step 1 below).
+- Node.js 18+ and git 2.34+ in `$PATH`.
+- The user has the Alien App installed with a verified AlienID.
+- A provider address (resolved in step 1 below).
 
 ## Why not `bootstrap`?
 
@@ -14,12 +14,12 @@ This walks through creating a fresh Alien Agent ID and binding it to a human own
 
 ## Step 1 — choose a provider
 
-This is your **first** user-facing message — no preamble, no "want me to start?" confirmation. Just ask the provider question. Do not silently read `default-provider.txt`.
+This is your first user-facing message — no preamble, no "want me to start?" confirmation. Just ask the provider question. Do not silently read `default-provider.txt`.
 
 > "Would you like to use the default Alien provider (recommended), or set up your own?"
 
-- **Default provider:** after the user confirms, read `default-provider.txt` (next to `cli.mjs`) for the address.
-- **Set up your own:** the user creates one at <https://dev.alien.org/dashboard/sso> and provides the address. QR code for that page:
+- Default provider: after the user confirms, read `default-provider.txt` (next to `cli.mjs`) for the address.
+- Set up your own: the user creates one at <https://dev.alien.org/dashboard/sso> and provides the address. QR code for that page:
   ```
   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
   █ ▄▄▄▄▄ █▄▄████▀ ▄▀ ▄▄█ ▄▄▄▄▄ █
@@ -53,7 +53,7 @@ Generates an Ed25519 keypair under `~/.agent-id/keys/main.json` (mode 0600).
 node CLI auth --provider-address <PROVIDER_ADDRESS>
 ```
 
-Returns JSON containing `deepLink` and `qrCode` (Unicode text). Show **both** to the user — the QR code as a fenced block and the deep link as a fallback:
+Returns JSON containing `deepLink` and `qrCode` (Unicode text). Show both to the user — the QR code as a fenced block and the deep link as a fallback:
 
 > Scan with your Alien App:
 > ```
@@ -75,7 +75,7 @@ Blocks up to 5 minutes while the user approves in the Alien App. Returns the bou
 node CLI git-setup
 ```
 
-Writes the SSH private key, public key, and `allowed_signers` file under `~/.agent-id/ssh/`. Tell the user to add the printed SSH public key to GitHub as a **Signing Key** so signed commits get the *Verified* badge — full instructions in [git-commits.md](git-commits.md).
+Writes the SSH private key, public key, and `allowed_signers` file under `~/.agent-id/ssh/`. Tell the user to add the printed SSH public key to GitHub as a Signing Key so signed commits get the *Verified* badge — full instructions in [git-commits.md](git-commits.md).
 
 ## Environment variables
 

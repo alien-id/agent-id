@@ -37,10 +37,10 @@ Default: `~/.agent-id`. Override with `--state-dir <path>` or `AGENT_ID_STATE_DI
 
 ## Security guarantees
 
-- Private keys stored with **mode 0600** — never transmitted.
-- Vault credentials encrypted with **AES-256-GCM**; key derived via HKDF from the agent's Ed25519 key.
-- **PKCE** prevents authorization-code interception.
-- Access tokens are **short-lived** (≤5 minutes).
-- **Hash-chained audit log** — any tampering breaks the chain.
-- **Ed25519 SSH signatures** on commits provide non-repudiation.
+- Private keys stored with mode 0600 — never transmitted.
+- Vault credentials encrypted with AES-256-GCM; key derived via HKDF from the agent's Ed25519 key.
+- PKCE prevents authorization-code interception.
+- Access tokens are short-lived (≤5 minutes).
+- Hash-chained audit log — any tampering breaks the chain.
+- Ed25519 SSH signatures on commits provide non-repudiation.
 - Never expose `owner-session.json` or any file under `vault/`.
