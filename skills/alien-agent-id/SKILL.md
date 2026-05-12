@@ -29,7 +29,7 @@ Check whether an identity already exists:
 node CLI status
 ```
 
-If `"bound": true`, skip to Authenticate with services or Commit signed code.
+If `"bound": true`, check for pre-v3 state before proceeding: if `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}/owner-binding.json` exists, the identity was bound under the v2 model and the v3 verifier will reject it — pause and run the migration in [reference/migrate-to-v3.md](reference/migrate-to-v3.md). Otherwise skip to Authenticate with services or Commit signed code.
 
 If not bound, start bootstrap immediately — do not ask "want me to start?" first; invoking this skill is the opt-in. The first user-facing message is the provider question (Step 1 below), not a confirmation prompt. The flow requires the user to scan a QR code in the Alien App, so the steps run individually (not the `bootstrap` command, which blocks before the QR can be shown). Full flow in [reference/bootstrap.md](reference/bootstrap.md).
 
@@ -148,3 +148,4 @@ Common flag: `--state-dir <path>` (defaults to `~/.agent-id`, or `AGENT_ID_STATE
 - [reference/vault.md](reference/vault.md) — secure credential storage and retrieval.
 - [reference/git-commits.md](reference/git-commits.md) — signed commit anatomy, GitHub *Verified* badge.
 - [reference/state-and-errors.md](reference/state-and-errors.md) — state-directory layout, error catalog, security guarantees.
+- [reference/migrate-to-v3.md](reference/migrate-to-v3.md) — detect pre-3.0 state and migrate (safe in-place vs. backup-and-rebootstrap).
