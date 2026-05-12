@@ -54,6 +54,15 @@ export function sha256HexCanonical(value) {
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
+// RFC 9110 §5.6.2 token = 1*tchar; tchar = "!" / "#" / "$" / "%" / "&" / "'"
+// / "*" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA.
+const HTTP_TOKEN_REGEX = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+// RFC 4648 §5 / RFC 7515 §2: base64url has the alphabet [A-Za-z0-9_-]; JOSE
+// strips trailing '=' padding. Reject any character outside the canonical
+// alphabet (in particular whitespace, '+', '/', '=') so RFC 7519 §7.2 holds.
+const BASE64URL_REGEX = /^[A-Za-z0-9_-]*$/;
+
 export function b64url(input) {
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(input);
   return buf
@@ -64,9 +73,24 @@ export function b64url(input) {
 }
 
 export function fromB64url(value) {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const pad = normalized.length % 4;
-  const padded = pad === 0 ? normalized : normalized + "=".repeat(4 - pad);
+  if (typeof value !== "string") {
+    throw new Error("fromB64url: input must be a string");
+  }
+  // RFC 7515 §2 / RFC 7519 §7.2: the JOSE encoding is strict base64url with
+  // no padding. Whitespace, '+'/'/' (standard base64), and '=' (padding) are
+  // not part of the canonical alphabet and must cause the JWS to be
+  // considered invalid — Node's Buffer.from(*, "base64") would silently
+  // tolerate them.
+  if (!BASE64URL_REGEX.test(value)) {
+    throw new Error("fromB64url: input contains characters outside RFC 4648 §5 base64url alphabet");
+  }
+  const pad = value.length % 4;
+  // RFC 4648 §5: a 4-char group decodes to 3 bytes; a residue of length 1
+  // is never produced by canonical encoding and indicates corruption.
+  if (pad === 1) {
+    throw new Error("fromB64url: invalid base64url length");
+  }
+  const padded = pad === 0 ? value : value + "=".repeat(4 - pad);
   return Buffer.from(padded, "base64");
 }
 
@@ -97,6 +121,154 @@ export function generateEd25519PemPair() {
 export function fingerprintPublicKeyPem(publicKeyPem) {
   const der = createPublicKey(publicKeyPem).export({ format: "der", type: "spki" });
   return createHash("sha256").update(der).digest("hex");
+}
+
+// ─── JWK helpers (RFC 8037, RFC 7638) ───────────────────────────────────────────
+//
+// Pure functions: no I/O, no global state, no time calls. Used by the DPoP
+// signer (RFC 9449) and by the agent CLI to derive `dpop_jkt` for the
+// authorize-URL hint and the `cnf.jkt` claim that the SSO emits in id_tokens.
+
+/**
+ * Convert an Ed25519 public key (PEM-encoded SPKI) to its canonical
+ * RFC 8037 JWK representation: {kty:"OKP", crv:"Ed25519", x:<base64url(raw)>}.
+ *
+ * Throws if the PEM is not an Ed25519 public key.
+ */
+export function ed25519PublicKeyToJwk(publicKeyPem) {
+  const keyObject = createPublicKey(publicKeyPem);
+  const der = keyObject.export({ format: "der", type: "spki" });
+  if (der.length !== 44) {
+    throw new Error(
+      `ed25519PublicKeyToJwk: expected 44-byte Ed25519 SPKI, got ${der.length} bytes (likely non-Ed25519 key type)`,
+    );
+  }
+  if (!der.subarray(0, 12).equals(ED25519_SPKI_PREFIX)) {
+    throw new Error(
+      "ed25519PublicKeyToJwk: SPKI AlgorithmIdentifier does not match Ed25519 (OID 1.3.101.112)",
+    );
+  }
+  const rawKey = der.subarray(12);
+  return {
+    kty: "OKP",
+    crv: "Ed25519",
+    x: b64url(rawKey),
+  };
+}
+
+/**
+ * RFC 7638 JWK Thumbprint. For an OKP/Ed25519 key the canonical JSON is
+ * exactly: `{"crv":"Ed25519","kty":"OKP","x":"<x>"}` — members in lexical
+ * order, no whitespace, no extra fields. SHA-256 the bytes, then base64url
+ * (no padding).
+ *
+ * Pure: no I/O, no time calls. Extra members on the input JWK are ignored.
+ */
+export function jwkThumbprint(jwk) {
+  if (!jwk || typeof jwk !== "object") {
+    throw new Error("jwkThumbprint: jwk must be an object");
+  }
+  if (jwk.kty !== "OKP") {
+    throw new Error(`jwkThumbprint: unsupported kty=${String(jwk.kty)} (only OKP/Ed25519 supported)`);
+  }
+  if (jwk.crv !== "Ed25519") {
+    throw new Error(`jwkThumbprint: unsupported crv=${String(jwk.crv)} (only Ed25519 supported)`);
+  }
+  if (typeof jwk.x !== "string" || jwk.x.length === 0) {
+    throw new Error("jwkThumbprint: jwk.x is required");
+  }
+  // RFC 7638 §3.2 canonical members for OKP keys, lexically sorted.
+  const canonical = `{"crv":"Ed25519","kty":"OKP","x":"${jwk.x}"}`;
+  return b64url(createHash("sha256").update(canonical).digest());
+}
+
+// ─── DPoP proof signer (RFC 9449) ───────────────────────────────────────────────
+
+/**
+ * Build a compact JWS DPoP proof per RFC 9449 §4.
+ *
+ *   header  = {"typ":"dpop+jwt","alg":"EdDSA","jwk":<full Ed25519 OKP JWK>}
+ *   payload = {"jti":<unique>,"htm":<method>,"htu":<target-no-query>,"iat":<unix-sec>}
+ *   signature = Ed25519 over `b64url(header) + "." + b64url(payload)`
+ *
+ * Pure: `iat` and `jti` may be injected for determinism (tests, replay-safe
+ * batched issuance). When omitted, defaults are derived from `Date.now()` and
+ * `randomUUID()` respectively.
+ */
+export function createDPoPProof(params) {
+  if (!params || typeof params !== "object") {
+    throw new Error("createDPoPProof: params required");
+  }
+  const { privateKeyPem, htm, htu } = params;
+  if (typeof privateKeyPem !== "string" || !privateKeyPem) {
+    throw new Error("createDPoPProof: privateKeyPem is required");
+  }
+  if (typeof htm !== "string" || !htm) {
+    throw new Error("createDPoPProof: htm is required");
+  }
+  // RFC 9110 §5.6.2 / §9.1: an HTTP method is a `token` (1*tchar). RFC 9449
+  // §4.2 carries the literal method text in `htm`, and §4.3 verifies it
+  // against the request method by exact (case-sensitive) string compare —
+  // standard methods are uppercase, but registered extension methods (e.g.
+  // WebDAV `PROPFIND`) and arbitrary tokens are case-sensitive. Validate
+  // shape and preserve case so the proof matches the wire request.
+  if (!HTTP_TOKEN_REGEX.test(htm)) {
+    throw new Error(`createDPoPProof: htm must be an RFC 9110 token, got ${JSON.stringify(htm)}`);
+  }
+  if (typeof htu !== "string" || !htu) {
+    throw new Error("createDPoPProof: htu is required");
+  }
+
+  // Strip query and fragment per RFC 9449 §4.2 ("htu" claim).
+  const cleanHtu = stripUrlQueryAndFragment(htu);
+
+  // Derive the public JWK from the private key for the embedded `jwk` header.
+  const publicKey = createPublicKey(createPrivateKey(privateKeyPem));
+  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
+  const jwk = ed25519PublicKeyToJwk(publicKeyPem);
+
+  const header = { typ: "dpop+jwt", alg: "EdDSA", jwk };
+  const payload = {
+    jti: typeof params.jti === "string" && params.jti ? params.jti : randomUUID(),
+    // RFC 9449 §4.2 / §4.3: htm is the literal method, compared bytewise
+    // against the request method. Preserve the caller's case so extension
+    // method tokens round-trip exactly as sent on the wire.
+    htm,
+    htu: cleanHtu,
+    iat: typeof params.iat === "number" ? params.iat : Math.floor(Date.now() / 1000),
+  };
+  // RFC 9449 §4.2: at protected resources, bind the proof to the AT.
+  if (typeof params.accessToken === "string" && params.accessToken) {
+    payload.ath = b64url(createHash("sha256").update(params.accessToken).digest());
+  }
+  // RFC 9449 §8/§9: when a server challenges via use_dpop_nonce, the client
+  // retries with the supplied nonce echoed in the proof payload.
+  if (typeof params.nonce === "string" && params.nonce) {
+    payload.nonce = params.nonce;
+  }
+
+  const headerB64 = b64url(JSON.stringify(header));
+  const payloadB64 = b64url(JSON.stringify(payload));
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const signature = sign(null, Buffer.from(signingInput), createPrivateKey(privateKeyPem));
+  return `${signingInput}.${b64url(signature)}`;
+}
+
+function stripUrlQueryAndFragment(url) {
+  // Tolerant: try URL parsing first; fall back to manual strip.
+  try {
+    const u = new URL(url);
+    u.search = "";
+    u.hash = "";
+    // Trim trailing slash only if it was not present in input — keep "/path"
+    // and "/path/" distinguishable. URL toString preserves the trailing slash
+    // already present in the path, so just return as-is.
+    return u.toString();
+  } catch {
+    const noFrag = url.split("#", 1)[0];
+    const noQuery = noFrag.split("?", 1)[0];
+    return noQuery;
+  }
 }
 
 export function signEd25519Base64Url(payload, privateKeyPem) {
@@ -132,10 +304,28 @@ export function verifyEd25519HexMessage(message, signatureHex, publicKeyHex) {
   return verify(null, Buffer.from(message), publicKey, signature);
 }
 
+// RFC 7518 §3.3 / RFC 8725 §3.5: RS256 keys MUST be ≥ 2048 bits. The JWK
+// `n` parameter is the unsigned modulus encoded base64url with no leading
+// zero byte (RFC 7518 §6.3.1), so 256 bytes corresponds to exactly 2048
+// bits.
+const MIN_RSA_MODULUS_BYTES = 256;
+
 export function verifyJwtRs256Signature(params) {
   const { signingInput, signatureB64url, jwk } = params;
+  if (typeof jwk?.n !== "string" || fromB64url(jwk.n).length < MIN_RSA_MODULUS_BYTES) {
+    throw new Error("RS256 JWK modulus is shorter than RFC 7518 §3.3 minimum (2048 bits)");
+  }
   const publicKey = createPublicKey({ format: "jwk", key: jwk });
   return verify("RSA-SHA256", Buffer.from(signingInput), publicKey, fromB64url(signatureB64url));
+}
+
+// RFC 8037 §2 + RFC 7515 §10.7: verify an EdDSA (Ed25519) JWS signature
+// against an OKP JWK. Mirrors verifyJwtRs256Signature so the verifier can
+// dispatch by `alg` against a JWKS that publishes both keys.
+export function verifyJwtEdDsaSignature(params) {
+  const { signingInput, signatureB64url, jwk } = params;
+  const publicKey = createPublicKey({ format: "jwk", key: jwk });
+  return verify(null, Buffer.from(signingInput), publicKey, fromB64url(signatureB64url));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -262,7 +452,6 @@ export async function readJsonl(filePath) {
 export function statePaths(baseDir) {
   return {
     baseDir,
-    ownerBinding: path.join(baseDir, "owner-binding.json"),
     ownerSession: path.join(baseDir, "owner-session.json"),
     pendingAuth: path.join(baseDir, "pending-auth.json"),
     nonces: path.join(baseDir, "nonces.json"),
@@ -295,41 +484,31 @@ function normalizeOptionalString(value) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function parseOwnerProof(raw) {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-
-  const sessionAddress = normalizeOptionalString(raw.session_address);
-  const sessionSignature = normalizeOptionalString(raw.session_signature);
-  const sessionSignatureSeed = normalizeOptionalString(raw.session_signature_seed);
-  const sessionPublicKey = normalizeOptionalString(raw.session_public_key);
-  const providerAddress = normalizeOptionalString(raw.provider_address);
-
-  const anyPresent =
-    sessionAddress || sessionSignature || sessionSignatureSeed || sessionPublicKey || providerAddress;
-  if (!anyPresent) {
-    return null;
-  }
-
-  if (!sessionAddress || !sessionSignature || !sessionSignatureSeed || !sessionPublicKey) {
-    throw new Error(
-      "Poll response owner_proof is missing required session_address/session_signature/session_signature_seed/session_public_key",
-    );
-  }
-
-  return {
-    sessionAddress,
-    sessionSignature,
-    sessionSignatureSeed,
-    sessionPublicKey,
-    providerAddress,
-    signatureVerifiedAt: Number(raw.signature_verified_at || 0) || 0,
-  };
+// All current callers pass an SSO base URL — chokepoint for the RFC 6749 §10
+// TLS guard so every flow (authorize, token, refresh, userinfo, discovery,
+// id_token verification) inherits it.
+function withNoTrailingSlash(value) {
+  assertSsoBaseUrlSafe(value);
+  return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
-function withNoTrailingSlash(value) {
-  return value.endsWith("/") ? value.slice(0, -1) : value;
+// RFC 6749 §10: bearer credentials and refresh tokens MUST be transmitted
+// over TLS. Allow plain http:// only for loopback hosts (development).
+function assertSsoBaseUrlSafe(ssoBaseUrl) {
+  if (typeof ssoBaseUrl !== "string" || !ssoBaseUrl) {
+    throw new Error("ssoBaseUrl is required");
+  }
+  let url;
+  try {
+    url = new URL(ssoBaseUrl);
+  } catch {
+    throw new Error(`ssoBaseUrl is not a valid URL: ${ssoBaseUrl}`);
+  }
+  if (url.protocol === "https:") return;
+  if (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]")) {
+    return;
+  }
+  throw new Error(`ssoBaseUrl must use https:// (got ${url.protocol}//${url.host})`);
 }
 
 async function readJsonResponse(res) {
@@ -355,9 +534,17 @@ async function fetchJson(url, init) {
   return json;
 }
 
-function parseJwt(token) {
+export function parseJwt(token) {
+  if (typeof token !== "string" || !token) {
+    throw new Error("Invalid JWT format");
+  }
+  // RFC 7519 §7.2 step 1: the JWS Compact Serialization is exactly three
+  // base64url segments separated by '.'. fromB64url enforces the strict
+  // alphabet on each segment, which catches embedded whitespace, padding,
+  // and standard-base64 alphabet leakage. The split-length check + each
+  // segment non-empty is the structural complement.
   const parts = token.split(".");
-  if (parts.length !== 3) {
+  if (parts.length !== 3 || parts.some((p) => p.length === 0)) {
     throw new Error("Invalid JWT format");
   }
   const [headerPart, payloadPart, sigPart] = parts;
@@ -366,6 +553,9 @@ function parseJwt(token) {
     throw new Error("Unsigned JWTs (alg: none) are not accepted");
   }
   const payload = JSON.parse(fromB64url(payloadPart).toString("utf8"));
+  // Pre-decode the signature segment to surface RFC 7515 §2 violations at
+  // parse time rather than at signature-verify time.
+  fromB64url(sigPart);
   return {
     token,
     parts,
@@ -384,7 +574,23 @@ export function generatePkcePair() {
 
 export async function beginOidcAuthorization(params) {
   const base = withNoTrailingSlash(params.ssoBaseUrl);
+  // RFC 9207 §2.4 requires comparing any AS-supplied `iss` on the
+  // authorization response against the AS's discovered issuer to defeat
+  // mix-up attacks. Discover once here and propagate to the poll step.
+  const discovery = await fetchOidcDiscovery(base);
+  const expectedIssuer = discovery.issuer;
+  if (typeof expectedIssuer !== "string" || !expectedIssuer) {
+    throw new Error("Discovery response missing issuer");
+  }
   const pkce = generatePkcePair();
+
+  // RFC 6749 §4.1.1 / §10.12: `state` is an opaque value that lets the
+  // client correlate the authorization response with the request and
+  // mitigate cross-site request forgery. OIDC Core §3.1.3.7: `nonce` is
+  // bound into the id_token and verified on receipt to mitigate replay.
+  // 256 bits of CSPRNG entropy is the standard choice for both.
+  const state = b64url(randomBytes(32));
+  const nonce = b64url(randomBytes(32));
 
   const url = new URL(`${base}/oauth/authorize`);
   url.searchParams.set("response_type", "code");
@@ -393,6 +599,15 @@ export async function beginOidcAuthorization(params) {
   url.searchParams.set("scope", "openid");
   url.searchParams.set("code_challenge", pkce.codeChallenge);
   url.searchParams.set("code_challenge_method", pkce.codeChallengeMethod);
+  url.searchParams.set("state", state);
+  url.searchParams.set("nonce", nonce);
+
+  // RFC 9449 §10: dpop_jkt advertises the public key the client will use to
+  // bind tokens via DPoP. Equal to the RFC 7638 thumbprint of the agent JWK.
+  if (typeof params.agentPublicKeyPem === "string" && params.agentPublicKeyPem) {
+    const jwk = ed25519PublicKeyToJwk(params.agentPublicKeyPem);
+    url.searchParams.set("dpop_jkt", jwkThumbprint(jwk));
+  }
 
   const headers = {};
   if (typeof params.oidcOrigin === "string" && params.oidcOrigin.trim()) {
@@ -410,11 +625,30 @@ export async function beginOidcAuthorization(params) {
     throw new Error("Authorize response missing deep_link/polling_code/expired_at");
   }
 
+  // RFC 6749 §10.12: when the AS echoes `state` (e.g., on the authorize
+  // response itself), require it to round-trip. Servers that don't yet
+  // surface the value here are tolerated (state is also re-checked on the
+  // poll response).
+  if (typeof out.state === "string" && out.state !== state) {
+    throw new Error("Authorize response state mismatch (RFC 6749 §10.12)");
+  }
+  // RFC 9207 §2.4: when the AS surfaces `iss` here, it MUST equal the
+  // discovered issuer. Tolerated when absent (legacy AS surfaces the
+  // value only on the poll response).
+  if (typeof out.iss === "string" && out.iss !== expectedIssuer) {
+    throw new Error(
+      `Authorize response issuer mismatch (RFC 9207 §2.4): expected ${expectedIssuer}, got ${out.iss}`,
+    );
+  }
+
   return {
     deepLink,
     pollingCode,
     expiredAt,
     codeVerifier: pkce.codeVerifier,
+    state,
+    nonce,
+    issuer: expectedIssuer,
   };
 }
 
@@ -422,6 +656,12 @@ export async function pollForAuthorizationCode(params) {
   const base = withNoTrailingSlash(params.ssoBaseUrl);
   const started = Date.now();
   const timeoutMs = params.timeoutSec * 1000;
+  const expectedState = typeof params.expectedState === "string" && params.expectedState
+    ? params.expectedState
+    : null;
+  const expectedIssuer = typeof params.expectedIssuer === "string" && params.expectedIssuer
+    ? params.expectedIssuer
+    : null;
 
   while (Date.now() - started < timeoutMs) {
     const out = await fetchJson(`${base}/oauth/poll`, {
@@ -435,9 +675,23 @@ export async function pollForAuthorizationCode(params) {
       if (!out.authorization_code) {
         throw new Error("Poll status authorized but authorization_code is missing");
       }
+      // RFC 6749 §10.12: when the AS echoes `state` on the authorization
+      // response, the client MUST verify it equals the value sent. If the
+      // server does not echo `state` (legacy), skip — the polling design
+      // already binds the response to the polling_code we created.
+      if (expectedState && typeof out.state === "string" && out.state !== expectedState) {
+        throw new Error("Authorization response state mismatch (RFC 6749 §10.12)");
+      }
+      // RFC 9207 §2.4: when the AS surfaces `iss` on the authorization
+      // response, it MUST equal the AS's discovered issuer. Tolerated when
+      // absent for legacy AS that have not yet adopted RFC 9207.
+      if (expectedIssuer && typeof out.iss === "string" && out.iss !== expectedIssuer) {
+        throw new Error(
+          `Authorization response issuer mismatch (RFC 9207 §2.4): expected ${expectedIssuer}, got ${out.iss}`,
+        );
+      }
       return {
         authorizationCode: out.authorization_code,
-        ownerProof: parseOwnerProof(out.owner_proof),
       };
     }
     if (status === "rejected") {
@@ -453,61 +707,6 @@ export async function pollForAuthorizationCode(params) {
   throw new Error("Timed out waiting for Alien SSO authorization");
 }
 
-export function verifyOwnerSessionProof(params) {
-  const proof = params?.proof;
-  if (!proof || typeof proof !== "object") {
-    return { ok: false, reason: "owner proof is missing" };
-  }
-
-  const sessionAddress = normalizeOptionalString(proof.sessionAddress);
-  const sessionSignature = normalizeOptionalString(proof.sessionSignature);
-  const sessionSignatureSeed = normalizeOptionalString(proof.sessionSignatureSeed);
-  const sessionPublicKey = normalizeOptionalString(proof.sessionPublicKey);
-  const providerAddress = normalizeOptionalString(proof.providerAddress);
-
-  if (!sessionAddress || !sessionSignature || !sessionSignatureSeed || !sessionPublicKey) {
-    return { ok: false, reason: "owner proof fields are incomplete" };
-  }
-
-  const expectedSessionAddress = normalizeOptionalString(params.expectedSessionAddress);
-  if (expectedSessionAddress && sessionAddress !== expectedSessionAddress) {
-    return {
-      ok: false,
-      reason: `owner proof session mismatch: expected ${expectedSessionAddress}, got ${sessionAddress}`,
-    };
-  }
-
-  const expectedProviderAddress = normalizeOptionalString(params.expectedProviderAddress);
-  if (expectedProviderAddress && providerAddress && providerAddress !== expectedProviderAddress) {
-    return {
-      ok: false,
-      reason: `owner proof provider mismatch: expected ${expectedProviderAddress}, got ${providerAddress}`,
-    };
-  }
-
-  const message = `${sessionAddress}${sessionSignatureSeed}`;
-  try {
-    const sigOk = verifyEd25519HexMessage(message, sessionSignature, sessionPublicKey);
-    if (!sigOk) {
-      return { ok: false, reason: "owner proof signature verification failed" };
-    }
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
-  }
-
-  return {
-    ok: true,
-    proof: {
-      sessionAddress,
-      sessionSignature,
-      sessionSignatureSeed,
-      sessionPublicKey,
-      providerAddress: providerAddress || null,
-      signatureVerifiedAt: Number(proof.signatureVerifiedAt || 0) || 0,
-    },
-  };
-}
-
 export async function exchangeAuthorizationCode(params) {
   const base = withNoTrailingSlash(params.ssoBaseUrl);
   const body = new URLSearchParams();
@@ -516,11 +715,12 @@ export async function exchangeAuthorizationCode(params) {
   body.set("client_id", params.providerAddress);
   body.set("code_verifier", params.codeVerifier);
 
-  const out = await fetchJson(`${base}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  const tokenUrl = `${base}/oauth/token`;
+  const out = await tokenEndpointPost(
+    tokenUrl,
     body,
-  });
+    params.agentPrivateKeyPem,
+  );
 
   if (!out.id_token || !out.access_token) {
     throw new Error("Token response missing id_token/access_token");
@@ -536,17 +736,200 @@ export async function refreshSession(params) {
   body.set("refresh_token", params.refreshToken);
   body.set("client_id", params.providerAddress);
 
-  const out = await fetchJson(`${base}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  const tokenUrl = `${base}/oauth/token`;
+  const out = await tokenEndpointPost(
+    tokenUrl,
     body,
-  });
+    params.agentPrivateKeyPem,
+  );
 
   if (!out.access_token) {
     throw new Error("Refresh response missing access_token");
   }
 
   return out;
+}
+
+// tokenEndpointPost POSTs a form-encoded body to /oauth/token, optionally
+// attaching a DPoP proof when an Ed25519 key is provided. On a server-issued
+// nonce challenge (RFC 9449 §8) the request is retried once with the
+// supplied nonce echoed in a freshly built proof.
+async function tokenEndpointPost(tokenUrl, body, agentPrivateKeyPem) {
+  const baseHeaders = { "Content-Type": "application/x-www-form-urlencoded" };
+  const useDPoP = typeof agentPrivateKeyPem === "string" && agentPrivateKeyPem;
+
+  const buildHeaders = (nonce) => {
+    if (!useDPoP) return baseHeaders;
+    return {
+      ...baseHeaders,
+      DPoP: createDPoPProof({
+        privateKeyPem: agentPrivateKeyPem,
+        htm: "POST",
+        htu: tokenUrl,
+        ...(nonce ? { nonce } : {}),
+      }),
+    };
+  };
+
+  const res = await fetchWithDPoPNonce(
+    tokenUrl,
+    { method: "POST", body },
+    buildHeaders,
+  );
+  const { json, text } = await readJsonResponse(res);
+  if (!res.ok) {
+    const details = json && typeof json === "object" ? JSON.stringify(json) : text;
+    const errorCode = json && typeof json === "object" && typeof json.error === "string"
+      ? json.error
+      : null;
+    // RFC 6749 §5.2: invalid_grant signals revoked/expired/already-used
+    // credentials. 401/403 are the bearer-level rejection codes. Surface
+    // these distinctly so callers can prompt re-auth without substring
+    // matching on error.message.
+    if (res.status === 401 || res.status === 403 || errorCode === "invalid_grant") {
+      throw new AuthRevokedError(
+        `HTTP ${res.status} from ${tokenUrl}: ${details || "no body"}`,
+        { status: res.status, errorCode },
+      );
+    }
+    throw new Error(`HTTP ${res.status} from ${tokenUrl}: ${details || "no body"}`);
+  }
+  if (!json || typeof json !== "object") {
+    throw new Error(`Expected JSON response from ${tokenUrl}`);
+  }
+  // RFC 9449 §5: when the client presents a DPoP proof, it MUST discard the
+  // response unless `token_type` is "DPoP" (case-insensitive per RFC 6749
+  // §5.1). Catches a downgrade or misbehaving AS that returns Bearer for a
+  // DPoP-bound request.
+  if (useDPoP) {
+    const tokenType = typeof json.token_type === "string" ? json.token_type : "";
+    if (tokenType.toLowerCase() !== "dpop") {
+      throw new Error(
+        `RFC 9449 §5: expected token_type="DPoP", got ${JSON.stringify(json.token_type)}`,
+      );
+    }
+  }
+  return json;
+}
+
+/**
+ * Fetch the OIDC `/oauth/userinfo` claims for a DPoP-bound access token.
+ *
+ * RFC 9449 §7.1: requests carrying a DPoP-bound AT MUST use
+ * `Authorization: DPoP <token>` and a fresh DPoP proof whose `ath` claim
+ * equals base64url(SHA-256(accessToken)). On 400 + use_dpop_nonce challenge
+ * (RFC 9449 §8/§9), the request is retried once with the supplied nonce
+ * echoed in the proof.
+ */
+export async function getUserInfo(params) {
+  if (!params || typeof params !== "object") {
+    throw new Error("getUserInfo: params required");
+  }
+  const { ssoBaseUrl, accessToken, agentPrivateKeyPem } = params;
+  if (typeof ssoBaseUrl !== "string" || !ssoBaseUrl) {
+    throw new Error("getUserInfo: ssoBaseUrl is required");
+  }
+  if (typeof accessToken !== "string" || !accessToken) {
+    throw new Error("getUserInfo: accessToken is required");
+  }
+  if (typeof agentPrivateKeyPem !== "string" || !agentPrivateKeyPem) {
+    throw new Error("getUserInfo: agentPrivateKeyPem is required");
+  }
+
+  const userinfoUrl = `${withNoTrailingSlash(ssoBaseUrl)}/oauth/userinfo`;
+
+  const buildHeaders = (nonce) => ({
+    Authorization: `DPoP ${accessToken}`,
+    DPoP: createDPoPProof({
+      privateKeyPem: agentPrivateKeyPem,
+      htm: "GET",
+      htu: userinfoUrl,
+      accessToken,
+      ...(nonce ? { nonce } : {}),
+    }),
+  });
+
+  const res = await fetchWithDPoPNonce(userinfoUrl, { method: "GET" }, buildHeaders);
+  const { json, text } = await readJsonResponse(res);
+  if (!res.ok) {
+    const details = json && typeof json === "object" ? JSON.stringify(json) : text;
+    throw new Error(`HTTP ${res.status} from userinfo: ${details || "no body"}`);
+  }
+  if (!json || typeof json !== "object") {
+    throw new Error("getUserInfo: expected JSON response");
+  }
+  return json;
+}
+
+// dpopNonceCache stores the most-recent server-issued DPoP-Nonce per URL,
+// per RFC 9449 §8.2-1: "the client MUST use the new nonce value for the
+// next request and all subsequent requests until the server supplies a new
+// nonce." Process-local in-memory; agent-id is a short-lived CLI so this
+// is a per-invocation cache that batches multi-call flows (e.g., token
+// then userinfo then refresh) without paying a 400/retry on each step.
+const dpopNonceCache = new Map();
+
+// fetchWithDPoPNonce executes a request, pre-attaching any cached nonce
+// for `url`. Two challenge shapes are recognized per RFC 9449:
+//
+//   §8 (authorization server, e.g. /oauth/token):
+//     400 + JSON body `{"error":"use_dpop_nonce"}` + `DPoP-Nonce` header.
+//
+//   §9 (resource server, e.g. /oauth/userinfo):
+//     401 + `WWW-Authenticate: DPoP error="use_dpop_nonce"` + `DPoP-Nonce`.
+//
+// In either case the helper retries ONCE with the supplied nonce echoed in
+// a freshly built proof and updates the cache. Subsequent responses
+// bearing a DPoP-Nonce header (success or failure) refresh the cache so
+// the server's rotation policy stays sticky.
+async function fetchWithDPoPNonce(url, init, buildHeaders) {
+  const cached = dpopNonceCache.get(url);
+  let res = await fetch(url, { ...init, headers: buildHeaders(cached) });
+  rememberNonce(url, res.headers.get("dpop-nonce"));
+
+  if (res.status !== 400 && res.status !== 401) {
+    return res;
+  }
+  const issuedNonce = res.headers.get("dpop-nonce");
+  if (!issuedNonce) {
+    return res;
+  }
+
+  // Detect the challenge in the right place per status code: §8 puts it in
+  // the JSON body, §9 puts it in WWW-Authenticate.
+  let challenged = false;
+  if (res.status === 400) {
+    try {
+      const body = await res.clone().json();
+      challenged = body && body.error === "use_dpop_nonce";
+    } catch {
+      challenged = false;
+    }
+  } else {
+    const wwwAuth = res.headers.get("www-authenticate") || "";
+    // RFC 6749 §3 / RFC 7235 §2.2: WWW-Authenticate parameter values are
+    // either token or quoted-string. Match the `error` parameter
+    // structurally so that the literal string "use_dpop_nonce" appearing
+    // inside some other parameter's value (e.g. realm) does not
+    // false-positive into a spurious retry.
+    const m = wwwAuth.match(/\berror\s*=\s*(?:"([^"]*)"|([^,\s]+))/i);
+    if (m) {
+      const value = m[1] !== undefined ? m[1] : m[2];
+      challenged = value.toLowerCase() === "use_dpop_nonce";
+    }
+  }
+
+  if (challenged) {
+    res = await fetch(url, { ...init, headers: buildHeaders(issuedNonce) });
+    rememberNonce(url, res.headers.get("dpop-nonce"));
+  }
+  return res;
+}
+
+function rememberNonce(url, nonce) {
+  if (typeof nonce === "string" && nonce) {
+    dpopNonceCache.set(url, nonce);
+  }
 }
 
 export async function fetchOidcDiscovery(ssoBaseUrl) {
@@ -562,10 +945,35 @@ export async function fetchJwks(jwksUri) {
   return out;
 }
 
+// RFC 7515 §10.7: applications anchor on a curated alg allowlist. SSO
+// publishes RS256 today and may rotate to EdDSA (RFC 8037); accept either.
+const ID_TOKEN_ALG_KTY = { RS256: "RSA", EdDSA: "OKP" };
+
+// RFC 8725 §3.11 / OIDC Core §2: id_tokens are typed JWTs. Cross-JWT confusion
+// (an `at+jwt` access token or `dpop+jwt` proof reused as an id_token) is
+// blocked here. Missing/non-string `typ` is tolerated for legacy tokens that
+// preceded the §3.11 guidance. RFC 6838 §4.2 — media types compare
+// case-insensitively, so the comparison lowercases first.
+function assertIdTokenTyp(rawTyp) {
+  if (typeof rawTyp !== "string" || rawTyp.length === 0) return;
+  const typ = rawTyp.toLowerCase();
+  if (typ === "jwt" || typ === "application/jwt") return;
+  throw new Error(`Unsupported id_token typ: ${rawTyp}`);
+}
+
 export async function verifyIdToken(params) {
+  assertSsoBaseUrlSafe(params.ssoBaseUrl);
   const parsed = parseJwt(params.idToken);
-  if (parsed.header.alg !== "RS256") {
-    throw new Error(`Unsupported id_token alg: ${String(parsed.header.alg)}`);
+  // RFC 7515 §4.1.11 / RFC 7519 §7.2: any non-empty `crit` array names
+  // extensions the verifier MUST understand. We support none.
+  if (Array.isArray(parsed.header.crit) && parsed.header.crit.length > 0) {
+    throw new Error(`id_token contains unsupported crit extensions: ${parsed.header.crit.join(",")}`);
+  }
+  assertIdTokenTyp(parsed.header.typ);
+  const alg = parsed.header.alg;
+  const expectedKty = ID_TOKEN_ALG_KTY[alg];
+  if (!expectedKty) {
+    throw new Error(`Unsupported id_token alg: ${String(alg)}`);
   }
 
   const discovery = await fetchOidcDiscovery(params.ssoBaseUrl);
@@ -577,12 +985,13 @@ export async function verifyIdToken(params) {
 
   const jwks = await fetchJwks(jwksUri);
   const kid = parsed.header.kid;
-  const key = jwks.keys.find((k) => k.kid === kid && k.kty === "RSA");
+  const key = jwks.keys.find((k) => k.kid === kid && k.kty === expectedKty);
   if (!key) {
-    throw new Error(`Unable to find RSA JWK for kid=${String(kid)}`);
+    throw new Error(`Unable to find ${expectedKty} JWK for kid=${String(kid)}`);
   }
 
-  const validSig = verifyJwtRs256Signature({
+  const verifier = alg === "RS256" ? verifyJwtRs256Signature : verifyJwtEdDsaSignature;
+  const validSig = verifier({
     signingInput: parsed.signingInput,
     signatureB64url: parsed.signatureB64url,
     jwk: key,
@@ -602,11 +1011,57 @@ export async function verifyIdToken(params) {
   if (!audOk) {
     throw new Error("id_token audience mismatch");
   }
+  // OIDC Core §3.1.3.7.6/.7: multi-aud id_token MUST carry azp == client_id;
+  // when azp is present at all, it MUST equal client_id.
+  const audIsMulti = Array.isArray(aud) && aud.length > 1;
+  if (audIsMulti && payload.azp === undefined) {
+    throw new Error("id_token has multiple audiences but no azp claim");
+  }
+  if (payload.azp !== undefined && payload.azp !== params.providerAddress) {
+    throw new Error(`id_token azp mismatch: expected ${params.providerAddress}, got ${String(payload.azp)}`);
+  }
+  // RFC 7519 §4.1.6: `iat` is OPTIONAL but, when present, MUST be a number
+  // (NumericDate). A non-numeric `iat` (string, object, …) is a malformed
+  // claim and the token MUST be rejected.
+  if ("iat" in payload && typeof payload.iat !== "number") {
+    throw new Error("id_token iat is not a NumericDate");
+  }
+  // RFC 7519 §4.1.5: when present, current time MUST be ≥ nbf. The claim
+  // itself MUST be a NumericDate when present.
+  if ("nbf" in payload && typeof payload.nbf !== "number") {
+    throw new Error("id_token nbf is not a NumericDate");
+  }
+  if (typeof payload.nbf === "number" && payload.nbf > nowSec) {
+    throw new Error("id_token not yet valid");
+  }
   if (typeof payload.exp !== "number" || payload.exp <= nowSec) {
     throw new Error("id_token is expired");
   }
   if (typeof payload.sub !== "string" || !payload.sub) {
     throw new Error("id_token sub is missing");
+  }
+  // OIDC Core §3.1.3.7 step 11: if the caller sent a `nonce` in the
+  // authorization request, the id_token MUST carry the same value. The
+  // comparison is exact-string. Refresh-token flows do not send a nonce,
+  // so callers omit `expectedNonce` there; in that case any nonce the AS
+  // chose to carry forward is accepted as opaque.
+  if (typeof params.expectedNonce === "string" && params.expectedNonce) {
+    if (typeof payload.nonce !== "string" || payload.nonce !== params.expectedNonce) {
+      throw new Error("id_token nonce mismatch");
+    }
+  }
+  // RFC 9449 §6.1 + RFC 7800 §3.1: when caller supplies the agent's public
+  // key, surface a cnf.jkt mismatch immediately rather than deferring to
+  // later proof-chain verification.
+  if (typeof params.agentPublicKeyPem === "string" && params.agentPublicKeyPem) {
+    const expectedJkt = jwkThumbprint(ed25519PublicKeyToJwk(params.agentPublicKeyPem));
+    const actualJkt = payload.cnf?.jkt;
+    if (typeof actualJkt !== "string" || !actualJkt) {
+      throw new Error("id_token missing cnf.jkt");
+    }
+    if (actualJkt !== expectedJkt) {
+      throw new Error(`id_token cnf.jkt mismatch: expected ${expectedJkt}, got ${actualJkt}`);
+    }
   }
 
   return {
@@ -624,9 +1079,13 @@ export async function verifyIdToken(params) {
  * signature remains valid proof that the SSO server attested the binding.
  */
 export async function verifyIdTokenSignatureOnly(params) {
+  assertSsoBaseUrlSafe(params.ssoBaseUrl);
   const parsed = parseJwt(params.idToken);
-  if (parsed.header.alg !== "RS256") {
-    throw new Error(`Unsupported id_token alg: ${String(parsed.header.alg)}`);
+  assertIdTokenTyp(parsed.header.typ);
+  const alg = parsed.header.alg;
+  const expectedKty = ID_TOKEN_ALG_KTY[alg];
+  if (!expectedKty) {
+    throw new Error(`Unsupported id_token alg: ${String(alg)}`);
   }
 
   const discovery = await fetchOidcDiscovery(params.ssoBaseUrl);
@@ -634,15 +1093,25 @@ export async function verifyIdTokenSignatureOnly(params) {
   if (!jwksUri) {
     throw new Error("Discovery response missing jwks_uri");
   }
+  // OIDC Core §3.1.3.7 step 2: id_token MUST carry `iss` matching the
+  // discovered issuer. Without this gate, an attacker-controlled discovery
+  // endpoint can mint a self-consistent token whose `iss` claim points
+  // anywhere — defeating the trust this function exposes to chain consumers.
+  if (parsed.payload?.iss !== discovery.issuer) {
+    throw new Error(
+      `id_token issuer mismatch: expected ${discovery.issuer}, got ${String(parsed.payload?.iss)}`,
+    );
+  }
 
   const jwks = await fetchJwks(jwksUri);
   const kid = parsed.header.kid;
-  const key = jwks.keys.find((k) => k.kid === kid && k.kty === "RSA");
+  const key = jwks.keys.find((k) => k.kid === kid && k.kty === expectedKty);
   if (!key) {
-    throw new Error(`Unable to find RSA JWK for kid=${String(kid)}`);
+    throw new Error(`Unable to find ${expectedKty} JWK for kid=${String(kid)}`);
   }
 
-  const validSig = verifyJwtRs256Signature({
+  const verifier = alg === "RS256" ? verifyJwtRs256Signature : verifyJwtEdDsaSignature;
+  const validSig = verifier({
     signingInput: parsed.signingInput,
     signatureB64url: parsed.signatureB64url,
     jwk: key,
@@ -659,6 +1128,34 @@ export async function verifyIdTokenSignatureOnly(params) {
     header: parsed.header,
     keyId: kid,
   };
+}
+
+/**
+ * SubjectMismatchError marks a refresh-time security failure: the refreshed
+ * token claims a different `sub` than the bound owner session. Callers use
+ * `instanceof` to distinguish a security-relevant mismatch from incidental
+ * parse errors on opaque tokens.
+ */
+export class SubjectMismatchError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SubjectMismatchError";
+  }
+}
+
+/**
+ * AuthRevokedError marks a token-endpoint failure where the AS has rejected
+ * the supplied credential — HTTP 401, HTTP 403, or RFC 6749 §5.2
+ * `invalid_grant`. Callers can catch this distinctly from network/parse
+ * errors and prompt the user to re-authenticate.
+ */
+export class AuthRevokedError extends Error {
+  constructor(message, { status, errorCode } = {}) {
+    super(message);
+    this.name = "AuthRevokedError";
+    this.status = status ?? null;
+    this.errorCode = errorCode ?? null;
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -688,29 +1185,6 @@ function delegationFile(baseDir, childAgentId) {
   return path.join(baseDir, "delegations", `${safeName(childAgentId)}.json`);
 }
 
-function normalizeOwnerSessionProof(input) {
-  if (!input || typeof input !== "object") {
-    return null;
-  }
-  const asString = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
-  const sessionAddress = asString(input.sessionAddress);
-  const sessionSignature = asString(input.sessionSignature);
-  const sessionSignatureSeed = asString(input.sessionSignatureSeed);
-  const sessionPublicKey = asString(input.sessionPublicKey);
-  const providerAddress = asString(input.providerAddress);
-  if (!sessionAddress || !sessionSignature || !sessionSignatureSeed || !sessionPublicKey) {
-    return null;
-  }
-  return {
-    sessionAddress,
-    sessionSignature,
-    sessionSignatureSeed,
-    sessionPublicKey,
-    providerAddress,
-    signatureVerifiedAt: Number(input.signatureVerifiedAt || 0) || 0,
-  };
-}
-
 // ════════════════════════════════════════════════════════════════════════════════
 // Service manifest discovery — /.well-known/alien-agent-id.json
 //
@@ -727,7 +1201,11 @@ export const SUPPORT_SIGNAL_MAX_BYTES = 65536;
 export const SUPPORT_SIGNAL_VERSIONS = new Set(["v1"]);
 
 const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
-const ALLOWED_AUTH_SCHEMES = new Set(["AgentID", "Bearer", "none"]);
+// RFC 9449 §7.1: protected resources advertise the `DPoP` scheme. `Bearer`
+// kept for non-Alien services. `none` for services that put the credential
+// in a custom header. The legacy custom `AgentID` JSON envelope was removed
+// in the 3.0.0 DPoP cutover — see artifacts/rfc9449-dpop-cutover.md.
+const ALLOWED_AUTH_SCHEMES = new Set(["DPoP", "Bearer", "none"]);
 const ALLOWED_TOP_KEYS = new Set(["version", "service", "auth", "api"]);
 const ALLOWED_SERVICE_KEYS = new Set(["name", "url"]);
 const ALLOWED_AUTH_KEYS = new Set(["header", "scheme"]);
@@ -818,7 +1296,7 @@ export function parseServiceManifest(raw, allowedHost, options = {}) {
       return raw.auth.header;
     })(),
     scheme: (() => {
-      if (raw.auth.scheme === undefined) return "AgentID";
+      if (raw.auth.scheme === undefined) return "DPoP";
       if (typeof raw.auth.scheme !== "string" || !ALLOWED_AUTH_SCHEMES.has(raw.auth.scheme)) {
         throw new Error(`Manifest auth.scheme: must be one of ${[...ALLOWED_AUTH_SCHEMES].join(", ")}`);
       }
@@ -1028,7 +1506,8 @@ export class SignatureEngine {
     this.delegations = new Map();
     this.nonces = null;
     this.sequence = null;
-    this.ownerBinding = null;
+    this.idTokenJti = null;
+    this.idTokenSub = null;
     this.writeQueue = Promise.resolve();
   }
 
@@ -1042,17 +1521,30 @@ export class SignatureEngine {
         nextSeq: 1,
         lastHash: null,
       })) || { nextSeq: 1, lastHash: null };
-    this.ownerBinding = await readJsonFile(this.paths.ownerBinding, null);
+
+    // Parse the cached id_token (if any) for the audit-log anchor. The jti
+    // (RFC 7519 §4.1.7) replaces the legacy ownerBindingId; sub is captured
+    // for envelope fields that previously read it off the binding.
+    const session = await readJsonFile(this.paths.ownerSession, null);
+    if (session?.idToken) {
+      try {
+        const payload = parseJwt(session.idToken).payload;
+        if (typeof payload?.jti === "string" && payload.jti) {
+          this.idTokenJti = payload.jti;
+        }
+        if (typeof payload?.sub === "string" && payload.sub) {
+          this.idTokenSub = payload.sub;
+        }
+      } catch {
+        // Unparseable id_token — engine still functions for non-audit ops.
+      }
+    }
 
     await this.ensureMainKey();
   }
 
   isOwnerBound() {
-    return Boolean(this.ownerBinding && this.ownerBinding.binding);
-  }
-
-  getOwnerBinding() {
-    return this.ownerBinding;
+    return Boolean(this.idTokenJti);
   }
 
   async ensureMainKey() {
@@ -1128,58 +1620,11 @@ export class SignatureEngine {
   }
 
   async bindOwnerSession(params) {
-    const main = await this.ensureMainKey();
-    const hostname = os.hostname();
-    const ownerSessionProof = normalizeOwnerSessionProof(params.ownerSessionProof);
-    if (ownerSessionProof?.sessionAddress && ownerSessionProof.sessionAddress !== params.ownerSessionSub) {
-      throw new Error(
-        `owner session proof mismatch: expected ${params.ownerSessionSub}, got ${ownerSessionProof.sessionAddress}`,
-      );
-    }
-    if (
-      ownerSessionProof?.providerAddress &&
-      ownerSessionProof.providerAddress !== params.providerAddress
-    ) {
-      throw new Error(
-        `owner session proof provider mismatch: expected ${params.providerAddress}, got ${ownerSessionProof.providerAddress}`,
-      );
-    }
+    await this.ensureMainKey();
 
-    const bindingPayload = {
-      version: 1,
-      issuedAt: nowMs(),
-      issuer: params.issuer,
-      providerAddress: params.providerAddress,
-      ownerSessionSub: params.ownerSessionSub,
-      ownerAudience: params.ownerAudience,
-      ownerProfileUrl: params.ownerProfileUrl || this.ownerProfileUrl,
-      idTokenHash: sha256Hex(params.idToken),
-      ownerSessionProof: ownerSessionProof || null,
-      ownerSessionProofHash: ownerSessionProof ? sha256HexCanonical(ownerSessionProof) : null,
-      agentInstance: {
-        hostname,
-        publicKeyFingerprint: main.fingerprint,
-        publicKeyPem: main.publicKeyPem,
-      },
-    };
-
-    const canonical = canonicalJSONString(bindingPayload);
-    const binding = {
-      id: newOperationId(),
-      payload: bindingPayload,
-      payloadHash: sha256HexCanonical(canonical),
-      signature: signEd25519Base64Url(canonical, main.privateKeyPem),
-      createdAt: nowMs(),
-    };
-
-    const ownerRecord = {
-      version: 1,
-      binding,
-    };
-
-    await writeJsonFile(this.paths.ownerBinding, ownerRecord);
-    this.ownerBinding = ownerRecord;
-
+    // v3 model: the SSO-signed id_token IS the binding (no agent-self-signed
+    // ownerBinding envelope). Persist only the session; future operations
+    // read the id_token directly and parse claims (sub, jti, cnf.jkt) at use.
     const ownerSessionRecord = {
       version: 1,
       issuer: params.issuer,
@@ -1189,13 +1634,27 @@ export class SignatureEngine {
       idToken: params.idToken,
       accessToken: params.accessToken,
       refreshToken: params.refreshToken,
-      ownerSessionProof: ownerSessionProof || null,
       savedAt: nowMs(),
     };
     await writeJsonFile(this.paths.ownerSession, ownerSessionRecord);
     await setPrivateFilePermissions(this.paths.ownerSession);
 
-    return ownerRecord;
+    // Refresh cached anchors so subsequent appendOperation calls work.
+    try {
+      const payload = parseJwt(params.idToken).payload;
+      this.idTokenJti = typeof payload?.jti === "string" ? payload.jti : null;
+      this.idTokenSub = typeof payload?.sub === "string" ? payload.sub : null;
+    } catch {
+      this.idTokenJti = null;
+      this.idTokenSub = null;
+    }
+
+    return {
+      ownerSessionSub: params.ownerSessionSub,
+      issuer: params.issuer,
+      providerAddress: params.providerAddress,
+      idTokenJti: this.idTokenJti,
+    };
   }
 
   async ensureValidSession(opts = {}) {
@@ -1226,10 +1685,15 @@ export class SignatureEngine {
     const ssoBaseUrl = session.ssoBaseUrl || session.issuer;
     if (!ssoBaseUrl) return null;
 
+    // Forward the agent's main keypair so the refresh request carries a DPoP
+    // proof bound to the same key the SSO advertises in `cnf.jkt`.
+    const main = await this.ensureMainKey();
+
     const fresh = await refreshSession({
       ssoBaseUrl,
       refreshToken: session.refreshToken,
       providerAddress: session.providerAddress,
+      agentPrivateKeyPem: main.privateKeyPem,
     });
 
     // Verify the refreshed token still belongs to the same owner.
@@ -1237,13 +1701,31 @@ export class SignatureEngine {
       try {
         const freshPayload = parseJwt(fresh.access_token).payload;
         if (freshPayload.sub && freshPayload.sub !== session.ownerSessionSub) {
-          throw new Error(
+          throw new SubjectMismatchError(
             `Refreshed token subject mismatch: expected ${session.ownerSessionSub}, got ${freshPayload.sub}`,
           );
         }
       } catch (err) {
-        if (err instanceof Error && err.message.includes("subject mismatch")) throw err;
+        if (err instanceof SubjectMismatchError) throw err;
         // Non-JWT or unparseable — skip subject check (opaque tokens have no sub).
+      }
+    }
+
+    // RFC 9449 §6.1 + RFC 6749 §6: when the AS rotates the id_token, re-run
+    // the full claim+signature+cnf.jkt check before persistence. A
+    // compromised or buggy AS that rotates `sub` or `cnf.jkt` is caught
+    // here rather than at the next chain verification.
+    if (fresh.id_token) {
+      const verified = await verifyIdToken({
+        ssoBaseUrl,
+        providerAddress: session.providerAddress,
+        idToken: fresh.id_token,
+        agentPublicKeyPem: main.publicKeyPem,
+      });
+      if (session.ownerSessionSub && verified.payload.sub !== session.ownerSessionSub) {
+        throw new SubjectMismatchError(
+          `Refreshed id_token sub mismatch: expected ${session.ownerSessionSub}, got ${verified.payload.sub}`,
+        );
       }
     }
 
@@ -1276,8 +1758,8 @@ export class SignatureEngine {
 
   async appendOperation(params) {
     this.writeQueue = this.writeQueue.then(async () => {
-      if (!this.ownerBinding?.binding?.id) {
-        throw new Error("Owner binding missing. Run `auth` and `bind` first.");
+      if (!this.idTokenJti) {
+        throw new Error("Owner session missing or id_token has no jti. Run `auth` and `bind` first.");
       }
 
       const agentId = resolveAgentId(params.ctx);
@@ -1301,8 +1783,8 @@ export class SignatureEngine {
         keyNonce: Number(key.keyNonce || 0),
         nonce,
         sessionKey: params.ctx?.sessionKey || null,
-        ownerBindingId: this.ownerBinding.binding.id,
-        ownerSessionSub: this.ownerBinding.binding.payload.ownerSessionSub,
+        idTokenJti: this.idTokenJti,
+        ownerSessionSub: this.idTokenSub,
         agentPublicKeyPem: key.publicKeyPem,
         parentAgentId: delegation ? delegation.payload.parentAgentId : null,
         delegationPayloadHash: delegation ? delegation.payloadHash : null,
@@ -1394,86 +1876,6 @@ async function readAllDelegations(paths) {
   return map;
 }
 
-function verifyOwnerBindingRecord(ownerBinding, keyByAgent, errors) {
-  if (!ownerBinding?.binding) {
-    errors.push("owner-binding.json is missing");
-    return;
-  }
-  const binding = ownerBinding.binding;
-  const main = keyByAgent.get("main");
-  if (!main?.publicKeyPem) {
-    errors.push("main key missing while verifying owner binding");
-    return;
-  }
-
-  const payloadCanonical = canonicalJSONString(binding.payload);
-  const payloadHash = sha256HexCanonical(payloadCanonical);
-  if (payloadHash !== binding.payloadHash) {
-    errors.push("owner binding payload hash mismatch");
-  }
-
-  const ok = verifyEd25519Base64Url(payloadCanonical, binding.signature, main.publicKeyPem);
-  if (!ok) {
-    errors.push("owner binding signature invalid");
-  }
-
-  verifyOwnerSessionProofInBinding(binding.payload, errors);
-}
-
-function verifyOwnerSessionProofInBinding(payload, errors) {
-  const proof = payload?.ownerSessionProof;
-  if (!proof || typeof proof !== "object") {
-    // ownerSessionProof is optional — some Alien App versions don't return it.
-    // The binding is still valid via the id_token server signature.
-    return;
-  }
-
-  const required = [
-    "sessionAddress",
-    "sessionSignature",
-    "sessionSignatureSeed",
-    "sessionPublicKey",
-  ];
-  for (const field of required) {
-    if (typeof proof[field] !== "string" || !proof[field]) {
-      errors.push(`owner session proof missing ${field}`);
-      return;
-    }
-  }
-
-  const message = `${proof.sessionAddress}${proof.sessionSignatureSeed}`;
-  let sigOk = false;
-  try {
-    sigOk = verifyEd25519HexMessage(message, proof.sessionSignature, proof.sessionPublicKey);
-  } catch (err) {
-    errors.push(`owner session proof parse error: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-
-  if (!sigOk) {
-    errors.push("owner session proof signature invalid");
-  }
-
-  if (payload.ownerSessionSub && payload.ownerSessionSub !== proof.sessionAddress) {
-    errors.push(
-      `owner session proof subject mismatch: binding=${payload.ownerSessionSub} proof=${proof.sessionAddress}`,
-    );
-  }
-
-  if (payload.providerAddress && proof.providerAddress && payload.providerAddress !== proof.providerAddress) {
-    errors.push(
-      `owner session proof provider mismatch: binding=${payload.providerAddress} proof=${proof.providerAddress}`,
-    );
-  }
-
-  if (payload.ownerSessionProofHash) {
-    const proofHash = sha256HexCanonical(canonicalJSONString(proof));
-    if (proofHash !== payload.ownerSessionProofHash) {
-      errors.push("owner session proof hash mismatch");
-    }
-  }
-}
-
 function verifyDelegation(childAgentId, delegation, keyByAgent, errors) {
   if (!delegation) {
     errors.push(`missing delegation certificate for subagent ${childAgentId}`);
@@ -1498,7 +1900,7 @@ function verifyDelegation(childAgentId, delegation, keyByAgent, errors) {
   }
 }
 
-function verifyAuditRecord(record, prevHash, keyByAgent, delegationsByChild, ownerBindingId, errors) {
+function verifyAuditRecord(record, prevHash, keyByAgent, delegationsByChild, idTokenJti, errors) {
   if ((record.prevHash || null) !== (prevHash || null)) {
     errors.push(`prevHash mismatch at seq=${record?.envelope?.seq ?? "?"}`);
   }
@@ -1527,8 +1929,13 @@ function verifyAuditRecord(record, prevHash, keyByAgent, delegationsByChild, own
     }
   }
 
-  if (record.envelope.ownerBindingId !== ownerBindingId) {
-    errors.push(`ownerBindingId mismatch at seq=${record.envelope.seq}`);
+  // idTokenJti is the v3 audit-log anchor (RFC 7519 §4.1.7) — the audit chain
+  // is consistent with whichever id_token was current at append time. Older
+  // entries with a different jti just mean the session refreshed; that's not
+  // a tamper signal, so only assert equality when both sides have a value.
+  if (idTokenJti && record.envelope.idTokenJti && record.envelope.idTokenJti !== idTokenJti) {
+    // Entries from a previous session — accept; verifyState only enforces
+    // the chain-integrity (prevHash + envelopeHash + signature) invariants.
   }
 
   if (record.envelope.agentId !== "main") {
@@ -1551,12 +1958,24 @@ export async function verifyState(baseDir) {
   const paths = statePaths(baseDir);
   const errors = [];
 
-  const ownerBinding = await readJsonFile(paths.ownerBinding, null);
+  const session = await readJsonFile(paths.ownerSession, null);
   const keyByAgent = await readAllKeyRecords(paths);
   const delegationsByChild = await readAllDelegations(paths);
   const auditRecords = await readJsonl(paths.auditJsonl);
 
-  verifyOwnerBindingRecord(ownerBinding, keyByAgent, errors);
+  let currentJti = null;
+  let ownerSub = null;
+  if (session?.idToken) {
+    try {
+      const payload = parseJwt(session.idToken).payload;
+      currentJti = typeof payload?.jti === "string" ? payload.jti : null;
+      ownerSub = typeof payload?.sub === "string" ? payload.sub : null;
+    } catch {
+      errors.push("owner-session.json id_token is unparseable");
+    }
+  } else {
+    errors.push("owner-session.json is missing");
+  }
 
   let prevHash = null;
   for (const record of auditRecords) {
@@ -1565,7 +1984,7 @@ export async function verifyState(baseDir) {
       prevHash,
       keyByAgent,
       delegationsByChild,
-      ownerBinding?.binding?.id,
+      currentJti,
       errors,
     );
   }
@@ -1574,8 +1993,7 @@ export async function verifyState(baseDir) {
     ok: errors.length === 0,
     errorCount: errors.length,
     errors,
-    ownerSessionSub: ownerBinding?.binding?.payload?.ownerSessionSub || null,
-    ownerProfileUrl: ownerBinding?.binding?.payload?.ownerProfileUrl || null,
+    ownerSessionSub: ownerSub,
     operations: auditRecords.length,
     agents: Array.from(keyByAgent.keys()).sort(),
     subagentDelegations: Array.from(delegationsByChild.keys()).sort(),
@@ -1623,27 +2041,3 @@ export function vaultDecrypt(key, entry) {
   return decrypted.toString("utf8");
 }
 
-// ════════════════════════════════════════════════════════════════════════════════
-// Agent Auth Token — Self-contained signed assertions for service authentication
-// ════════════════════════════════════════════════════════════════════════════════
-
-export function createAgentToken(params) {
-  const payload = {
-    v: 1,
-    fingerprint: params.fingerprint,
-    publicKeyPem: params.publicKeyPem,
-    owner: params.ownerSessionSub || null,
-    timestamp: nowMs(),
-    nonce: randomBytes(16).toString("hex"),
-  };
-  const canonical = canonicalJSONString(payload);
-  const signature = signEd25519Base64Url(canonical, params.privateKeyPem);
-  const token = { ...payload, sig: signature };
-  if (params.ownerBinding) {
-    token.ownerBinding = params.ownerBinding;
-  }
-  if (params.idToken) {
-    token.idToken = params.idToken;
-  }
-  return b64url(JSON.stringify(token));
-}

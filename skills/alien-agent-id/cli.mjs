@@ -3,7 +3,7 @@
 // Alien Agent ID — CLI tool for agent identity management.
 // Usage: node cli.mjs <command> [flags]
 //
-// Commands: bootstrap, init, auth, bind, status, sign, verify, export-proof,
+// Commands: bootstrap, setup-owner-session, init, auth, bind, status, sign, verify, export-proof,
 //           git-setup, git-commit, git-verify, vault-store, vault-get, vault-list,
 //           vault-remove, auth-header, discover-service, service-support, refresh
 
@@ -11,7 +11,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { execFile as execFileCb } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createPublicKey } from "node:crypto";
 
 import {
   statePaths,
@@ -28,19 +28,18 @@ import {
   exchangeAuthorizationCode,
   verifyIdToken,
   verifyIdTokenSignatureOnly,
-  verifyOwnerSessionProof,
   verifyState,
+  AuthRevokedError,
   SignatureEngine,
+  parseJwt,
+  ed25519PublicKeyToJwk,
+  jwkThumbprint,
   ed25519PemToSshPublicKey,
   ed25519PemToOpenSSHPrivateKey,
-  canonicalJSONString,
-  sha256Hex,
-  sha256HexCanonical,
-  verifyEd25519Base64Url,
   deriveVaultKey,
   vaultEncrypt,
   vaultDecrypt,
-  createAgentToken,
+  createDPoPProof,
   fetchServiceManifest,
   probeServiceSupportSignal,
 } from "./lib.mjs";
@@ -152,14 +151,16 @@ async function cmdAuth(flags) {
     return;
   }
 
-  // Auto-init if needed
-  await cmdInit({ ...flags, _quiet: true });
+  // Auto-init if needed — capture the agent key so we can advertise its
+  // RFC 7638 thumbprint as `dpop_jkt` on the authorize URL.
+  const agentKey = await cmdInit({ ...flags, _quiet: true });
+  const agentPublicKeyPem = agentKey?.publicKeyPem || null;
 
   // Start OIDC authorization
   stderr(`Starting OIDC authorization against ${ssoBaseUrl}...`);
   let auth;
   try {
-    auth = await beginOidcAuthorization({ ssoBaseUrl, providerAddress, oidcOrigin });
+    auth = await beginOidcAuthorization({ ssoBaseUrl, providerAddress, oidcOrigin, agentPublicKeyPem });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (oidcOrigin !== "http://localhost" && msg.includes("Origin not allowed")) {
@@ -168,17 +169,24 @@ async function cmdAuth(flags) {
         ssoBaseUrl,
         providerAddress,
         oidcOrigin: "http://localhost",
+        agentPublicKeyPem,
       });
     } else {
       throw err;
     }
   }
 
-  // Persist pending auth state (includes PKCE code_verifier)
+  // Persist pending auth state. Includes the PKCE code_verifier (RFC 7636),
+  // the OAuth `state` (RFC 6749 §10.12), and the OIDC `nonce` (OIDC Core
+  // §3.1.3.7) so cmdBind can correlate the polled response and verify the
+  // id_token against the value originally sent on the authorize URL.
   const paths = statePaths(stateDir);
   await writeJsonFile(paths.pendingAuth, {
     pollingCode: auth.pollingCode,
     codeVerifier: auth.codeVerifier,
+    state: auth.state,
+    nonce: auth.nonce,
+    issuer: auth.issuer,
     deepLink: auth.deepLink,
     expiredAt: auth.expiredAt,
     providerAddress,
@@ -212,7 +220,6 @@ async function cmdBind(flags) {
   const stateDir = resolveStateDir(flags);
   const timeoutSec = Number(flags["timeout-sec"] || 300);
   const pollIntervalMs = Number(flags["poll-interval-ms"] || 3000);
-  const requireOwnerProof = flags["require-owner-proof"] !== false;
 
   const paths = statePaths(stateDir);
   const pending = await readJsonFile(paths.pendingAuth, null);
@@ -221,15 +228,25 @@ async function cmdBind(flags) {
     return;
   }
 
-  // Poll for authorization
+  // Poll for authorization. Pass the previously-recorded state so the AS's
+  // echoed value (when present) is checked per RFC 6749 §10.12.
   stderr(`Polling for authorization (timeout ${timeoutSec}s)...`);
   const poll = await pollForAuthorizationCode({
     ssoBaseUrl: pending.ssoBaseUrl,
     pollingCode: pending.pollingCode,
+    expectedState: pending.state || null,
+    expectedIssuer: pending.issuer || null,
     pollIntervalMs,
     timeoutSec,
   });
   stderr("Authorization received. Exchanging tokens...");
+
+  // Load the agent's main key so the token request carries a DPoP proof.
+  const dpopKey = await readJsonFile(paths.mainKey, null);
+  if (!dpopKey?.privateKeyPem || !dpopKey?.publicKeyPem) {
+    outputError("No agent keypair. Run `init` or `bootstrap` first.");
+    return;
+  }
 
   // Exchange code for tokens
   const tokens = await exchangeAuthorizationCode({
@@ -237,43 +254,25 @@ async function cmdBind(flags) {
     providerAddress: pending.providerAddress,
     authorizationCode: poll.authorizationCode,
     codeVerifier: pending.codeVerifier,
+    agentPrivateKeyPem: dpopKey.privateKeyPem,
   });
 
-  // Verify id_token
+  // Verify id_token. Pass the agent public key so verifyIdToken enforces
+  // RFC 9449 §6.1 cnf.jkt binding at bind time, not only at chain verify.
+  // Pass the originally-sent nonce so OIDC §3.1.3.7 step 11 is enforced
+  // (replay protection for the authorization-code flow).
   const id = await verifyIdToken({
     ssoBaseUrl: pending.ssoBaseUrl,
     providerAddress: pending.providerAddress,
     idToken: tokens.id_token,
+    agentPublicKeyPem: dpopKey.publicKeyPem,
+    expectedNonce: pending.nonce || undefined,
   });
   stderr(`Verified id_token: sub=${id.payload.sub}`);
 
-  // Verify owner session proof
-  if (requireOwnerProof && !poll.ownerProof) {
-    outputError(
-      "OAuth poll did not return owner key proof (owner_proof). " +
-        "Upgrade SSO server or pass --no-require-owner-proof.",
-    );
-    return;
-  }
-
-  let ownerSessionProof = null;
-  if (poll.ownerProof) {
-    const proofCheck = verifyOwnerSessionProof({
-      proof: poll.ownerProof,
-      expectedSessionAddress: id.payload.sub,
-      expectedProviderAddress: pending.providerAddress,
-    });
-    if (!proofCheck.ok) {
-      outputError(`Owner session proof verification failed: ${proofCheck.reason}`);
-      return;
-    }
-    ownerSessionProof = proofCheck.proof;
-    stderr(
-      `Owner proof verified: session=${ownerSessionProof.sessionAddress} pub=${ownerSessionProof.sessionPublicKey.slice(0, 16)}...`,
-    );
-  }
-
-  // Create engine and bind
+  // Create engine and bind. The id_token IS the chain attestation
+  // (signed by the SSO server, RFC-7519 §7.2 verified above), so no
+  // separate owner-key proof is required at bind time.
   const engine = new SignatureEngine({ baseDir: stateDir });
   await engine.init();
   const owner = await engine.bindOwnerSession({
@@ -285,7 +284,6 @@ async function cmdBind(flags) {
     idToken: tokens.id_token,
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
-    ownerSessionProof,
   });
 
   // Clean up pending auth
@@ -296,11 +294,10 @@ async function cmdBind(flags) {
 
   const result = {
     ok: true,
-    ownerSessionSub: owner.binding.payload.ownerSessionSub,
-    bindingId: owner.binding.id,
-    issuer: id.issuer,
-    providerAddress: pending.providerAddress,
-    fingerprint: mainKey?.fingerprint || null,
+    ownerSub: owner.ownerSessionSub,
+    issuer: owner.issuer,
+    providerAddress: owner.providerAddress,
+    jkt: mainKey ? jwkThumbprint(ed25519PublicKeyToJwk(mainKey.publicKeyPem)) : null,
   };
   if (!flags._noOutput) {
     outputJson(result);
@@ -323,19 +320,28 @@ async function cmdStatus(flags) {
     return;
   }
 
-  const owner = await readJsonFile(paths.ownerBinding, null);
+  const session = await readJsonFile(paths.ownerSession, null);
   const seq = await readJsonFile(paths.seq, null);
   const nonces = await readJsonFile(paths.nonces, null);
+
+  const agentJkt = jwkThumbprint(ed25519PublicKeyToJwk(key.publicKeyPem));
+  let idPayload = null;
+  if (session?.idToken) {
+    try {
+      idPayload = parseJwt(session.idToken).payload;
+    } catch {
+      // ignore — bound:false will reflect the bad state
+    }
+  }
 
   outputJson({
     ok: true,
     initialized: true,
-    bound: Boolean(owner?.binding),
-    fingerprint: key.fingerprint,
-    ownerSessionSub: owner?.binding?.payload?.ownerSessionSub || null,
-    providerAddress: owner?.binding?.payload?.providerAddress || null,
-    issuer: owner?.binding?.payload?.issuer || null,
-    bindingId: owner?.binding?.id || null,
+    bound: Boolean(idPayload?.sub),
+    jkt: agentJkt,
+    ownerSub: idPayload?.sub || null,
+    providerAddress: session?.providerAddress || null,
+    issuer: session?.issuer || null,
     nextSeq: seq?.nextSeq ?? null,
     nonceAgents: Object.keys(nonces?.byAgent || {}).length,
     stateDir,
@@ -396,13 +402,13 @@ async function cmdExportProof(flags) {
   const stateDir = resolveStateDir(flags);
   const paths = statePaths(stateDir);
 
-  const owner = await readJsonFile(paths.ownerBinding, null);
+  const session = await readJsonFile(paths.ownerSession, null);
   const audit = await readJsonl(paths.auditJsonl);
 
   outputJson({
     exportedAt: Date.now(),
     stateDir,
-    ownerBinding: owner,
+    ownerSession: session,
     operations: audit,
   });
 }
@@ -492,8 +498,8 @@ async function cmdGitSetup(flags) {
   await fs.writeFile(publicKeyPath, sshPubKey + "\n", "utf8");
 
   // Allowed signers for verification (always uses agent's stable identity)
-  const owner = await readJsonFile(paths.ownerBinding, null);
-  const agentEmail = `agent-${key.fingerprint.slice(0, 8)}@agent-id.local`;
+  const agentJkt = jwkThumbprint(ed25519PublicKeyToJwk(key.publicKeyPem));
+  const agentEmail = `agent-${agentJkt.slice(0, 12)}@agent-id.local`;
   const signerLine = `${agentEmail} ${sshPubKey}`;
   await fs.writeFile(allowedSignersPath, signerLine + "\n", "utf8");
 
@@ -503,18 +509,27 @@ async function cmdGitSetup(flags) {
   stderr(``);
   stderr(sshPubKey);
 
+  const session = await readJsonFile(paths.ownerSession, null);
+  let ownerSub = null;
+  if (session?.idToken) {
+    try {
+      ownerSub = parseJwt(session.idToken).payload?.sub || null;
+    } catch {
+      // ignore — non-bound state, result omits ownerSub
+    }
+  }
+
   const result = {
     ok: true,
     privateKeyPath,
     publicKeyPath,
     allowedSignersPath,
     sshPublicKey: sshPubKey,
-    fingerprint: key.fingerprint,
+    jkt: agentJkt,
   };
 
-  if (owner?.binding) {
-    result.ownerSessionSub = owner.binding.payload.ownerSessionSub;
-    result.bindingId = owner.binding.id;
+  if (ownerSub) {
+    result.ownerSub = ownerSub;
   }
 
   outputJson(result);
@@ -529,27 +544,42 @@ async function cmdGitCommit(flags) {
     return;
   }
 
-  // Read agent state for trailers
+  // Read agent state. v3 commit attestation reads the SSO-signed id_token
+  // directly from owner-session.json; the agent JWK thumbprint is the chain
+  // anchor (RFC 7800 cnf.jkt on the id_token == jwkThumbprint(agent_jwk)).
   const paths = statePaths(stateDir);
   const key = await readJsonFile(paths.mainKey, null);
-  const owner = await readJsonFile(paths.ownerBinding, null);
+  const session = await readJsonFile(paths.ownerSession, null);
 
   if (!key) {
     outputError("No agent keypair. Run `init` first.");
     return;
   }
-
-  // Build commit message with Agent ID trailers
-  const trailers = [
-    `Agent-ID-Fingerprint: ${key.fingerprint}`,
-  ];
-  if (owner?.binding) {
-    trailers.push(`Agent-ID-Owner: ${owner.binding.payload.ownerSessionSub}`);
-    trailers.push(`Agent-ID-Binding: ${owner.binding.id}`);
+  if (!session?.idToken) {
+    outputError("No owner session. Run `auth` and `bind` first.");
+    return;
   }
 
-  const agentEmail = 'alienagentid@eti.co';
-  trailers.push(`Co-Authored-By: Alien Agent <${agentEmail}>`);
+  let idPayload;
+  try {
+    idPayload = parseJwt(session.idToken).payload;
+  } catch (err) {
+    outputError(`Could not parse id_token: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (typeof idPayload?.sub !== "string" || !idPayload.sub) {
+    outputError("id_token missing sub claim");
+    return;
+  }
+
+  const agentJwk = ed25519PublicKeyToJwk(key.publicKeyPem);
+  const agentJkt = jwkThumbprint(agentJwk);
+
+  const trailers = [
+    `Agent-ID-JKT: ${agentJkt}`,
+    `Agent-ID-Owner: ${idPayload.sub}`,
+    `Co-Authored-By: Alien Agent <alienagentid@eti.co>`,
+  ];
 
   const fullMessage = `${message}\n\n${trailers.join("\n")}`;
 
@@ -587,61 +617,50 @@ async function cmdGitCommit(flags) {
   const hashResult = await execFile("git", ["rev-parse", "HEAD"]);
   const commitHash = hashResult.stdout.trim();
 
-  // Log to audit trail if bound
+  // Log to audit trail (best-effort)
   let auditRecord = null;
-  if (owner?.binding) {
-    try {
-      const engine = new SignatureEngine({ baseDir: stateDir });
-      await engine.init();
-      auditRecord = await engine.appendOperation({
-        operationType: "GIT_COMMIT",
-        action: "git.commit",
-        payload: {
-          commitHash,
-          message,
-          fingerprint: key.fingerprint,
-        },
-        ctx: { agentId: "main" },
-      });
-    } catch {
-      // Non-fatal — commit succeeded, audit logging is best-effort
-      stderr("Warning: could not log commit to audit trail");
-    }
+  try {
+    const engine = new SignatureEngine({ baseDir: stateDir });
+    await engine.init();
+    auditRecord = await engine.appendOperation({
+      operationType: "GIT_COMMIT",
+      action: "git.commit",
+      payload: {
+        commitHash,
+        message,
+        jkt: agentJkt,
+      },
+      ctx: { agentId: "main" },
+    });
+  } catch {
+    // Non-fatal — commit succeeded, audit logging is best-effort
+    stderr("Warning: could not log commit to audit trail");
   }
 
-  // Attach proof bundle as git note for external verification
+  // Attach v3 proof bundle as a git note for external verification.
+  // Verifier reads {id_token, agent_jwk}; chain anchor is cnf.jkt on the
+  // SSO-signed id_token == jwkThumbprint(agent_jwk).
   let proofAttached = false;
-  if (owner?.binding) {
-    try {
-      const ownerSession = await readJsonFile(paths.ownerSession, null);
-      const rawIdToken = ownerSession?.idToken || null;
-      const proofBundle = {
-        version: 2,
-        agent: {
-          fingerprint: key.fingerprint,
-          publicKeyPem: key.publicKeyPem,
-        },
-        ownerBinding: owner.binding,
-        idToken: rawIdToken ? Buffer.from(rawIdToken).toString("base64url") : null,
-        ssoBaseUrl: ownerSession?.issuer
-          ? ownerSession.issuer
-          : "https://sso.alien-api.com",
-      };
-      const noteBody = JSON.stringify(proofBundle);
-      const noteResult = await execFile(
-        "git",
-        ["notes", "--ref=agent-id", "add", "-f", "-m", noteBody, commitHash],
-        { timeout: 10000 },
-      );
-      if (noteResult.code === 0) {
-        proofAttached = true;
-        stderr("Proof bundle attached as git note (refs/notes/agent-id).");
-      } else {
-        stderr(`Warning: could not attach proof note: ${noteResult.stderr.trim()}`);
-      }
-    } catch {
-      stderr("Warning: could not attach proof note");
+  try {
+    const proofBundle = {
+      version: 3,
+      id_token: Buffer.from(session.idToken).toString("base64url"),
+      agent_jwk: agentJwk,
+    };
+    const noteBody = JSON.stringify(proofBundle);
+    const noteResult = await execFile(
+      "git",
+      ["notes", "--ref=agent-id", "add", "-f", "-m", noteBody, commitHash],
+      { timeout: 10000 },
+    );
+    if (noteResult.code === 0) {
+      proofAttached = true;
+      stderr("Proof bundle attached as git note (refs/notes/agent-id).");
+    } else {
+      stderr(`Warning: could not attach proof note: ${noteResult.stderr.trim()}`);
     }
+  } catch {
+    stderr("Warning: could not attach proof note");
   }
 
   stderr(`Signed commit: ${commitHash.slice(0, 12)}`);
@@ -677,7 +696,7 @@ async function cmdGitCommit(flags) {
     ok: true,
     commitHash,
     signed: true,
-    fingerprint: key.fingerprint,
+    jkt: agentJkt,
     proofAttached,
     pushed,
     notesPushed,
@@ -690,10 +709,9 @@ async function cmdGitCommit(flags) {
 }
 
 async function cmdGitVerify(flags) {
-  const stateDir = resolveStateDir(flags);
   const commitHash = flags.commit || "HEAD";
 
-  // Step 1: Resolve commit hash
+  // Resolve commit hash.
   const revResult = await execFile("git", ["rev-parse", commitHash]);
   if (revResult.code !== 0) {
     outputError(`Cannot resolve commit: ${commitHash}`);
@@ -701,87 +719,137 @@ async function cmdGitVerify(flags) {
   }
   const resolvedHash = revResult.stdout.trim();
 
-  // Step 2: Read commit message to extract trailers
+  // Read v3 trailers (Agent-ID-JKT, Agent-ID-Owner). Pre-v3 commits are
+  // intentionally not supported — see commit-signing-cleanup.md.
   const logResult = await execFile("git", ["log", "-1", "--format=%B", resolvedHash]);
   const commitMessage = logResult.stdout.trim();
-
-  const trailerFingerprint = extractTrailer(commitMessage, "Agent-ID-Fingerprint");
+  const trailerJkt = extractTrailer(commitMessage, "Agent-ID-JKT");
   const trailerOwner = extractTrailer(commitMessage, "Agent-ID-Owner");
-  const trailerBinding = extractTrailer(commitMessage, "Agent-ID-Binding");
-
-  if (!trailerFingerprint) {
-    outputError(`Commit ${resolvedHash.slice(0, 12)} has no Agent-ID-Fingerprint trailer`);
+  if (!trailerJkt) {
+    outputError(
+      `Commit ${resolvedHash.slice(0, 12)} has no Agent-ID-JKT trailer (pre-v3 commits are not supported)`,
+    );
     return;
   }
 
-  // Step 3: Try to read proof bundle from git note (self-contained, works anywhere)
-  let proof = null;
+  // Load v3 bundle from refs/notes/agent-id.
   const noteResult = await execFile(
     "git",
     ["notes", "--ref=agent-id", "show", resolvedHash],
     { timeout: 10000 },
   );
-  if (noteResult.code === 0 && noteResult.stdout.trim()) {
+  if (noteResult.code !== 0 || !noteResult.stdout.trim()) {
+    outputError(
+      `Commit ${resolvedHash.slice(0, 12)} — no Agent-ID git note (refs/notes/agent-id) found`,
+    );
+    return;
+  }
+
+  let bundle;
+  try {
+    bundle = JSON.parse(noteResult.stdout.trim());
+  } catch (err) {
+    outputError(`Agent-ID note is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  if (bundle?.version !== 3) {
+    outputError(
+      `Unsupported bundle version ${String(bundle?.version)} (only v3 commits are verifiable)`,
+    );
+    return;
+  }
+  if (typeof bundle.id_token !== "string" || !bundle.id_token) {
+    outputError("v3 bundle missing id_token");
+    return;
+  }
+  if (!bundle.agent_jwk || typeof bundle.agent_jwk !== "object") {
+    outputError("v3 bundle missing agent_jwk");
+    return;
+  }
+
+  let idTokenStr;
+  try {
+    idTokenStr = Buffer.from(bundle.id_token, "base64url").toString("utf8");
+  } catch (err) {
+    outputError(`bundle.id_token is not valid base64url: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  let ssoBaseUrl = flags["sso-url"] || null;
+  if (!ssoBaseUrl) {
     try {
-      proof = JSON.parse(noteResult.stdout.trim());
+      ssoBaseUrl = parseJwt(idTokenStr).payload?.iss || null;
     } catch {
-      // Malformed note — fall through to local state
+      // fall through — verifyIdTokenSignatureOnly will surface the parse error
     }
   }
-
-  // Step 4: Fall back to local state if no git note
-  let source = "none";
-  let agentPublicKeyPem = null;
-  let binding = null;
-  let idToken = null;
-  let ssoBaseUrl = flags["sso-url"] || "https://sso.alien-api.com";
-
-  if ((proof?.version === 1 || proof?.version === 2) && proof.ownerBinding) {
-    source = "git-note";
-    agentPublicKeyPem = proof.agent?.publicKeyPem || null;
-    binding = proof.ownerBinding;
-    idToken = proof.idToken
-      ? (proof.version >= 2 ? Buffer.from(proof.idToken, "base64url").toString() : proof.idToken)
-      : null;
-    ssoBaseUrl = proof.ssoBaseUrl || ssoBaseUrl;
-  } else {
-    const paths = statePaths(stateDir);
-    const key = await readJsonFile(paths.mainKey, null);
-    const ownerRecord = await readJsonFile(paths.ownerBinding, null);
-    const ownerSession = await readJsonFile(paths.ownerSession, null);
-    if (key || ownerRecord || ownerSession) {
-      source = "local-state";
-      agentPublicKeyPem = key?.publicKeyPem || null;
-      binding = ownerRecord?.binding || null;
-      idToken = ownerSession?.idToken || null;
-    }
+  if (!ssoBaseUrl) {
+    outputError("Could not determine SSO base URL (no --sso-url flag and id_token.iss missing)");
+    return;
   }
 
-  const result = {
-    ok: true,
-    commit: resolvedHash,
-    source,
-    agentFingerprint: trailerFingerprint,
-    ownerSessionSub: trailerOwner || null,
-    bindingId: trailerBinding || null,
-    provenance: [],
-    warnings: [],
-  };
+  // Verify id_token SSO signature + issuer. exp/aud intentionally skipped —
+  // commit attestation is historical, not runtime resource access.
+  let tokenResult;
+  try {
+    tokenResult = await verifyIdTokenSignatureOnly({
+      idToken: idTokenStr,
+      ssoBaseUrl,
+    });
+  } catch (err) {
+    outputError(`id_token SSO signature verification failed: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  const idPayload = tokenResult.payload;
 
-  if (source === "none") {
-    result.warnings.push("No proof found — no git note (refs/notes/agent-id) and no local state");
+  if (typeof idPayload?.sub !== "string" || !idPayload.sub) {
+    outputError("id_token missing sub claim");
+    return;
+  }
+  if (trailerOwner && trailerOwner !== idPayload.sub) {
+    outputError(
+      `Agent-ID-Owner trailer ${trailerOwner} does not match id_token sub ${idPayload.sub}`,
+    );
+    return;
+  }
+  const cnfJkt = idPayload?.cnf?.jkt;
+  if (typeof cnfJkt !== "string" || !cnfJkt) {
+    outputError("id_token missing cnf.jkt (RFC 7800 §3.1 confirmation claim required)");
+    return;
   }
 
-  // Step 5: Verify SSH signature
-  // To verify against the note's public key, write a temporary allowed_signers file
-  let sshSignatureValid = false;
-  if (agentPublicKeyPem) {
-    const sshPub = ed25519PemToSshPublicKey(agentPublicKeyPem);
-    const tmpSignersPath = path.join(os.tmpdir(), `agent-id-signers-${randomUUID()}`);
-    const signerEmail = `agent-${trailerFingerprint.slice(0, 8)}@agent-id.local`;
-    await fs.writeFile(tmpSignersPath, `${signerEmail} ${sshPub}\n`, "utf8");
+  const computedJkt = jwkThumbprint(bundle.agent_jwk);
+  if (computedJkt !== cnfJkt) {
+    outputError(
+      `agent_jwk thumbprint ${computedJkt} does not match id_token cnf.jkt ${cnfJkt}`,
+    );
+    return;
+  }
+  if (computedJkt !== trailerJkt) {
+    outputError(
+      `agent_jwk thumbprint ${computedJkt} does not match Agent-ID-JKT trailer ${trailerJkt}`,
+    );
+    return;
+  }
 
-    // Configure temporary allowed signers for verification
+  // SSH commit signature against agent_jwk. Reconstruct the public key as
+  // PEM so the existing ed25519PemToSshPublicKey helper can format it for
+  // git's gpg.ssh.allowedSignersFile.
+  let agentPubKeyPem;
+  try {
+    const pubKey = createPublicKey({ key: bundle.agent_jwk, format: "jwk" });
+    agentPubKeyPem = pubKey.export({ type: "spki", format: "pem" });
+  } catch (err) {
+    outputError(`agent_jwk is not a valid Ed25519 JWK: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  const sshPub = ed25519PemToSshPublicKey(agentPubKeyPem);
+  const tmpSignersPath = path.join(os.tmpdir(), `agent-id-signers-${randomUUID()}`);
+  const signerEmail = `agent-${computedJkt.slice(0, 12)}@agent-id.local`;
+  await fs.writeFile(tmpSignersPath, `${signerEmail} ${sshPub}\n`, "utf8");
+  let sshOk = false;
+  try {
     const verifyResult = await execFile(
       "git",
       [
@@ -790,104 +858,27 @@ async function cmdGitVerify(flags) {
       ],
       { timeout: 10000 },
     );
-    sshSignatureValid = verifyResult.code === 0;
+    sshOk = verifyResult.code === 0;
+  } finally {
     await fs.unlink(tmpSignersPath).catch(() => {});
-  } else {
-    // Try without — uses whatever git config has
-    const verifyResult = await execFile("git", ["verify-commit", "--raw", resolvedHash], { timeout: 10000 });
-    sshSignatureValid = verifyResult.code === 0;
+  }
+  if (!sshOk) {
+    outputError(
+      `SSH commit signature verification failed for ${resolvedHash.slice(0, 12)} against agent_jwk ${computedJkt.slice(0, 16)}...`,
+    );
+    return;
   }
 
-  result.sshSignatureValid = sshSignatureValid;
-  if (sshSignatureValid) {
-    result.provenance.push("SSH commit signature valid");
-  } else {
-    result.warnings.push("SSH commit signature verification failed");
-  }
-
-  // Step 6: Verify agent fingerprint matches embedded public key
-  if (agentPublicKeyPem) {
-    const computedFingerprint = fingerprintPublicKeyPem(agentPublicKeyPem);
-    if (computedFingerprint === trailerFingerprint) {
-      result.provenance.push(`Agent public key matches trailer fingerprint (${trailerFingerprint.slice(0, 16)}...)`);
-    } else {
-      result.warnings.push(`Fingerprint mismatch: trailer=${trailerFingerprint.slice(0, 16)}... key=${computedFingerprint.slice(0, 16)}...`);
-    }
-  }
-
-  // Step 7: Verify owner binding signature
-  if (binding) {
-    const bindingPayload = binding.payload;
-    const payloadCanonical = canonicalJSONString(bindingPayload);
-    const payloadHash = sha256HexCanonical(payloadCanonical);
-    const signerPem = bindingPayload.agentInstance?.publicKeyPem;
-    const bindingSigOk =
-      payloadHash === binding.payloadHash &&
-      signerPem &&
-      verifyEd25519Base64Url(payloadCanonical, binding.signature, signerPem);
-
-    if (bindingSigOk) {
-      result.provenance.push(`Owner binding signature valid (binding: ${binding.id})`);
-    } else {
-      result.warnings.push("Owner binding signature verification failed");
-    }
-
-    if (bindingPayload.agentInstance?.publicKeyFingerprint === trailerFingerprint) {
-      result.provenance.push(
-        `Binding links agent ${trailerFingerprint.slice(0, 16)}... to owner ${bindingPayload.ownerSessionSub}`,
-      );
-    } else {
-      result.warnings.push("Binding agent fingerprint does not match commit trailer");
-    }
-
-    result.ownerSessionSub = bindingPayload.ownerSessionSub;
-    result.issuer = bindingPayload.issuer;
-    result.providerAddress = bindingPayload.providerAddress;
-  }
-
-  // Step 8: Verify id_token server signature against SSO JWKS
-  if (idToken) {
-    // Verify the id_token hash matches what's in the binding
-    if (binding?.payload?.idTokenHash) {
-      const actualHash = sha256Hex(idToken);
-      if (actualHash === binding.payload.idTokenHash) {
-        result.provenance.push("id_token hash matches binding");
-      } else {
-        result.warnings.push("id_token hash does not match binding");
-      }
-    }
-
-    try {
-      const tokenResult = await verifyIdTokenSignatureOnly({
-        idToken,
-        ssoBaseUrl,
-      });
-      result.provenance.push(
-        `SSO server signature valid (issuer: ${tokenResult.issuer}, sub: ${tokenResult.payload.sub})`,
-      );
-      result.ssoSignatureValid = true;
-    } catch (err) {
-      result.warnings.push(`id_token signature verification: ${err instanceof Error ? err.message : String(err)}`);
-      result.ssoSignatureValid = false;
-    }
-  } else {
-    result.warnings.push("No id_token available — cannot verify SSO attestation");
-    result.ssoSignatureValid = false;
-  }
-
-  // Build summary
-  if (result.provenance.length >= 3 && result.sshSignatureValid) {
-    const ownerLabel = result.ownerSessionSub || "unknown";
-    result.summary = `Commit ${resolvedHash.slice(0, 12)} was signed by agent ${trailerFingerprint.slice(0, 16)}... owned by ${ownerLabel}`;
-  } else {
-    result.summary = `Commit ${resolvedHash.slice(0, 12)} — provenance chain incomplete (see warnings)`;
-    result.ok = result.sshSignatureValid && result.provenance.length > 0;
-  }
-
-  outputJson(result);
-  if (!result.ok) {
-    process.exitCode = 1;
-  }
+  outputJson({
+    ok: true,
+    commit: resolvedHash,
+    jkt: computedJkt,
+    ownerSub: idPayload.sub,
+    issuer: tokenResult.issuer,
+    aud: idPayload.aud ?? null,
+    iat: idPayload.iat ?? null,
+    summary: `Commit ${resolvedHash.slice(0, 12)} signed by agent ${computedJkt.slice(0, 16)}... owned by ${idPayload.sub}`,
+  });
 }
 
 function extractTrailer(message, key) {
@@ -908,7 +899,11 @@ async function resolveProviderAddress(flags) {
     const txt = await fs.readFile(path.join(scriptDir, "default-provider.txt"), "utf8");
     const trimmed = txt.trim();
     if (trimmed) return trimmed;
-  } catch {}
+  } catch (err) {
+    // ENOENT is the expected case (no default-provider.txt). Other errors
+    // (EACCES, EIO, …) indicate something the user should know about.
+    if (err && err.code !== "ENOENT") throw err;
+  }
   return null;
 }
 
@@ -918,17 +913,23 @@ async function cmdBootstrap(flags) {
 
   // 1. Already bootstrapped?
   const existingKey = await readJsonFile(paths.mainKey, null);
-  const existingOwner = await readJsonFile(paths.ownerBinding, null);
+  const existingSession = await readJsonFile(paths.ownerSession, null);
 
-  if (existingKey && existingOwner?.binding) {
+  if (existingKey && existingSession?.idToken) {
     stderr("Agent ID already bootstrapped.");
     await cmdGitSetup({ ...flags, _quiet: true });
+    let existingSub = null;
+    try {
+      existingSub = parseJwt(existingSession.idToken).payload?.sub || null;
+    } catch {
+      // ignore — state will be re-bound below if parseable; report what we have
+    }
     outputJson({
       ok: true,
       alreadyBootstrapped: true,
-      fingerprint: existingKey.fingerprint,
-      ownerSessionSub: existingOwner.binding.payload.ownerSessionSub,
-      providerAddress: existingOwner.binding.payload.providerAddress,
+      jkt: jwkThumbprint(ed25519PublicKeyToJwk(existingKey.publicKeyPem)),
+      ownerSub: existingSub,
+      providerAddress: existingSession.providerAddress || null,
       stateDir,
     });
     return;
@@ -973,6 +974,74 @@ async function cmdBootstrap(flags) {
     fingerprint: bindResult.fingerprint,
     ownerSessionSub: bindResult.ownerSessionSub,
     bindingId: bindResult.bindingId,
+    providerAddress,
+    stateDir,
+  });
+}
+
+// ─── Setup Owner Session — DPoP/cnf rebind ─────────────────────────────────────
+
+// Force a fresh OAuth flow that produces a DPoP-bound, cnf-carrying id_token.
+// Used to migrate pre-3.0 agents whose existing bindings carry cnf-less
+// id_tokens that the 3.0 verifier rejects. Keys are preserved; only the
+// owner-session and binding state files are cleared so cmdBind can rewrite.
+async function cmdSetupOwnerSession(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  const verbose = flags.verbose === true;
+
+  // Clear only the session/pending-auth state. The keypair stays put — re-binding
+  // under DPoP just adds cnf.jkt for the SAME key the agent already has; rotating
+  // the key would gratuitously invalidate every signed commit. Also remove any
+  // stale `owner-binding.json` from pre-v3 agents.
+  let cleared = false;
+  const legacyBindingPath = path.join(stateDir, "owner-binding.json");
+  for (const p of [legacyBindingPath, paths.ownerSession, paths.pendingAuth]) {
+    try {
+      await fs.unlink(p);
+      cleared = true;
+    } catch (err) {
+      if (err && err.code !== "ENOENT") throw err;
+    }
+  }
+  if (cleared) {
+    stderr("Cleared existing owner-session and binding for re-bind.");
+  }
+
+  const providerAddress = await resolveProviderAddress(flags);
+  if (!providerAddress) {
+    outputError(
+      "No provider address. Set --provider-address, ALIEN_PROVIDER_ADDRESS env, or create default-provider.txt next to the CLI.",
+    );
+    return;
+  }
+  if (verbose) stderr(`Provider address: ${providerAddress}`);
+
+  // Init (no-op if keypair exists; generates one otherwise).
+  const agentKey = await cmdInit({ ...flags, _quiet: true });
+  if (verbose && agentKey?.fingerprint) {
+    stderr(`Agent fingerprint: ${agentKey.fingerprint}`);
+  }
+
+  const authResult = await cmdAuth({
+    ...flags,
+    "provider-address": providerAddress,
+    _noOutput: true,
+  });
+  stderr(`Open this link with your Alien App: ${authResult.deepLink}`);
+  if (verbose) stderr(`Polling code: ${authResult.pollingCode}`);
+
+  const bindResult = await cmdBind({ ...flags, _noOutput: true });
+
+  await cmdGitSetup({ ...flags, _quiet: true });
+
+  outputJson({
+    ok: true,
+    rebound: true,
+    fingerprint: bindResult?.fingerprint,
+    ownerSessionSub: bindResult?.ownerSessionSub,
+    bindingId: bindResult?.bindingId,
     providerAddress,
     stateDir,
   });
@@ -1181,14 +1250,13 @@ async function cmdRefresh(flags) {
       providerAddress: session.providerAddress,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("401") || msg.includes("403") || msg.includes("invalid_grant")) {
+    if (err instanceof AuthRevokedError) {
       outputError(
-        `Session refresh failed (authorization may have been revoked): ${msg}. Run \`bootstrap\` to re-authenticate.`,
+        `Session refresh failed (authorization revoked: ${err.errorCode || "HTTP " + err.status}): ${err.message}. Run \`bootstrap\` to re-authenticate.`,
       );
-    } else {
-      throw err;
+      return;
     }
+    throw err;
   }
 }
 
@@ -1204,42 +1272,57 @@ async function cmdAuthHeader(flags) {
     return;
   }
 
-  // Transparently refresh the SSO session if the access_token is expired.
+  // Refresh the SSO session first — the access_token is the bearer credential
+  // we attach to the request and the AS rotates it on a tight cadence.
   const engine = new SignatureEngine({ baseDir: stateDir });
   await engine.init();
   try {
     await engine.ensureValidSession();
   } catch {
-    // Non-fatal: auth-header uses the local keypair, not the access_token.
-    // Log but don't block.
-    stderr("Warning: SSO session refresh failed. Local auth tokens still work.");
+    stderr("Warning: SSO session refresh failed.");
   }
 
-  const owner = await readJsonFile(paths.ownerBinding, null);
   const session = await readJsonFile(paths.ownerSession, null);
+  if (!session?.accessToken) {
+    outputError("No bound session with access_token. Run `bootstrap` or `bind` first.");
+    return;
+  }
 
-  const token = createAgentToken({
-    fingerprint: key.fingerprint,
-    publicKeyPem: key.publicKeyPem,
+  // RFC 9449 §4.2: the DPoP proof binds to a specific request, so the agent
+  // MUST be told the target method + URL up front. Per-request proof, single-
+  // use jti, fresh signature. No long-lived envelope.
+  if (!flags.url) {
+    outputError("--url is required. The DPoP proof's `htu` claim binds to a specific request target (RFC 9449 §4.2).");
+    return;
+  }
+  const htm = String(flags.method || "GET").toUpperCase();
+  const htu = String(flags.url);
+
+  const proof = createDPoPProof({
     privateKeyPem: key.privateKeyPem,
-    ownerSessionSub: owner?.binding?.payload?.ownerSessionSub || null,
-    ownerBinding: owner?.binding || null,
-    idToken: session?.idToken || null,
+    htm,
+    htu,
+    // RFC 9449 §4.2: bind the proof to the access token via `ath` (sha256
+    // of the access token). Defends against proof reuse with a different
+    // token even if both were captured.
+    accessToken: session.accessToken,
   });
 
-  const header = `AgentID ${token}`;
+  const authorization = `DPoP ${session.accessToken}`;
+  const dpopHeader = proof;
 
   if (flags.raw) {
-    process.stdout.write(`Authorization: ${header}\n`);
-  } else {
-    outputJson({
-      ok: true,
-      header: `Authorization: ${header}`,
-      token,
-      fingerprint: key.fingerprint,
-      owner: owner?.binding?.payload?.ownerSessionSub || null,
-    });
+    process.stdout.write(`Authorization: ${authorization}\n`);
+    process.stdout.write(`DPoP: ${dpopHeader}\n`);
+    return;
   }
+  outputJson({
+    ok: true,
+    authorization,
+    dpop: dpopHeader,
+    method: htm,
+    url: htu,
+  });
 }
 
 async function cmdServiceSupport(flags) {
@@ -1283,6 +1366,7 @@ Usage: node cli.mjs <command> [flags]
 
 Commands:
   bootstrap      One-command identity setup (init + auth + bind + git-setup)
+  setup-owner-session  Re-bind an existing agent (DPoP/cnf migration; preserves keypair)
   init           Generate Ed25519 keypair and initialize state directory
   auth           Start OIDC authorization (returns deep link + QR page)
   bind           Poll for user approval and create owner binding
@@ -1293,7 +1377,8 @@ Commands:
   git-setup      Write SSH key files for commit signing
   git-commit     Create a signed commit with Agent ID trailers
   git-verify     Verify provenance chain of a signed commit
-  auth-header    Generate a signed authentication token for service calls
+  auth-header    Emit RFC 9449 DPoP Authorization + DPoP headers for a request
+                 (requires --url, optional --method, defaults to GET)
   discover-service  Fetch and validate /.well-known/alien-agent-id.json
   service-support   Probe a page for the <meta name="alien-agent-id"> support signal
   refresh        Refresh SSO session tokens (access_token / refresh_token)
@@ -1316,7 +1401,6 @@ Auth flags:
 Bind flags:
   --timeout-sec <n>          Poll timeout (default: 300)
   --poll-interval-ms <n>     Poll interval (default: 3000)
-  --no-require-owner-proof   Don't require owner session proof
 
 Sign flags:
   --type <type>              Operation type (e.g., TOOL_CALL, MESSAGE_SEND)
@@ -1355,6 +1439,7 @@ All commands output JSON to stdout. Progress and errors go to stderr.
 
 const commands = {
   bootstrap: cmdBootstrap,
+  "setup-owner-session": cmdSetupOwnerSession,
   init: cmdInit,
   auth: cmdAuth,
   bind: cmdBind,

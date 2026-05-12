@@ -1,16 +1,27 @@
 {
   "name": "alien-agent-id",
-  "version": "2.3.0",
+  "version": "3.0.0",
   "description": "Universal Agent ID - verifiable identity for AI agents linked to human owners via Alien Network SSO",
   "type": "module",
   "bin": {
     "alien-agent-id": "./skills/alien-agent-id/cli.mjs"
   },
+  "scripts": {
+    "test": "node --test tests/test-*.mjs",
+    "test:integration": "bash tests/integration/full-stack.sh",
+    "test:develop-smoke": "bash tests/integration/develop-sso-smoke.sh"
+  },
   "files": [
     "skills",
-    "docs",
     "examples",
-    "tests"
+    "tests",
+    "docs/AGENT-SSO.md",
+    "docs/DEPLOY-DPOP.md",
+    "docs/INTEGRATION.md",
+    "docs/MIGRATION-DPOP.md",
+    "docs/PRD-DPOP-POP.md",
+    "docs/RELEASE-NOTES.md",
+    "docs/TESTING.md"
   ],
   "repository": {
     "type": "git",
@@ -33,8 +44,5 @@
   ],
   "author": "Alien Org <support@alien.org>",
   "homepage": "https://alien.org/agent-id",
-  "license": "MIT",
-  "scripts": {
-    "test": "node --test tests/test-*.mjs"
-  }
+  "license": "MIT"
 }

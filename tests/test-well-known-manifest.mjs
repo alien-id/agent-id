@@ -11,22 +11,45 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createHash } from "node:crypto";
+
 import {
   parseServiceManifest,
   fetchServiceManifest,
   buildServiceAuthHeader,
   resolveServiceApiUrl,
   probeServiceSupportSignal,
-  createAgentToken,
+  createDPoPProof,
+  parseJwt,
   generateEd25519PemPair,
-  fingerprintPublicKeyPem,
-  canonicalJSONString,
-  verifyEd25519Base64Url,
-  fromB64url,
+  ed25519PublicKeyToJwk,
+  jwkThumbprint,
+  verifyJwtEdDsaSignature,
+  b64url,
   SERVICE_MANIFEST_PATH,
   SERVICE_MANIFEST_MAX_BYTES,
   SUPPORT_SIGNAL_MAX_BYTES,
 } from "../skills/alien-agent-id/lib.mjs";
+
+// Fixture access_token. The mock service does not verify SSO signatures —
+// that's covered exhaustively by test-id-token-verifier / test-cnf-verifier
+// against real JWKS. Here we only need a well-formed JWS whose payload
+// carries `cnf.jkt` so the manifest-flow tests can exercise the RFC 9449
+// §6.1 binding check between the proof's `jwk` and the access_token.
+function mintFixtureAccessToken({ agentPublicKeyPem, sub = "test-owner-sub" }) {
+  const header = { typ: "at+jwt", alg: "EdDSA", kid: "fixture" };
+  const jkt = jwkThumbprint(ed25519PublicKeyToJwk(agentPublicKeyPem));
+  const payload = {
+    iss: "https://fixture-sso.invalid",
+    sub,
+    aud: "fixture-resource",
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 600,
+    cnf: { jkt },
+  };
+  // Synthetic 64-byte signature segment — well-formed shape, no real key.
+  return `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}.${b64url(Buffer.alloc(64))}`;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../skills/alien-agent-id/cli.mjs");
@@ -35,7 +58,7 @@ function buildValidManifest(host) {
   return {
     version: 1,
     service: { name: "Acme", url: `http://${host}` },
-    auth: { header: "Authorization", scheme: "AgentID" },
+    auth: { header: "Authorization", scheme: "DPoP" },
     api: { base: `http://${host}/api/v1` },
   };
 }
@@ -82,38 +105,69 @@ function startMockService() {
       return;
     }
     if (req.url === "/api/v1/whoami") {
+      // RFC 9449 §4.3: verify the DPoP proof + cnf.jkt binding. The mock
+      // service trusts the access_token shape but does not verify the SSO
+      // signature here — that's covered exhaustively by the cnf/id-token
+      // verifier tests. The point of this fixture is the manifest →
+      // header-construction → proof-binding round-trip.
       const auth = req.headers["authorization"] || "";
       state.lastAuthHeader = auth;
-      const m = /^AgentID (.+)$/.exec(auth);
-      if (!m) {
+      const dpop = req.headers["dpop"] || "";
+      const authMatch = /^DPoP\s+(\S+)$/.exec(auth);
+      if (!authMatch) {
         res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "missing-bearer" }));
+        res.end(JSON.stringify({ error: "missing-dpop-scheme" }));
         return;
       }
-      let token;
+      if (typeof dpop !== "string" || !dpop) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "missing-dpop-proof" }));
+        return;
+      }
+      const accessToken = authMatch[1];
+      let proof;
+      let at;
       try {
-        token = JSON.parse(fromB64url(m[1]).toString("utf8"));
+        proof = parseJwt(dpop);
+        at = parseJwt(accessToken);
       } catch {
         res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "malformed-token" }));
+        res.end(JSON.stringify({ error: "malformed-jws" }));
         return;
       }
-      const { sig, ...payload } = token;
-      const ok = verifyEd25519Base64Url(canonicalJSONString(payload), sig, payload.publicKeyPem);
-      if (!ok) {
+      const proofJwk = proof.header.jwk;
+      const sigOk = verifyJwtEdDsaSignature({
+        signingInput: proof.signingInput,
+        signatureB64url: proof.signatureB64url,
+        jwk: proofJwk,
+      });
+      if (!sigOk) {
         res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "bad-signature" }));
+        res.end(JSON.stringify({ error: "bad-proof-signature" }));
         return;
       }
-      if (state.requireFingerprint && payload.fingerprint !== state.requireFingerprint) {
+      const proofJkt = jwkThumbprint(proofJwk);
+      if (at.payload?.cnf?.jkt !== proofJkt) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "jkt-mismatch" }));
+        return;
+      }
+      const expectedAth = b64url(createHash("sha256").update(accessToken).digest());
+      if (proof.payload.ath !== expectedAth) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "bad-ath" }));
+        return;
+      }
+      if (state.requireFingerprint && proofJkt !== state.requireFingerprint) {
         res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "fingerprint-mismatch" }));
+        res.end(JSON.stringify({ error: "jkt-pin-miss" }));
         return;
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
-        service_token: "svc-token-" + payload.fingerprint.slice(0, 8),
-        agent_fingerprint: payload.fingerprint,
+        service_token: "svc-token-" + proofJkt.slice(0, 8),
+        agent_jkt: proofJkt,
+        owner_sub: at.payload.sub,
       }));
       return;
     }
@@ -160,7 +214,7 @@ describe("parseServiceManifest (pure validation)", () => {
       },
       host,
     );
-    assert.equal(out.auth.scheme, "AgentID", "scheme defaults to AgentID");
+    assert.equal(out.auth.scheme, "DPoP", "scheme defaults to DPoP (RFC 9449 §7.1)");
     assert.equal(out.auth.header, "Authorization");
     assert.equal(out.api.base, `https://${host}/v1`);
     assert.equal(out.service, undefined);
@@ -391,7 +445,7 @@ describe("fetchServiceManifest (network)", () => {
     assert.equal(result.allowedHost, svc.host);
     assert.ok(result.manifestUrl.endsWith(SERVICE_MANIFEST_PATH));
     assert.equal(result.manifest.version, 1);
-    assert.equal(result.manifest.auth.scheme, "AgentID");
+    assert.equal(result.manifest.auth.scheme, "DPoP");
     assert.equal(result.manifest.api.base, `http://${svc.host}/api/v1`);
   });
 
@@ -445,12 +499,19 @@ describe("fetchServiceManifest (network)", () => {
   });
 });
 
-async function callApi(manifest, requestPath, agentToken) {
+async function callApiDPoP(manifest, requestPath, { accessToken, agentKeys, proofOverrides = {} }) {
   const url = resolveServiceApiUrl(manifest, requestPath);
-  const { name, value } = buildServiceAuthHeader(manifest, agentToken);
+  const proof = createDPoPProof({
+    privateKeyPem: agentKeys.privateKeyPem,
+    htm: "GET",
+    htu: url,
+    accessToken,
+    ...proofOverrides,
+  });
+  const { name, value } = buildServiceAuthHeader(manifest, accessToken);
   const res = await fetch(url, {
     method: "GET",
-    headers: { [name]: value, Accept: "application/json" },
+    headers: { [name]: value, DPoP: proof, Accept: "application/json" },
     redirect: "error",
   });
   const text = await res.text();
@@ -501,15 +562,15 @@ describe("buildServiceAuthHeader / resolveServiceApiUrl (pure)", () => {
   });
 });
 
-describe("end-to-end: agent calls API with header from discovered manifest", () => {
+describe("end-to-end: agent calls API with DPoP headers from discovered manifest", () => {
   let svc;
   let agentKeys;
-  let agentFingerprint;
+  let agentJkt;
 
   before(async () => {
     svc = await startMockService();
     agentKeys = generateEd25519PemPair();
-    agentFingerprint = fingerprintPublicKeyPem(agentKeys.publicKeyPem);
+    agentJkt = jwkThumbprint(ed25519PublicKeyToJwk(agentKeys.publicKeyPem));
   });
   after(async () => { await svc.close(); });
 
@@ -519,51 +580,42 @@ describe("end-to-end: agent calls API with header from discovered manifest", () 
     svc.state.lastAuthHeader = null;
   });
 
-  it("agent discovers manifest, calls api.base/whoami, service accepts", async () => {
+  it("agent discovers manifest, calls api.base/whoami with DPoP scheme, service accepts", async () => {
     const { manifest } = await fetchServiceManifest(svc.baseUrl, { allowInsecure: true });
-    const agentToken = createAgentToken({
-      fingerprint: agentFingerprint,
-      publicKeyPem: agentKeys.publicKeyPem,
-      privateKeyPem: agentKeys.privateKeyPem,
-    });
+    const accessToken = mintFixtureAccessToken({ agentPublicKeyPem: agentKeys.publicKeyPem });
 
-    const res = await callApi(manifest, "whoami", agentToken);
+    const res = await callApiDPoP(manifest, "whoami", { accessToken, agentKeys });
 
-    assert.equal(res.ok, true, "service accepted the agent token");
+    assert.equal(res.ok, true, "service accepted the DPoP-bound request");
     assert.equal(res.status, 200);
-    assert.equal(res.body.agent_fingerprint, agentFingerprint);
+    assert.equal(res.body.agent_jkt, agentJkt);
+    assert.equal(res.body.owner_sub, "test-owner-sub");
     assert.ok(res.body.service_token.startsWith("svc-token-"));
-    assert.match(svc.state.lastAuthHeader, /^AgentID /);
+    assert.match(svc.state.lastAuthHeader, /^DPoP /);
   });
 
-  it("service rejects forged token (wrong key signs another agent's payload)", async () => {
+  it("service rejects request where access_token cnf.jkt doesn't bind to the proof key", async () => {
     const { manifest } = await fetchServiceManifest(svc.baseUrl, { allowInsecure: true });
     const attackerKeys = generateEd25519PemPair();
-    const forged = createAgentToken({
-      fingerprint: agentFingerprint,
-      publicKeyPem: agentKeys.publicKeyPem,
-      privateKeyPem: attackerKeys.privateKeyPem,
-    });
+    // Access_token's cnf.jkt is pinned to the legitimate agent, but the
+    // attacker signs a DPoP proof with their own key — RFC 9449 §6.1.
+    const accessToken = mintFixtureAccessToken({ agentPublicKeyPem: agentKeys.publicKeyPem });
 
-    const res = await callApi(manifest, "whoami", forged);
+    const res = await callApiDPoP(manifest, "whoami", { accessToken, agentKeys: attackerKeys });
     assert.equal(res.ok, false);
     assert.equal(res.status, 401);
-    assert.equal(res.body.error, "bad-signature");
+    assert.equal(res.body.error, "jkt-mismatch");
   });
 
-  it("service can pin a specific agent fingerprint", async () => {
-    svc.state.requireFingerprint = "0".repeat(64);
+  it("service can pin a specific agent jkt", async () => {
+    svc.state.requireFingerprint = "0".repeat(43); // base64url-encoded 32-byte digest
     const { manifest } = await fetchServiceManifest(svc.baseUrl, { allowInsecure: true });
-    const agentToken = createAgentToken({
-      fingerprint: agentFingerprint,
-      publicKeyPem: agentKeys.publicKeyPem,
-      privateKeyPem: agentKeys.privateKeyPem,
-    });
+    const accessToken = mintFixtureAccessToken({ agentPublicKeyPem: agentKeys.publicKeyPem });
 
-    const res = await callApi(manifest, "whoami", agentToken);
+    const res = await callApiDPoP(manifest, "whoami", { accessToken, agentKeys });
     assert.equal(res.ok, false);
     assert.equal(res.status, 403);
-    assert.equal(res.body.error, "fingerprint-mismatch");
+    assert.equal(res.body.error, "jkt-pin-miss");
   });
 });
 
@@ -688,7 +740,7 @@ describe("CLI: discover-service", () => {
     assert.equal(parsed.allowedHost, svc.host);
     assert.equal(parsed.manifest.version, 1);
     assert.equal(parsed.manifest.auth.header, "Authorization");
-    assert.equal(parsed.manifest.auth.scheme, "AgentID");
+    assert.equal(parsed.manifest.auth.scheme, "DPoP");
     assert.equal(parsed.manifest.api.base, `http://${svc.host}/api/v1`);
   });
 

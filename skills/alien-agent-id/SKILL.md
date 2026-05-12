@@ -315,7 +315,7 @@ This returns JSON containing a `deepLink` and a `qrCode` (Unicode text). Output 
 
 ### Step 3: Wait for approval
 ```bash
-node CLI bind --no-require-owner-proof
+node CLI bind
 ```
 
 Blocks for up to 5 minutes while the user scans the QR code with Alien App.
@@ -380,8 +380,7 @@ Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **S
 │   ├── slack.json
 │   └── ...
 ├── audit/operations.jsonl     # Hash-chained signed operation log
-├── owner-binding.json         # Owner binding (human ↔ agent link)
-├── owner-session.json         # Session tokens (mode 0600) — NEVER commit
+├── owner-session.json         # Session tokens — id_token IS the chain attestation (mode 0600) — NEVER commit
 ├── nonces.json                # Per-agent nonce tracking
 ├── sequence.json              # Sequence counter
 ```
