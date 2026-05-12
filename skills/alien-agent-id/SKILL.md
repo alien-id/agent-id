@@ -72,41 +72,47 @@ Ask the user: **"Would you like to use the default Alien provider (recommended),
   > █▄▄▄▄▄▄▄█▄███▄█▄█▄█▄▄▄▄█████▄██
   > ```
 
-Then run:
+Then call the service. **Prefer `call`** — it handles the two-header DPoP dance and the single-use `jti` for you:
 
 ```bash
-node CLI auth-header
+# One-shot signed request (recommended). Output is JSON: { ok, status, body }.
+node CLI call --url https://service.example.com/api/whoami
+# POST with a JSON body file:
+node CLI call --url https://service.example.com/api/posts --method POST --body-file ./post.json
 ```
 
-This returns JSON with a `token` field. Use it in HTTP requests:
+If you need to drive `curl` yourself (for streaming, custom flags, etc.), generate the headers with `auth-header`. DPoP requires **two** headers and the `htu`/`htm` claims bind to one specific URL+method — so `--url` and `--method` are required, and the `jti` is single-use (regenerate per request):
 
 ```bash
-# Get the auth header for curl
-AUTH=$(node CLI auth-header --raw)
-curl -H "$AUTH" https://service.example.com/api/whoami
+HEADERS=$(node CLI auth-header --url https://service.example.com/api/whoami --method GET)
+AUTHZ=$(echo "$HEADERS" | jq -r .authorization)
+DPOP=$(echo "$HEADERS"  | jq -r .dpop)
+curl -H "Authorization: $AUTHZ" -H "DPoP: $DPOP" https://service.example.com/api/whoami
 ```
 
-The token is a self-contained Ed25519-signed assertion containing your fingerprint, public key, owner identity, owner proof chain, and a timestamp. Tokens are valid for 5 minutes. Services verify tokens using [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id).
+The access token (`DPoP <jwt>`) is a short-lived (~5 min) Ed25519-bound assertion containing your fingerprint, owner identity, and `cnf.jkt`. The `DPoP` proof header binds it to this request. Services verify both with [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id).
 
 ### Discovering service authentication
 
-When a human gives you a service URL, run:
+**When a user hands you a URL, try `discover-service` *before* `WebFetch`.** Alien-aware services expose a machine-readable manifest at `/.well-known/alien-agent-id.json` — reading it first tells you the auth scheme, the API base, and (if present) a schema document. If the call fails, the URL isn't Alien-aware and you can fall back to normal browsing.
 
 ```bash
 node CLI discover-service --url https://example.com
 ```
 
-The CLI fetches `https://example.com/.well-known/alien-agent-id.json`, validates it against the v1 schema (size cap, closed key set, same-authority URLs), and returns the manifest. **Do not fetch the well-known path yourself with `curl` or write your own parser.**
+The CLI fetches the well-known path, validates the response against the v1 schema (size cap, closed key set, same-authority URLs), and returns the manifest. **Do not fetch the well-known path yourself with `curl` or write your own parser.**
 
 Manifest fields:
 
 - `auth.header` — HTTP header name (e.g. `Authorization`)
-- `auth.scheme` — `AgentID` (default), `Bearer`, or `none`
+- `auth.scheme` — `DPoP` (default), `Bearer`, or `none`
 - `api.base` — API base URL for subsequent requests
 - `api.specUrl` — optional URL of an OpenAPI/JSON Schema document describing the API
 - `service.name`, `service.url` — optional display metadata
 
-Call the service: `auth-header --raw` for your token, attach it to requests under `api.base` with the manifest's header and scheme. Tokens are self-contained — services verify with [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id), no registration.
+**If `api.specUrl` is present, fetch and read it before calling endpoints.** The spec tells you the exact request field names, methods, and status codes — exactly the things you can't guess from the manifest alone. Side-effecting endpoints (POST/PUT/DELETE) often have no rollback path on a service. **Do not probe field names by trial-and-error against a live endpoint** — a wrong-shape POST may still create a permanent record under your owner identity.
+
+Call the service: use `call` (or generate headers with `auth-header` and drive `curl`), targeting routes under `api.base` with the manifest's `auth.header` / `auth.scheme`. Tokens are self-contained — services verify with [`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id), no registration.
 
 Optional: if the user gave you a page URL, `node CLI service-support --url <URL>` checks for `<meta name="alien-agent-id" content="v1">` (a closed-enum support signal) so you can skip the well-known fetch when absent. The manifest path is fixed regardless.
 
@@ -335,7 +341,8 @@ Go to GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **S
 |---------|---------|-----------|
 | `bootstrap` | One-command setup: init + auth + bind + git-setup | **Yes** (up to 5 min) |
 | `status` | Check if Alien Agent ID exists and is bound | No |
-| `auth-header [--raw]` | Generate signed auth token for service calls | No |
+| `call --url <URL> [--method M] [--body-file F]` | One-shot signed request (handles DPoP headers + send) | No |
+| `auth-header --url <URL> [--method M] [--raw]` | Emit `Authorization` + `DPoP` headers for one request (RFC 9449) | No |
 | `discover-service --url <URL>` | Fetch + validate `/.well-known/alien-agent-id.json` | No |
 | `service-support --url <URL>` | Probe page for `<meta name="alien-agent-id">` support signal | No |
 | `vault-store --service S --credential C` | Store encrypted credential | No |

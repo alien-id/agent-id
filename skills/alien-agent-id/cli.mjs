@@ -5,7 +5,7 @@
 //
 // Commands: bootstrap, setup-owner-session, init, auth, bind, status, sign, verify, export-proof,
 //           git-setup, git-commit, git-verify, vault-store, vault-get, vault-list,
-//           vault-remove, auth-header, discover-service, service-support, refresh
+//           vault-remove, auth-header, call, discover-service, service-support, refresh
 
 import path from "node:path";
 import os from "node:os";
@@ -1263,18 +1263,18 @@ async function cmdRefresh(flags) {
 
 // ─── Auth Header ────────────────────────────────────────────────────────────────
 
-async function cmdAuthHeader(flags) {
-  const stateDir = resolveStateDir(flags);
+// Build the DPoP-bound Authorization + DPoP headers for one request.
+// RFC 9449 §4.2: the proof binds to a specific (method, URL) and is single-use.
+// Returns null + writes an error if the agent isn't bootstrapped.
+async function buildDPoPHeaders(stateDir, method, url) {
   const paths = statePaths(stateDir);
-
   const key = await readJsonFile(paths.mainKey, null);
   if (!key) {
     outputError("No agent keypair. Run `bootstrap` or `init` first.");
-    return;
+    return null;
   }
 
-  // Refresh the SSO session first — the access_token is the bearer credential
-  // we attach to the request and the AS rotates it on a tight cadence.
+  // Refresh the SSO session — access_token is rotated on a tight cadence.
   const engine = new SignatureEngine({ baseDir: stateDir });
   await engine.init();
   try {
@@ -1286,43 +1286,103 @@ async function cmdAuthHeader(flags) {
   const session = await readJsonFile(paths.ownerSession, null);
   if (!session?.accessToken) {
     outputError("No bound session with access_token. Run `bootstrap` or `bind` first.");
-    return;
+    return null;
   }
 
-  // RFC 9449 §4.2: the DPoP proof binds to a specific request, so the agent
-  // MUST be told the target method + URL up front. Per-request proof, single-
-  // use jti, fresh signature. No long-lived envelope.
-  if (!flags.url) {
-    outputError("--url is required. The DPoP proof's `htu` claim binds to a specific request target (RFC 9449 §4.2).");
-    return;
-  }
-  const htm = String(flags.method || "GET").toUpperCase();
-  const htu = String(flags.url);
-
+  const htm = String(method || "GET").toUpperCase();
+  const htu = String(url);
   const proof = createDPoPProof({
     privateKeyPem: key.privateKeyPem,
     htm,
     htu,
-    // RFC 9449 §4.2: bind the proof to the access token via `ath` (sha256
-    // of the access token). Defends against proof reuse with a different
-    // token even if both were captured.
+    // RFC 9449 §4.2: `ath` binds the proof to this specific access token —
+    // defends against proof reuse with a different captured token.
     accessToken: session.accessToken,
   });
 
-  const authorization = `DPoP ${session.accessToken}`;
-  const dpopHeader = proof;
+  return { authorization: `DPoP ${session.accessToken}`, dpop: proof, method: htm, url: htu };
+}
 
-  if (flags.raw) {
-    process.stdout.write(`Authorization: ${authorization}\n`);
-    process.stdout.write(`DPoP: ${dpopHeader}\n`);
+async function cmdAuthHeader(flags) {
+  if (!flags.url) {
+    outputError("--url is required. The DPoP proof's `htu` claim binds to a specific request target (RFC 9449 §4.2).");
     return;
   }
+  const headers = await buildDPoPHeaders(resolveStateDir(flags), flags.method, flags.url);
+  if (!headers) return;
+
+  if (flags.raw) {
+    process.stdout.write(`Authorization: ${headers.authorization}\n`);
+    process.stdout.write(`DPoP: ${headers.dpop}\n`);
+    return;
+  }
+  outputJson({ ok: true, ...headers });
+}
+
+// One-shot signed request: generate DPoP headers, send, return the response.
+// Eliminates the two-header / single-use-jti footgun for agents that just
+// want to "call this endpoint with my identity attached."
+async function cmdCall(flags) {
+  if (!flags.url) {
+    outputError("--url is required.");
+    return;
+  }
+  const method = String(flags.method || "GET").toUpperCase();
+  if (!/^[A-Z]+$/.test(method)) {
+    outputError("--method must be an HTTP verb (GET, POST, PUT, DELETE, …)");
+    return;
+  }
+
+  // Body: --body-file <path> or --body <inline>. Inline is convenient for
+  // tiny payloads but visible in process listings, so the file form is
+  // preferred for anything non-trivial.
+  let body;
+  if (flags["body-file"]) {
+    try {
+      body = await fs.readFile(String(flags["body-file"]), "utf8");
+    } catch (err) {
+      outputError(`Failed to read --body-file: ${err.message}`);
+      return;
+    }
+  } else if (typeof flags.body === "string") {
+    body = flags.body;
+  }
+
+  const headers = await buildDPoPHeaders(resolveStateDir(flags), method, flags.url);
+  if (!headers) return;
+
+  const fetchHeaders = {
+    Authorization: headers.authorization,
+    DPoP: headers.dpop,
+  };
+  if (body !== undefined) {
+    fetchHeaders["Content-Type"] = flags["content-type"]
+      ? String(flags["content-type"])
+      : "application/json";
+  }
+
+  let res;
+  try {
+    res = await fetch(String(flags.url), { method, headers: fetchHeaders, body });
+  } catch (err) {
+    outputError(`Request failed: ${err.message}`);
+    return;
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+  let parsed;
+  if (/^application\/json\b/i.test(contentType)) {
+    try { parsed = JSON.parse(text); } catch { /* fall back to raw text */ }
+  }
+
   outputJson({
-    ok: true,
-    authorization,
-    dpop: dpopHeader,
-    method: htm,
-    url: htu,
+    ok: res.ok,
+    status: res.status,
+    method,
+    url: String(flags.url),
+    contentType,
+    body: parsed !== undefined ? parsed : text,
   });
 }
 
@@ -1378,8 +1438,12 @@ Commands:
   git-setup      Write SSH key files for commit signing
   git-commit     Create a signed commit with Agent ID trailers
   git-verify     Verify provenance chain of a signed commit
+  call           One-shot signed HTTP request (generates DPoP headers + sends).
+                 Flags: --url <URL> [--method GET|POST|…] [--body <inline>
+                        | --body-file <path>] [--content-type <type>]
   auth-header    Emit RFC 9449 DPoP Authorization + DPoP headers for a request
-                 (requires --url, optional --method, defaults to GET)
+                 (requires --url, optional --method, defaults to GET).
+                 Prefer 'call' unless you specifically need to drive curl.
   discover-service  Fetch and validate /.well-known/alien-agent-id.json
   service-support   Probe a page for the <meta name="alien-agent-id"> support signal
   refresh        Refresh SSO session tokens (access_token / refresh_token)
@@ -1422,6 +1486,14 @@ Git-verify flags:
 Auth-header flags:
   --raw                      Output raw header (not JSON) for use with curl
 
+Call flags:
+  --url <url>                Target URL (required)
+  --method <verb>            HTTP method (default: GET)
+  --body <inline>            Request body as a literal string
+  --body-file <path>         Request body read from a file (preferred for JSON)
+  --content-type <type>      Content-Type header (default: application/json
+                             when a body is supplied)
+
 Vault flags:
   --service <name>           Service name (required for store/get/remove)
   --type <type>              Credential type: api-key, password, oauth, bearer (default: api-key)
@@ -1456,6 +1528,7 @@ const commands = {
   "vault-list": cmdVaultList,
   "vault-remove": cmdVaultRemove,
   "auth-header": cmdAuthHeader,
+  call: cmdCall,
   "discover-service": cmdDiscoverService,
   "service-support": cmdServiceSupport,
   refresh: cmdRefresh,
