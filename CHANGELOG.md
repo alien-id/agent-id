@@ -2,6 +2,60 @@
 
 All notable changes are documented here.
 
+## [3.1.0] — 2026-05-12
+
+Minor release. Manifest v2 with inline operation catalogs, two new CLI subcommands (`call`,
+`capabilities`), and a substantial skill rewrite. No breaking changes vs. 3.0.x — v1 manifests
+still parse, all prior CLI subcommands behave the same.
+
+### Added
+
+- Service manifest v2: `api.operations[]` carries an inline capability catalog so agents can
+  call Alien-aware services without trial-probing endpoints. Each operation is closed-key
+  (`{name, description, method, path, auth, title?, inputSchema?, outputSchema?, annotations?}`).
+  `inputSchema` / `outputSchema` are constrained to a small JSON Schema subset: root
+  `type:"object"`, ≤20 properties, each property a scalar (`string` / `number` / `integer` /
+  `boolean` / `array` of scalars). Anything richer belongs in `api.specUrl`. Path placeholders
+  (`{id}`) are cross-validated against `inputSchema.properties` — declared-but-unbound
+  parameters fail closed.
+- `capabilities --url <U>` CLI subcommand: fetches a service manifest and emits LLM-friendly
+  markdown listing every operation with a per-operation `Call:` line. Markdown is the only
+  surface — the earlier speculative anthropic/openai/mcp output formats were dropped (no
+  in-session agent consumes them).
+- `call --url <U> [--method M] [--data JSON]` CLI subcommand: one-shot signed request. Builds
+  the DPoP proof, fetches, returns the JSON response. Eliminates the two-header / single-use
+  `jti` footgun for agents that just want to hit an endpoint with identity attached.
+  `auth-header` remains the manual / curl-driven path.
+- `renderCapabilities(manifest)` library export for SDK consumers that want the same markdown
+  rendering outside the CLI.
+- `reference/migrate-to-v3.md`: short migration guide for v2-bound agents whose state
+  directory contains a legacy `owner-binding.json`. The v3 verifier rejects pre-cutover
+  `id_tokens` because they lack the `cnf.jkt` confirmation claim — the doc covers detection
+  (`test -f $STATE_DIR/owner-binding.json` after `status`), the safe `setup-owner-session`
+  path that keeps keypair + vault + audit chain, and the timestamped-backup fallback.
+
+### Changed
+
+- SKILL.md rewritten per Anthropic skill best practices: body is 135 lines (was 436);
+  detail moved into one level of `reference/*.md` files (bootstrap, services, vault,
+  git-commits, state-and-errors). Description is a trigger string under the 1024-char cap.
+  Frontmatter `compatibility` field removed (it was a string where the spec wants an object).
+- SKILL.md `allowed-tools`: `Bash(node:*)` tightened to `Bash(node *alien-agent-id/cli.mjs:*)`
+  so the grant only covers the CLI, not arbitrary `node` invocations. The leading `*` keeps
+  the rule working across install locations (workspace, ccs mount, `~/.claude/plugins/...`).
+- SKILL.md handles the auto-mode classifier denying a routine `cli.mjs` call: surface the
+  full command, name what the subcommand does, and ask before retrying instead of silently
+  falling back to plain curl (which 401s — DPoP requires the CLI).
+- SKILL.md makes the `bound: false` path start bootstrap immediately. Previously the
+  imperative wasn't strong enough to prevent a meta-confirmation prompt before the first
+  user-facing question.
+
+### Removed
+
+- `--format` flag on `capabilities`. The provider tool-use JSON formats (anthropic / openai /
+  mcp) were speculative — no in-session agent consumes them. `renderCapabilities` stays
+  available as a library function for future provider-shaped adapters.
+
 ## [3.0.2] — 2026-05-12
 
 Patch release. No runtime behavior change. Documentation cleanup and version-stamp bump.
