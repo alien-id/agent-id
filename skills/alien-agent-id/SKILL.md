@@ -47,7 +47,7 @@ If the manifest is `version: 2` and carries `api.operations[]`, render it as mar
 node CLI capabilities --url https://example.com
 ```
 
-Falls back: if `operations[]` is absent but `api.specUrl` is present, fetch the spec and read it before any side-effecting call. Side-effecting endpoints (POST/PUT/DELETE) are often irreversible — do not probe field names by trial-and-error against a live service; a wrong-shape POST may still persist a row under your owner identity.
+Falls back: if `operations[]` is absent but `api.specUrl` is present, fetch the spec and read it before any side-effecting call. Side-effecting endpoints are often irreversible — do not probe field names by trial-and-error against a live service; a wrong-shape POST may still persist a row under your owner identity.
 
 Make signed requests with `call` (one-shot: handles both DPoP headers and the single-use `jti`):
 
@@ -61,6 +61,10 @@ Never hand-roll DPoP headers; never call an Alien-aware service with plain `fetc
 Output is JSON: `{ ok, status, contentType, body }`.
 
 If you need to drive `curl` yourself, see [reference/services.md](reference/services.md) for `auth-header` usage and the two-header pattern.
+
+### If the classifier denies a `cli.mjs` call
+
+Show the full command, name what the subcommand does (Command reference below), and for `call` include the resolved method, URL, and body. Ask before retrying. Don't fall back to `curl` — DPoP requires the CLI.
 
 ### Trust boundary
 
