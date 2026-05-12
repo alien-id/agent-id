@@ -598,9 +598,12 @@ async function cmdGitCommit(flags) {
     await setPrivateFilePermissions(privateKeyPath);
   }
 
-  // Pass signing config inline — no git config changes needed
+  // Pass signing config inline — no git config changes needed.
+  // gpg.ssh.program pinned to ssh-keygen so a user's globally-configured custom SSH
+  // signer (e.g. 1Password's op-ssh-sign) doesn't intercept signing with the agent key.
   const commitArgs = [
     "-c", "gpg.format=ssh",
+    "-c", "gpg.ssh.program=ssh-keygen",
     "-c", `user.signingkey=${privateKeyPath}`,
     "commit", "-S", "-m", fullMessage,
   ];
@@ -855,6 +858,7 @@ async function cmdGitVerify(flags) {
     const verifyResult = await execFile(
       "git",
       [
+        "-c", "gpg.ssh.program=ssh-keygen",
         "-c", `gpg.ssh.allowedSignersFile=${tmpSignersPath}`,
         "verify-commit", resolvedHash,
       ],
