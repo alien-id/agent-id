@@ -6,21 +6,20 @@ shared secrets, no pre-registration.
 
 ## How it works
 
-```
-Agent                                  Your Service
-  │                                         │
-  │  1. Mint per-request DPoP proof JWT     │
-  │     (Ed25519, signed by agent key)      │
-  │                                         │
-  │  2. HTTP request ──────────────────────►│
-  │     Authorization: DPoP <access_token>  │
-  │     DPoP:          <proof JWT>          │  3. Verify proof signature (RFC 9449 §4.3)
-  │                                         │  4. Check htm/htu/iat/jti
-  │                                         │  5. Verify access_token (RFC 9068)
-  │                                         │  6. Confirm cnf.jkt == jwkThumbprint(proof.jwk)
-  │                                         │  7. Confirm ath == sha256(access_token)
-  │                                         │
-  │◄────────────── response ────────────────│
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent
+    participant Service as Your Service
+
+    Agent->>Agent: Mint per-request DPoP proof JWT (Ed25519, signed by agent key)
+    Agent->>Service: HTTP request<br/>Authorization: DPoP &lt;access_token&gt;<br/>DPoP: &lt;proof JWT&gt;
+    Service->>Service: Verify proof signature (RFC 9449 §4.3)
+    Service->>Service: Check htm / htu / iat / jti
+    Service->>Service: Verify access_token (RFC 9068)
+    Service->>Service: Confirm cnf.jkt == jwkThumbprint(proof.jwk)
+    Service->>Service: Confirm ath == sha256(access_token)
+    Service-->>Agent: response
 ```
 
 The access_token is an Alien SSO-issued `at+jwt` (RFC 9068) that carries standard claims:
@@ -168,8 +167,8 @@ If you need a verifier in a runtime not covered by an SDK, the algorithm is full
 - **RFC 7800 §3.1** — JWK thumbprint confirmation (`cnf.jkt`)
 - **RFC 7235 §2.1** — `WWW-Authenticate` challenge header semantics
 
-The reference implementation is `examples/demo-service.mjs` in this repo — a ~340-line
-self-contained Node verifier with no SDK dependency, suitable as a template for porting.
+The reference implementation is `examples/demo-service.mjs` in this repo — a ~426-line self-contained Node
+verifier with no SDK dependency, suitable as a template for porting.
 
 #### Verifier checklist
 
@@ -484,9 +483,8 @@ RFC 9449.
 
 ### Trusted-proxy CIDR list
 
-If your service sits behind an ALB or other L7 proxy, the `htu` claim must reconstruct against the
-**external** URL the agent signed, not the internal scheme/host. The reference verifier honors
-`X-Forwarded-Proto` and `X-Forwarded-Host` only when the connection's remote address is inside a
-configured `TRUSTED_PROXY_CIDRS` list. Without the proxy CIDR set, `htu` reconstruction will use
-the internal `http://internal-host` URL and reject every proof. (See agent-id repo
-`internal/handler/oauth_helpers.go:dpopHTU` for the canonical implementation.)
+If your service sits behind an ALB or other L7 proxy, the `htu` claim must reconstruct against the **external**
+URL the agent signed, not the internal scheme/host. The reference verifier honors `X-Forwarded-Proto` and
+`X-Forwarded-Host` only when the connection's remote address is inside a configured `TRUSTED_PROXY_CIDRS` list.
+Without the proxy CIDR set, `htu` reconstruction will use the internal `http://internal-host` URL and reject
+every proof. See `examples/demo-service.mjs` for the canonical agent-side implementation.

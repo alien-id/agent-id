@@ -720,7 +720,8 @@ async function cmdGitVerify(flags) {
   const resolvedHash = revResult.stdout.trim();
 
   // Read v3 trailers (Agent-ID-JKT, Agent-ID-Owner). Pre-v3 commits are
-  // intentionally not supported — see commit-signing-cleanup.md.
+  // intentionally not supported — their id_tokens predate the RFC 7800
+  // cnf.jkt binding and cannot anchor the chain.
   const logResult = await execFile("git", ["log", "-1", "--format=%B", resolvedHash]);
   const commitMessage = logResult.stdout.trim();
   const trailerJkt = extractTrailer(commitMessage, "Agent-ID-JKT");

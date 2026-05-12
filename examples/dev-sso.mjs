@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 //
-// dev-sso — a minimal local SSO that implements the contract documented in
-// docs/RELEASE-NOTES.md (3.0.0 DPoP cutover) so the agent-id CLI can run end
-// to end against a real HTTP server without requiring the production Alien
-// SSO (which is closed-source and, at time of writing, has not yet rolled out
-// the cutover server-side).
+// dev-sso — a minimal local SSO that implements the RFC 9449 DPoP cutover
+// contract (id_token cnf.jkt + DPoP-bound token endpoint) so the agent-id CLI
+// can run end to end against a real HTTP server without requiring the
+// production Alien SSO (which is closed-source and, at time of writing, has
+// not yet rolled out the cutover server-side).
 //
 // What this is:
 //   - Auto-approves every authorize request. No QR, no Alien App.

@@ -1,87 +1,63 @@
 # Alien Agent SSO
 
-A system for giving AI agents verifiable identity, service authentication, and secure credential storage — all linked to a real human via the Alien Network.
+A system for giving AI agents verifiable identity, service authentication, and secure credential storage — all
+linked to a real human via the Alien Network.
 
 ## The problem
 
-AI agents (Claude Code, OpenClaw, Cursor, Copilot, custom scripts) operate without identity. They can't prove who authorized them, can't authenticate to services on their own, and have no safe place to store credentials. Humans end up pasting API keys into chat, hardcoding secrets in configs, or giving agents unrestricted access.
+AI agents (Claude Code, Cursor, Copilot, custom scripts) operate without identity. They can't prove who authorized
+them, can't authenticate to services on their own, and have no safe place to store credentials. Humans end up
+pasting API keys into chat, hard-coding secrets in configs, or giving agents unrestricted access.
 
 ## What Agent SSO provides
 
-**1. Cryptographic identity** — Each agent gets an Ed25519 keypair linked to a verified human owner through Alien Network SSO. The human scans a QR code once; the agent has a permanent, verifiable identity.
-
-**2. Service authentication** — Agents generate short-lived signed tokens (5-minute Ed25519 assertions) accepted by any service that imports the verification library. No API keys, no shared secrets.
-
-**3. Credential vault** — Encrypted storage (AES-256-GCM) for external service credentials. The encryption key is derived from the agent's private key via HKDF. Only that specific agent instance can decrypt its own vault.
-
-**4. Signed git commits** — Every commit is SSH-signed and tagged with trailers tracing back to the agent and its human owner. Proof bundles embedded as git notes make verification self-contained.
+1. **Cryptographic identity.** Each agent gets an Ed25519 keypair linked to a verified human owner through Alien
+   Network SSO. The human scans a QR code once; the agent has a permanent, verifiable identity.
+2. **Service authentication.** Agents present an SSO-issued `at+jwt` access token plus a fresh RFC 9449 DPoP
+   proof per request. Any service that imports the verifier (`@alien-id/sso-agent-id` / `alien-sso-agent-id`)
+   accepts the pair — no API keys, no shared secrets, no pre-registration.
+3. **Credential vault.** Encrypted storage (AES-256-GCM) for external service credentials. The encryption key
+   is derived from the agent's private key via HKDF-SHA256. Only that specific agent instance can decrypt its
+   own vault.
+4. **Signed git commits.** Every commit is SSH-signed and carries trailers that trace back to the agent and its
+   human owner. The v3 proof bundle embedded as a git note (`refs/notes/agent-id`) makes verification
+   self-contained — anyone with the commit and the note can verify the chain.
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    Human["Human<br/>(AlienID holder)"]
+    SSO["Alien SSO<br/>sso.alien-api.com"]
+    Agent["Agent<br/>(Claude Code, Cursor, …)"]
+    Service["Alien-aware service"]
+    External["External service<br/>(GitHub, AWS, Slack, …)"]
+    State["~/.agent-id/<br/>keypair · session · vault · audit"]
+
+    Human -- "1. Scan QR via Alien App" --> SSO
+    SSO -- "2. id_token + access_token + refresh_token" --> Agent
+    Agent --- State
+    Agent -- "Authorization: DPoP &lt;at&gt;<br/>DPoP: &lt;proof&gt;" --> Service
+    Agent -- "Stored API key / OAuth token" --> External
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Human                                                          │
-│  (AlienID holder)                                               │
-│                                                                 │
-│  1. Scans QR code with Alien App (one time)                     │
-└────────────┬────────────────────────────────────────────────────┘
-             │ OIDC approval
-             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Alien SSO (sso.alien-api.com)                                  │
-│                                                                 │
-│  • /oauth/authorize    Start OIDC flow, return deep link        │
-│  • /oauth/poll         Agent polls for human approval           │
-│  • /oauth/token        Exchange code for id_token + access_token│
-│  • /oauth/userinfo     Query owner identity                     │
-│  • /oauth/jwks         Public keys for signature verification   │
-│                                                                 │
-│  Refresh tokens allow agents to maintain sessions indefinitely  │
-│  without further human interaction.                             │
-└────────────┬────────────────────────────────────────────────────┘
-             │ id_token + access_token
-             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Agent (Claude Code, OpenClaw, any AI with shell access)        │
-│                                                                 │
-│  ~/.agent-id/                                                   │
-│  ├── keys/main.json          Ed25519 keypair (0600)             │
-│  ├── owner-session.json      SSO tokens — id_token IS the       │
-│  │                           chain attestation (0600)           │
-│  ├── vault/                  Encrypted credentials (0600)       │
-│  │   ├── github.json                                            │
-│  │   ├── aws.json                                               │
-│  │   └── ...                                                    │
-│  ├── ssh/                    Git signing keys                   │
-│  └── audit/operations.jsonl  Hash-chained operation log         │
-│                                                                 │
-│  Capabilities:                                                  │
-│  • Sign git commits with provenance trailers                    │
-│  • Generate auth tokens for Alien-aware services                │
-│  • Store/retrieve encrypted credentials for external services   │
-│  • Sign arbitrary operations for audit trail                    │
-└────────────┬──────────────┬─────────────────────────────────────┘
-             │              │
-     Auth tokens       Vault credentials
-             │              │
-             ▼              ▼
-┌────────────────┐  ┌───────────────────┐
-│ Alien-aware    │  │ External services │
-│ services       │  │ (GitHub, AWS,     │
-│                │  │  Slack, etc.)     │
-│ Verify agent   │  │                   │
-│ Ed25519 token  │  │ Use stored API    │
-│ inline — no    │  │ keys, OAuth       │
-│ pre-            │  │ tokens, passwords │
-│ registration   │  │                   │
-└────────────────┘  └───────────────────┘
-```
+
+The agent uses a standard OIDC + OAuth 2.0 + RFC 9449 flow. Discovery is at
+`<sso>/.well-known/openid-configuration`; from there the agent reads the authorization, token, userinfo, and
+JWKS URLs and the supported DPoP signing algorithms. The flow uses PKCE (S256) and an Alien-extended
+QR-and-poll variant of the authorization-code grant so a human can approve on a separate device.
+
+Once the agent holds a DPoP-bound `refresh_token`, it can keep its session alive by exchanging the refresh
+token for a new `access_token` on demand. The refresh stays bound to the same `cnf.jkt` for the life of the
+binding, so the agent never has to re-run the QR flow until the human revokes its authorization in the
+Alien App.
 
 ## How to give an agent these capabilities
 
 ### The skill file
 
-The file `SKILL.md` in this repository contains everything an AI agent needs to bootstrap its identity, authenticate with services, and manage credentials. It is written as agent-facing instructions — the agent reads it and follows the steps autonomously.
+`skills/alien-agent-id/SKILL.md` in this repository contains everything an AI agent needs to bootstrap its
+identity, authenticate with services, and manage credentials. It is written as agent-facing instructions — the
+agent reads it and follows the steps autonomously.
 
 To give any AI agent these capabilities, point it at the skill file.
 
@@ -92,246 +68,176 @@ Add to your project's `CLAUDE.md`:
 ```markdown
 ## Agent Identity
 
-Before making git commits or accessing authenticated services, read and follow
-the skill file at /path/to/agent-id/SKILL.md to obtain your Agent ID.
+Before making git commits or accessing authenticated services, read and follow the skill file at
+`/path/to/agent-id/skills/alien-agent-id/SKILL.md` to obtain your Alien Agent ID.
 ```
 
-Or reference it directly:
+Or install via the Claude Code marketplace:
 
-```markdown
-Read /path/to/agent-id/SKILL.md and follow the bootstrap instructions.
+```text
+/plugin marketplace add alien-id/agent-id
+/plugin install alien-agent-id@alien-agent-id
+/reload-plugins
 ```
 
-Claude Code will:
-1. Read `SKILL.md`
-2. Run `node cli.mjs bootstrap`
-3. Show you the QR code
-4. Wait for you to scan with Alien App
-5. Start signing commits and authenticating with services
+Then invoke `/alien-agent-id` inside Claude Code; it will run the bootstrap, surface the QR code, and wait for
+your Alien App approval.
 
-### OpenClaw / other agents
+### Other agents
 
 Any agent that can run shell commands and read files can use this system. The agent needs:
+
 - **Node.js 18+** available in the shell
 - **Read access** to `SKILL.md` and the CLI files
-- **Shell access** to run `node cli.mjs <command>`
+- **Shell access** to run `node skills/alien-agent-id/cli.mjs <command>`
 
-Instruct the agent however that platform supports it — system prompt, instructions file, initial message — to read `SKILL.md` and follow the bootstrap steps.
+Instruct the agent — system prompt, instructions file, initial message, whatever the platform supports — to
+read `SKILL.md` and follow the bootstrap steps.
 
 ### CI/CD
 
 ```yaml
-# GitHub Actions example
 - name: Bootstrap agent identity
   env:
     ALIEN_PROVIDER_ADDRESS: ${{ secrets.ALIEN_PROVIDER_ADDRESS }}
-  run: node /path/to/agent-id/cli.mjs bootstrap
+  run: node /path/to/agent-id/skills/alien-agent-id/cli.mjs bootstrap
 ```
 
-In CI, the bootstrap will block waiting for QR approval. For attended CI (developer watches the run), the QR link is printed to the log. For unattended CI, pre-bootstrap on the runner and persist `~/.agent-id/` across runs.
+`bootstrap` blocks waiting for QR approval. For attended CI (a developer watches the run), the QR / deep link
+is printed. For unattended CI, pre-bootstrap on the runner and persist `~/.agent-id/` across runs.
 
 ### Environment variables
 
 | Variable | Purpose |
-|---|---|
-| `ALIEN_PROVIDER_ADDRESS` | Provider address (avoids `--provider-address` flag) |
-| `AGENT_ID_STATE_DIR` | Custom state directory (default: `~/.agent-id`) |
+| --- | --- |
+| `ALIEN_PROVIDER_ADDRESS` | Provider address (avoids the `--provider-address` flag) |
+| `AGENT_ID_STATE_DIR` | Custom state directory (default `~/.agent-id`) |
 
-The provider address can also be set in `default-provider.txt` next to the CLI.
+The provider address can also be set in `skills/alien-agent-id/default-provider.txt` next to the CLI.
 
 ## SSO flow in detail
 
-### What happens during bootstrap
+### Bootstrap sequence
 
-```
-Agent                              Alien SSO                    Human
-  │                                   │                           │
-  │  1. Generate Ed25519 keypair      │                           │
-  │     (stored in ~/.agent-id/)      │                           │
-  │                                   │                           │
-  │  2. GET /oauth/authorize ────────►│                           │
-  │     client_id = provider_address  │                           │
-  │     code_challenge = PKCE hash    │                           │
-  │◄──── deep_link, polling_code ─────│                           │
-  │                                   │                           │
-  │  3. Open QR page in browser ──────┼──────────────────────────►│
-  │     (or print deep link)          │                           │
-  │                                   │    4. Scan QR with        │
-  │                                   │       Alien App           │
-  │                                   │◄─── approve ──────────────│
-  │                                   │                           │
-  │  5. POST /oauth/poll ────────────►│                           │
-  │     (repeats every 3s, up to 5m)  │                           │
-  │◄──── authorization_code ──────────│                           │
-  │                                   │                           │
-  │  6. POST /oauth/token ───────────►│                           │
-  │     code + PKCE verifier          │                           │
-  │◄──── id_token (RS256 JWT) ────────│                           │
-  │      access_token, refresh_token  │                           │
-  │                                   │                           │
-  │  7. Verify id_token signature     │                           │
-  │     against SSO JWKS (RFC 7519,   │                           │
-  │     RFC 9449 §6.1 cnf.jkt)        │                           │
-  │                                   │                           │
-  │  8. Create owner binding:         │                           │
-  │     Sign {agent_key, owner_sub,   │                           │
-  │     id_token_hash, hostname}      │                           │
-  │     with agent's Ed25519 key      │                           │
-  │                                   │                           │
-  │  9. Configure git SSH signing     │                           │
-  │                                   │                           │
-  │  ✓ Done. Agent has identity.      │                           │
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Agent
+    participant SSO as Alien SSO
+    participant H as Human (Alien App)
+
+    A->>A: Generate Ed25519 keypair (~/.agent-id/keys/main.json)
+    A->>SSO: GET /oauth/authorize<br/>client_id=provider, dpop_jkt, PKCE
+    SSO-->>A: deep_link, polling_code, expires_at
+    A->>H: Show QR / deep link
+    H->>SSO: Approve in Alien App
+    loop every 3s (up to 5min)
+        A->>SSO: POST /oauth/poll
+    end
+    SSO-->>A: authorization_code
+    A->>SSO: POST /oauth/token<br/>code + PKCE + DPoP proof
+    SSO-->>A: id_token (RS256, with cnf.jkt) + access_token + refresh_token
+    A->>A: Verify id_token signature against SSO JWKS<br/>(iss, sub, cnf.jkt match agent JWK)
+    A->>A: Persist owner-session.json (0600)
+    A->>A: Configure git SSH signing
 ```
 
 ### What the agent gets
 
-After bootstrap, the agent holds:
+After bootstrap the agent holds:
 
-- **Ed25519 keypair** — for signing operations, auth tokens, and git commits
-- **Owner binding** — cryptographic proof that `agent_key X` is authorized by `human Y`, signed by the agent and attested by the SSO server
-- **id_token** — RS256 JWT from Alien SSO, proving the SSO server witnessed the binding (valid for 30 days; signature remains verifiable after expiry)
-- **access_token** — short-lived JWT for SSO API calls (refreshable)
-- **refresh_token** — long-lived token to renew access without human interaction
-- **SSH signing config** — git configured to sign all commits with the agent's key
+- **Ed25519 keypair** — signs DPoP proofs, audit-log entries, and git commits.
+- **`id_token` (RS256 JWT from Alien SSO)** — the chain attestation. Carries `sub` (the human), `iss`, `aud`,
+  and `cnf.jkt` (RFC 7800 §3.1) committing the agent key thumbprint. The signature is the only ground truth; no
+  separate agent-self-signed envelope exists.
+- **`access_token` (RFC 9068 `at+jwt`)** — short-lived, DPoP-bound. Used per-request against Alien-aware
+  services.
+- **`refresh_token`** — sticky to the same `cnf.jkt`. Renews `access_token` without human interaction. Refresh
+  re-verifies the new `id_token` (subject, `cnf.jkt`) before persisting.
+- **SSH signing config** — git is configured to sign all commits with the agent's key.
 
 ### Trust chain
 
-Anyone can verify an agent's identity by tracing the provenance chain:
+```mermaid
+flowchart LR
+    Commit["Git commit<br/>(SSH signature)"]
+    JWK["agent_jwk<br/>(public key)"]
+    Cnf["id_token.cnf.jkt<br/>(RFC 7800 §3.1)"]
+    JWKS["SSO JWKS<br/>(RS256)"]
+    Holder["Verified AlienID holder<br/>(id_token.sub)"]
 
+    Commit --> JWK
+    JWK -- "jwkThumbprint == cnf.jkt" --> Cnf
+    Cnf -- "RS256 signature" --> JWKS
+    JWKS --> Holder
 ```
-Git commit (SSH signature)
-  └─► Agent public key (fingerprint in commit trailer)
-        └─► Owner binding (Ed25519 signature by agent)
-              └─► id_token (RS256 signature by Alien SSO)
-                    └─► Alien SSO JWKS (public keys)
-                          └─► Verified AlienID holder (human)
-```
 
-Every link is cryptographically verifiable. Proof bundles embedded as git notes make verification self-contained — no access to the agent's local state needed.
+Every link is cryptographically verifiable. The v3 proof bundle (`{ version: 3, id_token, agent_jwk }`)
+embedded as a git note makes verification self-contained — no access to the agent's local state needed.
 
-## Credential storage flow
+## Credential vault
 
 ### Overview
 
-The vault stores credentials for external services (GitHub, AWS, Slack, etc.) encrypted with a key derived from the agent's Ed25519 private key. This means:
+The vault stores credentials for external services (GitHub, AWS, Slack, etc.) encrypted with a key derived from
+the agent's Ed25519 private key. This means:
 
-- Credentials are encrypted at rest (AES-256-GCM)
-- Only the agent that stored them can decrypt them
-- The encryption key never leaves the agent's machine
-- If the agent's keypair is deleted, the credentials are irrecoverable
+- Credentials are encrypted at rest (AES-256-GCM).
+- Only the agent that stored them can decrypt them.
+- The encryption key never leaves the agent's machine.
+- If the agent's keypair is deleted, the credentials are irrecoverable.
 
 ### How credentials get into the vault
 
-There are three parties involved: the **human** (who has the credential), the **agent** (who needs to use it), and the **vault** (encrypted storage on the agent's machine).
+The skill instructs the agent to **never accept a secret pasted into chat** — anything pasted there is recorded
+in the agent's transcript. The agent offers the human three options, in decreasing order of safety:
 
-#### Flow: human provides credential to agent
-
-```
-Human                              Agent                         Vault
-  │                                  │                             │
-  │  "I need a GitHub token          │                             │
-  │   to create pull requests"       │                             │
-  │◄─────────────────────────────────│                             │
-  │                                  │                             │
-  │  Option A (most secure):         │                             │
-  │  $ echo 'ghp_xxx' > /tmp/tok    │                             │
-  │  $ chmod 600 /tmp/tok            │                             │
-  │  "It's in /tmp/tok"             │                             │
-  │─────────────────────────────────►│                             │
-  │                                  │  vault-store                │
-  │                                  │  --credential-file /tmp/tok │
-  │                                  │────────────────────────────►│
-  │                                  │  (encrypt + store)          │
-  │                                  │◄────────────────────────────│
-  │                                  │  rm /tmp/tok                │
-  │                                  │                             │
-  │  Option B (env var):             │                             │
-  │  $ export GH=ghp_xxx            │                             │
-  │  "Variable name is GH"          │                             │
-  │─────────────────────────────────►│                             │
-  │                                  │  vault-store                │
-  │                                  │  --credential-env GH        │
-  │                                  │────────────────────────────►│
-  │                                  │◄────────────────────────────│
-  │                                  │                             │
-  │  Option C (paste in chat):       │                             │
-  │  "Here: ghp_xxx"                │                             │
-  │─────────────────────────────────►│                             │
-  │                                  │  echo 'ghp_xxx' |           │
-  │                                  │  vault-store --service gh   │
-  │                                  │────────────────────────────►│
-  │                                  │◄────────────────────────────│
-  │                                  │                             │
-  ▼                                  ▼                             ▼
-  One-time action.                   All future sessions can       Encrypted
-  Human doesn't need to              retrieve the credential       with agent's
-  provide it again.                  from the vault.               Ed25519 key.
-```
-
-#### Security properties of each method
-
-| Method | Secret in `ps`? | In shell history? | In chat log? |
-|---|---|---|---|
-| `--credential-file` | No | No | No |
-| `--credential-env` | No | Depends on shell | No |
+| Method | Secret in `ps`? | Shell history? | Chat transcript? |
+| --- | --- | --- | --- |
+| `--credential-file <path>` | No | No | No |
+| `--credential-env <VAR>` | No | Depends on shell | No |
 | stdin pipe | No | The `echo` line, yes | No |
-| `--credential` | **Yes** | **Yes** | No |
-| Paste in chat | No | No | **Yes** |
+| `--credential <value>` | Yes | Yes | No |
+| Paste in chat | No | No | Yes |
 
-The agent is instructed (via SKILL.md) to prefer `--credential-file` and offer all options to the human in order of security.
+### Vault encryption
 
-#### Flow: agent uses stored credential
+```mermaid
+flowchart LR
+    Priv["Agent Ed25519 private key<br/>(PKCS8 DER)"]
+    HKDF["HKDF-SHA256<br/>salt: agent-id-vault-v1<br/>info: vault-encryption"]
+    Key["256-bit symmetric key"]
+    AES["AES-256-GCM<br/>random 96-bit IV per credential<br/>128-bit auth tag"]
+    Out["{ iv, data, tag } (hex)<br/>file mode 0600"]
 
-```bash
-# Agent retrieves credential, uses it for API call
-TOKEN=$(node cli.mjs vault-get --service github | jq -r .credential)
-curl -H "Authorization: Bearer $TOKEN" https://api.github.com/user/repos
-```
-
-The credential is decrypted in memory, used for the API call, and never written to disk in plaintext.
-
-### Vault encryption details
-
-```
-Agent's Ed25519 private key (PKCS8 DER)
-  │
-  ▼ HKDF-SHA256 (salt: "agent-id-vault-v1", info: "vault-encryption")
-  │
-  ▼ 256-bit symmetric key
-  │
-  ▼ AES-256-GCM (random 96-bit IV per credential)
-  │
-  ▼ Ciphertext + 128-bit authentication tag
-  │
-  ▼ Stored as JSON: { iv, data, tag } (hex-encoded, mode 0600)
+    Priv --> HKDF --> Key --> AES --> Out
 ```
 
 ## Service authentication
 
-### For Alien-aware services
+### Wire format (RFC 9449 DPoP)
 
-Services verify agents with RFC 9449 DPoP. Per request the agent sends two headers:
+Per request the agent sends two headers:
 
-```
+```text
 Authorization: DPoP <access_token>
 DPoP: <proof JWT>
 ```
 
-The access_token (RFC 9068 `at+jwt`) is issued by Alien SSO and carries the standard claims that
-attest the owner ↔ agent chain:
+The access token is an Alien SSO-issued `at+jwt` (RFC 9068). Its standard claims carry the owner ↔ agent chain:
 
 | Claim | Meaning |
-|---|---|
+| --- | --- |
 | `sub` | Owner's AlienID address |
 | `aud` | Target service identifier |
 | `iss` | `https://sso.alien-api.com` |
 | `exp` | Access-token expiry |
 | `cnf.jkt` | JWK SHA-256 thumbprint of the agent's Ed25519 public key (RFC 7800 §3.1) |
 
-The agent generates the per-request proof for a specific method and URL:
+The agent generates the per-request proof for a specific method + URL:
 
 ```bash
-node cli.mjs auth-header --url https://service.example.com/api/whoami --method GET
+node skills/alien-agent-id/cli.mjs auth-header --url https://service.example.com/api/whoami --method GET
 # → Authorization: DPoP <access_token>
 # → DPoP: <proof JWT>
 ```
@@ -341,95 +247,72 @@ Service-side verification walks RFC 9449 §4.3:
 1. Exactly one `Authorization: DPoP <at>` and one `DPoP: <proof>` header.
 2. Proof is a JWS with `typ=dpop+jwt`, `alg=EdDSA`, and an OKP/Ed25519 `jwk` (no private `d`) in the header.
 3. EdDSA signature over the proof verifies against the embedded JWK.
-4. `htm` equals the request method byte-for-byte; `htu` equals the reconstructed `<origin><pathname>` (no query, no fragment).
+4. `htm` equals the request method byte-for-byte; `htu` equals the reconstructed `<origin><pathname>` (no
+   query, no fragment).
 5. `iat` is within ±`PROOF_MAX_AGE_SEC` (default 30s); `jti` not seen before.
-6. Parse access_token; validate `typ`/`alg`, verify signature against SSO JWKS.
+6. Parse the access token; validate `typ`/`alg`, verify signature against SSO JWKS.
 7. Claim checks: `iss == expectedIss`, optional `aud` allow-list, `exp > now`, non-empty `sub`.
 8. RFC 9449 §6.1: `at.cnf.jkt === jwkThumbprint(proof.header.jwk)`.
 9. RFC 9449 §4.3 step 10: `proof.ath === b64url(sha256(access_token))`.
 
-Owner identity, agent identity, and proof-of-possession come from signed standard claims. No
-custom envelope, no key pre-registration.
+Owner identity, agent identity, and proof-of-possession all come from signed standard claims. No custom
+envelope, no key pre-registration. See [INTEGRATION.md](INTEGRATION.md) for service-side integration patterns
+and SDK examples.
 
-### For services to integrate
+### External services (GitHub, AWS, Slack)
 
-Use `verifyDPoPRequest` from
-[`@alien-id/sso-agent-id`](https://www.npmjs.com/package/@alien-id/sso-agent-id):
-
-```javascript
-import { verifyDPoPRequest } from "@alien-id/sso-agent-id";
-
-// In your HTTP handler:
-const result = verifyDPoPRequest(
-  { method: req.method, url: req.url, headers: req.headers },
-  { jwks: await getSsoJwks(), expectedAudience: process.env.SERVICE_AUDIENCE },
-);
-if (!result.ok) {
-  return res
-    .status(401)
-    .set("WWW-Authenticate", `DPoP error="invalid_token", error_description="${result.code}"`)
-    .json(result);
-}
-
-// result.sub               — owner's AlienID address (from access_token.sub)
-// result.jkt               — agent key thumbprint (from access_token.cnf.jkt)
-// result.accessTokenClaims — full verified access_token payload
-// result.proofClaims       — full verified DPoP proof payload
-```
-
-A working demo service is included in `examples/demo-service.mjs`.
-
-### For external services
-
-External services (GitHub, AWS, Slack) don't know about Agent ID tokens. The agent authenticates to them using credentials stored in the vault:
+External services don't know about Agent ID tokens. The agent authenticates to them using credentials stored
+in the vault:
 
 ```bash
-# Retrieve stored credential
-node cli.mjs vault-get --service github
-# → {"credential": "ghp_xxx", "type": "api-key", ...}
-
-# Use it
-curl -H "Authorization: Bearer ghp_xxx" https://api.github.com/...
+TOKEN=$(node skills/alien-agent-id/cli.mjs vault-get --service github | jq -r .credential)
+curl -H "Authorization: Bearer $TOKEN" https://api.github.com/user/repos
 ```
+
+The credential is decrypted in memory, used for the API call, and never written to disk in plaintext.
 
 ## Files in this repository
 
-| File | Purpose |
-|---|---|
-| `SKILL.md` | Agent-facing instructions — give this to any AI agent |
-| `AGENT-SSO.md` | This file — system documentation for humans |
-| `cli.mjs` | CLI tool — all agent operations |
-| `lib.mjs` | Core library — crypto, OIDC, vault, token verification |
-| `examples/demo-service.mjs` | Demo HTTP service with agent authentication |
-| `default-provider.txt` | Default provider address |
-| `package.json` | Package metadata (zero dependencies) |
+| Path | Purpose |
+| --- | --- |
+| `skills/alien-agent-id/SKILL.md` | Agent-facing instructions — give this to any AI agent |
+| `skills/alien-agent-id/cli.mjs` | CLI tool — all agent operations |
+| `skills/alien-agent-id/lib.mjs` | Core library — crypto, OIDC, DPoP, vault, verifier (no runtime deps) |
+| `skills/alien-agent-id/qrcode.cjs` | Vendored QR code generator (terminal output) |
+| `skills/alien-agent-id/default-provider.txt` | Default SSO provider address |
+| `examples/demo-service.mjs` | Reference DPoP-verifying HTTP service (~426 LOC, SDK-free) |
+| `examples/dev-sso.mjs` | Local SSO that auto-approves authorize requests for end-to-end testing |
+| `tests/` | Unit + integration test suites |
+| `docs/AGENT-SSO.md` | This document — system overview for humans |
+| `docs/INTEGRATION.md` | Service-side integration guide |
 | `README.md` | Project overview |
+| `CHANGELOG.md` | Release history |
 
 ## Quick reference
 
 ```bash
 # Bootstrap (one command, requires human QR scan once)
-node cli.mjs bootstrap
+node skills/alien-agent-id/cli.mjs bootstrap
 
 # Check status
-node cli.mjs status
+node skills/alien-agent-id/cli.mjs status
 
 # Store a credential securely
 echo 'ghp_xxx' > /tmp/tok && chmod 600 /tmp/tok
-node cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
+node skills/alien-agent-id/cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
 rm /tmp/tok
 
 # Retrieve a credential
-node cli.mjs vault-get --service github
+node skills/alien-agent-id/cli.mjs vault-get --service github
 
-# Generate auth token for service calls
-node cli.mjs auth-header --raw
+# Generate the two-header pair for a request
+node skills/alien-agent-id/cli.mjs auth-header --url https://service.example.com/api/whoami --method GET
 
 # Sign a git commit with provenance
-node cli.mjs git-commit --message "feat: something" --push
+node skills/alien-agent-id/cli.mjs git-commit --message "feat: something" --push
 
 # Verify a commit's provenance chain
-node cli.mjs git-verify --commit HEAD
+node skills/alien-agent-id/cli.mjs git-verify --commit HEAD
 
 # Start the demo service
 node examples/demo-service.mjs

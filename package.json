@@ -17,10 +17,7 @@
     "tests",
     "CHANGELOG.md",
     "docs/AGENT-SSO.md",
-    "docs/INTEGRATION.md",
-    "docs/MIGRATION-DPOP.md",
-    "docs/RELEASE-NOTES.md",
-    "docs/TESTING.md"
+    "docs/INTEGRATION.md"
   ],
   "repository": {
     "type": "git",

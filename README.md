@@ -1,17 +1,12 @@
-<p align="center">
-  <img src=".github/assets/logo.png" alt="Alien Agent ID" width="128">
-</p>
+![Alien Agent ID](.github/assets/logo.png)
 
-<h1 align="center">Alien Agent ID</h1>
+# Alien Agent ID
 
-<p align="center">
-  Verifiable cryptographic identity for AI agents, linked to human owners<br>
-  via <a href="https://alien.org">Alien Network</a> SSO.
-</p>
+Verifiable cryptographic identity for AI agents, linked to human owners via [Alien Network][alien] SSO.
 
-When an AI agent has an Alien Agent ID, every git commit it makes is SSH-signed and carries trailers
-that trace back to the specific agent and the human who authorized it. The provenance chain is
-fully verifiable: **commit → agent key → owner binding → SSO attestation → verified AlienID holder**.
+When an AI agent has an Alien Agent ID, every git commit it makes is SSH-signed and carries trailers that trace back
+to the specific agent and the human who authorized it. The provenance chain is fully verifiable:
+**commit → agent key → SSO `id_token` (with `cnf.jkt`) → verified AlienID holder**.
 
 [💻 Watch the setup demo on X](https://x.com/kirillzzy/status/2042269104359563500)
 
@@ -62,13 +57,16 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 | --- | --- |
 | `skills/alien-agent-id/SKILL.md` | Instructions for AI agents — point your agent here |
 | `skills/alien-agent-id/cli.mjs` | CLI tool — all agent operations |
-| `skills/alien-agent-id/lib.mjs` | Portable library — crypto, OIDC, signing engine, verification (zero npm deps) |
+| `skills/alien-agent-id/lib.mjs` | Portable library — crypto, OIDC, DPoP, signing, verification (zero npm deps) |
 | `skills/alien-agent-id/qrcode.cjs` | Vendored QR code generator (terminal output) |
 | `skills/alien-agent-id/default-provider.txt` | Default SSO provider address |
+| `examples/demo-service.mjs` | Reference DPoP-verifying service (~426 LOC, no SDK dependency) |
+| `examples/dev-sso.mjs` | Local SSO that auto-approves authorize requests for end-to-end testing |
+| `tests/` | Unit + integration test suites |
 | `docs/AGENT-SSO.md` | System documentation for humans |
 | `docs/INTEGRATION.md` | Integration guide for service providers |
-| `tests/test-refresh.mjs` | Test suite for session refresh flow |
-| `package.json` | Minimal metadata |
+| `CHANGELOG.md` | Release history |
+| `package.json` | Minimal metadata (no runtime dependencies) |
 
 ---
 
@@ -185,8 +183,9 @@ flowchart LR
    and the `Agent-ID-JKT` trailer
 4. **SSH commit signature** — git's native SSH signature must verify against `agent_jwk`
 
-Pre-v3 (legacy `Agent-ID-Fingerprint` / `Agent-ID-Binding`) commits are **intentionally not
-supported** — see `commit-signing-cleanup.md`.
+Pre-v3 (legacy `Agent-ID-Fingerprint` / `Agent-ID-Binding`) commits are **intentionally not supported**. Their
+`id_tokens` predate the RFC 7800 `cnf.jkt` binding and cannot anchor the chain; see [CHANGELOG.md](CHANGELOG.md)
+for the 3.0.0 cutover notes.
 
 Falls back to the agent's local state (`~/.agent-id/`) if no git note is found.
 
@@ -352,14 +351,15 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 | `init` | Generate Ed25519 keypair |
 | `status` | Check if Alien Agent ID exists and is bound |
 | `auth --provider-address <addr>` | Start OIDC auth, get QR / deep link |
-| `bind` | Poll for user approval, create owner binding |
+| `bind` | Poll for user approval, exchange tokens, verify `cnf.jkt`, persist `owner-session.json` |
+| `setup-owner-session` | Re-run the auth + bind flow against the existing keypair (re-auth) |
 | `git-setup [--email E]` | Configure git SSH signing |
-| `git-commit --message "..." [--push]` | Signed commit with trailers + proof note + audit log |
+| `git-commit --message "..." [--push]` | Signed commit with trailers + v3 proof note + audit log |
 | `git-verify [--commit <hash>]` | Verify provenance chain of a commit |
-| `auth-header [--raw]` | Generate signed auth token for service calls |
+| `auth-header --url <URL> --method <M>` | Emit `Authorization: DPoP <at>` and `DPoP: <proof>` for one request |
 | `discover-service --url <URL>` | Fetch + validate `/.well-known/alien-agent-id.json` |
 | `service-support --url <URL>` | Probe page for `<meta name="alien-agent-id">` support signal |
-| `refresh` | Refresh SSO session tokens |
+| `refresh` | Refresh SSO session tokens (DPoP-bound) |
 | `vault-store --service S` | Store encrypted credential |
 | `vault-get --service S` | Retrieve decrypted credential |
 | `vault-list` | List stored credentials (no secrets shown) |
@@ -375,14 +375,16 @@ Run `node skills/alien-agent-id/cli.mjs --help` for all flags.
 ## Security
 
 - **Private keys** stored with `0600` permissions; state directories created with `0700`
-- **PKCE (S256)** prevents authorization code interception
-- **Owner binding** is Ed25519-signed by the agent's key
-- **SSO id_token** (RS256) provides server attestation of the human-agent link
+- **PKCE (S256)** prevents authorization code interception (RFC 7636)
+- **SSO `id_token`** (RS256) commits the agent key thumbprint via `cnf.jkt` — the human ↔ agent binding lives
+  inside the SSO-signed claim, not a separate self-signed envelope (RFC 7800 §3.1)
+- **DPoP proof-of-possession** (RFC 9449) — every service request carries a fresh Ed25519-signed proof bound
+  to the URL, method, and `cnf.jkt`; a leaked access token is useless without the matching private key
 - **Hash-chained audit log** — any tampering breaks the chain
-- **Vault encryption** — AES-256-GCM with HKDF-derived key from agent's private key
+- **Vault encryption** — AES-256-GCM with HKDF-SHA256-derived key from agent's private key
 - **JWT alg:none rejected** — unsigned tokens are refused at parse level
 - **Subject validation** — token refresh verifies the subject claim still matches the bound owner
-- **Auth tokens** are short-lived (5 minutes) with random nonces for replay protection
+- **Refresh tokens are sticky** — bound to the original `cnf.jkt`, no rotation needed
 - `owner-session.json` contains tokens — never commit or share it
 
 ---
