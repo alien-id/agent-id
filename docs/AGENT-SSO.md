@@ -37,7 +37,7 @@ flowchart TD
     Human -- "1. Scan QR via Alien App" --> SSO
     SSO -- "2. id_token + access_token + refresh_token" --> Agent
     Agent --- State
-    Agent -- "Authorization: DPoP &lt;at&gt;<br/>DPoP: &lt;proof&gt;" --> Service
+    Agent -- "DPoP-bound request" --> Service
     Agent -- "Stored API key / OAuth token" --> External
 ```
 
@@ -127,7 +127,7 @@ sequenceDiagram
     participant H as Human (Alien App)
 
     A->>A: Generate Ed25519 keypair (~/.agent-id/keys/main.json)
-    A->>SSO: GET /oauth/authorize<br/>client_id=provider, dpop_jkt, PKCE
+    A->>SSO: GET /oauth/authorize (client_id, dpop_jkt, PKCE)
     SSO-->>A: deep_link, polling_code, expires_at
     A->>H: Show QR / deep link
     H->>SSO: Approve in Alien App
@@ -135,9 +135,9 @@ sequenceDiagram
         A->>SSO: POST /oauth/poll
     end
     SSO-->>A: authorization_code
-    A->>SSO: POST /oauth/token<br/>code + PKCE + DPoP proof
+    A->>SSO: POST /oauth/token (code + PKCE + DPoP proof)
     SSO-->>A: id_token (RS256, with cnf.jkt) + access_token + refresh_token
-    A->>A: Verify id_token signature against SSO JWKS<br/>(iss, sub, cnf.jkt match agent JWK)
+    A->>A: Verify id_token signature against SSO JWKS (iss, sub, cnf.jkt match agent JWK)
     A->>A: Persist owner-session.json (0600)
     A->>A: Configure git SSH signing
 ```

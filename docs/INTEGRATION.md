@@ -13,7 +13,7 @@ sequenceDiagram
     participant Service as Your Service
 
     Agent->>Agent: Mint per-request DPoP proof JWT (Ed25519, signed by agent key)
-    Agent->>Service: HTTP request<br/>Authorization: DPoP &lt;access_token&gt;<br/>DPoP: &lt;proof JWT&gt;
+    Agent->>Service: HTTP request with Authorization + DPoP headers
     Service->>Service: Verify proof signature (RFC 9449 §4.3)
     Service->>Service: Check htm / htu / iat / jti
     Service->>Service: Verify access_token (RFC 9068)
