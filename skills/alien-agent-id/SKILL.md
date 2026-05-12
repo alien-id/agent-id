@@ -120,7 +120,7 @@ A normal `git commit` still works but skips trailers, signing, and the proof not
 | `call --url <U> [--method M] [--body-file F] [--body S]` | One-shot signed HTTP request (preferred). |
 | `auth-header --url <U> [--method M] [--raw]` | Emit `Authorization` + `DPoP` headers for one request. |
 | `discover-service --url <U>` | Fetch + validate `/.well-known/alien-agent-id.json`. |
-| `capabilities --url <U> [--format markdown\|anthropic\|openai\|mcp]` | Render `api.operations[]` as markdown (default) or as a provider tool-use array. |
+| `capabilities --url <U>` | Render a manifest's `api.operations[]` as markdown. |
 | `service-support --url <U>` | Probe a page for the `<meta name="alien-agent-id">` support signal. |
 | `bootstrap` | Init + auth + bind + git-setup. Blocks ≤5 min — use only when the QR code can be surfaced. |
 | `init` / `auth` / `bind` / `git-setup` | Individual bootstrap steps. See [reference/bootstrap.md](reference/bootstrap.md). |

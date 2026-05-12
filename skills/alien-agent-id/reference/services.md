@@ -32,14 +32,6 @@ node CLI capabilities --url https://example.com
 
 Output is markdown — one heading per operation, with the exact `node CLI call …` invocation for each, plus a `⚠ destructive` note when the publisher set `annotations.destructiveHint: true`.
 
-For tool-use API integration, the same data renders as a provider-shaped array:
-
-```bash
-node CLI capabilities --url https://example.com --format anthropic   # Messages API tools[]
-node CLI capabilities --url https://example.com --format openai      # Chat Completions tools[]
-node CLI capabilities --url https://example.com --format mcp         # JSON-RPC tools/list response
-```
-
 #### Operation schema constraints
 
 `inputSchema` / `outputSchema` are a deliberately small subset of JSON Schema 2020-12:
