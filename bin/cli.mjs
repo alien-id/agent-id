@@ -1472,6 +1472,8 @@ Commands:
   vault-get      Retrieve a decrypted credential from the vault
   vault-list     List all stored credentials
   vault-remove   Remove a credential from the vault
+  mcp            Start the Model Context Protocol server on stdio (for Claude Code
+                 and other MCP-aware agents). Takes no flags.
 
 Bootstrap flags:
   --provider-address <addr>  Provider address (or ALIEN_PROVIDER_ADDRESS env / default-provider.txt)
@@ -1531,6 +1533,8 @@ All commands output JSON to stdout. Progress and errors go to stderr.
 
 // ─── Main ───────────────────────────────────────────────────────────────────────
 
+// The `mcp` subcommand is intentionally not in this map — it claims stdin/stdout
+// for JSON-RPC framing and is dispatched separately in main() below.
 const commands = {
   bootstrap: cmdBootstrap,
   "setup-owner-session": cmdSetupOwnerSession,
@@ -1562,6 +1566,13 @@ async function main() {
 
   if (!command || command === "help" || command === "--help" || command === "-h") {
     printHelp();
+    return;
+  }
+
+  if (command === "mcp") {
+    // Hand off to the Model Context Protocol server. It claims stdin/stdout
+    // for JSON-RPC framing, so we await it indefinitely.
+    await import("./mcp-server.mjs");
     return;
   }
 

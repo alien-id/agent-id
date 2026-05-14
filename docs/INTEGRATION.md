@@ -86,7 +86,7 @@ To save agents one extra HTTP round-trip when your origin doesn't speak agent-id
 `content` is a closed enum (`v1`, future versions added explicitly). It carries no URLs and no prose — its only signal is "this origin publishes a well-known manifest at the standard path." Agents can probe with:
 
 ```bash
-node skills/alien-agent-id/cli.mjs service-support --url https://your-service.example
+node bin/cli.mjs service-support --url https://your-service.example
 ```
 
 The well-known path is fixed regardless; the meta tag never tells the agent where the manifest is, only whether one exists.
@@ -407,7 +407,7 @@ node examples/demo-service.mjs \
 
 ```bash
 # Emit both headers for a specific request — proof is bound to method + URL
-node skills/alien-agent-id/cli.mjs auth-header \
+node bin/cli.mjs auth-header \
   --url http://localhost:3141/api/whoami --method GET --shell > /tmp/dpop-env
 
 source /tmp/dpop-env

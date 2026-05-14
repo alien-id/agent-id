@@ -1,11 +1,11 @@
 ---
 name: alien-id-vault
-description: Store, retrieve, list, and remove external-service credentials (GitHub PAT, Slack token, AWS keys, OAuth tokens, etc.) in an AES-256-GCM-encrypted vault keyed off the agent's Ed25519 private key. Use when the user asks to store, save, retrieve, look up, or rotate a credential / API key / token / secret for an external service — or when an existing flow needs a credential and `vault-get` reports it is missing. Also covers the secure out-of-band intake protocol so secrets never get pasted into chat.
+description: Store, retrieve, list, and remove external-service credentials (GitHub PAT, Slack token, AWS keys, OAuth tokens, etc.) in an AES-256-GCM-encrypted vault keyed off the agent's Ed25519 private key. Use when the user asks to store, save, retrieve, look up, or rotate a credential / API key / token / secret for an external service — or when an existing flow needs a credential and `vault_get` reports it is missing. Also covers the secure out-of-band intake protocol so secrets never get pasted into chat.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "3.1.1"
-allowed-tools: Bash(node *alien-agent-id/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
+  version: "4.0.0"
+allowed-tools: mcp__alien-agent-id__* Bash(node *bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
 ---
 
 # Alien Agent ID — Credential vault
@@ -14,51 +14,27 @@ Encrypted storage for external-service credentials. Records live in `~/.agent-id
 
 Never hard-code credentials. Always use the vault.
 
-## Resolve the CLI path
-
-`cli.mjs` lives in the sibling skill directory `alien-agent-id/`. Substitute `CLI` with its absolute path (e.g. `node /abs/path/to/skills/alien-agent-id/cli.mjs`) in every example below.
+This skill prefers MCP tools (`mcp__alien-agent-id__*`). If the MCP server is not registered, fall back to the CLI — see [CLI fallback](#cli-fallback) at the bottom.
 
 ## Precondition — identity must exist
 
-```bash
-node CLI status
-```
-
-If there is no keypair, run [[alien-id-setup]] first — the encryption key is derived from it.
+Call `mcp__alien-agent-id__status`. If there is no keypair, run `alien-id-setup` first — the encryption key is derived from it.
 
 ## Retrieve
 
-```bash
-node CLI vault-get --service github
-```
-
-Returns:
+Call `mcp__alien-agent-id__vault_get` with `service: "<name>"`. Returns:
 
 ```json
 { "ok": true, "service": "github", "type": "api-key", "credential": "<secret>", "url": "...", "username": "..." }
 ```
 
-List entries (metadata only, no secrets):
+List entries (metadata only, no secrets): `mcp__alien-agent-id__vault_list` (no args).
 
-```bash
-node CLI vault-list
-```
-
-Remove:
-
-```bash
-node CLI vault-remove --service <name>
-```
+Remove: `mcp__alien-agent-id__vault_remove` with `service: "<name>"`.
 
 ## Use a stored credential
 
-Pipe through `jq` — never echo the secret to the terminal:
-
-```bash
-GH_TOKEN=$(node CLI vault-get --service github | jq -r .credential)
-curl -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user
-unset GH_TOKEN
-```
+The credential lands inside the tool result as a JSON field. Pipe it directly into the consumer; do not echo it to the chat. For shell use, fall back to the CLI route below where stdout is straightforward to pipe through `jq`.
 
 ## Store — the secure flow
 
@@ -66,11 +42,7 @@ When a credential is missing, follow this protocol.
 
 ### Step 1 — confirm absence
 
-```bash
-node CLI vault-get --service github
-```
-
-If it returns the credential, use it. Otherwise continue.
+Call `mcp__alien-agent-id__vault_get` with the service name. If it returns the credential, use it. Otherwise continue.
 
 ### Step 2 — ask the user out-of-band
 
@@ -93,46 +65,61 @@ If it returns the credential, use it. Otherwise continue.
 
 ### Step 3 — store
 
-```bash
-# Option A: from env var (no secret on the command line, no stdout)
-node CLI vault-store --service github --type api-key --credential-env GITHUB_TOKEN
-unset GITHUB_TOKEN
+Call `mcp__alien-agent-id__vault_store` with:
 
-# Option B: from file
-node CLI vault-store --service github --type api-key --credential-file /tmp/gh-token
-rm -f /tmp/gh-token
+- `service: "<name>"` (required)
+- `type: "api-key" | "password" | "oauth" | "bearer" | "custom"` (default `api-key`)
+- One source of secret:
+  - `credentialEnv: "<VAR>"` — read from env var (preferred for env-loaded secrets).
+  - `credentialFile: "<path>"` — read from a file (best for CI; delete after).
+  - `credential: "<value>"` — inline; avoid — visible in MCP-server process args.
+- Optional `username: "<name>"`, `url: "<service URL>"`.
 
-# Programmatic: pipe from another secret source — no literal in the command
-your-secret-source | node CLI vault-store --service github --type api-key
-```
+After storing from a file, delete it (`rm -f /tmp/gh-token`). After storing from an env var, unset it (`unset GITHUB_TOKEN`).
 
-## `vault-store` flags
+## Store-tool args
 
-| Flag | Required | Description |
+| Arg | Required | Description |
 |---|---|---|
-| `--service <name>` | yes | Service identifier (also the lookup key). Sanitized to `[A-Za-z0-9._-]`. |
-| `--type <type>` | no (default `api-key`) | One of `api-key`, `password`, `oauth`, `bearer`, `custom`. Use `password` with `--username`. |
-| `--credential-env <VAR>` | one of these required | Read the secret from env var `VAR` — most agent-friendly. |
-| `--credential-file <path>` | | Read the secret from a file (best for CI; delete after). |
-| `--credential <value>` | | Pass the secret inline. Avoid — visible in `ps` and shell history. |
-| stdin pipe | | If none of the above is set, the secret is read from stdin. |
-| `--username <name>` | no | Account/login this credential belongs to. Required by convention with `--type password`. |
-| `--url <url>` | no | Service URL stored as metadata. Useful when one credential is tenant-specific. |
+| `service` | yes | Service identifier (also the lookup key). Sanitized to `[A-Za-z0-9._-]`. |
+| `type` | no (default `api-key`) | One of `api-key`, `password`, `oauth`, `bearer`, `custom`. Use `password` with `username`. |
+| `credentialEnv` | one of these required | Env var name to read the secret from — most agent-friendly. |
+| `credentialFile` | | Path to file containing the secret (best for CI). |
+| `credential` | | Inline secret. Avoid — visible in process args. |
+| `username` | no | Account/login. Required by convention with `type: "password"`. |
+| `url` | no | Service URL stored as metadata. Useful when one credential is tenant-specific. |
 
-Re-running with the same `--service` updates the credential and metadata; the original `createdAt` is preserved.
+Re-calling `vault_store` with the same `service` updates the credential and metadata; the original `createdAt` is preserved.
 
-## Command reference
+## Tool reference
 
-| Command | Purpose |
+| Tool | Purpose |
 |---|---|
-| `vault-get --service <S>` | Retrieve a decrypted credential. |
-| `vault-list` | List vault entries (metadata only). |
-| `vault-store --service <S> [--type T] --credential-env <V> \| --credential-file <P> \| stdin` | Store a credential securely. |
-| `vault-remove --service <S>` | Remove a credential. |
+| `mcp__alien-agent-id__vault_get` | Retrieve a decrypted credential. Args: `service`. |
+| `mcp__alien-agent-id__vault_list` | List vault entries (metadata only). |
+| `mcp__alien-agent-id__vault_store` | Store a credential securely. See table above. |
+| `mcp__alien-agent-id__vault_remove` | Remove a credential. Args: `service`. |
 
-Common flag: `--state-dir <path>` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`).
+Common arg: `stateDir` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`).
+
+## CLI fallback
+
+When MCP is unavailable, the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/bin/cli.mjs`).
+
+```bash
+node CLI vault-get --service github
+node CLI vault-list
+node CLI vault-remove --service github
+node CLI vault-store --service github --type api-key --credential-env GITHUB_TOKEN
+node CLI vault-store --service github --type api-key --credential-file /tmp/gh-token
+
+# Use a stored credential without leaking it:
+GH_TOKEN=$(node CLI vault-get --service github | jq -r .credential)
+curl -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user
+unset GH_TOKEN
+```
 
 ## Reference docs
 
-- [../alien-agent-id/reference/vault.md](../alien-agent-id/reference/vault.md) — secure credential storage and retrieval.
-- [../alien-agent-id/reference/state-and-errors.md](../alien-agent-id/reference/state-and-errors.md) — error catalog.
+- [../../docs/reference/vault.md](../../docs/reference/vault.md) — secure credential storage and retrieval.
+- [../../docs/reference/state-and-errors.md](../../docs/reference/state-and-errors.md) — error catalog.

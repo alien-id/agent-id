@@ -29,7 +29,7 @@ import {
   SERVICE_MANIFEST_PATH,
   SERVICE_MANIFEST_MAX_BYTES,
   SUPPORT_SIGNAL_MAX_BYTES,
-} from "../skills/alien-agent-id/lib.mjs";
+} from "../bin/lib.mjs";
 
 // Fixture access_token. The mock service does not verify SSO signatures —
 // that's covered exhaustively by test-id-token-verifier / test-cnf-verifier
@@ -52,7 +52,7 @@ function mintFixtureAccessToken({ agentPublicKeyPem, sub = "test-owner-sub" }) {
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_PATH = path.resolve(__dirname, "../skills/alien-agent-id/cli.mjs");
+const CLI_PATH = path.resolve(__dirname, "../bin/cli.mjs");
 
 function buildValidManifest(host) {
   return {
@@ -642,7 +642,7 @@ describe("renderCapabilities", () => {
   const host = "acme.test";
 
   it("falls back to specUrl message when operations[] is absent", async () => {
-    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const { renderCapabilities } = await import("../bin/lib.mjs");
     const md = renderCapabilities({
       service: { name: "Acme" },
       auth: { header: "Authorization", scheme: "DPoP" },
@@ -653,7 +653,7 @@ describe("renderCapabilities", () => {
   });
 
   it("renders the Call: line with the absolute URL and method", async () => {
-    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const { renderCapabilities } = await import("../bin/lib.mjs");
     const manifest = parseServiceManifest(
       {
         version: 2,
@@ -684,7 +684,7 @@ describe("renderCapabilities", () => {
   });
 
   it("preserves {param} placeholders in the Call: URL", async () => {
-    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const { renderCapabilities } = await import("../bin/lib.mjs");
     const manifest = parseServiceManifest(
       {
         version: 2,

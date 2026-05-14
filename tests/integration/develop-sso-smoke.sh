@@ -59,12 +59,12 @@ curl -fsS "$SSO_URL/.well-known/openid-configuration" \
 assert "advertises cnf + EdDSA" true
 
 blue "▸ Step 1: init (agent keypair)"
-node skills/alien-agent-id/cli.mjs init --state-dir "$STATE_DIR" >/tmp/dsm.init.json
+node bin/cli.mjs init --state-dir "$STATE_DIR" >/tmp/dsm.init.json
 assert "fingerprint produced" \
   bash -c 'jq -e ".fingerprint | type == \"string\"" /tmp/dsm.init.json >/dev/null'
 
 blue "▸ Step 2: auth (begin OIDC, dpop_jkt + Origin: http://localhost)"
-node skills/alien-agent-id/cli.mjs auth --state-dir "$STATE_DIR" \
+node bin/cli.mjs auth --state-dir "$STATE_DIR" \
   --provider-address "$PROVIDER" --sso-url "$SSO_URL" \
   --oidc-origin http://localhost >/tmp/dsm.auth.json
 assert "deep_link returned" \
@@ -92,7 +92,7 @@ HTTP_CODE=$(curl -s -o /tmp/dsm.cb.json -w '%{http_code}' \
 assert "SSO accepted mock signature (200)" bash -c "[[ '$HTTP_CODE' = '200' ]]"
 
 blue "▸ Step 5: bind (poll → DPoP token exchange → cnf.jkt verify)"
-node skills/alien-agent-id/cli.mjs bind --state-dir "$STATE_DIR" \
+node bin/cli.mjs bind --state-dir "$STATE_DIR" \
   --timeout-sec "$BIND_TIMEOUT_SEC" --poll-interval-ms 500 >/tmp/dsm.bind.json
 assert "binding created" \
   bash -c 'jq -e ".bindingId | type == \"string\"" /tmp/dsm.bind.json >/dev/null'
@@ -111,7 +111,7 @@ assert "cnf.jkt present in id_token" bash -c "[[ -n '$JKT' ]]"
 yellow "    cnf.jkt = $JKT"
 
 blue "▸ Step 7: status reports bound"
-node skills/alien-agent-id/cli.mjs status --state-dir "$STATE_DIR" >/tmp/dsm.status.json
+node bin/cli.mjs status --state-dir "$STATE_DIR" >/tmp/dsm.status.json
 assert "bound==true" \
   bash -c 'jq -e ".bound == true" /tmp/dsm.status.json >/dev/null'
 
@@ -125,7 +125,7 @@ for i in {1..30}; do
 done
 
 WHOAMI_URL="http://127.0.0.1:$DEMO_PORT/api/v1/whoami"
-node skills/alien-agent-id/cli.mjs auth-header --state-dir "$STATE_DIR" \
+node bin/cli.mjs auth-header --state-dir "$STATE_DIR" \
   --url "$WHOAMI_URL" --method GET --raw >/tmp/dsm.headers.txt
 AUTH_HDR=$(grep '^Authorization:' /tmp/dsm.headers.txt | sed 's/^Authorization: //')
 DPOP_HDR=$(grep '^DPoP:'         /tmp/dsm.headers.txt | sed 's/^DPoP: //')

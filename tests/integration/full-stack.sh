@@ -54,7 +54,7 @@ cli() {
   # `--state-dir` is forwarded to every command so all CLI invocations
   # share the same scratch state directory under STATE_DIR.
   local cmd=$1 ; shift
-  node skills/alien-agent-id/cli.mjs "$cmd" --state-dir "$STATE_DIR" "$@"
+  node bin/cli.mjs "$cmd" --state-dir "$STATE_DIR" "$@"
 }
 
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }

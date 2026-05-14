@@ -38,7 +38,7 @@ import {
   b64url,
   ensureDir,
   writeJsonFile,
-} from "../skills/alien-agent-id/lib.mjs";
+} from "../bin/lib.mjs";
 
 const HERMETIC_GIT_ENV = {
   ...process.env,
@@ -48,7 +48,7 @@ const HERMETIC_GIT_ENV = {
 const execRaw = promisify(execFileCb);
 const exec = (file, args, opts = {}) =>
   execRaw(file, args, { ...opts, env: { ...HERMETIC_GIT_ENV, ...(opts.env || {}) } });
-const CLI_PATH = new URL("../skills/alien-agent-id/cli.mjs", import.meta.url).pathname;
+const CLI_PATH = new URL("../bin/cli.mjs", import.meta.url).pathname;
 
 // ─── Fixture helpers ─────────────────────────────────────────────────────────────
 

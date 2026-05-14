@@ -34,7 +34,7 @@ import {
   verifyJwtEdDsaSignature,
   fetchOidcDiscovery,
   fetchJwks,
-} from "../skills/alien-agent-id/lib.mjs";
+} from "../bin/lib.mjs";
 
 const { values: argv } = parseArgs({
   args: process.argv.slice(2),

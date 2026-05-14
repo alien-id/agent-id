@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "alien-agent-id": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@alien-id/agent-id@latest", "mcp"]
+    }
+  }
+}

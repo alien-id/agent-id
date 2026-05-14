@@ -53,13 +53,19 @@ Alien App.
 
 ## How to give an agent these capabilities
 
-### The skill file
+### The skill files
 
-`skills/alien-agent-id/SKILL.md` in this repository contains everything an AI agent needs to bootstrap its
-identity, authenticate with services, and manage credentials. It is written as agent-facing instructions — the
-agent reads it and follows the steps autonomously.
+The toolkit ships as five focused skill files in this repository:
 
-To give any AI agent these capabilities, point it at the skill file.
+- `skills/alien-id-setup/SKILL.md` — bootstrap or re-auth the identity.
+- `skills/alien-id-commit/SKILL.md` — SSH-signed git commits with provenance trailers.
+- `skills/alien-id-verify/SKILL.md` — verify provenance on any commit (standalone; auditor-friendly).
+- `skills/alien-id-auth/SKILL.md` — DPoP-signed calls to Alien-aware services + discovery.
+- `skills/alien-id-vault/SKILL.md` — encrypted credential storage for external services.
+
+Each is written as agent-facing instructions — the agent reads it and follows the steps autonomously.
+
+To give any AI agent these capabilities, point it directly at the skill matching the task.
 
 ### Claude Code
 
@@ -68,8 +74,9 @@ Add to your project's `CLAUDE.md`:
 ```markdown
 ## Agent Identity
 
-Before making git commits or accessing authenticated services, read and follow the skill file at
-`/path/to/agent-id/skills/alien-agent-id/SKILL.md` to obtain your Alien Agent ID.
+Before making git commits or accessing authenticated services, read and follow the skill files under
+`/path/to/agent-id/skills/` to obtain your Alien Agent ID. Invoke the skill matching the task:
+`alien-id-setup`, `alien-id-commit`, `alien-id-verify`, `alien-id-auth`, `alien-id-vault`.
 ```
 
 Or install via the Claude Code marketplace:
@@ -80,19 +87,25 @@ Or install via the Claude Code marketplace:
 /reload-plugins
 ```
 
-Then invoke `/alien-agent-id` inside Claude Code; it will run the bootstrap, surface the QR code, and wait for
-your Alien App approval.
+Then invoke `/alien-id-setup` inside Claude Code to bootstrap; it will surface the QR code and wait for
+your Alien App approval. After bootstrap, use the matching skill for each task (`/alien-id-commit`,
+`/alien-id-verify`, `/alien-id-auth`, `/alien-id-vault`).
+
+The plugin bundles an MCP server (`bin/mcp-server.mjs`) registered automatically via `.mcp.json`.
+Skills call typed tools (`mcp__alien-agent-id__status`, `mcp__alien-agent-id__git_commit`, …) instead
+of shelling out to the CLI. The CLI is still available as a fallback for environments where MCP isn't
+wired up.
 
 ### Other agents
 
 Any agent that can run shell commands and read files can use this system. The agent needs:
 
 - **Node.js 18+** available in the shell
-- **Read access** to `SKILL.md` and the CLI files
-- **Shell access** to run `node skills/alien-agent-id/cli.mjs <command>`
+- **Read access** to the skill files and the CLI files
+- **Shell access** to run `node bin/cli.mjs <command>`
 
 Instruct the agent — system prompt, instructions file, initial message, whatever the platform supports — to
-read `SKILL.md` and follow the bootstrap steps.
+read the skill matching the task: `skills/alien-id-{setup,commit,verify,sso,vault}/SKILL.md`.
 
 ### CI/CD
 
@@ -100,7 +113,7 @@ read `SKILL.md` and follow the bootstrap steps.
 - name: Bootstrap agent identity
   env:
     ALIEN_PROVIDER_ADDRESS: ${{ secrets.ALIEN_PROVIDER_ADDRESS }}
-  run: node /path/to/agent-id/skills/alien-agent-id/cli.mjs bootstrap
+  run: node /path/to/agent-id/bin/cli.mjs bootstrap
 ```
 
 `bootstrap` blocks waiting for QR approval. For attended CI (a developer watches the run), the QR / deep link
@@ -113,7 +126,7 @@ is printed. For unattended CI, pre-bootstrap on the runner and persist `~/.agent
 | `ALIEN_PROVIDER_ADDRESS` | Provider address (avoids the `--provider-address` flag) |
 | `AGENT_ID_STATE_DIR` | Custom state directory (default `~/.agent-id`) |
 
-The provider address can also be set in `skills/alien-agent-id/default-provider.txt` next to the CLI.
+The provider address can also be set in `bin/default-provider.txt` next to the CLI.
 
 ## SSO flow in detail
 
@@ -237,7 +250,7 @@ The access token is an Alien SSO-issued `at+jwt` (RFC 9068). Its standard claims
 The agent generates the per-request proof for a specific method + URL:
 
 ```bash
-node skills/alien-agent-id/cli.mjs auth-header --url https://service.example.com/api/whoami --method GET
+node bin/cli.mjs auth-header --url https://service.example.com/api/whoami --method GET
 # → Authorization: DPoP <access_token>
 # → DPoP: <proof JWT>
 ```
@@ -265,7 +278,7 @@ External services don't know about Agent ID tokens. The agent authenticates to t
 in the vault:
 
 ```bash
-TOKEN=$(node skills/alien-agent-id/cli.mjs vault-get --service github | jq -r .credential)
+TOKEN=$(node bin/cli.mjs vault-get --service github | jq -r .credential)
 curl -H "Authorization: Bearer $TOKEN" https://api.github.com/user/repos
 ```
 
@@ -275,11 +288,17 @@ The credential is decrypted in memory, used for the API call, and never written 
 
 | Path | Purpose |
 | --- | --- |
-| `skills/alien-agent-id/SKILL.md` | Agent-facing instructions — give this to any AI agent |
-| `skills/alien-agent-id/cli.mjs` | CLI tool — all agent operations |
-| `skills/alien-agent-id/lib.mjs` | Core library — crypto, OIDC, DPoP, vault, verifier (no runtime deps) |
-| `skills/alien-agent-id/qrcode.cjs` | Vendored QR code generator (terminal output) |
-| `skills/alien-agent-id/default-provider.txt` | Default SSO provider address |
+| `skills/alien-id-setup/SKILL.md` | Bootstrap or re-auth the Alien Agent ID |
+| `skills/alien-id-commit/SKILL.md` | SSH-signed git commits with provenance trailers |
+| `skills/alien-id-verify/SKILL.md` | Verify provenance on any commit (standalone) |
+| `skills/alien-id-auth/SKILL.md` | DPoP-signed calls to Alien-aware services + discovery |
+| `skills/alien-id-vault/SKILL.md` | Encrypted credential storage (GitHub, AWS, …) |
+| `bin/cli.mjs` | CLI tool — all agent operations (shared backend) |
+| `bin/mcp-server.mjs` | Model Context Protocol server — exposes every CLI subcommand as a typed tool |
+| `.mcp.json` | Auto-registers the MCP server when the plugin is loaded in Claude Code |
+| `bin/lib.mjs` | Core library — crypto, OIDC, DPoP, vault, verifier (no runtime deps) |
+| `bin/qrcode.cjs` | Vendored QR code generator (terminal output) |
+| `bin/default-provider.txt` | Default SSO provider address |
 | `examples/demo-service.mjs` | Reference DPoP-verifying HTTP service (~426 LOC, SDK-free) |
 | `examples/dev-sso.mjs` | Local SSO that auto-approves authorize requests for end-to-end testing |
 | `tests/` | Unit + integration test suites |
@@ -292,27 +311,27 @@ The credential is decrypted in memory, used for the API call, and never written 
 
 ```bash
 # Bootstrap (one command, requires human QR scan once)
-node skills/alien-agent-id/cli.mjs bootstrap
+node bin/cli.mjs bootstrap
 
 # Check status
-node skills/alien-agent-id/cli.mjs status
+node bin/cli.mjs status
 
 # Store a credential securely
 echo 'ghp_xxx' > /tmp/tok && chmod 600 /tmp/tok
-node skills/alien-agent-id/cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
+node bin/cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
 rm /tmp/tok
 
 # Retrieve a credential
-node skills/alien-agent-id/cli.mjs vault-get --service github
+node bin/cli.mjs vault-get --service github
 
 # Generate the two-header pair for a request
-node skills/alien-agent-id/cli.mjs auth-header --url https://service.example.com/api/whoami --method GET
+node bin/cli.mjs auth-header --url https://service.example.com/api/whoami --method GET
 
 # Sign a git commit with provenance
-node skills/alien-agent-id/cli.mjs git-commit --message "feat: something" --push
+node bin/cli.mjs git-commit --message "feat: something" --push
 
 # Verify a commit's provenance chain
-node skills/alien-agent-id/cli.mjs git-verify --commit HEAD
+node bin/cli.mjs git-verify --commit HEAD
 
 # Start the demo service
 node examples/demo-service.mjs

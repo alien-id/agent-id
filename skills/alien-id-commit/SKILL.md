@@ -1,57 +1,33 @@
 ---
 name: alien-id-commit
-description: Make SSH-signed git commits with Alien Agent ID trailers, a v3 proof note, and an audit-trail entry — and verify the provenance chain of any commit. Use when the user asks to commit, sign, push, or attest code with provenance, when they want a GitHub *Verified* badge tied to the agent's owner binding, when they reference `Agent-ID-JKT` / `Agent-ID-Owner` trailers, or when they ask to verify who signed a commit. Also covers signing arbitrary non-git operations into the audit trail and exporting proof bundles.
+description: Make SSH-signed git commits with Alien Agent ID trailers, a v3 proof note, and an audit-trail entry. Use when the user asks to commit, sign, push, or attest code with provenance, when they want a GitHub *Verified* badge tied to the agent's owner binding, or when they reference `Agent-ID-JKT` / `Agent-ID-Owner` trailers. Also covers signing arbitrary non-git operations into the audit trail and exporting proof bundles. To verify someone else's commit, use `alien-id-verify`.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "3.1.1"
-allowed-tools: Bash(node *alien-agent-id/cli.mjs:*) Bash(git:*) Read
+  version: "4.0.0"
+allowed-tools: mcp__alien-agent-id__* Bash(node *bin/cli.mjs:*) Bash(git:*) Read
 ---
 
 # Alien Agent ID — Signed git commits
 
 Every commit is SSH-signed with the agent's Ed25519 key, tagged with trailers linking to the agent and human owner, logged in the hash-chained audit trail, and proof-bundled as a git note that anyone can verify without access to the agent's machine.
 
-## Resolve the CLI path
-
-`cli.mjs` lives in the sibling skill directory `alien-agent-id/`. Substitute `CLI` with its absolute path (e.g. `node /abs/path/to/skills/alien-agent-id/cli.mjs`) in every example below.
+This skill prefers MCP tools (`mcp__alien-agent-id__*`). If the MCP server is not registered, fall back to the CLI — see [CLI fallback](#cli-fallback) at the bottom.
 
 ## Precondition — identity must be bound
 
-```bash
-node CLI status
-```
-
-If `"bound": false`, run [[alien-id-setup]] first — there is no key to sign with otherwise.
+Call `mcp__alien-agent-id__status`. If `bound: false`, run `alien-id-setup` first — there is no key to sign with otherwise.
 
 ## Make a signed commit
 
-```bash
-node CLI git-commit --message "feat: implement auth flow"
-node CLI git-commit --message "feat: implement auth flow" --push   # commit + proof note in one push
-```
+Call `mcp__alien-agent-id__git_commit` with:
 
-`--push` pushes the commit and handles `refs/notes/agent-id` ref merging. Default remote is `origin`; override with `--remote <name>`. Allow empty commits with `--allow-empty`.
+- `message: "<commit message>"` (required)
+- `push: true` — pushes the commit and `refs/notes/agent-id` in one step.
+- `remote: "<name>"` — defaults to `origin`.
+- `allowEmpty: true` — allow empty commits.
 
-A plain `git commit` still works — but skips trailers, signing, and the proof note. Use `git-commit` whenever provenance matters.
-
-## Verify a commit
-
-```bash
-node CLI git-verify --commit HEAD
-node CLI git-verify --commit <hash>
-```
-
-Traces the chain: SSH signature → `agent_jwk` → id_token `cnf.jkt` → SSO RS256 signature. When the commit has a proof note, verification is fully self-contained — no access to the agent's state directory or any external service required.
-
-Anyone who clones the repo and fetches notes can verify:
-
-```bash
-git fetch origin refs/notes/agent-id:refs/notes/agent-id
-node CLI git-verify --commit <hash>
-```
-
-Pre-v3 commits (`Agent-ID-Fingerprint` / `Agent-ID-Binding` trailers) are intentionally rejected — their id_tokens predate the RFC 7800 `cnf.jkt` binding.
+A plain `git commit` still works — but skips trailers, signing, and the proof note. Use `git_commit` whenever provenance matters.
 
 ## What a signed commit looks like
 
@@ -66,44 +42,49 @@ Anyone can trace: **this commit** → **this agent key (JKT)** → **this human 
 
 ## GitHub *Verified* badge
 
-For the *Verified* badge, register the agent's SSH public key on GitHub as a **Signing Key** (not authentication). The key is printed by `git-setup` and lives at `~/.agent-id/ssh/agent-id.pub`.
+For the *Verified* badge, register the agent's SSH public key on GitHub as a **Signing Key** (not authentication). The key is printed by `git_setup` and lives at `~/.agent-id/ssh/agent-id.pub`.
 
 GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**.
 
 ## Sign other operations
 
-Append signed entries to the audit trail for any significant non-git action:
+Append signed entries to the audit trail for any significant non-git action via `mcp__alien-agent-id__sign`:
+
+- `type: "TOOL_CALL"` / `"API_CALL"` / …
+- `action: "bash.exec"` / `"github.create-pr"` / …
+- `payload: '<JSON string>'`
+
+Verify the entire state chain: `mcp__alien-agent-id__verify`.
+Export a portable proof bundle: `mcp__alien-agent-id__export_proof`.
+
+## Verifying commits
+
+This skill only *makes* signed commits. To verify provenance on a commit the agent (or someone else) produced — use `alien-id-verify`. It is standalone and does not require a bound identity.
+
+## Tool reference
+
+| Tool | Purpose |
+|---|---|
+| `mcp__alien-agent-id__git_commit` | Signed commit + trailers + v3 proof note + audit log. Args: `message`, optional `push`/`remote`/`allowEmpty`. |
+| `mcp__alien-agent-id__sign` | Sign an arbitrary operation into the audit trail. Args: `type`, `action`, `payload`. |
+| `mcp__alien-agent-id__verify` | Verify the state chain integrity. |
+| `mcp__alien-agent-id__export_proof` | Emit a proof bundle to stdout. |
+
+Common arg: `stateDir` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`).
+
+## CLI fallback
+
+When MCP is unavailable, the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/bin/cli.mjs`).
 
 ```bash
-node CLI sign --type TOOL_CALL --action "bash.exec"        --payload '{"command":"deploy"}'
-node CLI sign --type API_CALL  --action "github.create-pr" --payload '{"repo":"foo/bar"}'
-```
-
-Verify the entire state chain:
-
-```bash
+node CLI git-commit --message "feat: implement auth flow"
+node CLI git-commit --message "feat: implement auth flow" --push   # commit + proof note in one push
+node CLI sign --type TOOL_CALL --action "bash.exec" --payload '{"command":"deploy"}'
 node CLI verify
-```
-
-Export a portable proof bundle:
-
-```bash
 node CLI export-proof
 ```
 
-## Command reference
-
-| Command | Purpose |
-|---|---|
-| `git-commit --message <M> [--push] [--remote R] [--allow-empty]` | Signed commit + trailers + v3 proof note + audit log. |
-| `git-verify [--commit <hash>]` | Verify the provenance chain of a commit. |
-| `sign --type T --action A --payload <JSON>` | Sign an arbitrary operation into the audit trail. |
-| `verify` | Verify the state chain integrity. |
-| `export-proof` | Emit a proof bundle to stdout. |
-
-Common flag: `--state-dir <path>` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`).
-
 ## Reference docs
 
-- [../alien-agent-id/reference/git-commits.md](../alien-agent-id/reference/git-commits.md) — signed commit anatomy, GitHub *Verified* badge.
-- [../alien-agent-id/reference/state-and-errors.md](../alien-agent-id/reference/state-and-errors.md) — state-dir layout, error catalog.
+- [../../docs/reference/git-commits.md](../../docs/reference/git-commits.md) — signed commit anatomy, GitHub *Verified* badge.
+- [../../docs/reference/state-and-errors.md](../../docs/reference/state-and-errors.md) — state-dir layout, error catalog.

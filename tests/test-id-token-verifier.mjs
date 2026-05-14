@@ -19,7 +19,7 @@ import {
   signEd25519Base64Url,
   b64url,
   fromB64url,
-} from "../skills/alien-agent-id/lib.mjs";
+} from "../bin/lib.mjs";
 
 function generateRsaKeyPair() {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {

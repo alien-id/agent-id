@@ -24,7 +24,7 @@ import {
   fromB64url,
   b64url,
   getUserInfo,
-} from "../skills/alien-agent-id/lib.mjs";
+} from "../bin/lib.mjs";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────────
 //
@@ -875,7 +875,7 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
       canonicalJSONString,
       sha256Hex,
       signEd25519Base64Url,
-    } = await import("../skills/alien-agent-id/lib.mjs");
+    } = await import("../bin/lib.mjs");
 
     const stateDir = pathMod.join(os.tmpdir(), `agent-id-dpop-${crypto.randomUUID()}`);
     await fs.mkdir(stateDir, { recursive: true });

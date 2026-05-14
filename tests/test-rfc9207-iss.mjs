@@ -14,7 +14,7 @@ import http from "node:http";
 import {
   beginOidcAuthorization,
   pollForAuthorizationCode,
-} from "../skills/alien-agent-id/lib.mjs";
+} from "../bin/lib.mjs";
 
 function startMock({ issuer, authorize, poll }) {
   return new Promise((resolve) => {

@@ -2,6 +2,61 @@
 
 All notable changes are documented here.
 
+## [4.0.0] — 2026-05-14
+
+Major release. Repository layout reorganized: the CLI moved out of the skill directory into a
+dedicated `bin/`, a bundled MCP server lets Claude Code (and other MCP clients) call the toolkit
+as typed tools, and the monolithic `alien-agent-id` skill is fully decomposed into five focused
+skills. CLI semantics are byte-identical to 3.1.1 — every subcommand and flag behaves the same.
+
+### Breaking changes
+
+- **CLI path moved.** `node skills/alien-agent-id/cli.mjs` → `node bin/cli.mjs`. Update any
+  CI scripts, `CLAUDE.md` instructions, or shell aliases that hardcode the old path.
+  `package.json#bin` (`alien-agent-id` on the `PATH` after `npm i -g`) is unchanged.
+- **Umbrella skill removed.** `skills/alien-agent-id/SKILL.md` is gone. Invoke the focused
+  skill matching the task instead:
+  - `/alien-id-setup` — bootstrap or re-auth.
+  - `/alien-id-commit` — make a signed commit.
+  - `/alien-id-verify` — verify provenance on any commit (new — standalone, no bound identity required).
+  - `/alien-id-auth` — DPoP-signed calls to Alien-aware services.
+  - `/alien-id-vault` — encrypted credential storage.
+- **Reference docs moved.** `skills/alien-agent-id/reference/*.md` → `docs/reference/*.md`.
+  Linked from each skill via relative path; no public URL changes.
+
+### Added
+
+- **MCP server** (`bin/mcp-server.mjs`). All 22 CLI subcommands are exposed as typed Model
+  Context Protocol tools (`mcp__alien-agent-id__status`, `mcp__alien-agent-id__git_commit`, …).
+  Hand-rolled JSON-RPC over stdio — preserves the project's zero-npm-dependencies story. The
+  bundled `.mcp.json` auto-registers the server when the plugin is installed in Claude Code:
+
+  ```jsonc
+  {
+    "mcpServers": {
+      "alien-agent-id": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@alien-id/agent-id@latest", "mcp"]
+      }
+    }
+  }
+  ```
+
+  The `mcp` CLI subcommand (`node bin/cli.mjs mcp`) is the same entry point used by the auto-
+  registration. Skills now prefer the MCP path and fall back to the CLI when it isn't available.
+- `alien-id-verify` skill. Standalone provenance verification — auditors, CI runners, and code
+  reviewers can verify Alien Agent ID commits on any repo without setting up their own
+  identity. The CLI command (`git-verify`) is unchanged; the new skill simply exposes it as a
+  first-class operation.
+
+### Migration
+
+Replace any hard-coded `skills/alien-agent-id/cli.mjs` with `bin/cli.mjs`. The state directory
+(`~/.agent-id/`), all on-disk formats, the marketplace plugin name (`alien-agent-id`), and every
+CLI subcommand and flag are unchanged. Claude Code users get the MCP server automatically after
+installing 4.0.0 from the marketplace.
+
 ## [3.1.1] — 2026-05-12
 
 Patch release. Fixes a CLI failure on machines with a custom global SSH signing program (most

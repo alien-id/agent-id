@@ -60,11 +60,17 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 
 | Path | Purpose |
 | --- | --- |
-| `skills/alien-agent-id/SKILL.md` | Instructions for AI agents — point your agent here |
-| `skills/alien-agent-id/cli.mjs` | CLI tool — all agent operations |
-| `skills/alien-agent-id/lib.mjs` | Portable library — crypto, OIDC, DPoP, signing, verification (zero npm deps) |
-| `skills/alien-agent-id/qrcode.cjs` | Vendored QR code generator (terminal output) |
-| `skills/alien-agent-id/default-provider.txt` | Default SSO provider address |
+| `skills/alien-id-setup/SKILL.md` | Bootstrap or re-auth the Alien Agent ID |
+| `skills/alien-id-commit/SKILL.md` | SSH-signed git commits with provenance trailers |
+| `skills/alien-id-verify/SKILL.md` | Verify the provenance chain of any commit (standalone) |
+| `skills/alien-id-auth/SKILL.md` | DPoP-signed calls to Alien-aware services + discovery |
+| `skills/alien-id-vault/SKILL.md` | Encrypted credential storage (GitHub, AWS, …) |
+| `bin/cli.mjs` | CLI tool — all agent operations (shared backend) |
+| `bin/mcp-server.mjs` | Model Context Protocol server — typed tools for Claude Code and other MCP clients |
+| `bin/lib.mjs` | Portable library — crypto, OIDC, DPoP, signing, verification (zero npm deps) |
+| `bin/qrcode.cjs` | Vendored QR code generator (terminal output) |
+| `bin/default-provider.txt` | Default SSO provider address |
+| `.mcp.json` | Auto-registers the MCP server when the plugin is installed in Claude Code |
 | `examples/demo-service.mjs` | Reference DPoP-verifying service (~426 LOC, no SDK dependency) |
 | `examples/dev-sso.mjs` | Local SSO that auto-approves authorize requests for end-to-end testing |
 | `tests/` | Unit + integration test suites |
@@ -98,10 +104,11 @@ Claude usually helps.
 
 ### 2. Set up your Alien Agent ID
 
-When the plugin is loaded, run the skill:
+The plugin loads five focused skills: `/alien-id-setup`, `/alien-id-commit`, `/alien-id-verify`,
+`/alien-id-auth`, `/alien-id-vault`. To create your identity, invoke the setup skill:
 
 ```text
-/alien-agent-id
+/alien-id-setup
 ```
 
 Follow the instructions — the agent will generate a keypair, show a
@@ -119,17 +126,39 @@ Commits will then show a "Verified" badge.
 
 ### 4. Use the skill to commit and push
 
-You can pass arguments to the skill for common operations:
+For signed commits, invoke the commit sub-skill:
 
 ```text
-/alien-agent-id stage, commit and push all files in the repo, follow previous commits naming convention
+/alien-id-commit stage, commit and push all files in the repo, follow previous commits naming convention
 ```
 
 ### Other agents
 
-Any agent with shell access can use `skills/alien-agent-id/SKILL.md` directly. The agent
-needs Node.js 18+, git 2.34+, and permission to run
-`node skills/alien-agent-id/cli.mjs ...` commands.
+Any agent with shell access can use the skill files directly. Point at the skill matching the task —
+`skills/alien-id-{setup,commit,verify,sso,vault}/SKILL.md`. The agent needs Node.js 18+, git 2.34+,
+and permission to run `node bin/cli.mjs ...` commands.
+
+### MCP-aware agents (alternative to the CLI)
+
+For agents that speak the Model Context Protocol — Claude Code, MCP-aware Cursor, custom MCP clients —
+the toolkit ships an MCP server that exposes every CLI subcommand as a typed tool (`mcp__alien-agent-id__status`,
+`mcp__alien-agent-id__git_commit`, …). In Claude Code, the plugin auto-registers the server via the
+bundled `.mcp.json`. For other MCP clients, configure manually:
+
+```jsonc
+{
+  "mcpServers": {
+    "alien-agent-id": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@alien-id/agent-id@latest", "mcp"]
+    }
+  }
+}
+```
+
+The MCP server and the CLI share the same backend — same state, same on-disk formats, same semantics.
+The skills prefer the MCP path when available and fall back to the CLI when it isn't.
 
 ---
 
@@ -156,7 +185,7 @@ prove the provenance chain without access to the agent's local state.
 ## Verifying Provenance
 
 ```bash
-node skills/alien-agent-id/cli.mjs git-verify --commit HEAD
+node bin/cli.mjs git-verify --commit HEAD
 ```
 
 Verification is **self-contained**: the v3 git-note bundle is `{ version: 3, id_token, agent_jwk }`.
@@ -168,7 +197,7 @@ agent's machine.
 git fetch origin refs/notes/agent-id:refs/notes/agent-id
 
 # Verify any commit
-node skills/alien-agent-id/cli.mjs git-verify --commit abc123
+node bin/cli.mjs git-verify --commit abc123
 ```
 
 ### Verification chain (v3)
@@ -204,13 +233,13 @@ Ed25519 key) in the `DPoP` header:
 
 ```bash
 # Generate the two-header pair for a specific request (URL and method are bound into the proof)
-node skills/alien-agent-id/cli.mjs auth-header \
+node bin/cli.mjs auth-header \
   --url https://service.example.com/api/whoami --method GET
 # → Authorization: DPoP <access_token>
 # → DPoP: <proof JWT>
 
 # Use in API calls
-eval $(node skills/alien-agent-id/cli.mjs auth-header \
+eval $(node bin/cli.mjs auth-header \
   --url https://service.example.com/api/whoami --method GET --shell)
 curl -H "Authorization: $AUTHORIZATION" -H "DPoP: $DPOP" https://service.example.com/api/whoami
 ```
@@ -229,7 +258,7 @@ Alien-aware services publish a JSON manifest at `https://<host>/.well-known/alie
 Agents fetch and validate it before talking to the service:
 
 ```bash
-node skills/alien-agent-id/cli.mjs discover-service --url https://example.com
+node bin/cli.mjs discover-service --url https://example.com
 ```
 
 The CLI enforces an 8 KiB body cap, rejects redirects, requires `application/json`, and validates
@@ -262,7 +291,7 @@ manifest path is fixed; the meta tag never tells the agent where to go, only *wh
 claims support. Probe it with:
 
 ```bash
-node skills/alien-agent-id/cli.mjs service-support --url https://example.com
+node bin/cli.mjs service-support --url https://example.com
 # → {"ok": true, "supported": true, "version": "v1"}
 ```
 
@@ -277,21 +306,21 @@ HKDF — only the agent that stored the credential can decrypt it.
 ```bash
 # Store a credential (most secure — from file)
 echo 'ghp_xxx' > /tmp/tok && chmod 600 /tmp/tok
-node skills/alien-agent-id/cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
+node bin/cli.mjs vault-store --service github --type api-key --credential-file /tmp/tok
 rm /tmp/tok
 
 # Store from environment variable
-node skills/alien-agent-id/cli.mjs vault-store --service github --type api-key --credential-env GITHUB_TOKEN
+node bin/cli.mjs vault-store --service github --type api-key --credential-env GITHUB_TOKEN
 
 # Retrieve
-node skills/alien-agent-id/cli.mjs vault-get --service github
+node bin/cli.mjs vault-get --service github
 # → {"ok": true, "service": "github", "type": "api-key", "credential": "ghp_xxx..."}
 
 # List all stored credentials (no secrets shown)
-node skills/alien-agent-id/cli.mjs vault-list
+node bin/cli.mjs vault-list
 
 # Remove
-node skills/alien-agent-id/cli.mjs vault-remove --service github
+node bin/cli.mjs vault-remove --service github
 ```
 
 Supported credential types: `api-key`, `password`, `oauth`, `bearer`, `custom`.
@@ -305,10 +334,10 @@ command renews the `access_token` without requiring human interaction:
 
 ```bash
 # Explicit refresh
-node skills/alien-agent-id/cli.mjs refresh
+node bin/cli.mjs refresh
 
 # Transparent — auth-header automatically refreshes expired sessions
-node skills/alien-agent-id/cli.mjs auth-header
+node bin/cli.mjs auth-header
 ```
 
 If the human revokes the agent's authorization via the Alien App, the refresh will fail
@@ -373,7 +402,7 @@ All state is stored in `~/.agent-id/` (configurable via `--state-dir` or `AGENT_
 | `verify` | Verify state chain integrity |
 | `export-proof` | Export proof bundle |
 
-Run `node skills/alien-agent-id/cli.mjs --help` for all flags.
+Run `node bin/cli.mjs --help` for all flags.
 
 ---
 
