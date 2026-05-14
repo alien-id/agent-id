@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# Keep skills/*/scripts and skills/*/references in sync with bin/ and docs/reference/.
+# Without this, `npx skills add github:alien-id/agent-id` ships stale bundles.
+
+set -e
+
+npm run --silent sync:skills
+git add skills/*/scripts skills/*/references

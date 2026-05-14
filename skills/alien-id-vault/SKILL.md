@@ -5,7 +5,7 @@ license: MIT
 metadata:
   author: Alien Wallet
   version: "4.0.0"
-allowed-tools: mcp__alien-agent-id__* Bash(node *bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
+allowed-tools: mcp__alien-agent-id__* Bash(node *scripts/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
 ---
 
 # Alien Agent ID — Credential vault
@@ -104,7 +104,7 @@ Common arg: `stateDir` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`).
 
 ## CLI fallback
 
-When MCP is unavailable, the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/bin/cli.mjs`).
+When MCP is unavailable, the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/scripts/cli.mjs`).
 
 ```bash
 node CLI vault-get --service github
@@ -121,5 +121,5 @@ unset GH_TOKEN
 
 ## Reference docs
 
-- [../../docs/reference/vault.md](../../docs/reference/vault.md) — secure credential storage and retrieval.
-- [../../docs/reference/state-and-errors.md](../../docs/reference/state-and-errors.md) — error catalog.
+- [./references/vault.md](./references/vault.md) — secure credential storage and retrieval.
+- [./references/state-and-errors.md](./references/state-and-errors.md) — error catalog.

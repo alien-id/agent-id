@@ -5,7 +5,7 @@ license: MIT
 metadata:
   author: Alien Wallet
   version: "4.0.0"
-allowed-tools: mcp__alien-agent-id__* Bash(node *bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
+allowed-tools: mcp__alien-agent-id__* Bash(node *scripts/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
 ---
 
 # Alien Agent ID — Service authentication (DPoP)
@@ -93,7 +93,7 @@ Common arg: `stateDir` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`).
 
 ## CLI fallback
 
-When MCP is unavailable, the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/bin/cli.mjs`).
+When MCP is unavailable, the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/scripts/cli.mjs`).
 
 ```bash
 node CLI discover-service --url https://example.com
@@ -106,5 +106,5 @@ node CLI refresh
 
 ## Reference docs
 
-- [../../docs/reference/services.md](../../docs/reference/services.md) — manifests, `auth-header` two-header pattern, DPoP details.
-- [../../docs/reference/state-and-errors.md](../../docs/reference/state-and-errors.md) — error catalog.
+- [./references/services.md](./references/services.md) — manifests, `auth-header` two-header pattern, DPoP details.
+- [./references/state-and-errors.md](./references/state-and-errors.md) — error catalog.

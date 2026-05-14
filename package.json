@@ -9,7 +9,10 @@
   "scripts": {
     "test": "node --test tests/test-*.mjs",
     "test:integration": "bash tests/integration/full-stack.sh",
-    "test:develop-smoke": "bash tests/integration/develop-sso-smoke.sh"
+    "test:develop-smoke": "bash tests/integration/develop-sso-smoke.sh",
+    "sync:skills": "node scripts/sync-skill-bundles.mjs",
+    "prepack": "node scripts/sync-skill-bundles.mjs",
+    "prepare": "husky"
   },
   "files": [
     "bin",
@@ -42,5 +45,8 @@
   ],
   "author": "Alien Org <support@alien.org>",
   "homepage": "https://alien.org/agent-id",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
 }

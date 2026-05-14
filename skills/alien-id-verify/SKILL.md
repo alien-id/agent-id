@@ -5,7 +5,7 @@ license: MIT
 metadata:
   author: Alien Wallet
   version: "4.0.0"
-allowed-tools: mcp__alien-agent-id__git_verify Bash(node *bin/cli.mjs:*) Bash(git:*) Read
+allowed-tools: mcp__alien-agent-id__git_verify Bash(node *scripts/cli.mjs:*) Bash(git:*) Read
 ---
 
 # Alien Agent ID — Verify commit provenance
@@ -52,7 +52,7 @@ Then call `mcp__alien-agent-id__git_verify` with the commit hash.
 
 ## Pre-v3 commits
 
-Commits carrying legacy `Agent-ID-Fingerprint` / `Agent-ID-Binding` trailers are intentionally rejected — their id_tokens predate the RFC 7800 `cnf.jkt` binding and cannot anchor the chain. See [../../docs/reference/migrate-to-v3.md](../../docs/reference/migrate-to-v3.md) for the 3.0 cutover history.
+Commits carrying legacy `Agent-ID-Fingerprint` / `Agent-ID-Binding` trailers are intentionally rejected — their id_tokens predate the RFC 7800 `cnf.jkt` binding and cannot anchor the chain. See [./references/migrate-to-v3.md](./references/migrate-to-v3.md) for the 3.0 cutover history.
 
 ## Trust boundary
 
@@ -68,7 +68,7 @@ Common arg: `stateDir` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`). Onl
 
 ## CLI fallback
 
-When MCP is unavailable (e.g. CI runners verifying a third-party commit), use the CLI directly. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/bin/cli.mjs`).
+When MCP is unavailable (e.g. CI runners verifying a third-party commit), use the CLI directly. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/scripts/cli.mjs`).
 
 ```bash
 node CLI git-verify --commit HEAD
@@ -77,5 +77,5 @@ node CLI git-verify --commit <hash>
 
 ## Reference docs
 
-- [../../docs/reference/git-commits.md](../../docs/reference/git-commits.md) — signed commit anatomy, proof-note format, GitHub *Verified* badge.
-- [../../docs/reference/state-and-errors.md](../../docs/reference/state-and-errors.md) — error catalog.
+- [./references/git-commits.md](./references/git-commits.md) — signed commit anatomy, proof-note format, GitHub *Verified* badge.
+- [./references/state-and-errors.md](./references/state-and-errors.md) — error catalog.

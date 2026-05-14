@@ -5,7 +5,7 @@ license: MIT
 metadata:
   author: Alien Wallet
   version: "4.0.0"
-allowed-tools: mcp__alien-agent-id__* Bash(node *bin/cli.mjs:*) Bash(git:*) Read
+allowed-tools: mcp__alien-agent-id__* Bash(node *scripts/cli.mjs:*) Bash(git:*) Read
 ---
 
 # Alien Agent ID — Signed git commits
@@ -74,7 +74,7 @@ Common arg: `stateDir` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`).
 
 ## CLI fallback
 
-When MCP is unavailable, the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/bin/cli.mjs`).
+When MCP is unavailable, the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/scripts/cli.mjs`).
 
 ```bash
 node CLI git-commit --message "feat: implement auth flow"
@@ -86,5 +86,5 @@ node CLI export-proof
 
 ## Reference docs
 
-- [../../docs/reference/git-commits.md](../../docs/reference/git-commits.md) — signed commit anatomy, GitHub *Verified* badge.
-- [../../docs/reference/state-and-errors.md](../../docs/reference/state-and-errors.md) — state-dir layout, error catalog.
+- [./references/git-commits.md](./references/git-commits.md) — signed commit anatomy, GitHub *Verified* badge.
+- [./references/state-and-errors.md](./references/state-and-errors.md) — state-dir layout, error catalog.

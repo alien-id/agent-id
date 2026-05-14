@@ -1,11 +1,11 @@
 ---
 name: alien-id-setup
-description: Bootstrap or migrate the agent's Alien Agent ID — a cryptographic identity bound to a verified human owner via Alien Network SSO (QR-code consent in the Alien App). Use when the user asks to set up, initialize, install, register, link, bind, re-auth, or migrate an Alien Agent ID / Agent ID, when `status` reports `bound: false`, or when pre-v3 state (`owner-binding.json`) is detected. Also triggers on "Alien ID", "Agent ID", "owner binding", "cnf.jkt", "bootstrap identity".
+description: Bootstrap or migrate the agent's Alien Agent ID — a cryptographic identity bound to a verified human owner via Alien Network SSO (QR-code consent in the Alien App). Use when the user asks to set up, initialize, install, register, link, bind, re-auth, or migrate an Alien Agent ID / Agent ID, when `status` reports the agent is not bound, or when pre-v3 state (`owner-binding.json`) is detected. Also triggers on "Alien ID", "Agent ID", "owner binding", "cnf.jkt", "bootstrap identity".
 license: MIT
 metadata:
   author: Alien Wallet
   version: "4.0.0"
-allowed-tools: mcp__alien-agent-id__* Bash(node *bin/cli.mjs:*) Bash(test:*) Read
+allowed-tools: mcp__alien-agent-id__* Bash(node *scripts/cli.mjs:*) Bash(test:*) Read
 ---
 
 # Alien Agent ID — Setup
@@ -25,14 +25,14 @@ STATE_DIR="${AGENT_ID_STATE_DIR:-$HOME/.agent-id}"
 test -f "$STATE_DIR/owner-binding.json" && echo "pre-v3 — migrate"
 ```
 
-- File exists → run the migration in [../../docs/reference/migrate-to-v3.md](../../docs/reference/migrate-to-v3.md). Do not proceed with signed operations.
+- File exists → run the migration in [./references/migrate-to-v3.md](./references/migrate-to-v3.md). Do not proceed with signed operations.
 - File absent → identity is current; setup is complete. Tell the user and hand off to `alien-id-commit`, `alien-id-auth`, or `alien-id-vault` as needed.
 
 If `bound: false`, start bootstrap immediately — do not ask "want me to start?" first; invoking this skill is the opt-in. The first user-facing message is the provider question below.
 
 ## Bootstrap flow
 
-The flow requires the user to scan a QR code in the Alien App, so run the steps individually — not the `bootstrap` tool, which blocks before the QR can be shown. Full walkthrough in [../../docs/reference/bootstrap.md](../../docs/reference/bootstrap.md).
+The flow requires the user to scan a QR code in the Alien App, so run the steps individually — not the `bootstrap` tool, which blocks before the QR can be shown. Full walkthrough in [./references/bootstrap.md](./references/bootstrap.md).
 
 ### Step 1 — ask the provider question
 
@@ -57,11 +57,11 @@ Call `mcp__alien-agent-id__bind` with no arguments. Blocks up to 5 minutes while
 
 ### Step 5 — configure git signing
 
-Call `mcp__alien-agent-id__git_setup` (optionally `email: "<addr>"`). Writes the SSH keys under `~/.agent-id/ssh/`. Tell the user to add the printed public key to GitHub as a *Signing Key* so signed commits earn the *Verified* badge — full instructions in [../../docs/reference/git-commits.md](../../docs/reference/git-commits.md).
+Call `mcp__alien-agent-id__git_setup` (optionally `email: "<addr>"`). Writes the SSH keys under `~/.agent-id/ssh/`. Tell the user to add the printed public key to GitHub as a *Signing Key* so signed commits earn the *Verified* badge — full instructions in [./references/git-commits.md](./references/git-commits.md).
 
 ## Migrate from pre-v3
 
-If `owner-binding.json` is present, call `mcp__alien-agent-id__setup_owner_session` with `providerAddress: "<PROVIDER_ADDRESS>"` to re-run OAuth under DPoP and refresh the id_token with `cnf.jkt`. Keypair, vault, and audit log are preserved. Resolve the provider address the same way as Step 1. Full migration matrix in [../../docs/reference/migrate-to-v3.md](../../docs/reference/migrate-to-v3.md).
+If `owner-binding.json` is present, call `mcp__alien-agent-id__setup_owner_session` with `providerAddress: "<PROVIDER_ADDRESS>"` to re-run OAuth under DPoP and refresh the id_token with `cnf.jkt`. Keypair, vault, and audit log are preserved. Resolve the provider address the same way as Step 1. Full migration matrix in [./references/migrate-to-v3.md](./references/migrate-to-v3.md).
 
 ## Trust boundary
 
@@ -90,7 +90,7 @@ Common arg: `stateDir` (defaults to `~/.agent-id`, or `AGENT_ID_STATE_DIR`).
 
 ## CLI fallback
 
-When MCP is unavailable (non-Claude-Code agent, manual terminal use, CI/CD), the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/bin/cli.mjs`).
+When MCP is unavailable (non-Claude-Code agent, manual terminal use, CI/CD), the same operations are reachable via the CLI. `CLI` below is the absolute path to `cli.mjs` (e.g. `node /abs/path/to/scripts/cli.mjs`).
 
 ```bash
 node CLI status
@@ -103,6 +103,6 @@ node CLI setup-owner-session --provider-address <PROVIDER_ADDRESS>   # pre-v3 mi
 
 ## Reference docs
 
-- [../../docs/reference/bootstrap.md](../../docs/reference/bootstrap.md) — first-time identity setup.
-- [../../docs/reference/migrate-to-v3.md](../../docs/reference/migrate-to-v3.md) — detect pre-3.0 state and migrate.
-- [../../docs/reference/state-and-errors.md](../../docs/reference/state-and-errors.md) — state-dir layout, error catalog.
+- [./references/bootstrap.md](./references/bootstrap.md) — first-time identity setup.
+- [./references/migrate-to-v3.md](./references/migrate-to-v3.md) — detect pre-3.0 state and migrate.
+- [./references/state-and-errors.md](./references/state-and-errors.md) — state-dir layout, error catalog.
