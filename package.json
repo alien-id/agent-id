@@ -4,7 +4,7 @@
   "description": "Universal Agent ID - verifiable identity for AI agents linked to human owners via Alien Network SSO",
   "type": "module",
   "bin": {
-    "alien-agent-id": "./skills/alien-agent-id/cli.mjs"
+    "alien-agent-id": "./plugins/agent-id-core/bin/cli.mjs"
   },
   "scripts": {
     "test": "node --test tests/test-*.mjs",
@@ -12,7 +12,8 @@
     "test:develop-smoke": "bash tests/integration/develop-sso-smoke.sh"
   },
   "files": [
-    "skills",
+    "plugins",
+    ".claude-plugin",
     "examples",
     "tests",
     "CHANGELOG.md",

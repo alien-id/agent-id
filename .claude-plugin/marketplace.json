@@ -11,24 +11,6 @@
   },
   "plugins": [
     {
-      "name": "alien-agent-id",
-      "description": "Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Sign git commits so every line of agent-written code is cryptographically attributable.",
-      "version": "3.1.1",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/alien-id/agent-id.git"
-      },
-      "category": "identity",
-      "keywords": [
-        "agent-identity",
-        "cryptography",
-        "git-signing",
-        "sso",
-        "oidc",
-        "provenance"
-      ]
-    },
-    {
       "name": "agent-id-core",
       "description": "Shared library for Alien Agent ID: crypto primitives, v3 bundle format, universal verifier, SignatureEngine, OIDC, state I/O. Required by every other agent-id-* plugin.",
       "version": "0.0.0",

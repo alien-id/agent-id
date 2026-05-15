@@ -31,14 +31,16 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
-  generateEd25519PemPair,
-  ed25519PublicKeyToJwk,
-  ed25519PemToOpenSSHPrivateKey,
-  jwkThumbprint,
   b64url,
+  ed25519PemToOpenSSHPrivateKey,
+  ed25519PublicKeyToJwk,
+  generateEd25519PemPair,
+  jwkThumbprint,
+} from "../plugins/agent-id-core/lib/crypto.mjs";
+import {
   ensureDir,
   writeJsonFile,
-} from "../skills/alien-agent-id/lib.mjs";
+} from "../plugins/agent-id-core/lib/state.mjs";
 
 const HERMETIC_GIT_ENV = {
   ...process.env,
@@ -48,7 +50,7 @@ const HERMETIC_GIT_ENV = {
 const execRaw = promisify(execFileCb);
 const exec = (file, args, opts = {}) =>
   execRaw(file, args, { ...opts, env: { ...HERMETIC_GIT_ENV, ...(opts.env || {}) } });
-const CLI_PATH = new URL("../skills/alien-agent-id/cli.mjs", import.meta.url).pathname;
+const CLI_PATH = new URL("../plugins/agent-id-git/bin/cli.mjs", import.meta.url).pathname;
 
 // ─── Fixture helpers ─────────────────────────────────────────────────────────────
 
@@ -242,7 +244,7 @@ describe("v3 bundle emit → verify round trip", () => {
 
     // Emit a v3 commit.
     const commit = await runCli(
-      ["git-commit", "--state-dir", stateDir, "--message", "tracer bullet", "--allow-empty"],
+      ["commit", "--state-dir", stateDir, "--message", "tracer bullet", "--allow-empty"],
       { cwd: repoDir },
     );
     assert.equal(
@@ -277,7 +279,7 @@ describe("v3 bundle emit → verify round trip", () => {
     // Verify accepts the bundle.
     const verify = await runCli(
       [
-        "git-verify",
+        "verify",
         "--state-dir", stateDir,
         "--commit", "HEAD",
         "--sso-url", sso.baseUrl,
@@ -299,7 +301,7 @@ describe("v3 bundle emit → verify round trip", () => {
     });
 
     const commit = await runCli(
-      ["git-commit", "--state-dir", stateDir, "--message", "no-cnf", "--allow-empty"],
+      ["commit", "--state-dir", stateDir, "--message", "no-cnf", "--allow-empty"],
       { cwd: repoDir },
     );
     assert.equal(commit.code, 0);
@@ -322,7 +324,7 @@ describe("v3 bundle emit → verify round trip", () => {
     }));
 
     const verify = await runCli(
-      ["git-verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
+      ["verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
       { cwd: repoDir },
     );
     assert.equal(verify.code, 1);
@@ -339,7 +341,7 @@ describe("v3 bundle emit → verify round trip", () => {
     });
 
     const commit = await runCli(
-      ["git-commit", "--state-dir", stateDir, "--message", "v2-reject", "--allow-empty"],
+      ["commit", "--state-dir", stateDir, "--message", "v2-reject", "--allow-empty"],
       { cwd: repoDir },
     );
     assert.equal(commit.code, 0);
@@ -354,7 +356,7 @@ describe("v3 bundle emit → verify round trip", () => {
     }));
 
     const verify = await runCli(
-      ["git-verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
+      ["verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
       { cwd: repoDir },
     );
     assert.equal(verify.code, 1);
@@ -370,7 +372,7 @@ describe("v3 bundle emit → verify round trip", () => {
     });
 
     const commit = await runCli(
-      ["git-commit", "--state-dir", stateDir, "--message", "jkt-mismatch", "--allow-empty"],
+      ["commit", "--state-dir", stateDir, "--message", "jkt-mismatch", "--allow-empty"],
       { cwd: repoDir },
     );
     assert.equal(commit.code, 0);
@@ -382,7 +384,7 @@ describe("v3 bundle emit → verify round trip", () => {
     await tamperGitNote(commit.parsed.commitHash, (b) => ({ ...b, agent_jwk: otherJwk }));
 
     const verify = await runCli(
-      ["git-verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
+      ["verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
       { cwd: repoDir },
     );
     assert.equal(verify.code, 1);
@@ -397,7 +399,7 @@ describe("v3 bundle emit → verify round trip", () => {
     });
 
     const commit = await runCli(
-      ["git-commit", "--state-dir", stateDir, "--message", "trailer-mismatch", "--allow-empty"],
+      ["commit", "--state-dir", stateDir, "--message", "trailer-mismatch", "--allow-empty"],
       { cwd: repoDir },
     );
     assert.equal(commit.code, 0);
@@ -453,7 +455,7 @@ describe("v3 bundle emit → verify round trip", () => {
     }
 
     const verify = await runCli(
-      ["git-verify", "--commit", newHash.trim(), "--sso-url", sso.baseUrl],
+      ["verify", "--commit", newHash.trim(), "--sso-url", sso.baseUrl],
       { cwd: repoDir },
     );
     assert.equal(verify.code, 1);

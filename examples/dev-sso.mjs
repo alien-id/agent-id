@@ -22,7 +22,7 @@
 // Usage:
 //   node examples/dev-sso.mjs --port 5050
 //   # then in another shell:
-//   node skills/alien-agent-id/cli.mjs auth \
+//   node plugins/agent-id-core/bin/cli.mjs auth \
 //     --provider-address dev-fixture-provider \
 //     --sso-url http://localhost:5050
 //
@@ -48,11 +48,11 @@ import {
 import { parseArgs } from "node:util";
 
 import {
-  jwkThumbprint,
   ed25519PublicKeyToJwk,
   fingerprintPublicKeyPem,
   generateEd25519PemPair,
-} from "../skills/alien-agent-id/lib.mjs";
+  jwkThumbprint,
+} from "../plugins/agent-id-core/lib/crypto.mjs";
 
 // ─── CLI args ──────────────────────────────────────────────────────────────
 

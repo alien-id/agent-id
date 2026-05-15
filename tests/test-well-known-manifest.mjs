@@ -14,22 +14,24 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
 import {
-  parseServiceManifest,
-  fetchServiceManifest,
-  buildServiceAuthHeader,
-  resolveServiceApiUrl,
-  probeServiceSupportSignal,
+  b64url,
   createDPoPProof,
-  parseJwt,
-  generateEd25519PemPair,
   ed25519PublicKeyToJwk,
+  generateEd25519PemPair,
   jwkThumbprint,
   verifyJwtEdDsaSignature,
-  b64url,
-  SERVICE_MANIFEST_PATH,
+} from "../plugins/agent-id-core/lib/crypto.mjs";
+import { parseJwt } from "../plugins/agent-id-core/lib/oidc.mjs";
+import {
   SERVICE_MANIFEST_MAX_BYTES,
+  SERVICE_MANIFEST_PATH,
   SUPPORT_SIGNAL_MAX_BYTES,
-} from "../skills/alien-agent-id/lib.mjs";
+  buildServiceAuthHeader,
+  fetchServiceManifest,
+  parseServiceManifest,
+  probeServiceSupportSignal,
+  resolveServiceApiUrl,
+} from "../plugins/agent-id-auth/lib/manifest.mjs";
 
 // Fixture access_token. The mock service does not verify SSO signatures —
 // that's covered exhaustively by test-id-token-verifier / test-cnf-verifier
@@ -52,7 +54,7 @@ function mintFixtureAccessToken({ agentPublicKeyPem, sub = "test-owner-sub" }) {
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_PATH = path.resolve(__dirname, "../skills/alien-agent-id/cli.mjs");
+const CLI_PATH = path.resolve(__dirname, "../plugins/agent-id-auth/bin/cli.mjs");
 
 function buildValidManifest(host) {
   return {
@@ -642,7 +644,7 @@ describe("renderCapabilities", () => {
   const host = "acme.test";
 
   it("falls back to specUrl message when operations[] is absent", async () => {
-    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const { renderCapabilities } = await import("../plugins/agent-id-auth/lib/manifest.mjs");
     const md = renderCapabilities({
       service: { name: "Acme" },
       auth: { header: "Authorization", scheme: "DPoP" },
@@ -653,7 +655,7 @@ describe("renderCapabilities", () => {
   });
 
   it("renders the Call: line with the absolute URL and method", async () => {
-    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const { renderCapabilities } = await import("../plugins/agent-id-auth/lib/manifest.mjs");
     const manifest = parseServiceManifest(
       {
         version: 2,
@@ -684,7 +686,7 @@ describe("renderCapabilities", () => {
   });
 
   it("preserves {param} placeholders in the Call: URL", async () => {
-    const { renderCapabilities } = await import("../skills/alien-agent-id/lib.mjs");
+    const { renderCapabilities } = await import("../plugins/agent-id-auth/lib/manifest.mjs");
     const manifest = parseServiceManifest(
       {
         version: 2,
@@ -1009,7 +1011,7 @@ describe("CLI: discover-service", () => {
 
   it("prints validated manifest as JSON for a well-formed service", async () => {
     const { code, stdout } = await runCli([
-      "discover-service",
+      "discover",
       "--url", svc.baseUrl,
       "--allow-insecure",
     ]);
@@ -1030,7 +1032,7 @@ describe("CLI: discover-service", () => {
       api: { base: `http://${svc.host}/v1` },
     });
     const { code, stdout } = await runCli([
-      "discover-service",
+      "discover",
       "--url", svc.baseUrl,
       "--allow-insecure",
     ]);
@@ -1041,7 +1043,7 @@ describe("CLI: discover-service", () => {
   });
 
   it("requires --url", async () => {
-    const { code, stdout } = await runCli(["discover-service"]);
+    const { code, stdout } = await runCli(["discover"]);
     assert.equal(code, 1);
     const parsed = JSON.parse(stdout);
     assert.equal(parsed.ok, false);
@@ -1058,7 +1060,7 @@ describe("CLI: service-support", () => {
   it("reports supported when the meta tag is present", async () => {
     svc.setPage(`<html><head><meta name="alien-agent-id" content="v1"></head></html>`);
     const { code, stdout } = await runCli([
-      "service-support",
+      "support",
       "--url", svc.baseUrl,
       "--allow-insecure",
     ]);
@@ -1072,7 +1074,7 @@ describe("CLI: service-support", () => {
   it("reports not-supported when the tag is absent", async () => {
     svc.setPage(`<html><head><title>nothing here</title></head></html>`);
     const { code, stdout } = await runCli([
-      "service-support",
+      "support",
       "--url", svc.baseUrl,
       "--allow-insecure",
     ]);

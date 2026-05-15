@@ -53,8 +53,42 @@ cli() {
   # Usage: cli <command> [flags...]
   # `--state-dir` is forwarded to every command so all CLI invocations
   # share the same scratch state directory under STATE_DIR.
+  #
+  # Routes the legacy subcommand names to the per-plugin CLIs that own
+  # them post-split. Old names (git-commit, vault-store, auth-header,
+  # discover-service, …) are accepted on input and mapped to the
+  # plugin's current subcommand name before forwarding.
   local cmd=$1 ; shift
-  node skills/alien-agent-id/cli.mjs "$cmd" --state-dir "$STATE_DIR" "$@"
+  local plugin_path
+  case "$cmd" in
+    init|auth|bind|bootstrap|setup-owner-session|refresh|status|sign|verify|export-proof)
+      plugin_path="plugins/agent-id-core/bin/cli.mjs" ;;
+    git-setup)
+      plugin_path="plugins/agent-id-git/bin/cli.mjs" ; cmd="setup" ;;
+    git-commit)
+      plugin_path="plugins/agent-id-git/bin/cli.mjs" ; cmd="commit" ;;
+    git-verify)
+      plugin_path="plugins/agent-id-git/bin/cli.mjs" ; cmd="verify" ;;
+    vault-store)
+      plugin_path="plugins/agent-id-vault/bin/cli.mjs" ; cmd="store" ;;
+    vault-get)
+      plugin_path="plugins/agent-id-vault/bin/cli.mjs" ; cmd="get" ;;
+    vault-list)
+      plugin_path="plugins/agent-id-vault/bin/cli.mjs" ; cmd="list" ;;
+    vault-remove)
+      plugin_path="plugins/agent-id-vault/bin/cli.mjs" ; cmd="remove" ;;
+    auth-header)
+      plugin_path="plugins/agent-id-auth/bin/cli.mjs" ; cmd="header" ;;
+    discover-service)
+      plugin_path="plugins/agent-id-auth/bin/cli.mjs" ; cmd="discover" ;;
+    service-support)
+      plugin_path="plugins/agent-id-auth/bin/cli.mjs" ; cmd="support" ;;
+    call|capabilities)
+      plugin_path="plugins/agent-id-auth/bin/cli.mjs" ;;
+    *)
+      echo "cli(): unknown subcommand: $cmd" >&2 ; return 1 ;;
+  esac
+  node "$plugin_path" "$cmd" --state-dir "$STATE_DIR" "$@"
 }
 
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }

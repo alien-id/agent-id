@@ -12,14 +12,14 @@ import {
 } from "node:crypto";
 
 import {
-  verifyIdToken,
-  ed25519PublicKeyToJwk,
-  jwkThumbprint,
-  generateEd25519PemPair,
-  signEd25519Base64Url,
   b64url,
+  ed25519PublicKeyToJwk,
   fromB64url,
-} from "../skills/alien-agent-id/lib.mjs";
+  generateEd25519PemPair,
+  jwkThumbprint,
+  signEd25519Base64Url,
+} from "../plugins/agent-id-core/lib/crypto.mjs";
+import { verifyIdToken } from "../plugins/agent-id-core/lib/oidc.mjs";
 
 function generateRsaKeyPair() {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
