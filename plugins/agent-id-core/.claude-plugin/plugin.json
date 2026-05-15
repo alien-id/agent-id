@@ -1,0 +1,6 @@
+{
+  "name": "agent-id-core",
+  "version": "0.0.0",
+  "description": "Shared library for Alien Agent ID: crypto primitives, v3 bundle format, universal verifier, SignatureEngine, OIDC session management, and state I/O. Required by every other agent-id-* plugin.",
+  "keywords": ["agent-identity", "cryptography", "verification"]
+}

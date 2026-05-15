@@ -1,0 +1,9 @@
+{
+  "name": "agent-id-git",
+  "version": "0.0.0",
+  "description": "SSH-signed git commits with Agent-ID trailers and v3 proof notes; verify provenance on any commit.",
+  "keywords": ["git-signing", "provenance", "agent-identity"],
+  "dependencies": [
+    { "name": "agent-id-core", "version": "^0.0.0" }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "agent-id-auth",
+  "version": "0.0.0",
+  "description": "DPoP-signed calls to Alien-aware services: service manifest discovery, capability rendering, one-shot signed requests.",
+  "keywords": ["dpop", "oidc", "agent-identity"],
+  "dependencies": [
+    { "name": "agent-id-core", "version": "^0.0.0" }
+  ]
+}

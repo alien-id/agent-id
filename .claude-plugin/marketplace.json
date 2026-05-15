@@ -7,7 +7,7 @@
     "email": "support@alien.org"
   },
   "metadata": {
-    "pluginRoot": "./"
+    "pluginRoot": "./plugins"
   },
   "plugins": [
     {
@@ -27,6 +27,46 @@
         "oidc",
         "provenance"
       ]
+    },
+    {
+      "name": "agent-id-core",
+      "description": "Shared library for Alien Agent ID: crypto primitives, v3 bundle format, universal verifier, SignatureEngine, OIDC, state I/O. Required by every other agent-id-* plugin.",
+      "version": "0.0.0",
+      "source": "agent-id-core",
+      "category": "identity",
+      "keywords": ["agent-identity", "cryptography", "verification"]
+    },
+    {
+      "name": "agent-id-setup",
+      "description": "Bootstrap and lifecycle commands for Alien Agent ID: init, auth, bind, owner session, refresh.",
+      "version": "0.0.0",
+      "source": "agent-id-setup",
+      "category": "identity",
+      "keywords": ["agent-identity", "bootstrap", "sso"]
+    },
+    {
+      "name": "agent-id-git",
+      "description": "SSH-signed git commits with Agent-ID trailers and v3 proof notes; verify provenance on any commit.",
+      "version": "0.0.0",
+      "source": "agent-id-git",
+      "category": "identity",
+      "keywords": ["git-signing", "provenance", "agent-identity"]
+    },
+    {
+      "name": "agent-id-vault",
+      "description": "Encrypted credential vault keyed off the agent's private key.",
+      "version": "0.0.0",
+      "source": "agent-id-vault",
+      "category": "identity",
+      "keywords": ["credential-vault", "agent-identity"]
+    },
+    {
+      "name": "agent-id-auth",
+      "description": "DPoP-signed calls to Alien-aware services: discovery, capabilities, one-shot signed requests.",
+      "version": "0.0.0",
+      "source": "agent-id-auth",
+      "category": "identity",
+      "keywords": ["dpop", "oidc", "agent-identity"]
     }
   ]
 }
