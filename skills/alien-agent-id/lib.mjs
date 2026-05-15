@@ -62,6 +62,12 @@ import {
 // (appendOperation, ensureValidSession, …), verifyState, resolveAgentId.
 export * from "../../plugins/agent-id-core/lib/signature-engine.mjs";
 
+// Re-export vault crypto from the agent-id-vault plugin. Plugin-private —
+// no other plugin needs these — so it lives in the vault plugin's own lib,
+// not in core. Stays surfaced from lib.mjs for now so the legacy
+// skills/alien-agent-id/cli.mjs keeps working until per-plugin CLIs land.
+export * from "../../plugins/agent-id-vault/lib/vault.mjs";
+
 import {
   b64url,
   canonicalJSONString,
@@ -652,46 +658,5 @@ export function resolveServiceApiUrl(manifest, requestPath) {
     throw new Error(`resolveServiceApiUrl: path "${requestPath}" escapes api.base`);
   }
   return resolved.toString();
-}
-
-// ════════════════════════════════════════════════════════════════════════════════
-// Vault — Encrypted credential storage linked to agent identity
-// ════════════════════════════════════════════════════════════════════════════════
-
-export function deriveVaultKey(privateKeyPem) {
-  const privKey = createPrivateKey(privateKeyPem);
-  const rawKey = privKey.export({ type: "pkcs8", format: "der" });
-  return Buffer.from(
-    hkdfSync("sha256", rawKey, "agent-id-vault-v1", "vault-encryption", 32),
-  );
-}
-
-export function vaultEncrypt(key, plaintext) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([
-    cipher.update(plaintext, "utf8"),
-    cipher.final(),
-  ]);
-  const tag = cipher.getAuthTag();
-  return {
-    iv: iv.toString("hex"),
-    data: encrypted.toString("hex"),
-    tag: tag.toString("hex"),
-  };
-}
-
-export function vaultDecrypt(key, entry) {
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    key,
-    Buffer.from(entry.iv, "hex"),
-  );
-  decipher.setAuthTag(Buffer.from(entry.tag, "hex"));
-  const decrypted = Buffer.concat([
-    decipher.update(Buffer.from(entry.data, "hex")),
-    decipher.final(),
-  ]);
-  return decrypted.toString("utf8");
 }
 

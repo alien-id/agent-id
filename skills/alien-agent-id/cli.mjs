@@ -10,8 +10,17 @@
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { execFile as execFileCb } from "node:child_process";
 import { randomUUID, createPublicKey } from "node:crypto";
+
+import {
+  execFile,
+  outputError,
+  outputJson,
+  parseFlags,
+  resolveStateDir,
+  runCli,
+  stderr,
+} from "../../plugins/agent-id-core/lib/cli-runtime.mjs";
 
 import {
   statePaths,
@@ -50,61 +59,6 @@ import {
   BundleVerifyError,
 } from "./lib.mjs";
 import qrcode from "./qrcode.cjs";
-
-// ─── Helpers ────────────────────────────────────────────────────────────────────
-
-function stderr(msg) {
-  process.stderr.write(`${msg}\n`);
-}
-
-function outputJson(obj) {
-  process.stdout.write(JSON.stringify(obj, null, 2) + "\n");
-}
-
-function outputError(message) {
-  outputJson({ ok: false, error: message });
-  process.exitCode = 1;
-}
-
-function parseFlags(argv) {
-  const flags = {};
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      if (key.startsWith("no-")) {
-        flags[key.slice(3)] = false;
-      } else if (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
-        flags[key] = argv[++i];
-      } else {
-        flags[key] = true;
-      }
-    }
-  }
-  return flags;
-}
-
-function resolveStateDir(flags) {
-  if (flags["state-dir"]) {
-    return path.resolve(String(flags["state-dir"]));
-  }
-  if (process.env.AGENT_ID_STATE_DIR) {
-    return path.resolve(process.env.AGENT_ID_STATE_DIR);
-  }
-  return path.join(os.homedir(), ".agent-id");
-}
-
-function execFile(command, args, options = {}) {
-  return new Promise((resolve) => {
-    execFileCb(command, args, { timeout: 5000, ...options }, (err, stdout, stderr) => {
-      resolve({
-        code: err?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? 1 : err ? (err.code ?? 1) : 0,
-        stdout: stdout || "",
-        stderr: stderr || "",
-      });
-    });
-  });
-}
 
 // ─── Commands ───────────────────────────────────────────────────────────────────
 
@@ -1512,28 +1466,4 @@ const commands = {
   refresh: cmdRefresh,
 };
 
-async function main() {
-  const args = process.argv.slice(2);
-  const command = args[0];
-
-  if (!command || command === "help" || command === "--help" || command === "-h") {
-    printHelp();
-    return;
-  }
-
-  const handler = commands[command];
-  if (!handler) {
-    outputError(`Unknown command: ${command}. Run with --help for usage.`);
-    return;
-  }
-
-  const flags = parseFlags(args.slice(1));
-
-  try {
-    await handler(flags);
-  } catch (err) {
-    outputError(err instanceof Error ? err.message : String(err));
-  }
-}
-
-main();
+runCli({ commands, printHelp });
