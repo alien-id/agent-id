@@ -1,9 +1,15 @@
 {
   "name": "agent-id-vault",
-  "version": "0.0.0",
+  "version": "4.0.0",
   "description": "Encrypted credential vault keyed off the agent's private key. Store, retrieve, list, and remove external-service credentials.",
-  "keywords": ["credential-vault", "agent-identity"],
+  "keywords": [
+    "credential-vault",
+    "agent-identity"
+  ],
   "dependencies": [
-    { "name": "agent-id-core", "version": "^0.0.0" }
+    {
+      "name": "agent-id-core",
+      "version": "^4.0.0"
+    }
   ]
 }

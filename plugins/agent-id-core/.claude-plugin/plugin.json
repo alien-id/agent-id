@@ -1,6 +1,13 @@
 {
   "name": "agent-id-core",
-  "version": "0.0.0",
+  "version": "4.0.0",
   "description": "Alien Agent ID — core: bootstrap (init/auth/bind), session lifecycle (refresh, status), arbitrary-operation signing (sign, verify, export-proof), and the shared library (crypto, v3 bundle format, universal verifier, SignatureEngine, OIDC, state I/O) that every other agent-id-* plugin depends on.",
-  "keywords": ["agent-identity", "cryptography", "verification", "bootstrap", "sso"]
+  "keywords": [
+    "agent-identity",
+    "cryptography",
+    "verification",
+    "bootstrap",
+    "sso"
+  ],
+  "dependencies": []
 }

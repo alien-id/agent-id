@@ -2,6 +2,91 @@
 
 All notable changes are documented here.
 
+## [4.0.0] — 2026-05-15
+
+Major release. The monolithic `skills/alien-agent-id/` is replaced by a
+marketplace of four focused plugins under `plugins/`: `agent-id-core`,
+`agent-id-git`, `agent-id-vault`, and `agent-id-auth`. The wire protocol
+(RFC 9449 DPoP + RFC 9068 `at+jwt` + RFC 7800 `cnf.jkt` + v3 commit
+attestation bundle) is unchanged; consumers on the verifier side
+(`@alien-id/sso-agent-id`, `alien-sso-agent-id`) continue to work
+without changes.
+
+### Breaking changes
+
+- **Repository layout.** `skills/alien-agent-id/` is gone. The CLI now
+  lives at `plugins/agent-id-core/bin/cli.mjs` (and the per-plugin
+  binaries for the other three plugins). `package.json#bin` (`alien-agent-id`)
+  is repointed at core, so the global binary still works for the
+  bootstrap and lifecycle subcommands.
+- **CLI subcommand names.** In the focused per-plugin CLIs the
+  `git-` / `vault-` / `auth-header` prefixes are redundant and dropped:
+  - `git-commit` → `agent-id-git commit`
+  - `git-verify` → `agent-id-git verify`
+  - `git-setup` → `agent-id-git setup`
+  - `vault-store` / `-get` / `-list` / `-remove` → `agent-id-vault store` / `get` / `list` / `remove`
+  - `auth-header` → `agent-id-auth header`
+  - `discover-service` → `agent-id-auth discover`
+  - `service-support` → `agent-id-auth support`
+  - `call`, `capabilities`, `bootstrap`, `init`, `auth`, `bind`,
+    `refresh`, `status`, `sign`, `verify`, `export-proof`,
+    `setup-owner-session` keep their names (within their owning plugins).
+- **Bootstrap no longer auto-runs git-setup.** That coupling crossed
+  plugin boundaries; `agent-id-core bootstrap` now stops after `init`
+  + `auth` + `bind` and points the user at `agent-id-git setup` for the
+  follow-up. Stderr message updated accordingly.
+- **Library import paths.** Downstream consumers that imported from
+  `skills/alien-agent-id/lib.mjs` should switch to the focused modules:
+  `plugins/agent-id-core/lib/{crypto,bundle,state,errors,oidc,signature-engine,cli-runtime}.mjs`,
+  plus `plugins/agent-id-auth/lib/manifest.mjs` and
+  `plugins/agent-id-vault/lib/vault.mjs`. The `export *` shim in the
+  old `lib.mjs` is removed alongside the directory.
+
+### Added
+
+- **`verifyBundle()` universal verifier** (`agent-id-core/lib/bundle.mjs`).
+  Takes a v3 bundle (`{ version: 3, id_token, agent_jwk }`) and returns
+  the verified facts (`{ jkt, ownerSub, issuer, aud, iat, … }`) or a
+  typed `BundleVerifyError`. Transport-specific binding (Agent-ID
+  trailers, SSH commit signature, future signed-tool-call attestations)
+  layers on top — `agent-id-git verify` is the first consumer.
+  Auditors and CI runners only need `agent-id-core`; the verifier is
+  pure protocol and does not require a bound local identity.
+- **Inter-plugin dependencies.** `agent-id-git`, `agent-id-vault`, and
+  `agent-id-auth` declare `agent-id-core` as a `^4.0.0` dependency in
+  their `plugin.json`. The Claude Code marketplace auto-resolves these
+  on install (v2.1.110+); `claude plugin prune` cleans up orphans.
+- **Per-plugin SKILL.md.** Each plugin ships its own focused skill
+  that surfaces to Claude Code: `/agent-id-core`, `/agent-id-git`,
+  `/agent-id-vault`, `/agent-id-auth`.
+
+### Changed
+
+- **`agent-id-core/lib/cli-runtime.mjs`** centralizes the CLI helpers
+  every per-plugin binary needs: argv parsing, output formatting,
+  state-dir resolution, the standardized `requireAgentKey` guard, and
+  the `runCli({ commands, printHelp })` dispatch loop. No per-plugin
+  CLI duplicates these.
+- **`agent-id-core/lib/errors.mjs`** consolidates the typed error
+  classes (`SubjectMismatchError`, `AuthRevokedError`,
+  `BundleFormatError`, `BundleVerifyError`) plus an `errorMessage(err)`
+  helper.
+- **Marketplace structure.** `.claude-plugin/marketplace.json` lists
+  the four plugins under `metadata.pluginRoot: "./plugins"`. Each
+  plugin is independently versioned and tag-resolvable using the
+  `{plugin-name}--v{version}` convention.
+
+### Migration
+
+The state directory (`~/.agent-id/`), all on-disk formats, the SSO
+wire protocol, the v3 commit attestation bundle, and the marketplace
+plugin name (`alien-agent-id` is now the meta-marketplace name; the
+four focused plugins each have their own `agent-id-<name>` identifier)
+are unchanged. Existing bound agents do not need to re-bootstrap.
+Scripts that hardcode `node skills/alien-agent-id/cli.mjs <subcommand>`
+need to switch to the per-plugin invocation; `node bin/cli.mjs` users
+should follow the same break-down.
+
 ## [3.1.1] — 2026-05-12
 
 Patch release. Fixes a CLI failure on machines with a custom global SSH signing program (most
