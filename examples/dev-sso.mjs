@@ -22,7 +22,7 @@
 // Usage:
 //   node examples/dev-sso.mjs --port 5050
 //   # then in another shell:
-//   node skills/alien-agent-id/cli.mjs auth \
+//   node plugins/agent-id-core/bin/cli.mjs auth \
 //     --provider-address dev-fixture-provider \
 //     --sso-url http://localhost:5050
 //
@@ -48,11 +48,11 @@ import {
 import { parseArgs } from "node:util";
 
 import {
-  jwkThumbprint,
   ed25519PublicKeyToJwk,
   fingerprintPublicKeyPem,
   generateEd25519PemPair,
-} from "../skills/alien-agent-id/lib.mjs";
+  jwkThumbprint,
+} from "../plugins/agent-id-core/lib/crypto.mjs";
 
 // ─── CLI args ──────────────────────────────────────────────────────────────
 
@@ -240,8 +240,8 @@ function verifyDPoPProof({ proof, htm, htu, accessToken: at }) {
 //
 // If a future verifier change adds a required claim, surface it here first
 // before flipping behavior server-side.
-function signRs256Jwt(payload) {
-  const header = { alg: "RS256", typ: "JWT", kid: rsaKid };
+function signRs256Jwt(payload, { typ = "JWT" } = {}) {
+  const header = { alg: "RS256", typ, kid: rsaKid };
   const headerB = b64url(JSON.stringify(header));
   const payloadB = b64url(JSON.stringify(payload));
   const signingInput = `${headerB}.${payloadB}`;
@@ -300,6 +300,10 @@ function routeAuthorize(req, res, url) {
   const codeChallenge = q.get("code_challenge");
   const responseType = q.get("response_type");
   const dpopJkt = q.get("dpop_jkt");
+  // OIDC Core §3.1.3.7 step 11: if `nonce` was sent on the authorize URL,
+  // it MUST be echoed in the id_token. Thread it through the polling
+  // session → authorization code → token mint.
+  const nonce = q.get("nonce");
   if (responseType !== "code") return send(res, 400, { error: "unsupported_response_type" });
   if (!clientId) return send(res, 400, { error: "invalid_request", error_description: "client_id required" });
   if (!codeChallenge) return send(res, 400, { error: "invalid_request", error_description: "code_challenge required" });
@@ -312,6 +316,7 @@ function routeAuthorize(req, res, url) {
     clientId,
     codeChallenge,
     dpopJkt,
+    nonce,
     status: "pending",
     authorizationCode,
     expiredAt,
@@ -327,6 +332,7 @@ function routeAuthorize(req, res, url) {
       clientId,
       codeChallenge,
       dpopJkt,
+      nonce,
       sub: OWNER_SESSION_ADDRESS,
       consumed: false,
     });
@@ -390,7 +396,7 @@ async function routeToken(req, res) {
     if (codeRec.dpopJkt && codeRec.dpopJkt !== proof.jkt) {
       return send(res, 400, { error: "invalid_dpop_proof", error_description: "dpop_jkt mismatch with /authorize" });
     }
-    return mintTokens(res, { clientId, sub: codeRec.sub, jkt: proof.jkt });
+    return mintTokens(res, { clientId, sub: codeRec.sub, jkt: proof.jkt, nonce: codeRec.nonce });
   }
 
   if (grantType === "refresh_token") {
@@ -410,22 +416,52 @@ async function routeToken(req, res) {
   send(res, 400, { error: "unsupported_grant_type" });
 }
 
-function mintTokens(res, { clientId, sub, jkt, refreshToken: existingRt }) {
-  const accessToken = b64url(randomBytes(32));
+function mintTokens(res, { clientId, sub, jkt, refreshToken: existingRt, nonce }) {
   const refreshToken = existingRt || b64url(randomBytes(32));
-  const exp = nowSec() + 3600;
+  const iat = nowSec();
+  const exp = iat + 3600;
+
+  // RFC 9068 §2 / RFC 9449 §6.1: the access_token is an at+jwt JWS carrying
+  // iss/sub/aud/iat/exp + cnf.jkt. Verifiers (e.g. examples/demo-service.mjs,
+  // alien-sso-agent-id) dispatch on the `typ` header and check the signature
+  // against the SSO's JWKS — opaque random-bytes access tokens are not
+  // acceptable in v3.
+  //
+  // Audience choice: without an explicit `resource` (RFC 8707) on the token
+  // request, the AS sets aud to its own issuer. Resource servers that don't
+  // override `expected_audience` (the SDK default) compare against the same
+  // SSO URL they fetched JWKS from. id_token `aud: clientId` is separate —
+  // OIDC Core §3.1.3.7 step 3 requires that one.
+  const accessToken = signRs256Jwt(
+    {
+      iss: ISSUER,
+      sub,
+      aud: ISSUER,
+      iat,
+      exp,
+      jti: b64url(randomBytes(12)),
+      cnf: { jkt },
+    },
+    { typ: "at+jwt" },
+  );
 
   accessTokens.set(accessToken, { clientId, jkt, sub, exp });
   refreshTokens.set(refreshToken, { clientId, jkt, sub });
 
-  const idToken = signRs256Jwt({
+  const idTokenClaims = {
     iss: ISSUER,
     sub,
     aud: clientId,
     iat: nowSec(),
     exp,
     cnf: { jkt },
-  });
+  };
+  // OIDC Core §3.1.3.7 step 11: echo the nonce from the authorize request.
+  // Refresh-token flows don't send a nonce, so it's omitted there.
+  if (typeof nonce === "string" && nonce) {
+    idTokenClaims.nonce = nonce;
+  }
+  const idToken = signRs256Jwt(idTokenClaims);
 
   send(res, 200, {
     access_token: accessToken,

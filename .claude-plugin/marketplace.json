@@ -1,31 +1,60 @@
 {
   "name": "alien-agent-id",
-  "version": "3.1.1",
+  "version": "4.0.0",
   "description": "Verifiable cryptographic identity for AI agents — SSH-signed git commits, owner binding via Alien Network SSO, and hash-chained audit logs",
   "owner": {
     "name": "Alien",
     "email": "support@alien.org"
   },
   "metadata": {
-    "pluginRoot": "./"
+    "pluginRoot": "./plugins"
   },
   "plugins": [
     {
-      "name": "alien-agent-id",
-      "description": "Obtain a verifiable Agent ID linked to a human owner via Alien Network SSO. Sign git commits so every line of agent-written code is cryptographically attributable.",
-      "version": "3.1.1",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/alien-id/agent-id.git"
-      },
+      "name": "agent-id-core",
+      "description": "Shared library for Alien Agent ID: crypto primitives, v3 bundle format, universal verifier, SignatureEngine, OIDC, state I/O. Required by every other agent-id-* plugin.",
+      "version": "4.0.0",
+      "source": "agent-id-core",
       "category": "identity",
       "keywords": [
         "agent-identity",
         "cryptography",
+        "verification"
+      ]
+    },
+    {
+      "name": "agent-id-git",
+      "description": "SSH-signed git commits with Agent-ID trailers and v3 proof notes; verify provenance on any commit.",
+      "version": "4.0.0",
+      "source": "agent-id-git",
+      "category": "identity",
+      "keywords": [
         "git-signing",
-        "sso",
+        "provenance",
+        "agent-identity"
+      ]
+    },
+    {
+      "name": "agent-id-vault",
+      "description": "Encrypted credential vault keyed off the agent's private key.",
+      "version": "4.0.0",
+      "source": "agent-id-vault",
+      "category": "identity",
+      "keywords": [
+        "credential-vault",
+        "agent-identity"
+      ]
+    },
+    {
+      "name": "agent-id-auth",
+      "description": "DPoP-signed calls to Alien-aware services: discovery, capabilities, one-shot signed requests.",
+      "version": "4.0.0",
+      "source": "agent-id-auth",
+      "category": "identity",
+      "keywords": [
+        "dpop",
         "oidc",
-        "provenance"
+        "agent-identity"
       ]
     }
   ]

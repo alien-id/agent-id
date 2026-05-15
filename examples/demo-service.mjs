@@ -28,13 +28,15 @@ import { parseArgs } from "node:util";
 
 import {
   b64url,
-  parseJwt,
   jwkThumbprint,
-  verifyJwtRs256Signature,
   verifyJwtEdDsaSignature,
-  fetchOidcDiscovery,
+  verifyJwtRs256Signature,
+} from "../plugins/agent-id-core/lib/crypto.mjs";
+import {
   fetchJwks,
-} from "../skills/alien-agent-id/lib.mjs";
+  fetchOidcDiscovery,
+  parseJwt,
+} from "../plugins/agent-id-core/lib/oidc.mjs";
 
 const { values: argv } = parseArgs({
   args: process.argv.slice(2),

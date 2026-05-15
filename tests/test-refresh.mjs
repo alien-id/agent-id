@@ -13,24 +13,26 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import {
-  refreshSession,
-  SignatureEngine,
-  generateEd25519PemPair,
+  b64url,
+  canonicalJSONString,
+  ed25519PublicKeyToJwk,
   fingerprintPublicKeyPem,
-  writeJsonFile,
+  fromB64url,
+  generateEd25519PemPair,
+  jwkThumbprint,
+  nowMs,
+  sha256Hex,
+  signEd25519Base64Url,
+} from "../plugins/agent-id-core/lib/crypto.mjs";
+import {
+  ensureDir,
   readJsonFile,
   setPrivateFilePermissions,
   statePaths,
-  ensureDir,
-  nowMs,
-  b64url,
-  fromB64url,
-  signEd25519Base64Url,
-  canonicalJSONString,
-  sha256Hex,
-  ed25519PublicKeyToJwk,
-  jwkThumbprint,
-} from "../skills/alien-agent-id/lib.mjs";
+  writeJsonFile,
+} from "../plugins/agent-id-core/lib/state.mjs";
+import { refreshSession } from "../plugins/agent-id-core/lib/oidc.mjs";
+import { SignatureEngine } from "../plugins/agent-id-core/lib/signature-engine.mjs";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -849,7 +851,7 @@ describe("CLI refresh command (integration)", () => {
       const { promisify } = await import("node:util");
       const exec = promisify(execFile);
 
-      const cliPath = new URL("../skills/alien-agent-id/cli.mjs", import.meta.url).pathname;
+      const cliPath = new URL("../plugins/agent-id-core/bin/cli.mjs", import.meta.url).pathname;
       const { stdout } = await exec("node", [cliPath, "refresh", "--state-dir", stateDir]);
 
       const result = JSON.parse(stdout);
@@ -887,7 +889,7 @@ describe("CLI refresh command (integration)", () => {
     const { promisify } = await import("node:util");
     const exec = promisify(execFile);
 
-    const cliPath = new URL("../skills/alien-agent-id/cli.mjs", import.meta.url).pathname;
+    const cliPath = new URL("../plugins/agent-id-core/bin/cli.mjs", import.meta.url).pathname;
 
     try {
       await exec("node", [cliPath, "refresh", "--state-dir", stateDir]);

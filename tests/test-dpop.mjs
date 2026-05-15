@@ -14,17 +14,19 @@ import crypto, {
 } from "node:crypto";
 
 import {
-  ed25519PublicKeyToJwk,
-  jwkThumbprint,
+  b64url,
   createDPoPProof,
+  ed25519PublicKeyToJwk,
+  fromB64url,
+  generateEd25519PemPair,
+  jwkThumbprint,
+} from "../plugins/agent-id-core/lib/crypto.mjs";
+import {
   beginOidcAuthorization,
   exchangeAuthorizationCode,
-  refreshSession,
-  generateEd25519PemPair,
-  fromB64url,
-  b64url,
   getUserInfo,
-} from "../skills/alien-agent-id/lib.mjs";
+  refreshSession,
+} from "../plugins/agent-id-core/lib/oidc.mjs";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────────
 //
@@ -863,19 +865,21 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
     const { default: fs } = await import("node:fs/promises");
     const { default: os } = await import("node:os");
     const { default: pathMod } = await import("node:path");
+    const { SignatureEngine } = await import("../plugins/agent-id-core/lib/signature-engine.mjs");
     const {
-      SignatureEngine,
-      statePaths,
       ensureDir,
-      writeJsonFile,
       readJsonFile,
-      generateEd25519PemPair,
-      fingerprintPublicKeyPem,
-      nowMs,
+      statePaths,
+      writeJsonFile,
+    } = await import("../plugins/agent-id-core/lib/state.mjs");
+    const {
       canonicalJSONString,
+      fingerprintPublicKeyPem,
+      generateEd25519PemPair,
+      nowMs,
       sha256Hex,
       signEd25519Base64Url,
-    } = await import("../skills/alien-agent-id/lib.mjs");
+    } = await import("../plugins/agent-id-core/lib/crypto.mjs");
 
     const stateDir = pathMod.join(os.tmpdir(), `agent-id-dpop-${crypto.randomUUID()}`);
     await fs.mkdir(stateDir, { recursive: true });
