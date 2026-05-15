@@ -27,6 +27,27 @@ export * from "../../plugins/agent-id-core/lib/crypto.mjs";
 // core, not in the git plugin.
 export * from "../../plugins/agent-id-core/lib/bundle.mjs";
 
+// Re-export state I/O helpers from agent-id-core.
+export * from "../../plugins/agent-id-core/lib/state.mjs";
+
+import {
+  appendJsonl,
+  ensureDir,
+  readJsonFile,
+  readJsonl,
+  setPrivateFilePermissions,
+  statePaths,
+  writeJsonFile,
+} from "../../plugins/agent-id-core/lib/state.mjs";
+
+// Re-export typed error classes from agent-id-core.
+export * from "../../plugins/agent-id-core/lib/errors.mjs";
+
+import {
+  AuthRevokedError,
+  SubjectMismatchError,
+} from "../../plugins/agent-id-core/lib/errors.mjs";
+
 import {
   b64url,
   canonicalJSONString,
@@ -47,81 +68,6 @@ import {
   verifyJwtRs256Signature,
 } from "../../plugins/agent-id-core/lib/crypto.mjs";
 
-
-// ════════════════════════════════════════════════════════════════════════════════
-// State Management
-// ════════════════════════════════════════════════════════════════════════════════
-
-async function ensureParent(filePath) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-}
-
-export async function ensureDir(dirPath) {
-  await fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
-}
-
-export async function readJsonFile(filePath, fallback = null) {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return JSON.parse(raw);
-  } catch (err) {
-    if (err && typeof err === "object" && err.code === "ENOENT") {
-      return fallback;
-    }
-    throw err;
-  }
-}
-
-export async function writeJsonFile(filePath, value, mode = 0o600) {
-  await ensureParent(filePath);
-  const payload = `${JSON.stringify(value, null, 2)}\n`;
-  await fs.writeFile(filePath, payload, { encoding: "utf8", mode });
-}
-
-export async function appendJsonl(filePath, value) {
-  await ensureParent(filePath);
-  const line = `${JSON.stringify(value)}\n`;
-  await fs.appendFile(filePath, line, { encoding: "utf8" });
-}
-
-export async function readJsonl(filePath) {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return raw
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-  } catch (err) {
-    if (err && typeof err === "object" && err.code === "ENOENT") {
-      return [];
-    }
-    throw err;
-  }
-}
-
-export function statePaths(baseDir) {
-  return {
-    baseDir,
-    ownerSession: path.join(baseDir, "owner-session.json"),
-    pendingAuth: path.join(baseDir, "pending-auth.json"),
-    nonces: path.join(baseDir, "nonces.json"),
-    seq: path.join(baseDir, "sequence.json"),
-    mainKey: path.join(baseDir, "keys", "main.json"),
-    subagentKeysDir: path.join(baseDir, "keys", "subagents"),
-    delegationsDir: path.join(baseDir, "delegations"),
-    auditJsonl: path.join(baseDir, "audit", "operations.jsonl"),
-    vaultDir: path.join(baseDir, "vault"),
-  };
-}
-
-export async function setPrivateFilePermissions(filePath) {
-  try {
-    await fs.chmod(filePath, 0o600);
-  } catch {
-    // Ignore on unsupported filesystems.
-  }
-}
 
 // ════════════════════════════════════════════════════════════════════════════════
 // OIDC
@@ -779,34 +725,6 @@ export async function verifyIdTokenSignatureOnly(params) {
     header: parsed.header,
     keyId: kid,
   };
-}
-
-/**
- * SubjectMismatchError marks a refresh-time security failure: the refreshed
- * token claims a different `sub` than the bound owner session. Callers use
- * `instanceof` to distinguish a security-relevant mismatch from incidental
- * parse errors on opaque tokens.
- */
-export class SubjectMismatchError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "SubjectMismatchError";
-  }
-}
-
-/**
- * AuthRevokedError marks a token-endpoint failure where the AS has rejected
- * the supplied credential — HTTP 401, HTTP 403, or RFC 6749 §5.2
- * `invalid_grant`. Callers can catch this distinctly from network/parse
- * errors and prompt the user to re-authenticate.
- */
-export class AuthRevokedError extends Error {
-  constructor(message, { status, errorCode } = {}) {
-    super(message);
-    this.name = "AuthRevokedError";
-    this.status = status ?? null;
-    this.errorCode = errorCode ?? null;
-  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
