@@ -43,6 +43,11 @@ import {
   fetchServiceManifest,
   probeServiceSupportSignal,
   renderCapabilities,
+  buildV3Bundle,
+  parseBundle,
+  verifyBundle,
+  BundleFormatError,
+  BundleVerifyError,
 } from "./lib.mjs";
 import qrcode from "./qrcode.cjs";
 
@@ -646,11 +651,10 @@ async function cmdGitCommit(flags) {
   // SSO-signed id_token == jwkThumbprint(agent_jwk).
   let proofAttached = false;
   try {
-    const proofBundle = {
-      version: 3,
-      id_token: Buffer.from(session.idToken).toString("base64url"),
-      agent_jwk: agentJwk,
-    };
+    const proofBundle = buildV3Bundle({
+      idToken: session.idToken,
+      agentJwk,
+    });
     const noteBody = JSON.stringify(proofBundle);
     const noteResult = await execFile(
       "git",
@@ -750,84 +754,41 @@ async function cmdGitVerify(flags) {
     return;
   }
 
-  let bundle;
+  let parsed;
   try {
-    bundle = JSON.parse(noteResult.stdout.trim());
+    parsed = parseBundle(noteResult.stdout.trim());
   } catch (err) {
-    outputError(`Agent-ID note is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-
-  if (bundle?.version !== 3) {
-    outputError(
-      `Unsupported bundle version ${String(bundle?.version)} (only v3 commits are verifiable)`,
-    );
-    return;
-  }
-  if (typeof bundle.id_token !== "string" || !bundle.id_token) {
-    outputError("v3 bundle missing id_token");
-    return;
-  }
-  if (!bundle.agent_jwk || typeof bundle.agent_jwk !== "object") {
-    outputError("v3 bundle missing agent_jwk");
-    return;
-  }
-
-  let idTokenStr;
-  try {
-    idTokenStr = Buffer.from(bundle.id_token, "base64url").toString("utf8");
-  } catch (err) {
-    outputError(`bundle.id_token is not valid base64url: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-
-  let ssoBaseUrl = flags["sso-url"] || null;
-  if (!ssoBaseUrl) {
-    try {
-      ssoBaseUrl = parseJwt(idTokenStr).payload?.iss || null;
-    } catch {
-      // fall through — verifyIdTokenSignatureOnly will surface the parse error
+    if (err instanceof BundleFormatError) {
+      outputError(err.message);
+      return;
     }
-  }
-  if (!ssoBaseUrl) {
-    outputError("Could not determine SSO base URL (no --sso-url flag and id_token.iss missing)");
-    return;
+    throw err;
   }
 
-  // Verify id_token SSO signature + issuer. exp/aud intentionally skipped —
-  // commit attestation is historical, not runtime resource access.
-  let tokenResult;
+  // Universal v3 bundle verification: id_token SSO signature, cnf.jkt
+  // binding, agent_jwk validity. exp/aud intentionally skipped — commit
+  // attestation is historical, not runtime resource access.
+  let verified;
   try {
-    tokenResult = await verifyIdTokenSignatureOnly({
-      idToken: idTokenStr,
-      ssoBaseUrl,
+    verified = await verifyBundle(parsed, {
+      ssoBaseUrl: flags["sso-url"] || null,
+      verifyIdToken: verifyIdTokenSignatureOnly,
     });
   } catch (err) {
-    outputError(`id_token SSO signature verification failed: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-  const idPayload = tokenResult.payload;
-
-  if (typeof idPayload?.sub !== "string" || !idPayload.sub) {
-    outputError("id_token missing sub claim");
-    return;
-  }
-  if (trailerOwner && trailerOwner !== idPayload.sub) {
-    outputError(
-      `Agent-ID-Owner trailer ${trailerOwner} does not match id_token sub ${idPayload.sub}`,
-    );
-    return;
-  }
-  const cnfJkt = idPayload?.cnf?.jkt;
-  if (typeof cnfJkt !== "string" || !cnfJkt) {
-    outputError("id_token missing cnf.jkt (RFC 7800 §3.1 confirmation claim required)");
-    return;
+    if (err instanceof BundleVerifyError) {
+      outputError(err.message);
+      return;
+    }
+    throw err;
   }
 
-  const computedJkt = jwkThumbprint(bundle.agent_jwk);
-  if (computedJkt !== cnfJkt) {
+  const { jkt: computedJkt, ownerSub, idTokenPayload: idPayload, agentJwk } = verified;
+
+  // Git-specific binding: trailers in the commit message must agree with
+  // the bundle's verified facts.
+  if (trailerOwner && trailerOwner !== ownerSub) {
     outputError(
-      `agent_jwk thumbprint ${computedJkt} does not match id_token cnf.jkt ${cnfJkt}`,
+      `Agent-ID-Owner trailer ${trailerOwner} does not match id_token sub ${ownerSub}`,
     );
     return;
   }
@@ -840,15 +801,10 @@ async function cmdGitVerify(flags) {
 
   // SSH commit signature against agent_jwk. Reconstruct the public key as
   // PEM so the existing ed25519PemToSshPublicKey helper can format it for
-  // git's gpg.ssh.allowedSignersFile.
-  let agentPubKeyPem;
-  try {
-    const pubKey = createPublicKey({ key: bundle.agent_jwk, format: "jwk" });
-    agentPubKeyPem = pubKey.export({ type: "spki", format: "pem" });
-  } catch (err) {
-    outputError(`agent_jwk is not a valid Ed25519 JWK: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
+  // git's gpg.ssh.allowedSignersFile. (agent_jwk is already validated by
+  // verifyBundle, so this createPublicKey is expected to succeed.)
+  const agentPubKeyPem = createPublicKey({ key: agentJwk, format: "jwk" })
+    .export({ type: "spki", format: "pem" });
   const sshPub = ed25519PemToSshPublicKey(agentPubKeyPem);
   const tmpSignersPath = path.join(os.tmpdir(), `agent-id-signers-${randomUUID()}`);
   const signerEmail = `agent-${computedJkt.slice(0, 12)}@agent-id.local`;
@@ -879,11 +835,11 @@ async function cmdGitVerify(flags) {
     ok: true,
     commit: resolvedHash,
     jkt: computedJkt,
-    ownerSub: idPayload.sub,
-    issuer: tokenResult.issuer,
-    aud: idPayload.aud ?? null,
-    iat: idPayload.iat ?? null,
-    summary: `Commit ${resolvedHash.slice(0, 12)} signed by agent ${computedJkt.slice(0, 16)}... owned by ${idPayload.sub}`,
+    ownerSub,
+    issuer: verified.issuer,
+    aud: verified.aud,
+    iat: verified.iat,
+    summary: `Commit ${resolvedHash.slice(0, 12)} signed by agent ${computedJkt.slice(0, 16)}... owned by ${ownerSub}`,
   });
 }
 

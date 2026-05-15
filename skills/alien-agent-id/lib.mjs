@@ -21,6 +21,12 @@ import os from "node:os";
 // keeps existing imports from skills/alien-agent-id/lib.mjs working.
 export * from "../../plugins/agent-id-core/lib/crypto.mjs";
 
+// Re-export the v3 bundle module from agent-id-core. Bundles are the
+// universal provenance unit — git commits today, signed tool calls
+// tomorrow — so the constructor + parser + universal verifier live in
+// core, not in the git plugin.
+export * from "../../plugins/agent-id-core/lib/bundle.mjs";
+
 import {
   b64url,
   canonicalJSONString,
