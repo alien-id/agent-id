@@ -94,8 +94,8 @@ assert "SSO accepted mock signature (200)" bash -c "[[ '$HTTP_CODE' = '200' ]]"
 blue "▸ Step 5: bind (poll → DPoP token exchange → cnf.jkt verify)"
 node plugins/agent-id-core/bin/cli.mjs bind --state-dir "$STATE_DIR" \
   --timeout-sec "$BIND_TIMEOUT_SEC" --poll-interval-ms 500 >/tmp/dsm.bind.json
-assert "binding created" \
-  bash -c 'jq -e ".bindingId | type == \"string\"" /tmp/dsm.bind.json >/dev/null'
+assert "owner sub returned" \
+  bash -c 'jq -e ".ownerSub | type == \"string\"" /tmp/dsm.bind.json >/dev/null'
 assert "issuer matches develop SSO" \
   bash -c "[[ \"\$(jq -r .issuer /tmp/dsm.bind.json)\" = '$SSO_URL' ]]"
 
@@ -145,6 +145,6 @@ assert "agent_jkt matches id_token cnf.jkt" \
 
 green ""
 green "All 8 develop-SSO smoke steps passed against $SSO_URL."
-green "  binding:    $(jq -r .bindingId  /tmp/dsm.bind.json)"
+green "  owner sub:  $(jq -r .ownerSub /tmp/dsm.bind.json)"
 green "  fingerprint:$(jq -r .fingerprint /tmp/dsm.bind.json)"
 green "  cnf.jkt:    $JKT"

@@ -121,8 +121,9 @@ else
 fi
 
 if [[ -z "$DEMO_URL" ]]; then
-  blue "▸ Starting demo-service on :$DEMO_PORT"
-  node examples/demo-service.mjs --port "$DEMO_PORT" --verbose >/tmp/demo.log 2>&1 &
+  blue "▸ Starting demo-service on :$DEMO_PORT (trusting SSO at $RESOLVED_SSO_URL)"
+  node examples/demo-service.mjs --port "$DEMO_PORT" --sso-url "$RESOLVED_SSO_URL" \
+    --verbose >/tmp/demo.log 2>&1 &
   DEMO_PID=$!
 else
   blue "▸ Using external demo-service: $DEMO_URL"
@@ -182,10 +183,10 @@ fi
 
 blue "▸ Step 3: bind (poll → exchange → verify cnf.jkt)"
 cli bind --timeout-sec "$BIND_TIMEOUT_SEC" --poll-interval-ms 1000 >/tmp/integ.bind.json
-assert "binding created"  \
-  bash -c 'jq -e ".bindingId" /tmp/integ.bind.json >/dev/null'
-assert "fingerprint matches init" \
-  bash -c 'test "$(jq -r .fingerprint /tmp/integ.init.json)" = "$(jq -r .fingerprint /tmp/integ.bind.json)"'
+assert "owner sub returned" \
+  bash -c 'jq -e ".ownerSub | type == \"string\"" /tmp/integ.bind.json >/dev/null'
+assert "agent jkt returned" \
+  bash -c 'jq -e ".jkt | type == \"string\"" /tmp/integ.bind.json >/dev/null'
 
 blue "▸ Step 4: status reports bound"
 cli status >/tmp/integ.status.json
@@ -196,8 +197,8 @@ blue "▸ Step 5: discover-service (well-known fetch)"
 cli discover-service --url "$RESOLVED_DEMO_URL" "${INSECURE_FLAG[@]}" >/tmp/integ.discover.json
 assert "manifest version 1" \
   bash -c 'jq -e ".manifest.version == 1" /tmp/integ.discover.json >/dev/null'
-assert "manifest auth.scheme is AgentID" \
-  bash -c '[[ "$(jq -r .manifest.auth.scheme /tmp/integ.discover.json)" = "AgentID" ]]'
+assert "manifest auth.scheme is DPoP" \
+  bash -c '[[ "$(jq -r .manifest.auth.scheme /tmp/integ.discover.json)" = "DPoP" ]]'
 assert "api.base under same authority" \
   bash -c "[[ \"\$(jq -r .manifest.api.base /tmp/integ.discover.json)\" =~ $RESOLVED_DEMO_URL ]]"
 
@@ -206,22 +207,37 @@ cli service-support --url "$RESOLVED_DEMO_URL" "${INSECURE_FLAG[@]}" >/tmp/integ
 assert "supported v1" \
   bash -c '[[ "$(jq -r .version /tmp/integ.support.json)" = "v1" ]]'
 
+# Step 7+: RFC 9449 puts two headers on the wire — `Authorization: DPoP <at>`
+# and `DPoP: <proof>`. The `cli call` one-shot wraps that for normal callers;
+# the steps below use `cli auth-header --raw` so they can exercise tampered /
+# bare-token failure paths via curl.
+
 blue "▸ Step 7: auth-header --raw → call /api/v1/whoami"
-HDR=$(cli auth-header --raw)
-HTTP_CODE=$(curl -s -o /tmp/integ.whoami.json -w '%{http_code}' -H "$HDR" "$RESOLVED_DEMO_URL/api/v1/whoami")
+HDR=$(cli auth-header --url "$RESOLVED_DEMO_URL/api/v1/whoami" --method GET --raw)
+AUTH_LINE=$(printf '%s\n' "$HDR" | grep '^Authorization:')
+DPOP_LINE=$(printf '%s\n' "$HDR" | grep '^DPoP:')
+HTTP_CODE=$(curl -s -o /tmp/integ.whoami.json -w '%{http_code}' \
+  -H "$AUTH_LINE" -H "$DPOP_LINE" "$RESOLVED_DEMO_URL/api/v1/whoami")
 assert "service returns 200" bash -c "[[ '$HTTP_CODE' = '200' ]]"
-assert "agent_fingerprint matches" \
-  bash -c 'test "$(jq -r .agent_fingerprint /tmp/integ.whoami.json)" = "$(jq -r .fingerprint /tmp/integ.bind.json)"'
+assert "owner sub matches binding" \
+  bash -c 'test "$(jq -r .owner_sub /tmp/integ.whoami.json)" = "$(jq -r .ownerSub /tmp/integ.bind.json)"'
+assert "agent jkt matches binding" \
+  bash -c 'test "$(jq -r .agent_jkt /tmp/integ.whoami.json)" = "$(jq -r .jkt /tmp/integ.bind.json)"'
 
-blue "▸ Step 8: tampered token → 401"
-TAMP="${HDR:0:30}$([[ ${HDR:30:1} = Z ]] && echo Y || echo Z)${HDR:31}"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$TAMP" "$RESOLVED_DEMO_URL/api/v1/whoami")
-assert "tampered → 401"  bash -c "[[ '$CODE' = '401' ]]"
+blue "▸ Step 8: tampered DPoP proof → 401"
+HDR_T=$(cli auth-header --url "$RESOLVED_DEMO_URL/api/v1/whoami" --method GET --raw)
+AUTH_T=$(printf '%s\n' "$HDR_T" | grep '^Authorization:')
+DPOP_T=$(printf '%s\n' "$HDR_T" | grep '^DPoP:')
+# Flip a character mid-signature (after the second '.') so the proof JWS no longer verifies.
+DPOP_TAMP=$(printf '%s' "$DPOP_T" | sed 's/\(.\{40\}\).\(.*\)/\1Z\2/')
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_T" -H "$DPOP_TAMP" "$RESOLVED_DEMO_URL/api/v1/whoami")
+assert "tampered DPoP → 401"  bash -c "[[ '$CODE' = '401' ]]"
 
-blue "▸ Step 9: bare token (no scheme) → 401"
-RAW="${HDR#Authorization: AgentID }"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: $RAW" "$RESOLVED_DEMO_URL/api/v1/whoami")
-assert "bare → 401"  bash -c "[[ '$CODE' = '401' ]]"
+blue "▸ Step 9: missing DPoP header → 401"
+HDR_B=$(cli auth-header --url "$RESOLVED_DEMO_URL/api/v1/whoami" --method GET --raw)
+AUTH_B=$(printf '%s\n' "$HDR_B" | grep '^Authorization:')
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_B" "$RESOLVED_DEMO_URL/api/v1/whoami")
+assert "no DPoP → 401"  bash -c "[[ '$CODE' = '401' ]]"
 
 blue "▸ Step 10: refresh (DPoP-bound, sticky cnf.jkt)"
 cli refresh >/tmp/integ.refresh.json
@@ -229,8 +245,10 @@ assert "refresh ok" \
   bash -c 'jq -e ".ok == true" /tmp/integ.refresh.json >/dev/null'
 
 blue "▸ Step 11: post-refresh, service call still 200"
-HDR2=$(cli auth-header --raw)
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$HDR2" "$RESOLVED_DEMO_URL/api/v1/whoami")
+HDR2=$(cli auth-header --url "$RESOLVED_DEMO_URL/api/v1/whoami" --method GET --raw)
+AUTH2=$(printf '%s\n' "$HDR2" | grep '^Authorization:')
+DPOP2=$(printf '%s\n' "$HDR2" | grep '^DPoP:')
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH2" -H "$DPOP2" "$RESOLVED_DEMO_URL/api/v1/whoami")
 assert "post-refresh → 200"  bash -c "[[ '$CODE' = '200' ]]"
 
 green ""
