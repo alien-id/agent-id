@@ -422,14 +422,21 @@ function mintTokens(res, { clientId, sub, jkt, refreshToken: existingRt, nonce }
   const exp = iat + 3600;
 
   // RFC 9068 §2 / RFC 9449 §6.1: the access_token is an at+jwt JWS carrying
-  // iss/sub/aud/iat/exp + cnf.jkt. Verifiers (e.g. examples/demo-service.mjs)
-  // dispatch on the `typ` header and check the signature against the SSO's
-  // JWKS — opaque random-bytes access tokens are not acceptable in v3.
+  // iss/sub/aud/iat/exp + cnf.jkt. Verifiers (e.g. examples/demo-service.mjs,
+  // alien-sso-agent-id) dispatch on the `typ` header and check the signature
+  // against the SSO's JWKS — opaque random-bytes access tokens are not
+  // acceptable in v3.
+  //
+  // Audience choice: without an explicit `resource` (RFC 8707) on the token
+  // request, the AS sets aud to its own issuer. Resource servers that don't
+  // override `expected_audience` (the SDK default) compare against the same
+  // SSO URL they fetched JWKS from. id_token `aud: clientId` is separate —
+  // OIDC Core §3.1.3.7 step 3 requires that one.
   const accessToken = signRs256Jwt(
     {
       iss: ISSUER,
       sub,
-      aud: clientId,
+      aud: ISSUER,
       iat,
       exp,
       jti: b64url(randomBytes(12)),
