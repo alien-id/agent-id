@@ -37,14 +37,6 @@
       "keywords": ["agent-identity", "cryptography", "verification"]
     },
     {
-      "name": "agent-id-setup",
-      "description": "Bootstrap and lifecycle commands for Alien Agent ID: init, auth, bind, owner session, refresh.",
-      "version": "0.0.0",
-      "source": "agent-id-setup",
-      "category": "identity",
-      "keywords": ["agent-identity", "bootstrap", "sso"]
-    },
-    {
       "name": "agent-id-git",
       "description": "SSH-signed git commits with Agent-ID trailers and v3 proof notes; verify provenance on any commit.",
       "version": "0.0.0",

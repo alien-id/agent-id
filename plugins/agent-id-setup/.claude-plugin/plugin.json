@@ -1,9 +1,0 @@
-{
-  "name": "agent-id-setup",
-  "version": "0.0.0",
-  "description": "Bootstrap and lifecycle commands for Alien Agent ID: init, auth, bind, owner session, refresh. Interactive QR-code flow.",
-  "keywords": ["agent-identity", "bootstrap", "sso"],
-  "dependencies": [
-    { "name": "agent-id-core", "version": "^0.0.0" }
-  ]
-}
