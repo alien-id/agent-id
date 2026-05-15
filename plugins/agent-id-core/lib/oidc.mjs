@@ -22,19 +22,12 @@ import {
   verifyJwtRs256Signature,
 } from "./crypto.mjs";
 
-import { AuthRevokedError } from "./errors.mjs";
+import { AuthRevokedError, errorMessage } from "./errors.mjs";
 
-// All current callers pass an SSO base URL — chokepoint for the RFC 6749 §10
-// TLS guard so every flow (authorize, token, refresh, userinfo, discovery,
-// id_token verification) inherits it.
-function withNoTrailingSlash(value) {
-  assertSsoBaseUrlSafe(value);
-  return value.endsWith("/") ? value.slice(0, -1) : value;
-}
-
-// RFC 6749 §10: bearer credentials and refresh tokens MUST be transmitted
-// over TLS. Allow plain http:// only for loopback hosts (development).
-function assertSsoBaseUrlSafe(ssoBaseUrl) {
+// Validate and normalize an SSO base URL in one pass. Every public function
+// that accepts ssoBaseUrl calls this once; the returned value is safe and
+// has no trailing slash.
+function normalizeSsoBaseUrl(ssoBaseUrl) {
   if (typeof ssoBaseUrl !== "string" || !ssoBaseUrl) {
     throw new Error("ssoBaseUrl is required");
   }
@@ -44,11 +37,15 @@ function assertSsoBaseUrlSafe(ssoBaseUrl) {
   } catch {
     throw new Error(`ssoBaseUrl is not a valid URL: ${ssoBaseUrl}`);
   }
-  if (url.protocol === "https:") return;
-  if (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]")) {
-    return;
+  // RFC 6749 §10: bearer credentials and refresh tokens MUST be transmitted
+  // over TLS. Allow plain http:// only for loopback hosts (development).
+  if (url.protocol !== "https:") {
+    const loopback = url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
+    if (!loopback) {
+      throw new Error(`ssoBaseUrl must use https:// (got ${url.protocol}//${url.host})`);
+    }
   }
-  throw new Error(`ssoBaseUrl must use https:// (got ${url.protocol}//${url.host})`);
+  return ssoBaseUrl.endsWith("/") ? ssoBaseUrl.slice(0, -1) : ssoBaseUrl;
 }
 
 async function readJsonResponse(res) {
@@ -113,7 +110,7 @@ export function generatePkcePair() {
 }
 
 export async function beginOidcAuthorization(params) {
-  const base = withNoTrailingSlash(params.ssoBaseUrl);
+  const base = normalizeSsoBaseUrl(params.ssoBaseUrl);
   // RFC 9207 §2.4 requires comparing any AS-supplied `iss` on the
   // authorization response against the AS's discovered issuer to defeat
   // mix-up attacks. Discover once here and propagate to the poll step.
@@ -193,7 +190,7 @@ export async function beginOidcAuthorization(params) {
 }
 
 export async function pollForAuthorizationCode(params) {
-  const base = withNoTrailingSlash(params.ssoBaseUrl);
+  const base = normalizeSsoBaseUrl(params.ssoBaseUrl);
   const started = Date.now();
   const timeoutMs = params.timeoutSec * 1000;
   const expectedState = typeof params.expectedState === "string" && params.expectedState
@@ -248,7 +245,7 @@ export async function pollForAuthorizationCode(params) {
 }
 
 export async function exchangeAuthorizationCode(params) {
-  const base = withNoTrailingSlash(params.ssoBaseUrl);
+  const base = normalizeSsoBaseUrl(params.ssoBaseUrl);
   const body = new URLSearchParams();
   body.set("grant_type", "authorization_code");
   body.set("code", params.authorizationCode);
@@ -270,7 +267,7 @@ export async function exchangeAuthorizationCode(params) {
 }
 
 export async function refreshSession(params) {
-  const base = withNoTrailingSlash(params.ssoBaseUrl);
+  const base = normalizeSsoBaseUrl(params.ssoBaseUrl);
   const body = new URLSearchParams();
   body.set("grant_type", "refresh_token");
   body.set("refresh_token", params.refreshToken);
@@ -376,7 +373,7 @@ export async function getUserInfo(params) {
     throw new Error("getUserInfo: agentPrivateKeyPem is required");
   }
 
-  const userinfoUrl = `${withNoTrailingSlash(ssoBaseUrl)}/oauth/userinfo`;
+  const userinfoUrl = `${normalizeSsoBaseUrl(ssoBaseUrl)}/oauth/userinfo`;
 
   const buildHeaders = (nonce) => ({
     Authorization: `DPoP ${accessToken}`,
@@ -473,7 +470,7 @@ function rememberNonce(url, nonce) {
 }
 
 export async function fetchOidcDiscovery(ssoBaseUrl) {
-  const base = withNoTrailingSlash(ssoBaseUrl);
+  const base = normalizeSsoBaseUrl(ssoBaseUrl);
   return await fetchJson(`${base}/.well-known/openid-configuration`, { method: "GET" });
 }
 
@@ -501,11 +498,11 @@ function assertIdTokenTyp(rawTyp) {
   throw new Error(`Unsupported id_token typ: ${rawTyp}`);
 }
 
-export async function verifyIdToken(params) {
-  assertSsoBaseUrlSafe(params.ssoBaseUrl);
-  const parsed = parseJwt(params.idToken);
-  // RFC 7515 §4.1.11 / RFC 7519 §7.2: any non-empty `crit` array names
-  // extensions the verifier MUST understand. We support none.
+// Shared core of verifyIdToken and verifyIdTokenSignatureOnly: parse the
+// JWT, validate typ/alg, fetch discovery+JWKS, and verify the cryptographic
+// signature. Returns { parsed, discovery, kid } on success.
+async function verifyIdTokenSignatureCore(ssoBaseUrl, idToken) {
+  const parsed = parseJwt(idToken);
   if (Array.isArray(parsed.header.crit) && parsed.header.crit.length > 0) {
     throw new Error(`id_token contains unsupported crit extensions: ${parsed.header.crit.join(",")}`);
   }
@@ -516,11 +513,10 @@ export async function verifyIdToken(params) {
     throw new Error(`Unsupported id_token alg: ${String(alg)}`);
   }
 
-  const discovery = await fetchOidcDiscovery(params.ssoBaseUrl);
-  const issuer = discovery.issuer;
+  const discovery = await fetchOidcDiscovery(ssoBaseUrl);
   const jwksUri = discovery.jwks_uri;
-  if (!issuer || !jwksUri) {
-    throw new Error("Discovery response missing issuer or jwks_uri");
+  if (!jwksUri) {
+    throw new Error("Discovery response missing jwks_uri");
   }
 
   const jwks = await fetchJwks(jwksUri);
@@ -536,9 +532,20 @@ export async function verifyIdToken(params) {
     signatureB64url: parsed.signatureB64url,
     jwk: key,
   });
-
   if (!validSig) {
     throw new Error("id_token signature verification failed");
+  }
+
+  return { parsed, discovery, kid };
+}
+
+export async function verifyIdToken(params) {
+  const base = normalizeSsoBaseUrl(params.ssoBaseUrl);
+  const { parsed, discovery, kid } = await verifyIdTokenSignatureCore(base, params.idToken);
+
+  const issuer = discovery.issuer;
+  if (!issuer) {
+    throw new Error("Discovery response missing issuer");
   }
 
   const nowSec = Math.floor(Date.now() / 1000);
@@ -551,8 +558,6 @@ export async function verifyIdToken(params) {
   if (!audOk) {
     throw new Error("id_token audience mismatch");
   }
-  // OIDC Core §3.1.3.7.6/.7: multi-aud id_token MUST carry azp == client_id;
-  // when azp is present at all, it MUST equal client_id.
   const audIsMulti = Array.isArray(aud) && aud.length > 1;
   if (audIsMulti && payload.azp === undefined) {
     throw new Error("id_token has multiple audiences but no azp claim");
@@ -560,14 +565,9 @@ export async function verifyIdToken(params) {
   if (payload.azp !== undefined && payload.azp !== params.providerAddress) {
     throw new Error(`id_token azp mismatch: expected ${params.providerAddress}, got ${String(payload.azp)}`);
   }
-  // RFC 7519 §4.1.6: `iat` is OPTIONAL but, when present, MUST be a number
-  // (NumericDate). A non-numeric `iat` (string, object, …) is a malformed
-  // claim and the token MUST be rejected.
   if ("iat" in payload && typeof payload.iat !== "number") {
     throw new Error("id_token iat is not a NumericDate");
   }
-  // RFC 7519 §4.1.5: when present, current time MUST be ≥ nbf. The claim
-  // itself MUST be a NumericDate when present.
   if ("nbf" in payload && typeof payload.nbf !== "number") {
     throw new Error("id_token nbf is not a NumericDate");
   }
@@ -580,19 +580,11 @@ export async function verifyIdToken(params) {
   if (typeof payload.sub !== "string" || !payload.sub) {
     throw new Error("id_token sub is missing");
   }
-  // OIDC Core §3.1.3.7 step 11: if the caller sent a `nonce` in the
-  // authorization request, the id_token MUST carry the same value. The
-  // comparison is exact-string. Refresh-token flows do not send a nonce,
-  // so callers omit `expectedNonce` there; in that case any nonce the AS
-  // chose to carry forward is accepted as opaque.
   if (typeof params.expectedNonce === "string" && params.expectedNonce) {
     if (typeof payload.nonce !== "string" || payload.nonce !== params.expectedNonce) {
       throw new Error("id_token nonce mismatch");
     }
   }
-  // RFC 9449 §6.1 + RFC 7800 §3.1: when caller supplies the agent's public
-  // key, surface a cnf.jkt mismatch immediately rather than deferring to
-  // later proof-chain verification.
   if (typeof params.agentPublicKeyPem === "string" && params.agentPublicKeyPem) {
     const expectedJkt = jwkThumbprint(ed25519PublicKeyToJwk(params.agentPublicKeyPem));
     const actualJkt = payload.cnf?.jkt;
@@ -612,53 +604,14 @@ export async function verifyIdToken(params) {
   };
 }
 
-/**
- * Verify only the RSA signature of an id_token against the SSO's JWKS,
- * without checking expiration, audience, or issuer. This is used for
- * post-hoc provenance verification: the token has expired but the
- * signature remains valid proof that the SSO server attested the binding.
- */
 export async function verifyIdTokenSignatureOnly(params) {
-  assertSsoBaseUrlSafe(params.ssoBaseUrl);
-  const parsed = parseJwt(params.idToken);
-  assertIdTokenTyp(parsed.header.typ);
-  const alg = parsed.header.alg;
-  const expectedKty = ID_TOKEN_ALG_KTY[alg];
-  if (!expectedKty) {
-    throw new Error(`Unsupported id_token alg: ${String(alg)}`);
-  }
+  const base = normalizeSsoBaseUrl(params.ssoBaseUrl);
+  const { parsed, discovery, kid } = await verifyIdTokenSignatureCore(base, params.idToken);
 
-  const discovery = await fetchOidcDiscovery(params.ssoBaseUrl);
-  const jwksUri = discovery.jwks_uri;
-  if (!jwksUri) {
-    throw new Error("Discovery response missing jwks_uri");
-  }
-  // OIDC Core §3.1.3.7 step 2: id_token MUST carry `iss` matching the
-  // discovered issuer. Without this gate, an attacker-controlled discovery
-  // endpoint can mint a self-consistent token whose `iss` claim points
-  // anywhere — defeating the trust this function exposes to chain consumers.
   if (parsed.payload?.iss !== discovery.issuer) {
     throw new Error(
       `id_token issuer mismatch: expected ${discovery.issuer}, got ${String(parsed.payload?.iss)}`,
     );
-  }
-
-  const jwks = await fetchJwks(jwksUri);
-  const kid = parsed.header.kid;
-  const key = jwks.keys.find((k) => k.kid === kid && k.kty === expectedKty);
-  if (!key) {
-    throw new Error(`Unable to find ${expectedKty} JWK for kid=${String(kid)}`);
-  }
-
-  const verifier = alg === "RS256" ? verifyJwtRs256Signature : verifyJwtEdDsaSignature;
-  const validSig = verifier({
-    signingInput: parsed.signingInput,
-    signatureB64url: parsed.signatureB64url,
-    jwk: key,
-  });
-
-  if (!validSig) {
-    throw new Error("id_token signature verification failed");
   }
 
   return {

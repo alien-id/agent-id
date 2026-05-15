@@ -9,6 +9,9 @@ import { execFile as execFileCb } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 
+import { errorMessage } from "./errors.mjs";
+import { readJsonFile, statePaths } from "./state.mjs";
+
 export function stderr(msg) {
   process.stderr.write(`${msg}\n`);
 }
@@ -48,6 +51,16 @@ export function resolveStateDir(flags) {
     return path.resolve(process.env.AGENT_ID_STATE_DIR);
   }
   return path.join(os.homedir(), ".agent-id");
+}
+
+export async function requireAgentKey(stateDir) {
+  const paths = statePaths(stateDir);
+  const key = await readJsonFile(paths.mainKey, null);
+  if (!key) {
+    outputError("No agent keypair. Run `agent-id-core bootstrap` first.");
+    return null;
+  }
+  return { key, paths };
 }
 
 export function execFile(command, args, options = {}) {
@@ -94,6 +107,6 @@ export async function runCli({ commands, printHelp }) {
   try {
     await handler(flags);
   } catch (err) {
-    outputError(err instanceof Error ? err.message : String(err));
+    outputError(errorMessage(err));
   }
 }

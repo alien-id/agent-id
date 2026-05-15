@@ -18,6 +18,7 @@
 import { createPublicKey } from "node:crypto";
 
 import { jwkThumbprint } from "./crypto.mjs";
+import { errorMessage, BundleFormatError, BundleVerifyError } from "./errors.mjs";
 
 export const BUNDLE_VERSION = 3;
 
@@ -57,7 +58,7 @@ export function parseBundle(raw) {
       bundle = JSON.parse(raw);
     } catch (err) {
       throw new BundleFormatError(
-        `bundle is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+        `bundle is not valid JSON: ${errorMessage(err)}`,
       );
     }
   }
@@ -88,7 +89,7 @@ export function decodeBundleIdToken(bundle) {
     return Buffer.from(bundle.id_token, "base64url").toString("utf8");
   } catch (err) {
     throw new BundleFormatError(
-      `bundle.id_token is not valid base64url: ${err instanceof Error ? err.message : String(err)}`,
+      `bundle.id_token is not valid base64url: ${errorMessage(err)}`,
     );
   }
 }
@@ -162,7 +163,7 @@ export async function verifyBundle(bundle, { ssoBaseUrl, verifyIdToken } = {}) {
     tokenResult = await verifyIdToken({ idToken: idTokenStr, ssoBaseUrl: resolvedSsoBaseUrl });
   } catch (err) {
     throw new BundleVerifyError(
-      `id_token SSO signature verification failed: ${err instanceof Error ? err.message : String(err)}`,
+      `id_token SSO signature verification failed: ${errorMessage(err)}`,
       "id-token-invalid",
     );
   }
@@ -186,7 +187,7 @@ export async function verifyBundle(bundle, { ssoBaseUrl, verifyIdToken } = {}) {
     createPublicKey({ key: parsed.agent_jwk, format: "jwk" });
   } catch (err) {
     throw new BundleVerifyError(
-      `agent_jwk is not a valid Ed25519 JWK: ${err instanceof Error ? err.message : String(err)}`,
+      `agent_jwk is not a valid Ed25519 JWK: ${errorMessage(err)}`,
       "agent-jwk-invalid",
     );
   }
@@ -210,18 +211,5 @@ export async function verifyBundle(bundle, { ssoBaseUrl, verifyIdToken } = {}) {
   };
 }
 
-export class BundleFormatError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "BundleFormatError";
-    this.code = "bundle-format";
-  }
-}
-
-export class BundleVerifyError extends Error {
-  constructor(message, code = "bundle-verify") {
-    super(message);
-    this.name = "BundleVerifyError";
-    this.code = code;
-  }
-}
+// Re-export for backwards compatibility — canonical definitions are in errors.mjs.
+export { BundleFormatError, BundleVerifyError } from "./errors.mjs";

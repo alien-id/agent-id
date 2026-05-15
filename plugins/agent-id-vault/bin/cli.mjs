@@ -27,6 +27,7 @@ import { deriveVaultKey, vaultEncrypt, vaultDecrypt } from "../lib/vault.mjs";
 import {
   outputError,
   outputJson,
+  requireAgentKey,
   resolveStateDir,
   runCli,
   stderr,
@@ -39,12 +40,9 @@ function safeServiceName(name) {
 }
 
 async function loadVaultKey(stateDir) {
-  const paths = statePaths(stateDir);
-  const key = await readJsonFile(paths.mainKey, null);
-  if (!key?.privateKeyPem) {
-    throw new Error("No agent keypair. Run `agent-id-setup bootstrap` first.");
-  }
-  return { vaultKey: deriveVaultKey(key.privateKeyPem), paths };
+  const loaded = await requireAgentKey(stateDir);
+  if (!loaded) return null;
+  return { vaultKey: deriveVaultKey(loaded.key.privateKeyPem), paths: loaded.paths };
 }
 
 async function readStdin() {
@@ -105,7 +103,9 @@ async function cmdStore(flags) {
     return;
   }
 
-  const { vaultKey, paths } = await loadVaultKey(stateDir);
+  const loaded = await loadVaultKey(stateDir);
+  if (!loaded) return;
+  const { vaultKey, paths } = loaded;
   await ensureDir(paths.vaultDir);
 
   const filePath = path.join(paths.vaultDir, `${safeServiceName(service)}.json`);
@@ -140,7 +140,9 @@ async function cmdGet(flags) {
     return;
   }
 
-  const { vaultKey, paths } = await loadVaultKey(stateDir);
+  const loaded = await loadVaultKey(stateDir);
+  if (!loaded) return;
+  const { vaultKey, paths } = loaded;
   const filePath = path.join(paths.vaultDir, `${safeServiceName(service)}.json`);
   const record = await readJsonFile(filePath, null);
 

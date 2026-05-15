@@ -41,7 +41,7 @@ import {
   verifyIdToken,
 } from "./oidc.mjs";
 
-import { SubjectMismatchError } from "./errors.mjs";
+import { SubjectMismatchError, errorMessage } from "./errors.mjs";
 
 // ─── Private helpers ────────────────────────────────────────────────────────────
 
@@ -115,8 +115,10 @@ export class SignatureEngine {
         if (typeof payload?.sub === "string" && payload.sub) {
           this.idTokenSub = payload.sub;
         }
-      } catch {
-        // Unparseable id_token — engine still functions for non-audit ops.
+      } catch (err) {
+        if (typeof process !== "undefined" && process.stderr) {
+          process.stderr.write(`Warning: could not parse cached id_token: ${errorMessage(err)}\n`);
+        }
       }
     }
 

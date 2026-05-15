@@ -40,6 +40,10 @@ import {
 import {
   BundleFormatError,
   BundleVerifyError,
+  errorMessage,
+} from "../../agent-id-core/lib/errors.mjs";
+
+import {
   buildV3Bundle,
   parseBundle,
   verifyBundle,
@@ -56,6 +60,7 @@ import {
   execFile,
   outputError,
   outputJson,
+  requireAgentKey,
   resolveStateDir,
   runCli,
   stderr,
@@ -127,14 +132,9 @@ async function syncAndPushNotes(remote = "origin") {
 
 async function cmdSetup(flags) {
   const stateDir = resolveStateDir(flags);
-  const paths = statePaths(stateDir);
-
-  // Ensure we have a key
-  const key = await readJsonFile(paths.mainKey, null);
-  if (!key) {
-    outputError("No agent keypair. Run `agent-id-setup init` first.");
-    return;
-  }
+  const loaded = await requireAgentKey(stateDir);
+  if (!loaded) return;
+  const { key, paths } = loaded;
 
   // Write SSH key files
   const sshDir = path.join(stateDir, "ssh");
@@ -200,17 +200,10 @@ async function cmdCommit(flags) {
     return;
   }
 
-  // Read agent state. v3 commit attestation reads the SSO-signed id_token
-  // directly from owner-session.json; the agent JWK thumbprint is the chain
-  // anchor (RFC 7800 cnf.jkt on the id_token == jwkThumbprint(agent_jwk)).
-  const paths = statePaths(stateDir);
-  const key = await readJsonFile(paths.mainKey, null);
+  const loaded = await requireAgentKey(stateDir);
+  if (!loaded) return;
+  const { key, paths } = loaded;
   const session = await readJsonFile(paths.ownerSession, null);
-
-  if (!key) {
-    outputError("No agent keypair. Run `agent-id-setup init` first.");
-    return;
-  }
   if (!session?.idToken) {
     outputError("No owner session. Run `agent-id-setup auth` and `agent-id-setup bind` first.");
     return;
@@ -220,7 +213,7 @@ async function cmdCommit(flags) {
   try {
     idPayload = parseJwt(session.idToken).payload;
   } catch (err) {
-    outputError(`Could not parse id_token: ${err instanceof Error ? err.message : String(err)}`);
+    outputError(`Could not parse id_token: ${errorMessage(err)}`);
     return;
   }
   if (typeof idPayload?.sub !== "string" || !idPayload.sub) {
@@ -239,23 +232,8 @@ async function cmdCommit(flags) {
 
   const fullMessage = `${message}\n\n${trailers.join("\n")}`;
 
-  // Write SSH key files for signing
-  const sshDir = path.join(stateDir, "ssh");
-  await ensureDir(sshDir);
-  const privateKeyPath = path.join(sshDir, "agent-id");
+  const privateKeyPath = await ensureSshKey(stateDir, key);
 
-  // Ensure SSH key file exists (may already exist from setup or bootstrap)
-  try {
-    await fs.access(privateKeyPath);
-  } catch {
-    const opensshKey = ed25519PemToOpenSSHPrivateKey(key.privateKeyPem);
-    await fs.writeFile(privateKeyPath, opensshKey, { encoding: "utf8", mode: 0o600 });
-    await setPrivateFilePermissions(privateKeyPath);
-  }
-
-  // Pass signing config inline — no git config changes needed.
-  // gpg.ssh.program pinned to ssh-keygen so a user's globally-configured custom SSH
-  // signer (e.g. 1Password's op-ssh-sign) doesn't intercept signing with the agent key.
   const commitArgs = [
     "-c", "gpg.format=ssh",
     "-c", "gpg.ssh.program=ssh-keygen",
@@ -272,83 +250,17 @@ async function cmdCommit(flags) {
     return;
   }
 
-  // Get the commit hash
   const hashResult = await execFile("git", ["rev-parse", "HEAD"]);
   const commitHash = hashResult.stdout.trim();
 
-  // Log to audit trail (best-effort)
-  let auditRecord = null;
-  try {
-    const engine = new SignatureEngine({ baseDir: stateDir });
-    await engine.init();
-    auditRecord = await engine.appendOperation({
-      operationType: "GIT_COMMIT",
-      action: "git.commit",
-      payload: {
-        commitHash,
-        message,
-        jkt: agentJkt,
-      },
-      ctx: { agentId: "main" },
-    });
-  } catch {
-    // Non-fatal — commit succeeded, audit logging is best-effort
-    stderr("Warning: could not log commit to audit trail");
-  }
-
-  // Attach v3 proof bundle as a git note for external verification.
-  // Verifier reads {id_token, agent_jwk}; chain anchor is cnf.jkt on the
-  // SSO-signed id_token == jwkThumbprint(agent_jwk).
-  let proofAttached = false;
-  try {
-    const proofBundle = buildV3Bundle({
-      idToken: session.idToken,
-      agentJwk,
-    });
-    const noteBody = JSON.stringify(proofBundle);
-    const noteResult = await execFile(
-      "git",
-      ["notes", "--ref=agent-id", "add", "-f", "-m", noteBody, commitHash],
-      { timeout: 10000 },
-    );
-    if (noteResult.code === 0) {
-      proofAttached = true;
-      stderr("Proof bundle attached as git note (refs/notes/agent-id).");
-    } else {
-      stderr(`Warning: could not attach proof note: ${noteResult.stderr.trim()}`);
-    }
-  } catch {
-    stderr("Warning: could not attach proof note");
-  }
+  const auditRecord = await logCommitToAuditTrail(stateDir, { commitHash, message, agentJkt });
+  const proofAttached = await attachProofBundle(session.idToken, agentJwk, commitHash);
 
   stderr(`Signed commit: ${commitHash.slice(0, 12)}`);
 
-  // Push commit and notes if --push is set
-  let pushed = false;
-  let notesPushed = false;
-  if (flags.push) {
-    const remote = flags.remote || "origin";
-
-    // Push the commit
-    const pushResult = await execFile("git", ["push", remote], { timeout: 60000 });
-    if (pushResult.code === 0) {
-      pushed = true;
-      stderr(`Pushed to ${remote}.`);
-    } else {
-      stderr(`Warning: git push failed: ${pushResult.stderr.trim()}`);
-    }
-
-    // Sync and push proof notes
-    if (proofAttached) {
-      const notesResult = await syncAndPushNotes(remote);
-      if (notesResult.ok) {
-        notesPushed = true;
-        stderr(`Proof notes pushed to ${remote} (${notesResult.method}).`);
-      } else {
-        stderr(`Warning: could not push proof notes: ${notesResult.error}`);
-      }
-    }
-  }
+  const { pushed, notesPushed } = flags.push
+    ? await pushCommitAndNotes(flags.remote || "origin", proofAttached)
+    : { pushed: false, notesPushed: false };
 
   const result = {
     ok: true,
@@ -364,6 +276,81 @@ async function cmdCommit(flags) {
     result.signatureShort = auditRecord.signatureShort;
   }
   outputJson(result);
+}
+
+async function ensureSshKey(stateDir, key) {
+  const sshDir = path.join(stateDir, "ssh");
+  await ensureDir(sshDir);
+  const privateKeyPath = path.join(sshDir, "agent-id");
+  try {
+    await fs.access(privateKeyPath);
+  } catch {
+    const opensshKey = ed25519PemToOpenSSHPrivateKey(key.privateKeyPem);
+    await fs.writeFile(privateKeyPath, opensshKey, { encoding: "utf8", mode: 0o600 });
+    await setPrivateFilePermissions(privateKeyPath);
+  }
+  return privateKeyPath;
+}
+
+async function logCommitToAuditTrail(stateDir, { commitHash, message, agentJkt }) {
+  try {
+    const engine = new SignatureEngine({ baseDir: stateDir });
+    await engine.init();
+    return await engine.appendOperation({
+      operationType: "GIT_COMMIT",
+      action: "git.commit",
+      payload: { commitHash, message, jkt: agentJkt },
+      ctx: { agentId: "main" },
+    });
+  } catch {
+    stderr("Warning: could not log commit to audit trail");
+    return null;
+  }
+}
+
+async function attachProofBundle(idToken, agentJwk, commitHash) {
+  try {
+    const proofBundle = buildV3Bundle({ idToken, agentJwk });
+    const noteBody = JSON.stringify(proofBundle);
+    const noteResult = await execFile(
+      "git",
+      ["notes", "--ref=agent-id", "add", "-f", "-m", noteBody, commitHash],
+      { timeout: 10000 },
+    );
+    if (noteResult.code === 0) {
+      stderr("Proof bundle attached as git note (refs/notes/agent-id).");
+      return true;
+    }
+    stderr(`Warning: could not attach proof note: ${noteResult.stderr.trim()}`);
+  } catch {
+    stderr("Warning: could not attach proof note");
+  }
+  return false;
+}
+
+async function pushCommitAndNotes(remote, proofAttached) {
+  let pushed = false;
+  let notesPushed = false;
+
+  const pushResult = await execFile("git", ["push", remote], { timeout: 60000 });
+  if (pushResult.code === 0) {
+    pushed = true;
+    stderr(`Pushed to ${remote}.`);
+  } else {
+    stderr(`Warning: git push failed: ${pushResult.stderr.trim()}`);
+  }
+
+  if (proofAttached) {
+    const notesResult = await syncAndPushNotes(remote);
+    if (notesResult.ok) {
+      notesPushed = true;
+      stderr(`Proof notes pushed to ${remote} (${notesResult.method}).`);
+    } else {
+      stderr(`Warning: could not push proof notes: ${notesResult.error}`);
+    }
+  }
+
+  return { pushed, notesPushed };
 }
 
 async function cmdVerify(flags) {

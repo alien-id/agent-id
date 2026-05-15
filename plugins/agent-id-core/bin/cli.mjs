@@ -20,14 +20,10 @@ import path from "node:path";
 
 import {
   ed25519PublicKeyToJwk,
-  fingerprintPublicKeyPem,
-  generateEd25519PemPair,
   jwkThumbprint,
-  nowMs,
 } from "../lib/crypto.mjs";
 
 import {
-  ensureDir,
   readJsonFile,
   readJsonl,
   setPrivateFilePermissions,
@@ -35,7 +31,7 @@ import {
   writeJsonFile,
 } from "../lib/state.mjs";
 
-import { AuthRevokedError } from "../lib/errors.mjs";
+import { AuthRevokedError, errorMessage } from "../lib/errors.mjs";
 
 import {
   beginOidcAuthorization,
@@ -84,30 +80,16 @@ async function resolveProviderAddress(flags) {
 
 async function cmdInit(flags) {
   const stateDir = resolveStateDir(flags);
-  const paths = statePaths(stateDir);
 
-  await ensureDir(stateDir);
-  await ensureDir(path.dirname(paths.mainKey));
-  await ensureDir(path.dirname(paths.auditJsonl));
+  const engine = new SignatureEngine({ baseDir: stateDir });
+  await engine.init();
+  const key = engine.keys.get("main");
 
-  let key = await readJsonFile(paths.mainKey, null);
-  if (!key) {
-    const pair = generateEd25519PemPair();
-    key = {
-      version: 1,
-      agentId: "main",
-      keyNonce: 0,
-      createdAt: nowMs(),
-      publicKeyPem: pair.publicKeyPem,
-      privateKeyPem: pair.privateKeyPem,
-      fingerprint: fingerprintPublicKeyPem(pair.publicKeyPem),
-    };
-    await writeJsonFile(paths.mainKey, key);
-    await setPrivateFilePermissions(paths.mainKey);
-    stderr(`Generated agent keypair: ${key.fingerprint.slice(0, 16)}...`);
-  } else {
-    stderr(`Agent keypair already exists: ${key.fingerprint.slice(0, 16)}...`);
-  }
+  stderr(
+    key
+      ? `Agent keypair ready: ${key.fingerprint.slice(0, 16)}...`
+      : "Agent keypair initialized.",
+  );
 
   if (!flags._quiet) {
     outputJson({
@@ -142,7 +124,7 @@ async function cmdAuth(flags) {
   try {
     auth = await beginOidcAuthorization({ ssoBaseUrl, providerAddress, oidcOrigin, agentPublicKeyPem });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     if (oidcOrigin !== "http://localhost" && msg.includes("Origin not allowed")) {
       stderr(`Origin ${oidcOrigin} rejected, retrying with http://localhost...`);
       auth = await beginOidcAuthorization({

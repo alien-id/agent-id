@@ -12,10 +12,7 @@ import fs from "node:fs/promises";
 
 import { createDPoPProof } from "../../agent-id-core/lib/crypto.mjs";
 
-import {
-  readJsonFile,
-  statePaths,
-} from "../../agent-id-core/lib/state.mjs";
+import { readJsonFile } from "../../agent-id-core/lib/state.mjs";
 
 import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
 
@@ -28,6 +25,7 @@ import {
 import {
   outputError,
   outputJson,
+  requireAgentKey,
   resolveStateDir,
   runCli,
   stderr,
@@ -39,14 +37,10 @@ import {
 // RFC 9449 §4.2: the proof binds to a specific (method, URL) and is single-use.
 // Returns null + writes an error if the agent isn't bootstrapped.
 async function buildDPoPHeaders(stateDir, method, url) {
-  const paths = statePaths(stateDir);
-  const key = await readJsonFile(paths.mainKey, null);
-  if (!key) {
-    outputError("No agent keypair. Run `agent-id-setup bootstrap` first.");
-    return null;
-  }
+  const loaded = await requireAgentKey(stateDir);
+  if (!loaded) return null;
+  const { key, paths } = loaded;
 
-  // Refresh the SSO session — access_token is rotated on a tight cadence.
   const engine = new SignatureEngine({ baseDir: stateDir });
   await engine.init();
   try {
