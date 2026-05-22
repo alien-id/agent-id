@@ -291,15 +291,27 @@ function routeJwks(req, res) {
   });
 }
 
-// GET /oauth/authorize?response_type=code&client_id=...&dpop_jkt=...&...
-// Returns { deep_link, polling_code, expired_at } and immediately marks the
-// session as authorized.
+// GET /oauth/authorize?response_type=code&client_id=...&[dpop_jkt|redirect_uri]&...
+//
+// Two flow shapes:
+//
+//   1. CLI / polling flow — no `redirect_uri`. Returns
+//      { deep_link, polling_code, expired_at }, auto-approves inline.
+//      This is what the agent-id CLI uses.
+//
+//   2. Browser / redirect flow — `redirect_uri` present. Auto-approves
+//      and 302s to `${redirect_uri}?code=...&state=...`. This is what
+//      web RPs using libraries like Better Auth use (RFC 6749 §4.1.2,
+//      response_mode=query). The prod Alien SSO supports both shapes;
+//      the dev fixture now mirrors that.
 function routeAuthorize(req, res, url) {
   const q = url.searchParams;
   const clientId = q.get("client_id");
   const codeChallenge = q.get("code_challenge");
   const responseType = q.get("response_type");
   const dpopJkt = q.get("dpop_jkt");
+  const redirectUri = q.get("redirect_uri");
+  const state = q.get("state");
   // OIDC Core §3.1.3.7 step 11: if `nonce` was sent on the authorize URL,
   // it MUST be echoed in the id_token. Thread it through the polling
   // session → authorization code → token mint.
@@ -308,8 +320,30 @@ function routeAuthorize(req, res, url) {
   if (!clientId) return send(res, 400, { error: "invalid_request", error_description: "client_id required" });
   if (!codeChallenge) return send(res, 400, { error: "invalid_request", error_description: "code_challenge required" });
 
-  const pollingCode = b64url(randomBytes(18));
   const authorizationCode = b64url(randomBytes(24));
+
+  // Browser redirect flow (RP supplied a redirect_uri).
+  if (redirectUri && /^https?:\/\//i.test(redirectUri)) {
+    authzCodes.set(authorizationCode, {
+      clientId,
+      codeChallenge,
+      dpopJkt,
+      nonce,
+      redirectUri,
+      sub: OWNER_SESSION_ADDRESS,
+      consumed: false,
+    });
+    const target = new URL(redirectUri);
+    target.searchParams.set("code", authorizationCode);
+    if (state) target.searchParams.set("state", state);
+    if (q.get("iss") || true) target.searchParams.set("iss", ISSUER);
+    trace(`browser-redirect auto-approve → ${target.toString()}`);
+    res.writeHead(302, { Location: target.toString() });
+    return res.end();
+  }
+
+  // CLI polling flow.
+  const pollingCode = b64url(randomBytes(18));
   const expiredAt = nowSec() + 300;
 
   const session = {
@@ -362,25 +396,29 @@ async function routePoll(req, res) {
   });
 }
 
-// POST /oauth/token  (form-urlencoded; DPoP header required)
+// POST /oauth/token  (form-urlencoded; DPoP optional per RFC 9449 §5)
+//
+// Mirrors the prod SSO matrix (sso/internal/handler/oauth_token.go §148–151):
+//   session.dpopJkt set                      → proof REQUIRED, thumbprint MUST match (§10)
+//   session.dpopJkt unset, DPoP header sent  → verify proof, bind AT/RT to thumbprint (§5)
+//   session.dpopJkt unset, no DPoP header    → unbound (Bearer)
 async function routeToken(req, res) {
   const body = await readBody(req);
   const params = new URLSearchParams(body);
   const grantType = params.get("grant_type");
   const dpopHeader = req.headers["dpop"];
 
-  if (!dpopHeader) {
-    return send(res, 400, { error: "invalid_dpop_proof", error_description: "DPoP header required" });
-  }
-  let proof;
-  try {
-    proof = verifyDPoPProof({
-      proof: dpopHeader,
-      htm: "POST",
-      htu: `${ISSUER}/oauth/token`,
-    });
-  } catch (err) {
-    return send(res, 400, { error: "invalid_dpop_proof", error_description: err.message });
+  let proof = null;
+  if (dpopHeader) {
+    try {
+      proof = verifyDPoPProof({
+        proof: dpopHeader,
+        htm: "POST",
+        htu: `${ISSUER}/oauth/token`,
+      });
+    } catch (err) {
+      return send(res, 400, { error: "invalid_dpop_proof", error_description: err.message });
+    }
   }
 
   if (grantType === "authorization_code") {
@@ -393,10 +431,15 @@ async function routeToken(req, res) {
     if (codeRec.clientId !== clientId) return send(res, 400, { error: "invalid_grant", error_description: "client_id mismatch" });
     const expectedChallenge = b64url(createHash("sha256").update(String(verifier || "")).digest());
     if (expectedChallenge !== codeRec.codeChallenge) return send(res, 400, { error: "invalid_grant", error_description: "PKCE mismatch" });
-    if (codeRec.dpopJkt && codeRec.dpopJkt !== proof.jkt) {
-      return send(res, 400, { error: "invalid_dpop_proof", error_description: "dpop_jkt mismatch with /authorize" });
+    if (codeRec.dpopJkt) {
+      if (!proof) {
+        return send(res, 400, { error: "invalid_dpop_proof", error_description: "dpop_jkt set at /authorize; DPoP proof required" });
+      }
+      if (codeRec.dpopJkt !== proof.jkt) {
+        return send(res, 400, { error: "invalid_dpop_proof", error_description: "dpop_jkt mismatch with /authorize" });
+      }
     }
-    return mintTokens(res, { clientId, sub: codeRec.sub, jkt: proof.jkt, nonce: codeRec.nonce });
+    return mintTokens(res, { clientId, sub: codeRec.sub, jkt: proof?.jkt ?? null, nonce: codeRec.nonce });
   }
 
   if (grantType === "refresh_token") {
@@ -405,12 +448,15 @@ async function routeToken(req, res) {
     const rtRec = refreshTokens.get(String(rt || ""));
     if (!rtRec) return send(res, 400, { error: "invalid_grant" });
     if (rtRec.clientId !== clientId) return send(res, 400, { error: "invalid_grant" });
-    if (rtRec.jkt !== proof.jkt) {
-      trace(`refresh jkt mismatch: stored=${rtRec.jkt} proof=${proof.jkt}`);
-      return send(res, 400, { error: "invalid_dpop_proof", error_description: "refresh-token jkt sticky" });
+    if (rtRec.jkt) {
+      if (!proof) return send(res, 400, { error: "invalid_dpop_proof", error_description: "refresh-token is DPoP-bound" });
+      if (rtRec.jkt !== proof.jkt) {
+        trace(`refresh jkt mismatch: stored=${rtRec.jkt} proof=${proof.jkt}`);
+        return send(res, 400, { error: "invalid_dpop_proof", error_description: "refresh-token jkt sticky" });
+      }
     }
     // RFC 9449: sticky binding, do NOT rotate refresh token.
-    return mintTokens(res, { clientId, sub: rtRec.sub, jkt: proof.jkt, refreshToken: rt });
+    return mintTokens(res, { clientId, sub: rtRec.sub, jkt: proof?.jkt ?? rtRec.jkt ?? null, refreshToken: rt });
   }
 
   send(res, 400, { error: "unsupported_grant_type" });
@@ -432,18 +478,16 @@ function mintTokens(res, { clientId, sub, jkt, refreshToken: existingRt, nonce }
   // override `expected_audience` (the SDK default) compare against the same
   // SSO URL they fetched JWKS from. id_token `aud: clientId` is separate —
   // OIDC Core §3.1.3.7 step 3 requires that one.
-  const accessToken = signRs256Jwt(
-    {
-      iss: ISSUER,
-      sub,
-      aud: ISSUER,
-      iat,
-      exp,
-      jti: b64url(randomBytes(12)),
-      cnf: { jkt },
-    },
-    { typ: "at+jwt" },
-  );
+  const accessTokenClaims = {
+    iss: ISSUER,
+    sub,
+    aud: ISSUER,
+    iat,
+    exp,
+    jti: b64url(randomBytes(12)),
+  };
+  if (jkt) accessTokenClaims.cnf = { jkt };
+  const accessToken = signRs256Jwt(accessTokenClaims, { typ: "at+jwt" });
 
   accessTokens.set(accessToken, { clientId, jkt, sub, exp });
   refreshTokens.set(refreshToken, { clientId, jkt, sub });
@@ -454,8 +498,8 @@ function mintTokens(res, { clientId, sub, jkt, refreshToken: existingRt, nonce }
     aud: clientId,
     iat: nowSec(),
     exp,
-    cnf: { jkt },
   };
+  if (jkt) idTokenClaims.cnf = { jkt };
   // OIDC Core §3.1.3.7 step 11: echo the nonce from the authorize request.
   // Refresh-token flows don't send a nonce, so it's omitted there.
   if (typeof nonce === "string" && nonce) {
@@ -467,52 +511,61 @@ function mintTokens(res, { clientId, sub, jkt, refreshToken: existingRt, nonce }
     access_token: accessToken,
     refresh_token: refreshToken,
     id_token: idToken,
-    token_type: "DPoP",
+    token_type: jkt ? "DPoP" : "Bearer",
     expires_in: 3600,
     scope: "openid",
   });
 }
 
-// GET /oauth/userinfo (requires Authorization: DPoP <at> + DPoP proof)
+// GET /oauth/userinfo — accepts both DPoP-bound and unbound Bearer access tokens.
+// A token's scheme is determined at issuance: jkt set → DPoP, jkt null → Bearer.
 async function routeUserinfo(req, res) {
   const auth = req.headers.authorization || "";
-  const m = /^DPoP\s+(.+)$/i.exec(auth);
+  const dpopMatch = /^DPoP\s+(.+)$/i.exec(auth);
+  const bearerMatch = /^Bearer\s+(.+)$/i.exec(auth);
+  const m = dpopMatch || bearerMatch;
   if (!m) {
     return send(res, 401, { error: "invalid_token" }, {
-      "WWW-Authenticate": 'DPoP error="invalid_token", algs="EdDSA"',
+      "WWW-Authenticate": 'Bearer, DPoP error="invalid_token", algs="EdDSA"',
     });
   }
   const at = m[1];
   const atRec = accessTokens.get(at);
   if (!atRec) {
     return send(res, 401, { error: "invalid_token" }, {
-      "WWW-Authenticate": 'DPoP error="invalid_token", algs="EdDSA"',
+      "WWW-Authenticate": 'Bearer, DPoP error="invalid_token", algs="EdDSA"',
     });
   }
   if (atRec.exp <= nowSec()) {
     return send(res, 401, { error: "invalid_token", error_description: "expired" });
   }
-  const dpopHeader = req.headers["dpop"];
-  if (!dpopHeader) {
-    return send(res, 401, { error: "invalid_dpop_proof" }, {
-      "WWW-Authenticate": 'DPoP error="invalid_dpop_proof", algs="EdDSA"',
-    });
-  }
-  let proof;
-  try {
-    proof = verifyDPoPProof({
-      proof: dpopHeader,
-      htm: "GET",
-      htu: `${ISSUER}/oauth/userinfo`,
-      accessToken: at,
-    });
-  } catch (err) {
-    return send(res, 401, { error: "invalid_dpop_proof", error_description: err.message }, {
-      "WWW-Authenticate": 'DPoP error="invalid_dpop_proof", algs="EdDSA"',
-    });
-  }
-  if (proof.jkt !== atRec.jkt) {
-    return send(res, 401, { error: "invalid_token", error_description: "cnf.jkt mismatch" });
+  if (atRec.jkt) {
+    // DPoP-bound: proof is mandatory and the scheme must be DPoP.
+    if (!dpopMatch) {
+      return send(res, 401, { error: "invalid_token", error_description: "token is DPoP-bound; use Authorization: DPoP" });
+    }
+    const dpopHeader = req.headers["dpop"];
+    if (!dpopHeader) {
+      return send(res, 401, { error: "invalid_dpop_proof" }, {
+        "WWW-Authenticate": 'DPoP error="invalid_dpop_proof", algs="EdDSA"',
+      });
+    }
+    let proof;
+    try {
+      proof = verifyDPoPProof({
+        proof: dpopHeader,
+        htm: "GET",
+        htu: `${ISSUER}/oauth/userinfo`,
+        accessToken: at,
+      });
+    } catch (err) {
+      return send(res, 401, { error: "invalid_dpop_proof", error_description: err.message }, {
+        "WWW-Authenticate": 'DPoP error="invalid_dpop_proof", algs="EdDSA"',
+      });
+    }
+    if (proof.jkt !== atRec.jkt) {
+      return send(res, 401, { error: "invalid_token", error_description: "cnf.jkt mismatch" });
+    }
   }
   send(res, 200, {
     sub: atRec.sub,

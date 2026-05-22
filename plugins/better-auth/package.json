@@ -1,0 +1,35 @@
+{
+  "name": "@alien-id/better-auth-plugin",
+  "version": "0.1.0",
+  "description": "Sign in with Alien — Better Auth plugin. Wraps better-auth/plugins/genericOAuth with Alien SSO discovery + PKCE.",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "better-auth": ">=1.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alien-id/agent-id.git",
+    "directory": "plugins/better-auth"
+  },
+  "keywords": [
+    "better-auth",
+    "oidc",
+    "alien",
+    "agent-id",
+    "sign-in-with-alien"
+  ],
+  "author": "Alien Org <support@alien.org>",
+  "license": "MIT"
+}
