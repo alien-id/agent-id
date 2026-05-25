@@ -36,12 +36,24 @@
     },
     {
       "name": "agent-id-vault",
-      "description": "Encrypted credential vault keyed off the agent's private key.",
-      "version": "4.0.0",
+      "description": "Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key) and typed/domain-scoped credential records.",
+      "version": "5.0.0",
       "source": "agent-id-vault",
       "category": "identity",
       "keywords": [
         "credential-vault",
+        "agent-identity"
+      ]
+    },
+    {
+      "name": "agent-id-proxy",
+      "description": "Local stub-translating HTTP proxy: agent sends `AgentVault <name>` headers, proxy injects the real credential from the vault. Enforces per-credential host allowlist.",
+      "version": "0.1.0",
+      "source": "agent-id-proxy",
+      "category": "identity",
+      "keywords": [
+        "credential-injection",
+        "proxy",
         "agent-identity"
       ]
     },

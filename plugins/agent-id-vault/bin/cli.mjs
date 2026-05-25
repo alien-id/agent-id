@@ -2,244 +2,507 @@
 
 // Alien Agent ID — Vault plugin CLI.
 //
-// Encrypted credential storage keyed off the agent's identity. Read by
-// downstream tools that need an external-service secret (GitHub PAT,
-// Slack token, AWS key, …) without hardcoding it. The encryption key is
-// derived from the agent's main private key via HKDF-SHA256, so a
-// credential is only readable on the same machine as the bound agent.
+// Portable encrypted credential vault. Backed by a single file
+// (~/.agent-id/vault.enc) with a LUKS-style slot construction:
 //
-// Subcommands: store, get, list, remove.
+//   slot 0: passphrase-wrapped master key (Argon2id-class KDF; scrypt v1)
+//   slot 1: agent-key-wrapped master key (fast, unattended unlock)
+//
+// Subcommands:
+//   init                        — create new vault (passphrase + agent-key slots)
+//   add                         — add a credential record (typed, domain-scoped)
+//   show --name <N>             — retrieve plaintext (use sparingly; prefer the proxy)
+//   list                        — metadata only, never plaintext
+//   remove --name <N>           — delete a record
+//   rekey add-passphrase        — append a passphrase slot
+//   rekey add-agent-key         — append an agent-key slot
+//   rekey remove-slot --id <N>  — remove a slot
+//   export --out <PATH>         — copy the encrypted vault file
+//   import --in <PATH>          — install an encrypted vault file
+//   migrate                     — convert legacy ~/.agent-id/vault/*.json → vault.enc
+//
+// Unlock inputs:
+//   --passphrase-file <path>    — read from file (recommended for automation)
+//   --passphrase-env <VAR>      — read from env
+//   --unlock-via-agent-key      — explicit; otherwise auto-tried if available
+//   (interactive trusted /dev/tty prompt as last resort)
 
 import fs from "node:fs/promises";
-import path from "node:path";
-
-import {
-  ensureDir,
-  readJsonFile,
-  setPrivateFilePermissions,
-  statePaths,
-  writeJsonFile,
-} from "../../agent-id-core/lib/state.mjs";
-import { nowMs } from "../../agent-id-core/lib/crypto.mjs";
-
-import { deriveVaultKey, vaultEncrypt, vaultDecrypt } from "../lib/vault.mjs";
 
 import {
   outputError,
   outputJson,
-  requireAgentKey,
   resolveStateDir,
   runCli,
   stderr,
 } from "../../agent-id-core/lib/cli-runtime.mjs";
+import {
+  readJsonFile,
+  statePaths,
+} from "../../agent-id-core/lib/state.mjs";
 
-// ─── Vault helpers ──────────────────────────────────────────────────────────────
+import {
+  exportVault,
+  importVault,
+  initVault,
+  loadAgentPrivateKey,
+  openVault,
+  vaultFileExists,
+} from "../lib/vault.mjs";
+import { readLegacyVault } from "../lib/legacy.mjs";
+import {
+  hasTty,
+  promptNewPassphrase,
+  promptSecret,
+  TrustedInputUnavailable,
+} from "../lib/trusted-input.mjs";
+import { CREDENTIAL_TYPES } from "../lib/store.mjs";
 
-function safeServiceName(name) {
-  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
-
-async function loadVaultKey(stateDir) {
-  const loaded = await requireAgentKey(stateDir);
-  if (!loaded) return null;
-  return { vaultKey: deriveVaultKey(loaded.key.privateKeyPem), paths: loaded.paths };
-}
+// ─── Input helpers ──────────────────────────────────────────────────────────────
 
 async function readStdin() {
   if (process.stdin.isTTY) return null;
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8").replace(/\n$/, "");
+  const s = Buffer.concat(chunks).toString("utf8");
+  return s.length === 0 ? null : s.replace(/\n$/, "");
 }
 
-async function resolveCredential(flags) {
-  // 1. --credential-file <path>  (most secure — never touches CLI args)
-  if (flags["credential-file"]) {
+async function resolvePassphrase(flags, { allowPrompt = true, promptMsg = "Passphrase: " } = {}) {
+  if (flags["passphrase-file"]) {
+    const raw = await fs.readFile(flags["passphrase-file"], "utf8");
+    return raw.replace(/\n$/, "");
+  }
+  if (flags["passphrase-env"]) {
+    const val = process.env[flags["passphrase-env"]];
+    if (!val) throw new Error(`Env var ${flags["passphrase-env"]} is not set`);
+    return val;
+  }
+  if (flags.passphrase) return String(flags.passphrase);
+  if (allowPrompt && hasTty()) return promptSecret(promptMsg);
+  return null;
+}
+
+async function resolveValue(flags, fieldName = "credential") {
+  if (flags[`${fieldName}-file`]) {
+    const raw = await fs.readFile(flags[`${fieldName}-file`], "utf8");
+    return raw.replace(/\n$/, "");
+  }
+  if (flags[`${fieldName}-env`]) {
+    const val = process.env[flags[`${fieldName}-env`]];
+    if (!val) throw new Error(`Env var ${flags[`${fieldName}-env`]} is not set`);
+    return val;
+  }
+  const piped = await readStdin();
+  if (piped != null) return piped;
+  if (hasTty()) return promptSecret(`${fieldName}: `);
+  return null;
+}
+
+function parseDomains(flags) {
+  const raw = flags.domains;
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  return String(raw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function openWithFlags(flags, { allowPrompt = true } = {}) {
+  const stateDir = resolveStateDir(flags);
+  const useAgentKey = flags["agent-key"] !== false; // `--no-agent-key` opts out
+  const privateKeyPem = useAgentKey
+    ? await loadAgentPrivateKey(stateDir)
+    : null;
+
+  // First attempt: agent-key only (no passphrase needed → faster, no prompt).
+  if (privateKeyPem && !flags["passphrase-file"] && !flags["passphrase-env"] && !flags.passphrase) {
     try {
-      return (await fs.readFile(flags["credential-file"], "utf8")).replace(/\n$/, "");
+      return await openVault({ stateDir, privateKeyPem });
     } catch (err) {
-      throw new Error(`Cannot read credential file: ${err.message}`);
+      if (err.code !== "VAULT_UNLOCK_FAILED") throw err;
+      // Fall through to passphrase.
     }
   }
 
-  // 2. --credential-env <VAR_NAME>  (reads from environment variable)
-  if (flags["credential-env"]) {
-    const val = process.env[flags["credential-env"]];
-    if (!val) throw new Error(`Environment variable ${flags["credential-env"]} is not set`);
-    return val;
-  }
-
-  // 3. stdin  (piped: echo "secret" | node cli.mjs store ...)
-  const fromStdin = await readStdin();
-  if (fromStdin) return fromStdin;
-
-  // 4. --credential <value>  (fallback — visible in process list)
-  if (flags.credential) return flags.credential;
-
-  return null;
+  const passphrase = await resolvePassphrase(flags, { allowPrompt });
+  return openVault({ stateDir, privateKeyPem, passphrase });
 }
 
 // ─── Commands ───────────────────────────────────────────────────────────────────
 
-async function cmdStore(flags) {
+async function cmdInit(flags) {
   const stateDir = resolveStateDir(flags);
-  const service = flags.service;
-  const credType = flags.type || "api-key";
-
-  if (!service) {
-    outputError("--service <name> is required");
+  if (await vaultFileExists(stateDir)) {
+    outputError(`Vault already exists at ${statePaths(stateDir).vaultFile}`);
     return;
   }
 
-  const credential = await resolveCredential(flags);
-  if (!credential) {
-    outputError(
-      "Credential required. Provide via:\n" +
-      "  --credential-file <path>   (read from file — most secure)\n" +
-      "  --credential-env <VAR>     (read from environment variable)\n" +
-      "  echo 'secret' | <cli> store ...   (pipe via stdin)\n" +
-      "  --credential <value>       (CLI arg — visible in process list)",
-    );
-    return;
+  let passphrase = await resolvePassphrase(flags, { allowPrompt: false });
+  if (!passphrase) {
+    if (!hasTty()) {
+      outputError(
+        "Passphrase required. Pass --passphrase-file <path>, --passphrase-env <VAR>, " +
+          "or run interactively to enter one.",
+      );
+      return;
+    }
+    passphrase = promptNewPassphrase({
+      prompt: "New vault passphrase: ",
+      confirm: "Confirm passphrase: ",
+    });
   }
 
-  const loaded = await loadVaultKey(stateDir);
-  if (!loaded) return;
-  const { vaultKey, paths } = loaded;
-  await ensureDir(paths.vaultDir);
+  const useAgentKey = flags["agent-key"] !== false;
+  const privateKeyPem = useAgentKey
+    ? await loadAgentPrivateKey(stateDir)
+    : null;
+  const agentId = privateKeyPem
+    ? (await readJsonFile(statePaths(stateDir).mainKey, null))?.agentId || null
+    : null;
 
-  const filePath = path.join(paths.vaultDir, `${safeServiceName(service)}.json`);
-
-  // Preserve creation time if updating an existing credential
-  const existing = await readJsonFile(filePath, null);
-  const encrypted = vaultEncrypt(vaultKey, credential);
-  const record = {
-    version: 1,
-    service,
-    type: credType,
-    url: flags.url || existing?.url || null,
-    username: flags.username || existing?.username || null,
-    encrypted,
-    createdAt: existing?.createdAt || nowMs(),
-    updatedAt: nowMs(),
-  };
-
-  await writeJsonFile(filePath, record);
-  await setPrivateFilePermissions(filePath);
-
-  stderr(`Stored credential for "${service}" (${credType}).`);
-  outputJson({ ok: true, service, type: credType, updated: !!existing });
+  const result = await initVault({ stateDir, passphrase, privateKeyPem, agentId });
+  stderr(`Vault initialized: ${result.path}`);
+  outputJson({ ok: true, ...result });
 }
 
-async function cmdGet(flags) {
-  const stateDir = resolveStateDir(flags);
-  const service = flags.service;
-
-  if (!service) {
-    outputError("--service <name> is required");
-    return;
+async function cmdAdd(flags) {
+  const name = flags.name;
+  const type = flags.type;
+  if (!name) return outputError("--name <NAME> is required");
+  if (!type) return outputError(`--type <${CREDENTIAL_TYPES.join("|")}> is required`);
+  if (!CREDENTIAL_TYPES.includes(type)) {
+    return outputError(`Unknown type: ${type}. Allowed: ${CREDENTIAL_TYPES.join(", ")}`);
+  }
+  const domains = parseDomains(flags);
+  if (domains.length === 0) {
+    return outputError("--domains <host[,host…]> is required (default-deny)");
   }
 
-  const loaded = await loadVaultKey(stateDir);
-  if (!loaded) return;
-  const { vaultKey, paths } = loaded;
-  const filePath = path.join(paths.vaultDir, `${safeServiceName(service)}.json`);
-  const record = await readJsonFile(filePath, null);
+  const vault = await openWithFlags(flags);
+  try {
+    const record = { name, type, domains, description: flags.description || null };
 
-  if (!record) {
-    outputError(`No credential stored for "${service}".`);
-    return;
+    switch (type) {
+      case "bearer": {
+        const value = await resolveValue(flags, "value");
+        if (!value) return outputError("Value required (--value-file / --value-env / stdin)");
+        record.value = value;
+        break;
+      }
+      case "basic": {
+        record.username = flags.username;
+        record.password = await resolveValue(flags, "password");
+        if (!record.username || !record.password) {
+          return outputError("--username and password input required for basic auth");
+        }
+        break;
+      }
+      case "header": {
+        record.headerName = flags["header-name"];
+        record.value = await resolveValue(flags, "value");
+        if (!record.headerName || !record.value) {
+          return outputError("--header-name and value input required");
+        }
+        break;
+      }
+      case "query": {
+        record.paramName = flags["param-name"];
+        record.value = await resolveValue(flags, "value");
+        if (!record.paramName || !record.value) {
+          return outputError("--param-name and value input required");
+        }
+        break;
+      }
+      case "cookie": {
+        record.cookieName = flags["cookie-name"];
+        record.value = await resolveValue(flags, "value");
+        if (!record.cookieName || !record.value) {
+          return outputError("--cookie-name and value input required");
+        }
+        break;
+      }
+      case "totp": {
+        record.secret = await resolveValue(flags, "secret");
+        record.period = Number(flags.period || 30);
+        record.digits = Number(flags.digits || 6);
+        record.algorithm = flags.algorithm || "SHA1";
+        if (!record.secret) return outputError("TOTP secret required");
+        break;
+      }
+      case "cookie-jar": {
+        const json = await resolveValue(flags, "jar");
+        if (!json) return outputError("Cookie jar JSON required");
+        record.cookies = JSON.parse(json);
+        break;
+      }
+    }
+
+    const stored = vault.add(record);
+    await vault.save();
+    stderr(`Added credential '${name}' (${type}) for ${domains.join(", ")}.`);
+    outputJson({
+      ok: true,
+      name: stored.name,
+      type: stored.type,
+      domains: stored.domains,
+      createdAt: stored.createdAt,
+      updatedAt: stored.updatedAt,
+    });
+  } finally {
+    vault.lock();
   }
+}
 
-  const credential = vaultDecrypt(vaultKey, record.encrypted);
-
-  outputJson({
-    ok: true,
-    service: record.service,
-    type: record.type,
-    credential,
-    url: record.url,
-    username: record.username,
-  });
+async function cmdShow(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    outputJson({ ok: true, credential: rec });
+  } finally {
+    vault.lock();
+  }
 }
 
 async function cmdList(flags) {
-  const stateDir = resolveStateDir(flags);
-  const paths = statePaths(stateDir);
-
-  let files;
+  const vault = await openWithFlags(flags);
   try {
-    files = await fs.readdir(paths.vaultDir);
-  } catch {
-    outputJson({ ok: true, credentials: [] });
-    return;
+    outputJson({ ok: true, credentials: vault.list(), slots: vault.slots });
+  } finally {
+    vault.lock();
   }
-
-  const credentials = [];
-  for (const file of files) {
-    if (!file.endsWith(".json")) continue;
-    const record = await readJsonFile(path.join(paths.vaultDir, file), null);
-    if (record?.service) {
-      credentials.push({
-        service: record.service,
-        type: record.type,
-        url: record.url,
-        username: record.username,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt,
-      });
-    }
-  }
-
-  outputJson({ ok: true, credentials });
 }
 
 async function cmdRemove(flags) {
-  const stateDir = resolveStateDir(flags);
-  const service = flags.service;
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const vault = await openWithFlags(flags);
+  try {
+    const removed = vault.remove(name);
+    if (!removed) return outputError(`No credential named '${name}'`);
+    await vault.save();
+    stderr(`Removed credential '${name}'.`);
+    outputJson({ ok: true, name });
+  } finally {
+    vault.lock();
+  }
+}
 
-  if (!service) {
-    outputError("--service <name> is required");
+async function cmdRekey(flags) {
+  const sub = flags._sub;
+  const vault = await openWithFlags(flags);
+  try {
+    if (sub === "add-passphrase") {
+      let passphrase = await resolvePassphrase(
+        { ...flags, "passphrase-file": flags["new-passphrase-file"], "passphrase-env": flags["new-passphrase-env"], passphrase: flags["new-passphrase"] },
+        { allowPrompt: false },
+      );
+      if (!passphrase) {
+        if (!hasTty()) return outputError("New passphrase required");
+        passphrase = promptNewPassphrase({
+          prompt: "New passphrase: ",
+          confirm: "Confirm: ",
+        });
+      }
+      const slot = vault.addPassphraseSlot(passphrase);
+      await vault.save();
+      stderr(`Added passphrase slot ${slot.id}.`);
+      outputJson({ ok: true, slot: { id: slot.id, type: slot.type } });
+    } else if (sub === "add-agent-key") {
+      const stateDir = resolveStateDir(flags);
+      const privateKeyPem = await loadAgentPrivateKey(stateDir);
+      if (!privateKeyPem) return outputError("No agent key found. Run agent-id-core bootstrap first.");
+      const agentId =
+        (await readJsonFile(statePaths(stateDir).mainKey, null))?.agentId || null;
+      const slot = vault.addAgentKeySlot(privateKeyPem, agentId);
+      await vault.save();
+      stderr(`Added agent-key slot ${slot.id} for agent ${agentId || "(unknown)"}.`);
+      outputJson({ ok: true, slot: { id: slot.id, type: slot.type, agentId } });
+    } else if (sub === "remove-slot") {
+      const id = Number(flags.id);
+      if (!Number.isFinite(id)) return outputError("--id <N> required");
+      const ok = vault.removeSlot(id);
+      if (!ok) return outputError(`No slot with id ${id}`);
+      await vault.save();
+      stderr(`Removed slot ${id}.`);
+      outputJson({ ok: true, removed: id });
+    } else {
+      return outputError(`rekey subcommand required: add-passphrase | add-agent-key | remove-slot`);
+    }
+  } finally {
+    vault.lock();
+  }
+}
+
+async function cmdExport(flags) {
+  const out = flags.out;
+  if (!out) return outputError("--out <PATH> is required");
+  const stateDir = resolveStateDir(flags);
+  if (!(await vaultFileExists(stateDir))) {
+    return outputError("No vault to export");
+  }
+  const written = await exportVault({ stateDir, outPath: out });
+  stderr(`Exported encrypted vault to ${written}`);
+  outputJson({ ok: true, path: written });
+}
+
+async function cmdImport(flags) {
+  const inPath = flags.in;
+  if (!inPath) return outputError("--in <PATH> is required");
+  const stateDir = resolveStateDir(flags);
+  const written = await importVault({
+    stateDir,
+    inPath,
+    overwrite: Boolean(flags.overwrite),
+  });
+  stderr(`Imported encrypted vault to ${written}`);
+  outputJson({ ok: true, path: written });
+}
+
+async function cmdMigrate(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+
+  if (await vaultFileExists(stateDir)) {
+    if (!flags["force"]) {
+      return outputError(
+        `Portable vault already exists at ${paths.vaultFile}. ` +
+          "Pass --force to re-run migration (will not overwrite existing slots).",
+      );
+    }
+  }
+
+  const privateKeyPem = await loadAgentPrivateKey(stateDir);
+  if (!privateKeyPem) return outputError("No agent key — cannot decrypt legacy vault.");
+
+  const legacy = await readLegacyVault(paths.vaultDir, privateKeyPem);
+  if (legacy.length === 0) {
+    stderr("No legacy credentials found — nothing to migrate.");
+    outputJson({ ok: true, migrated: 0 });
     return;
   }
 
-  const paths = statePaths(stateDir);
-  const filePath = path.join(paths.vaultDir, `${safeServiceName(service)}.json`);
+  let passphrase = await resolvePassphrase(flags, { allowPrompt: false });
+  if (!passphrase) {
+    if (!hasTty()) return outputError("Migration requires a passphrase for slot 0");
+    passphrase = promptNewPassphrase({
+      prompt: "New vault passphrase (for portability): ",
+      confirm: "Confirm: ",
+    });
+  }
+  const agentId =
+    (await readJsonFile(paths.mainKey, null))?.agentId || null;
 
+  await initVault({ stateDir, passphrase, privateKeyPem, agentId });
+  const vault = await openVault({ stateDir, privateKeyPem });
   try {
-    await fs.unlink(filePath);
-    stderr(`Removed credential for "${service}".`);
-    outputJson({ ok: true, service });
-  } catch (err) {
-    if (err?.code === "ENOENT") {
-      outputError(`No credential stored for "${service}".`);
-    } else {
-      throw err;
+    for (const old of legacy) {
+      // Legacy v4 records had no host allowlist; require migrate caller to
+      // supply --default-domains, otherwise we tag them as "unrestricted"
+      // so the proxy refuses to use them until the user attaches a domain.
+      const domains =
+        parseDomains({ domains: flags["default-domains"] }) || [];
+      vault.add({
+        name: old.service,
+        type: "bearer",
+        domains: domains.length > 0 ? domains : ["UNCONFIGURED.invalid"],
+        description: `migrated from v4 (${old.type})`,
+        value: old.credential,
+      });
     }
+    await vault.save();
+    stderr(`Migrated ${legacy.length} legacy credentials.`);
+    if (!flags["default-domains"]) {
+      stderr(
+        "WARNING: legacy records have no host allowlist. " +
+          "Update each with `agent-id-vault add --name <N> --type bearer --domains <H> --value-env <V>` " +
+          "before the proxy will inject them.",
+      );
+    }
+    // Rename old dir so a re-run notices it's done.
+    try {
+      await fs.rename(paths.vaultDir, `${paths.vaultDir}.bak`);
+    } catch {
+      // not fatal
+    }
+    outputJson({ ok: true, migrated: legacy.length, vault: paths.vaultFile });
+  } finally {
+    vault.lock();
   }
 }
+
+// ─── Dispatch ───────────────────────────────────────────────────────────────────
 
 function printHelp() {
   stderr(
     [
-      "agent-id-vault — encrypted credential storage",
+      "agent-id-vault — portable encrypted credential vault",
       "",
       "Subcommands:",
-      "  store --service <NAME> [--type T] [--credential-file F | --credential-env V | --credential S | -]",
-      "  get --service <NAME>",
+      "  init [--passphrase-file F | --passphrase-env V] [--no-agent-key]",
+      "  add --name N --type T --domains H[,H…] [type-specific value flags]",
+      "  show --name N",
       "  list",
-      "  remove --service <NAME>",
+      "  remove --name N",
+      "  rekey add-passphrase | add-agent-key | remove-slot --id N",
+      "  export --out PATH",
+      "  import --in PATH [--overwrite]",
+      "  migrate [--default-domains H[,H…]] [--force]",
       "",
-      "Common flags: --state-dir <path> (defaults to AGENT_ID_STATE_DIR or ~/.agent-id)",
+      "Types: " + CREDENTIAL_TYPES.join(", "),
+      "Unlock: --passphrase-file F | --passphrase-env V | auto via agent-key | /dev/tty prompt",
+      "Common: --state-dir <path>  (defaults to AGENT_ID_STATE_DIR or ~/.agent-id)",
     ].join("\n"),
   );
 }
 
+// `rekey` takes a sub-verb as its first positional arg; wrap dispatch.
+function makeRekeyHandler() {
+  return async (flags) => {
+    const argv = process.argv.slice(2);
+    const idx = argv.indexOf("rekey");
+    const sub = idx >= 0 ? argv[idx + 1] : null;
+    await cmdRekey({ ...flags, _sub: sub });
+  };
+}
+
 const commands = {
-  store: cmdStore,
-  get: cmdGet,
+  init: cmdInit,
+  add: cmdAdd,
+  show: cmdShow,
   list: cmdList,
   remove: cmdRemove,
+  rekey: makeRekeyHandler(),
+  export: cmdExport,
+  import: cmdImport,
+  migrate: cmdMigrate,
 };
+
+// Wrap runCli to catch trusted-input + vault-not-found errors with friendlier
+// messages.
+const originalCommands = { ...commands };
+for (const k of Object.keys(commands)) {
+  commands[k] = async (flags) => {
+    try {
+      await originalCommands[k](flags);
+    } catch (err) {
+      if (err instanceof TrustedInputUnavailable) {
+        outputError(err.message);
+      } else if (err.code === "VAULT_NOT_FOUND") {
+        outputError(err.message);
+      } else if (err.code === "VAULT_UNLOCK_FAILED") {
+        outputError(err.message);
+      } else if (err.code === "VAULT_EXISTS") {
+        outputError(err.message);
+      } else {
+        throw err;
+      }
+    }
+  };
+}
 
 runCli({ commands, printHelp });

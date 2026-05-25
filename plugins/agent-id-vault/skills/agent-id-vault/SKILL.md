@@ -1,62 +1,118 @@
 ---
 name: agent-id-vault
-description: Encrypted credential vault keyed off the agent's Alien Agent ID private key. Store, retrieve, list, and remove external-service credentials (GitHub PAT, Slack token, AWS keys, etc.) without ever hardcoding secrets. Use when the user asks to save, fetch, or remove a service credential, or whenever a downstream tool needs an external-service secret that should not appear in shell history, source files, or process arguments.
+description: Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key) and typed/domain-scoped credential records. Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them by substituting `AgentVault <name>` stubs. Use whenever the user asks to save, fetch, or remove a service credential, or whenever a downstream tool needs an external-service secret that must not appear in shell history, source files, or process arguments.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "0.0.0"
+  version: "5.0.0"
 allowed-tools: Bash(node *agent-id-vault/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
 ---
 
 # Alien Agent ID — Vault
 
-Encrypted storage for external-service credentials. The encryption key is derived from the agent's main private key via HKDF-SHA256, so credentials are only readable on the same machine as the bound agent. Encryption is AES-256-GCM with a fresh IV per write.
+Portable single-file encrypted vault at `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}/vault.enc`.
 
-Requires that `agent-id-setup bootstrap` has already produced a keypair under `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}`.
+The master key is held in slots, LUKS-style:
+- **slot 0**: passphrase-wrapped (Argon2id-class KDF — scrypt in v1)
+- **slot 1**: agent-key-wrapped (auto-unlock on the agent's own machine)
+
+Copy the file to a second machine, type the passphrase, you're in.
+
+Pairs with the agent-id-proxy plugin — the proxy unlocks the vault and injects values into outbound HTTP requests. The agent itself does not retrieve plaintext during normal operation; `show` exists only for manual export.
 
 ## Resolve the CLI
 
-`bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path (e.g. `node /abs/path/to/plugins/agent-id-vault/bin/cli.mjs`) in the examples below.
+`bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path (e.g. `node /abs/path/to/plugins/agent-id-vault/bin/cli.mjs`).
 
-## Store a credential
-
-```bash
-# Most secure — never appears in argv or shell history:
-node CLI store --service github --credential-file /tmp/gh-token
-
-# From an environment variable (typed/pasted into the calling shell):
-GH_TOKEN=ghp_... node CLI store --service github --credential-env GH_TOKEN
-
-# Piped via stdin:
-echo "$GH_TOKEN" | node CLI store --service github
-
-# Fallback — visible in process list and shell history, avoid:
-node CLI store --service github --credential "ghp_..."
-```
-
-Optional flags: `--type api-key|oauth|...`, `--url <hint>`, `--username <hint>`.
-
-Never accept a secret pasted into chat. Transcripts persist. Use a file or env var as the transport.
-
-## Retrieve a credential
+## Initialize the vault
 
 ```bash
-node CLI get --service github
+# Interactive — passphrase typed on /dev/tty, never enters the agent transcript:
+node CLI init
+
+# Non-interactive (for automation):
+node CLI init --passphrase-file /path/to/pass
 ```
 
-Returns JSON `{ ok, service, type, credential, url, username }`. Pipe `.credential` into the calling tool:
+If the agent has a main key (from `agent-id-core bootstrap`), an agent-key slot is added automatically for fast unattended unlock. Pass `--no-agent-key` to skip it.
+
+## Add a credential
+
+Every credential needs a **name**, **type**, and **domain allowlist** (default-deny — the proxy refuses to inject for any host not on the list).
 
 ```bash
-GH_TOKEN=$(node CLI get --service github | jq -r .credential)
-curl -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user
+# Bearer token (GitHub PATs, OpenAI keys, Slack bot tokens, …):
+node CLI add --name github-pat --type bearer \
+  --domains '*.github.com,api.github.com' --value-file /tmp/tok
+
+# Custom header (X-Api-Key style):
+node CLI add --name openai --type header --header-name X-Api-Key \
+  --domains api.openai.com --value-file /tmp/key
+
+# Basic auth:
+node CLI add --name old-svc --type basic --domains svc.example.com \
+  --username admin --password-file /tmp/pw
+
+# Query param (?api_key=... style):
+node CLI add --name geocoder --type query --param-name api_key \
+  --domains api.example.com --value-env GEO_KEY
+
+# Cookie:
+node CLI add --name session --type cookie --cookie-name sid \
+  --domains app.example.com --value-file /tmp/sid
+
+# TOTP seed (proxy generates the code at request time):
+node CLI add --name github-totp --type totp --domains '*.github.com' \
+  --secret-file /tmp/seed.b32
+
+# Full cookie jar for one origin (JSON object):
+echo '{"sid":"abc","csrf":"xyz"}' | node CLI add --name gmail \
+  --type cookie-jar --domains mail.google.com
 ```
 
-## List or remove
+Value-input channels — pick the one with the smallest attack surface:
+- `--<field>-file <path>` — read from file (recommended)
+- `--<field>-env <VAR>` — read from environment variable
+- stdin (piped) — `echo "secret" | node CLI add ...`
+- `--<field> <value>` — visible in process list; avoid
+
+Never paste a secret into chat. The agent transcript persists.
+
+## List, show, remove
 
 ```bash
-node CLI list             # metadata only — never returns plaintext credentials
-node CLI remove --service github
+node CLI list                     # metadata only; never plaintext
+node CLI show --name github-pat   # plaintext export; prefer the proxy for runtime use
+node CLI remove --name github-pat
 ```
+
+## Rekey: add/remove slots
+
+```bash
+node CLI rekey add-passphrase --new-passphrase-file /tmp/newpass
+node CLI rekey add-agent-key
+node CLI rekey remove-slot --id 1
+```
+
+The CLI refuses to remove the last slot (vault would become unrecoverable).
+
+## Portability
+
+```bash
+node CLI export --out vault.enc        # already-encrypted; copy anywhere
+node CLI import --in vault.enc         # install on a new machine
+```
+
+After importing on machine B, run `rekey add-agent-key` to wire B's main key in for unattended unlock.
+
+## Migration from v4 (single-key-derived) vault
+
+```bash
+node CLI migrate                                # interactive passphrase prompt
+node CLI migrate --passphrase-file /tmp/pass    # automation
+```
+
+One-shot: the old `~/.agent-id/vault/` directory is renamed to `vault.bak/`. Migrated records get the placeholder allowlist `["UNCONFIGURED.invalid"]` — the proxy refuses to inject them until you attach real domains via `agent-id-vault add --name <N> --domains <H,…> --value-env <V>`.
 
 ## Common flag
 

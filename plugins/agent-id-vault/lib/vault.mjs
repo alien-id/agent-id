@@ -1,57 +1,280 @@
-// Alien Agent ID — Vault crypto.
+// Alien Agent ID — Vault facade.
 //
-// Encrypted credential storage keyed off the agent's Ed25519 private key.
-// The key material never leaves the agent: a stable per-agent AES-256
-// encryption key is derived via HKDF-SHA256 over the raw private key bytes.
+// Single import surface for callers (CLI, proxy). Backs onto lib/format.mjs
+// for crypto + file layout and lib/store.mjs for record schema.
 //
-// Encryption is AES-256-GCM with a fresh 12-byte IV per write. The
-// authentication tag is stored alongside ciphertext; vaultDecrypt verifies
-// it before returning plaintext.
+// Typical flow:
 //
-// Plugin-private: only agent-id-vault needs these primitives. They do not
-// live in agent-id-core.
+//   const vault = await openVault({ stateDir, passphrase });
+//   const cred = vault.get("github-pat");
+//   vault.add({ name: "x", type: "bearer", value: "...", domains: ["api.x.com"] });
+//   await vault.save();
+//
+// Unlock attempts agent-key slot first (fast, unattended) then falls back
+// to passphrase if provided. Throws if neither works.
+
+import fs from "node:fs/promises";
 
 import {
-  createCipheriv,
-  createDecipheriv,
-  createPrivateKey,
-  hkdfSync,
-  randomBytes,
-} from "node:crypto";
+  buildAgentKeySlot,
+  buildPassphraseSlot,
+  decryptPayload,
+  encryptPayload,
+  findAgentKeySlot,
+  generateMasterKey,
+  newVaultFile,
+  nextSlotId,
+  unwrapSlotWithAgentKey,
+  unwrapSlotWithPassphrase,
+  validateVaultHeader,
+  VAULT_VERSION,
+} from "./format.mjs";
 
-export function deriveVaultKey(privateKeyPem) {
-  const privKey = createPrivateKey(privateKeyPem);
-  const rawKey = privKey.export({ type: "pkcs8", format: "der" });
-  return Buffer.from(
-    hkdfSync("sha256", rawKey, "agent-id-vault-v1", "vault-encryption", 32),
-  );
+import {
+  addCredential,
+  emptyPayload,
+  getCredential,
+  listMetadata,
+  parsePayload,
+  removeCredential,
+  serializePayload,
+  touchLastUsed,
+} from "./store.mjs";
+
+import {
+  ensureDir,
+  readJsonFile,
+  setPrivateFilePermissions,
+  statePaths,
+} from "../../agent-id-core/lib/state.mjs";
+import path from "node:path";
+
+const VAULT_LOCKED = Symbol("vault-locked");
+
+async function readVaultFile(filePath) {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return JSON.parse(raw);
+  } catch (err) {
+    if (err?.code === "ENOENT") return null;
+    throw err;
+  }
 }
 
-export function vaultEncrypt(key, plaintext) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([
-    cipher.update(plaintext, "utf8"),
-    cipher.final(),
-  ]);
-  const tag = cipher.getAuthTag();
+async function writeVaultFile(filePath, vaultFile) {
+  await ensureDir(path.dirname(filePath));
+  await fs.writeFile(filePath, JSON.stringify(vaultFile, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await setPrivateFilePermissions(filePath);
+}
+
+export async function vaultFileExists(stateDir) {
+  const paths = statePaths(stateDir);
+  try {
+    await fs.access(paths.vaultFile);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function loadAgentPrivateKey(stateDir) {
+  const paths = statePaths(stateDir);
+  const key = await readJsonFile(paths.mainKey, null);
+  return key?.privateKeyPem || null;
+}
+
+// ─── Open / unlock ──────────────────────────────────────────────────────────────
+
+export async function openVault({ stateDir, passphrase = null, privateKeyPem = null }) {
+  const paths = statePaths(stateDir);
+  const file = await readVaultFile(paths.vaultFile);
+  if (!file) {
+    const err = new Error(
+      `Vault not found at ${paths.vaultFile}. Run \`agent-id-vault init\` first.`,
+    );
+    err.code = "VAULT_NOT_FOUND";
+    throw err;
+  }
+  validateVaultHeader(file);
+
+  let masterKey = null;
+  const errors = [];
+
+  if (privateKeyPem) {
+    const slot = findAgentKeySlot(file.slots);
+    if (slot) {
+      try {
+        masterKey = unwrapSlotWithAgentKey(slot, privateKeyPem);
+      } catch (err) {
+        errors.push(`agent-key slot ${slot.id}: ${err.message}`);
+      }
+    }
+  }
+
+  if (!masterKey && passphrase != null) {
+    for (const slot of file.slots) {
+      if (slot.type !== "passphrase") continue;
+      try {
+        masterKey = unwrapSlotWithPassphrase(slot, passphrase);
+        break;
+      } catch (err) {
+        errors.push(`passphrase slot ${slot.id}: ${err.message}`);
+      }
+    }
+  }
+
+  if (!masterKey) {
+    const err = new Error(
+      "Could not unlock vault — passphrase wrong or no usable slot. " +
+        (errors.length ? `(${errors.join("; ")})` : ""),
+    );
+    err.code = "VAULT_UNLOCK_FAILED";
+    throw err;
+  }
+
+  const payloadJson = decryptPayload(masterKey, file.payload);
+  const payload = parsePayload(payloadJson);
+
+  return buildVaultHandle({ stateDir, file, masterKey, payload });
+}
+
+function buildVaultHandle({ stateDir, file, masterKey, payload }) {
+  let state = { file, masterKey, payload };
+
+  function assertOpen() {
+    if (state === VAULT_LOCKED) throw new Error("Vault is locked");
+  }
+
   return {
-    iv: iv.toString("hex"),
-    data: encrypted.toString("hex"),
-    tag: tag.toString("hex"),
+    get stateDir() {
+      return stateDir;
+    },
+    get slots() {
+      assertOpen();
+      return state.file.slots.map((s) => ({ id: s.id, type: s.type, agentId: s.agentId || null }));
+    },
+    list() {
+      assertOpen();
+      return listMetadata(state.payload);
+    },
+    get(name) {
+      assertOpen();
+      return getCredential(state.payload, name);
+    },
+    has(name) {
+      assertOpen();
+      return getCredential(state.payload, name) !== null;
+    },
+    add(record) {
+      assertOpen();
+      return addCredential(state.payload, record);
+    },
+    remove(name) {
+      assertOpen();
+      return removeCredential(state.payload, name);
+    },
+    touchLastUsed(name) {
+      assertOpen();
+      touchLastUsed(state.payload, name);
+    },
+    addPassphraseSlot(passphrase) {
+      assertOpen();
+      const id = nextSlotId(state.file.slots);
+      const slot = buildPassphraseSlot(id, state.masterKey, passphrase);
+      state.file.slots.push(slot);
+      return slot;
+    },
+    addAgentKeySlot(privateKeyPem, agentId = null) {
+      assertOpen();
+      const id = nextSlotId(state.file.slots);
+      const slot = buildAgentKeySlot(id, state.masterKey, privateKeyPem, agentId);
+      state.file.slots.push(slot);
+      return slot;
+    },
+    removeSlot(id) {
+      assertOpen();
+      if (state.file.slots.length <= 1) {
+        throw new Error("Refusing to remove last slot — vault would be unrecoverable");
+      }
+      const before = state.file.slots.length;
+      state.file.slots = state.file.slots.filter((s) => s.id !== id);
+      return before !== state.file.slots.length;
+    },
+    async save() {
+      assertOpen();
+      const paths = statePaths(stateDir);
+      state.file.payload = encryptPayload(state.masterKey, serializePayload(state.payload));
+      await writeVaultFile(paths.vaultFile, state.file);
+    },
+    lock() {
+      if (state !== VAULT_LOCKED) {
+        state.masterKey.fill(0);
+        state = VAULT_LOCKED;
+      }
+    },
+    raw() {
+      assertOpen();
+      return state.file;
+    },
   };
 }
 
-export function vaultDecrypt(key, entry) {
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    key,
-    Buffer.from(entry.iv, "hex"),
-  );
-  decipher.setAuthTag(Buffer.from(entry.tag, "hex"));
-  const decrypted = Buffer.concat([
-    decipher.update(Buffer.from(entry.data, "hex")),
-    decipher.final(),
-  ]);
-  return decrypted.toString("utf8");
+// ─── Init ───────────────────────────────────────────────────────────────────────
+
+export async function initVault({ stateDir, passphrase, privateKeyPem = null, agentId = null }) {
+  const paths = statePaths(stateDir);
+  const existing = await readVaultFile(paths.vaultFile);
+  if (existing) {
+    const err = new Error(`Vault already exists at ${paths.vaultFile}`);
+    err.code = "VAULT_EXISTS";
+    throw err;
+  }
+  if (!passphrase) {
+    throw new Error("Passphrase required for slot 0");
+  }
+  const masterKey = generateMasterKey();
+  const slots = [buildPassphraseSlot(0, masterKey, passphrase)];
+  if (privateKeyPem) {
+    slots.push(buildAgentKeySlot(1, masterKey, privateKeyPem, agentId));
+  }
+  const file = newVaultFile({
+    masterKey,
+    slots,
+    payloadPlaintext: serializePayload(emptyPayload()),
+  });
+  await writeVaultFile(paths.vaultFile, file);
+  return { path: paths.vaultFile, slots: file.slots.length, version: VAULT_VERSION };
+}
+
+// ─── Export / import (the file is already encrypted, so copy bytes) ─────────────
+
+export async function exportVault({ stateDir, outPath }) {
+  const paths = statePaths(stateDir);
+  const data = await fs.readFile(paths.vaultFile);
+  await fs.writeFile(outPath, data, { mode: 0o600 });
+  return outPath;
+}
+
+export async function importVault({ stateDir, inPath, overwrite = false }) {
+  const paths = statePaths(stateDir);
+  if (!overwrite) {
+    const existing = await readVaultFile(paths.vaultFile);
+    if (existing) {
+      const err = new Error(
+        `Vault already exists at ${paths.vaultFile}. Use --overwrite to replace.`,
+      );
+      err.code = "VAULT_EXISTS";
+      throw err;
+    }
+  }
+  const data = await fs.readFile(inPath, "utf8");
+  // Parse to validate it's a real vault file before clobbering anything.
+  const parsed = JSON.parse(data);
+  validateVaultHeader(parsed);
+  await fs.writeFile(paths.vaultFile, data, { encoding: "utf8", mode: 0o600 });
+  await setPrivateFilePermissions(paths.vaultFile);
+  return paths.vaultFile;
 }

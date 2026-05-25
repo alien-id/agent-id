@@ -1,0 +1,175 @@
+// Alien Agent ID — Credential store: schema + in-memory record table.
+//
+// The vault payload is a single JSON document holding all credential
+// records. This module owns:
+//   - the schema (allowed types, required fields per type)
+//   - in-memory CRUD on the record array
+//   - domain allowlist matching used by the proxy at injection time
+//
+// Records:
+//   {
+//     name: "github-pat",
+//     type: "bearer" | "basic" | "header" | "query" | "cookie" | "totp" | "cookie-jar",
+//     domains: ["*.github.com"],
+//     description: "...",
+//     createdAt, updatedAt, lastUsedAt,
+//     ...type-specific fields
+//   }
+
+import { nowMs } from "../../agent-id-core/lib/crypto.mjs";
+
+export const CREDENTIAL_TYPES = Object.freeze([
+  "bearer",
+  "basic",
+  "header",
+  "query",
+  "cookie",
+  "totp",
+  "cookie-jar",
+]);
+
+const NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/;
+
+function requireNonEmpty(rec, fields) {
+  for (const f of fields) {
+    if (typeof rec[f] !== "string" || rec[f].length === 0) {
+      throw new Error(`Credential ${rec.name}: '${f}' is required for type ${rec.type}`);
+    }
+  }
+}
+
+export function validateRecord(rec) {
+  if (!rec || typeof rec !== "object") {
+    throw new Error("Record must be an object");
+  }
+  if (!NAME_RE.test(rec.name || "")) {
+    throw new Error(
+      `Invalid credential name: ${rec.name} (must match ${NAME_RE.source})`,
+    );
+  }
+  if (!CREDENTIAL_TYPES.includes(rec.type)) {
+    throw new Error(`Unknown credential type: ${rec.type}`);
+  }
+  if (!Array.isArray(rec.domains) || rec.domains.length === 0) {
+    throw new Error(
+      `Credential ${rec.name}: 'domains' must be a non-empty array (default-deny)`,
+    );
+  }
+  for (const d of rec.domains) {
+    if (typeof d !== "string" || d.length === 0) {
+      throw new Error(`Credential ${rec.name}: invalid domain entry`);
+    }
+  }
+  switch (rec.type) {
+    case "bearer":
+      requireNonEmpty(rec, ["value"]);
+      break;
+    case "basic":
+      requireNonEmpty(rec, ["username", "password"]);
+      break;
+    case "header":
+      requireNonEmpty(rec, ["headerName", "value"]);
+      break;
+    case "query":
+      requireNonEmpty(rec, ["paramName", "value"]);
+      break;
+    case "cookie":
+      requireNonEmpty(rec, ["cookieName", "value"]);
+      break;
+    case "totp":
+      requireNonEmpty(rec, ["secret"]);
+      break;
+    case "cookie-jar":
+      if (!rec.cookies || typeof rec.cookies !== "object") {
+        throw new Error(`Credential ${rec.name}: 'cookies' object is required`);
+      }
+      break;
+  }
+}
+
+// ─── Payload serializer ─────────────────────────────────────────────────────────
+
+export function emptyPayload() {
+  return { version: 1, credentials: [] };
+}
+
+export function parsePayload(jsonString) {
+  if (!jsonString || jsonString === "{}") return emptyPayload();
+  const parsed = JSON.parse(jsonString);
+  if (!parsed.credentials) return emptyPayload();
+  for (const rec of parsed.credentials) validateRecord(rec);
+  return parsed;
+}
+
+export function serializePayload(payload) {
+  return JSON.stringify(payload);
+}
+
+// ─── CRUD ───────────────────────────────────────────────────────────────────────
+
+export function addCredential(payload, record) {
+  validateRecord(record);
+  const idx = payload.credentials.findIndex((c) => c.name === record.name);
+  const now = nowMs();
+  const finalRecord = {
+    ...record,
+    createdAt: idx >= 0 ? payload.credentials[idx].createdAt : now,
+    updatedAt: now,
+    lastUsedAt: idx >= 0 ? payload.credentials[idx].lastUsedAt || null : null,
+  };
+  if (idx >= 0) {
+    payload.credentials[idx] = finalRecord;
+  } else {
+    payload.credentials.push(finalRecord);
+  }
+  return finalRecord;
+}
+
+export function removeCredential(payload, name) {
+  const idx = payload.credentials.findIndex((c) => c.name === name);
+  if (idx < 0) return null;
+  const [removed] = payload.credentials.splice(idx, 1);
+  return removed;
+}
+
+export function getCredential(payload, name) {
+  return payload.credentials.find((c) => c.name === name) || null;
+}
+
+export function listMetadata(payload) {
+  return payload.credentials.map((c) => ({
+    name: c.name,
+    type: c.type,
+    domains: c.domains,
+    description: c.description || null,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    lastUsedAt: c.lastUsedAt || null,
+  }));
+}
+
+export function touchLastUsed(payload, name) {
+  const rec = getCredential(payload, name);
+  if (rec) rec.lastUsedAt = nowMs();
+}
+
+// ─── Domain allowlist matching ──────────────────────────────────────────────────
+
+// Supports literal hostnames and a single leading "*." wildcard.
+// `*.github.com` matches `github.com`, `api.github.com`, `x.y.github.com`.
+export function hostMatchesAllowlist(host, allowlist) {
+  if (!host || !Array.isArray(allowlist)) return false;
+  const hostLower = host.toLowerCase();
+  for (const entry of allowlist) {
+    const e = entry.toLowerCase();
+    if (e.startsWith("*.")) {
+      const suffix = e.slice(1); // ".github.com"
+      const bare = e.slice(2); // "github.com"
+      if (hostLower === bare) return true;
+      if (hostLower.endsWith(suffix)) return true;
+    } else if (hostLower === e) {
+      return true;
+    }
+  }
+  return false;
+}

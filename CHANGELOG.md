@@ -2,6 +2,49 @@
 
 All notable changes are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **`agent-id-vault` v5.0.0 — portable LUKS-style vault format.**
+  Single file at `~/.agent-id/vault.enc` with a slot-wrapped master key:
+  slot 0 = passphrase-wrapped (scrypt), slot 1 = agent-key-wrapped
+  (HKDF, fast unattended unlock). Payload AEAD-encrypted with the
+  master key. Copy the file to a second machine, type the passphrase,
+  you're in.
+- **Vault credential schema.** Records carry `type` (bearer / basic /
+  header / query / cookie / totp / cookie-jar), a `domains` allowlist
+  (default-deny — required, no fallback), and timestamps.
+- **New vault subcommands.** `init`, `add`, `show`, `list`, `remove`,
+  `rekey add-passphrase | add-agent-key | remove-slot`, `export`,
+  `import`, `migrate`.
+- **Trusted-input channel.** `/dev/tty` reader bypasses the agent's
+  stdin pipe so credential entry and passphrase prompts never enter
+  the agent transcript or prompt cache.
+- **`agent-id-proxy` plugin (new) — stub-translating local HTTP proxy.**
+  Agent sends `AgentVault <name>` in headers or query params; the
+  proxy looks the name up in the unlocked vault, enforces the host
+  allowlist, and substitutes the materialized value before forwarding.
+  Structured 4xx JSON on missing credential or disallowed host.
+  Metadata-only access log at `~/.agent-id/proxy.log`.
+
+### v1 scope cuts (deferred)
+
+- **HTTPS injection.** HTTPS upstream is CONNECT-tunneled without MITM.
+  Local-CA + per-host TLS interception is the next spike per the
+  proposal in `documentation/agent-id/vault-proxy-mvp-proposal.md`.
+- **Consent prompts.** Per-credential confirmation on first use is
+  deferred; the host allowlist is the only authorization gate in v1.
+- **Auto-lock.** The proxy holds the master key in memory until `stop`.
+
+### Migration
+
+- Existing v4 vaults (`~/.agent-id/vault/*.json`) are migrated by
+  `agent-id-vault migrate`. The old directory is renamed to
+  `vault.bak/`. Migrated records get the placeholder allowlist
+  `["UNCONFIGURED.invalid"]` — the proxy refuses to inject them
+  until real domains are attached via `add`.
+
 ## [4.0.0] — 2026-05-15
 
 Major release. The monolithic `skills/alien-agent-id/` is replaced by a

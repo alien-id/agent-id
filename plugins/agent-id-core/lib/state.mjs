@@ -68,6 +68,9 @@ export function statePaths(baseDir) {
     delegationsDir: path.join(baseDir, "delegations"),
     auditJsonl: path.join(baseDir, "audit", "operations.jsonl"),
     vaultDir: path.join(baseDir, "vault"),
+    vaultFile: path.join(baseDir, "vault.enc"),
+    proxyLog: path.join(baseDir, "proxy.log"),
+    proxyState: path.join(baseDir, "proxy.json"),
   };
 }
 
