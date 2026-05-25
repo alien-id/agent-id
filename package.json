@@ -18,7 +18,8 @@
     "tests",
     "CHANGELOG.md",
     "docs/AGENT-SSO.md",
-    "docs/INTEGRATION.md"
+    "docs/INTEGRATION.md",
+    "docs/VAULT-PROXY.md"
   ],
   "repository": {
     "type": "git",

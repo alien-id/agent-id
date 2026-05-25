@@ -16,9 +16,10 @@ pasting API keys into chat, hard-coding secrets in configs, or giving agents unr
 2. **Service authentication.** Agents present an SSO-issued `at+jwt` access token plus a fresh RFC 9449 DPoP
    proof per request. Any service that imports the verifier (`@alien-id/sso-agent-id` / `alien-sso-agent-id`)
    accepts the pair — no API keys, no shared secrets, no pre-registration.
-3. **Credential vault.** Encrypted storage (AES-256-GCM) for external service credentials. The encryption key
-   is derived from the agent's private key via HKDF-SHA256. Only that specific agent instance can decrypt its
-   own vault.
+3. **Credential vault + proxy.** Portable encrypted store (`vault.enc`) for external-service credentials, with
+   a LUKS-style slot construction (passphrase + agent-key). A companion process, `agent-id-proxy`, holds the
+   unlocked vault in memory and injects credentials into outbound HTTP requests by name — the **agent never
+   sees the value**. See [VAULT-PROXY.md](VAULT-PROXY.md).
 4. **Signed git commits.** Every commit is SSH-signed and carries trailers that trace back to the agent and its
    human owner. The v3 proof bundle embedded as a git note (`refs/notes/agent-id`) makes verification
    self-contained — anyone with the commit and the note can verify the chain.
@@ -32,13 +33,16 @@ flowchart TD
     Agent["Agent<br/>(Claude Code, Cursor, …)"]
     Service["Alien-aware service"]
     External["External service<br/>(GitHub, AWS, Slack, …)"]
-    State["~/.agent-id/<br/>keypair · session · vault · audit"]
+    State["~/.agent-id/<br/>keypair · session · vault.enc · audit"]
+    Proxy["agent-id-proxy<br/>(local, unlocks vault)"]
 
     Human -- "1. Scan QR via Alien App" --> SSO
     SSO -- "2. id_token + access_token + refresh_token" --> Agent
     Agent --- State
     Agent -- "DPoP-bound request" --> Service
-    Agent -- "Stored API key / OAuth token" --> External
+    Agent -- "named credential, no value" --> Proxy
+    Proxy --- State
+    Proxy -- "real Bearer / header / cookie" --> External
 ```
 
 The agent uses a standard OIDC + OAuth 2.0 + RFC 9449 flow. Discovery is at
@@ -55,14 +59,15 @@ Alien App.
 
 ### The skill file
 
-This repository ships as a marketplace of four focused plugins, each with its own agent-facing skill:
+This repository ships as a marketplace of five focused plugins, each with its own agent-facing skill:
 
 - `plugins/agent-id-core/skills/agent-id-core/SKILL.md` — bootstrap + session lifecycle + sign/verify on the local audit trail.
 - `plugins/agent-id-git/skills/agent-id-git/SKILL.md` — SSH-signed commits with provenance trailers and v3 proof notes.
-- `plugins/agent-id-vault/skills/agent-id-vault/SKILL.md` — encrypted credential vault for external-service secrets.
+- `plugins/agent-id-vault/skills/agent-id-vault/SKILL.md` — portable encrypted credential vault for external-service secrets.
+- `plugins/agent-id-proxy/skills/agent-id-proxy/SKILL.md` — local credential-injecting HTTP proxy that pairs with the vault.
 - `plugins/agent-id-auth/skills/agent-id-auth/SKILL.md` — DPoP-signed calls to Alien-aware services.
 
-Together they replace the monolithic `alien-agent-id` skill from 3.x. `agent-id-core` is required by the others; install only the plugins you need.
+Together they replace the monolithic `alien-agent-id` skill from 3.x. `agent-id-core` is required by the others; `agent-id-proxy` depends on `agent-id-vault`. Install only the plugins you need.
 
 ### Claude Code
 
@@ -85,6 +90,7 @@ Or install via the Claude Code marketplace:
 /plugin install agent-id-git@alien-agent-id       # for signed commits
 /plugin install agent-id-auth@alien-agent-id      # for DPoP-signed service calls
 /plugin install agent-id-vault@alien-agent-id     # for credential storage
+/plugin install agent-id-proxy@alien-agent-id     # for credential injection at runtime
 /reload-plugins
 ```
 
@@ -184,43 +190,62 @@ flowchart LR
 Every link is cryptographically verifiable. The v3 proof bundle (`{ version: 3, id_token, agent_jwk }`)
 embedded as a git note makes verification self-contained — no access to the agent's local state needed.
 
-## Credential vault
+## Credential vault + proxy
+
+> Full architecture, threat model, and per-type materialization rules live in **[VAULT-PROXY.md](VAULT-PROXY.md)**. This section is a summary.
 
 ### Overview
 
-The vault stores credentials for external services (GitHub, AWS, Slack, etc.) encrypted with a key derived from
-the agent's Ed25519 private key. This means:
+External-service credentials (GitHub PATs, OpenAI keys, cookies, TOTP seeds, …) live in a single encrypted file at `~/.agent-id/vault.enc`. A companion process, `agent-id-proxy`, holds the unlocked vault in memory and **injects credentials into outbound HTTP requests by name** so the agent never sees the value.
 
-- Credentials are encrypted at rest (AES-256-GCM).
-- Only the agent that stored them can decrypt them.
-- The encryption key never leaves the agent's machine.
-- If the agent's keypair is deleted, the credentials are irrecoverable.
+The vault uses a LUKS-style slot construction:
+
+- A random 32-byte **master key** AES-256-GCM-encrypts the credential payload.
+- Each **slot** wraps the master key with a different KEK derivation:
+  - **passphrase slot** — `KEK = scrypt(passphrase, salt, N=32768, r=8, p=1)`. Portable; entered via `/dev/tty` so it never enters the agent's stdin pipe.
+  - **agent-key slot** — `KEK = HKDF-SHA256(agent_ed25519_sk, "vault-unlock")`. Fast unattended unlock on the machine that owns the agent key.
+
+Either slot decrypts the same payload, so the vault is **copyable between machines** (passphrase on first use, optionally bind a new agent key for fast unlock thereafter).
 
 ### How credentials get into the vault
 
-The skill instructs the agent to **never accept a secret pasted into chat** — anything pasted there is recorded
-in the agent's transcript. The agent offers the human three options, in decreasing order of safety:
+`agent-id-vault add --name <N> --type <T> --domains <H[,H…]>` plus type-specific value-input flags. The skill instructs the agent to **never accept a secret pasted into chat**. Value-input channels in decreasing order of safety:
 
 | Method | Secret in `ps`? | Shell history? | Chat transcript? |
 | --- | --- | --- | --- |
-| `--credential-file <path>` | No | No | No |
-| `--credential-env <VAR>` | No | Depends on shell | No |
+| `--<field>-file <path>` | No | No | No |
+| `--<field>-env <VAR>` | No | Depends on shell | No |
 | stdin pipe | No | The `echo` line, yes | No |
-| `--credential <value>` | Yes | Yes | No |
+| `--<field> <value>` | Yes | Yes | No |
 | Paste in chat | No | No | Yes |
 
-### Vault encryption
+### Vault format
 
 ```mermaid
 flowchart LR
-    Priv["Agent Ed25519 private key<br/>(PKCS8 DER)"]
-    HKDF["HKDF-SHA256<br/>salt: agent-id-vault-v1<br/>info: vault-encryption"]
-    Key["256-bit symmetric key"]
-    AES["AES-256-GCM<br/>random 96-bit IV per credential<br/>128-bit auth tag"]
-    Out["{ iv, data, tag } (hex)<br/>file mode 0600"]
+    Pass["Passphrase"]
+    Scrypt["scrypt(N=32768, r=8, p=1)"]
+    AgentKey["Agent Ed25519 sk<br/>(PKCS8 DER)"]
+    HKDF["HKDF-SHA256<br/>salt: vault-unlock"]
+    MK["Master key<br/>(32 random bytes)"]
+    Slot0["slot 0<br/>AES-256-GCM(KEK0, master_key)"]
+    Slot1["slot 1<br/>AES-256-GCM(KEK1, master_key)"]
+    Payload["payload<br/>AES-256-GCM(master_key, credentials.json)"]
+    File["vault.enc<br/>(mode 0600)"]
 
-    Priv --> HKDF --> Key --> AES --> Out
+    Pass --> Scrypt --> Slot0
+    AgentKey --> HKDF --> Slot1
+    MK --> Slot0
+    MK --> Slot1
+    MK --> Payload
+    Slot0 --> File
+    Slot1 --> File
+    Payload --> File
 ```
+
+### Idle auto-lock
+
+After 12 h of no proxy traffic (configurable via `--idle-timeout`), the master key is zeroed in memory and the decrypted records are dropped. Subsequent requests return `401 vault_locked`; restart the proxy to re-unlock. Mirrors 1Password's default.
 
 ## Service authentication
 
@@ -268,17 +293,23 @@ Owner identity, agent identity, and proof-of-possession all come from signed sta
 envelope, no key pre-registration. See [INTEGRATION.md](INTEGRATION.md) for service-side integration patterns
 and SDK examples.
 
-### External services (GitHub, AWS, Slack)
+### External services (GitHub, AWS, Slack, …)
 
-External services don't know about Agent ID tokens. The agent authenticates to them using credentials stored
-in the vault:
+External services don't know about Agent ID tokens. The agent uses credentials stored in the vault — but it does so by **name**, through the proxy, never reading the value itself:
 
 ```bash
-TOKEN=$(node plugins/agent-id-vault/bin/cli.mjs get --service github | jq -r .credential)
-curl -H "Authorization: Bearer $TOKEN" https://api.github.com/user/repos
+# Start the proxy once
+node plugins/agent-id-proxy/bin/cli.mjs start
+
+# Agent calls a local URL; proxy substitutes the real credential
+curl http://localhost:48771/github-pat/api.github.com/user/repos
+# upstream sees: Authorization: Bearer ghp_xxx...
+# agent transcript sees: the credential NAME, the URL, and the response
 ```
 
-The credential is decrypted in memory, used for the API call, and never written to disk in plaintext.
+The credential value is decrypted in proxy memory at injection time, used for the upstream HTTPS request, and never written to disk in plaintext. The agent's transcript, prompt cache, and tool-call envelopes never contain the credential.
+
+See [VAULT-PROXY.md](VAULT-PROXY.md) for the URL-rewrite request flow, per-type materialization rules, and threat model.
 
 ## Files in this repository
 
@@ -286,9 +317,10 @@ The credential is decrypted in memory, used for the API call, and never written 
 | --- | --- |
 | `plugins/agent-id-core/` | Shared library (crypto, v3 bundle, universal verifier, SignatureEngine, OIDC, state I/O) + bootstrap/lifecycle CLI + qrcode + `default-provider.txt`. Required by every other plugin. |
 | `plugins/agent-id-git/` | SSH-signed commits with provenance trailers + v3 proof note; verify any commit. |
-| `plugins/agent-id-vault/` | Encrypted credential vault (AES-256-GCM, HKDF-derived from agent key). |
+| `plugins/agent-id-vault/` | Portable encrypted credential vault. Single file (`vault.enc`) with LUKS-style slot construction (passphrase + agent-key). Typed, domain-scoped records. |
+| `plugins/agent-id-proxy/` | Local credential-injecting HTTP proxy. Agent calls `http://<proxy>/<credname>/<host>/<path>`; proxy materializes the credential by type and forwards over real HTTPS. |
 | `plugins/agent-id-auth/` | DPoP-signed calls to Alien-aware services + service-manifest discovery. |
-| `.claude-plugin/marketplace.json` | Plugin marketplace manifest (lists all four plugins). |
+| `.claude-plugin/marketplace.json` | Plugin marketplace manifest (lists all five plugins). |
 | `examples/demo-service.mjs` | Reference DPoP-verifying HTTP service (~426 LOC, SDK-free) |
 | `examples/dev-sso.mjs` | Local SSO that auto-approves authorize requests for end-to-end testing |
 | `tests/` | Unit + integration test suites |
@@ -309,13 +341,18 @@ node plugins/agent-id-git/bin/cli.mjs setup
 # Check status
 node plugins/agent-id-core/bin/cli.mjs status
 
-# Store a credential securely
+# Initialize the credential vault (one-time)
+node plugins/agent-id-vault/bin/cli.mjs init --passphrase-file /tmp/pass
+
+# Add a credential
 echo 'ghp_xxx' > /tmp/tok && chmod 600 /tmp/tok
-node plugins/agent-id-vault/bin/cli.mjs store --service github --type api-key --credential-file /tmp/tok
+node plugins/agent-id-vault/bin/cli.mjs add --name github-pat --type bearer \
+  --domains '*.github.com,api.github.com' --value-file /tmp/tok
 rm /tmp/tok
 
-# Retrieve a credential
-node plugins/agent-id-vault/bin/cli.mjs get --service github
+# Start the proxy, then use the credential by name (no value in the agent transcript)
+node plugins/agent-id-proxy/bin/cli.mjs start &
+curl http://localhost:48771/github-pat/api.github.com/user/repos
 
 # Generate the two-header pair for a request
 node plugins/agent-id-auth/bin/cli.mjs header --url https://service.example.com/api/whoami --method GET
