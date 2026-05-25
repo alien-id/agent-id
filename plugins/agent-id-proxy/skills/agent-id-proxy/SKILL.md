@@ -1,18 +1,22 @@
 ---
 name: agent-id-proxy
-description: Local stub-translating HTTP proxy. The agent sends requests with `AgentVault <name>` in headers or query params; the proxy substitutes the real credential from the vault before forwarding upstream. Enforces per-credential host allowlist (default-deny). Use whenever the agent calls an external service and the credential must never enter the agent's transcript or argv.
+description: Local credential-injecting HTTP proxy. The agent calls `http://localhost:PORT/<credname>/<upstream-host>/<path>`; the proxy looks up the credential in the vault, validates the host against that credential's allowlist (default-deny), materializes the credential into the appropriate request location, and forwards over real HTTPS. The agent never sees the credential value. Use whenever the agent calls an external service and the credential must not enter the transcript, argv, or environment.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "0.1.0"
+  version: "0.2.0"
 allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
 ---
 
 # Alien Agent ID — Proxy
 
-The proxy intercepts HTTP requests, finds `AgentVault <credential-name>` stub markers in headers + URL query parameters, looks each one up in the unlocked vault, verifies the request host is on that credential's allowlist, and substitutes the materialized value before forwarding.
+The proxy holds the unlocked vault's master key in memory, accepts HTTP requests on localhost, and forwards them to real upstream services with the configured credential injected. Two request shapes are supported.
 
-Requires that `agent-id-vault init` has produced a portable vault with at least one credential.
+Requires `agent-id-vault init` to have produced a portable vault with at least one credential.
+
+## Resolve the CLI
+
+`bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path.
 
 ## Start the proxy
 
@@ -20,72 +24,109 @@ Requires that `agent-id-vault init` has produced a portable vault with at least 
 # Foreground (Ctrl-C to stop). Tries agent-key unlock first, falls back to /dev/tty prompt.
 node CLI start --port 48771
 
-# With explicit passphrase source:
+# With an explicit passphrase source:
 node CLI start --passphrase-file ~/.agent-id-pass
 
-# Print connection info as JSON (for piping into env setup):
-node CLI start --print-config
+# Idle auto-lock window (default 12h; "never" disables for unattended agents):
+node CLI start --idle-timeout 30m
 ```
 
-CLI prints the suggested `HTTP_PROXY` env var. Set it in any shell or tool that should route through the proxy:
+The CLI prints the suggested env exports. Set them in any shell that should route through the proxy:
+
+```bash
+export AGENT_ID_PROXY=http://127.0.0.1:48771
+```
+
+## Mode 1 — URL-rewrite (recommended, universal)
+
+The agent calls a local URL that names the credential and the real upstream host:
+
+```
+http://<proxy>/<credname>/<upstream-host>/<path>
+```
+
+The credname picks the credential, the next path segment names the upstream host (validated against that credential's allowlist), and the rest is forwarded verbatim. The proxy is the HTTPS client — the system CA bundle verifies the upstream cert. No TLS interception on the agent side.
+
+```bash
+# GitHub PAT (bearer credential):
+curl http://localhost:48771/github-pat/api.github.com/user
+
+# OpenAI key (header credential, name configured at `vault add` time):
+curl -X POST http://localhost:48771/openai-key/api.openai.com/v1/chat/completions \
+  -H "Content-Type: application/json" -d '{"model":"...","messages":[...]}'
+
+# Stripe secret (bearer):
+curl http://localhost:48771/stripe-sk/api.stripe.com/v1/charges
+
+# Geocoder API (query param credential):
+curl 'http://localhost:48771/geo/api.example.com/lookup?address=1+Main+St'
+
+# Cookie-based session for a private app:
+curl http://localhost:48771/intranet-sess/intranet.corp.example/api/v2/things
+```
+
+The credential is materialized into the request based on its type:
+
+| Type | Materialization |
+|---|---|
+| `bearer` | `Authorization: Bearer <value>` |
+| `basic` | `Authorization: Basic <b64(user:pass)>` |
+| `header` | `<headerName>: <value>` |
+| `query` | URL query param `<paramName>=<value>` |
+| `cookie` | `Cookie: <cookieName>=<value>` (appended if Cookie present) |
+| `cookie-jar` | `Cookie: k1=v1; k2=v2; …` |
+| `totp` | `<otpHeader || X-OTP-Code>: <6-digit code>` |
+
+Upstream scheme defaults to **HTTPS**. Set `upstreamScheme: "http"` on the credential to opt into plain HTTP (legacy/internal services). The proxy rewrites the `Host` header and strips `Origin` / `Referer` before forwarding.
+
+## Mode 2 — HTTP_PROXY stub injection (legacy, HTTP only)
+
+For agents that want to use the standard `HTTP_PROXY` env without rewriting URLs. Only works for plain HTTP upstream; HTTPS upstream needs TLS interception (out of scope).
 
 ```bash
 export HTTP_PROXY=http://127.0.0.1:48771
+curl -H "Authorization: AgentVault github-pat" http://api.example.com/foo
 ```
 
-## Use a credential
-
-The agent writes the stub wherever the credential would go. The proxy figures out the materialization from the credential type:
-
-```bash
-# bearer credential — proxy expands `AgentVault github-pat` → `Bearer ghp_xxx`
-curl -H "Authorization: AgentVault github-pat" http://api.github.com/user
-
-# header credential — proxy expands to just the raw value
-curl -H "X-Api-Key: AgentVault openai-key" http://api.openai.com/v1/models
-
-# query credential — URL-encoded by URLSearchParams
-curl "http://example.com/api?api_key=AgentVault%20example-key"
-```
+Prefer Mode 1 for new code.
 
 ## Idle auto-lock
 
-After `--idle-timeout` of no traffic (default **12h**, 1Password parity), the proxy zeroes the master key + drops the decrypted credential records from memory. Subsequent requests get `401 {error: "vault_locked"}`. Restart the proxy to re-unlock:
+After `--idle-timeout` of no traffic (default **12h**, 1Password parity), the proxy zeroes the master key + drops decrypted credential records. Subsequent requests get `401 {error: "vault_locked"}`. Restart the proxy to re-unlock:
 
 ```bash
 node CLI stop && node CLI start --passphrase-file ~/.agent-id-pass
 ```
 
-Override the default:
+Override:
 
 ```bash
 node CLI start --idle-timeout 30m       # tighter
 node CLI start --idle-timeout never     # disable (unattended agents)
 ```
 
-`node CLI status` includes the configured `idleTimeout`.
-
-## v1 limitations
-
-- **HTTP only.** HTTPS upstream goes through CONNECT tunneling without MITM — stubs in HTTPS requests are NOT injected. The next milestone is the local-CA + per-host TLS interception spike described in `documentation/agent-id/vault-proxy-mvp-proposal.md`.
-- **No consent prompt.** v1 uses the host allowlist as the only authorization gate. Consent dialogs (per-credential, per-agent, persisted) come in a follow-up.
-- **No in-process re-unlock.** After idle lock, restart the proxy to re-unlock. A control-socket `unlock` subcommand is the natural follow-up.
-
-## Status + stop
-
-```bash
-node CLI status   # JSON: { running, pid, host, port, uptimeMs, ... }
-node CLI stop     # SIGTERM the running proxy
-```
+`node CLI status` reports the configured `idleTimeout`.
 
 ## Error responses
-
-The proxy returns structured 4xx JSON when injection fails:
 
 ```json
 { "ok": false, "error": "credential_not_found", "credential": "github-pat" }
 { "ok": false, "error": "host_not_allowed", "credential": "github-pat", "host": "evil.example.com", "allowed": ["*.github.com"] }
-{ "ok": false, "error": "https_not_supported_yet", "message": "..." }
+{ "ok": false, "error": "vault_locked", "reason": "idle_timeout" }
+{ "ok": false, "error": "bad_request", "message": "..." }
 ```
 
-The `X-AgentVault-Proxy-Error` response header carries the same code for clients that don't parse the body.
+The `X-AgentVault-Proxy-Error` response header carries the same code.
+
+## Status + stop
+
+```bash
+node CLI status
+node CLI stop
+```
+
+## v1 limitations
+
+- **HTTPS only at the upstream leg** in URL-rewrite mode. The agent-to-proxy leg is plain HTTP loopback by design.
+- **No consent prompt.** Host allowlist is the only authorization gate in v1.
+- **No in-process re-unlock.** Restart the proxy to re-unlock after idle lock.

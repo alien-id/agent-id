@@ -1,18 +1,21 @@
-// Alien Agent ID — Stub-translating local HTTP proxy.
+// Alien Agent ID — Local HTTP proxy with two modes:
 //
-// Listens on localhost. Speaks standard HTTP_PROXY semantics:
+// 1. URL-rewrite (recommended, universal): the agent calls
+//      http://localhost:PORT/<credname>/<upstream-host>/<path>
+//    The proxy resolves credname, validates the host against that
+//    credential's allowlist, materializes the credential into the
+//    appropriate request location based on its type, and forwards to
+//    the real upstream over HTTPS (or HTTP if the credential opts in).
+//    System CA bundle verifies the upstream cert — no TLS interception
+//    on our side.
 //
-//   GET http://api.example.com/path HTTP/1.1     ← absolute-URI request
-//   CONNECT api.example.com:443 HTTP/1.1         ← tunnel for HTTPS
+// 2. HTTP_PROXY stub injection (legacy, HTTP only): the agent sets
+//    HTTP_PROXY and writes `AgentVault <name>` markers in headers / query
+//    parameters. Works only for plain HTTP upstream. Kept for backward
+//    compatibility; new agents should prefer mode 1.
 //
-// For absolute-URI requests it parses headers + URL for `AgentVault <name>`
-// stubs, materializes them against the unlocked vault, enforces per-credential
-// host allowlist, and forwards upstream. The agent never sees the value.
-//
-// CONNECT tunneling is transparent (no MITM); HTTPS stub injection requires
-// the local-CA + per-host MITM spike described in the proposal. The agent
-// receives unmodified TLS bytes — any stub left in an HTTPS request will go
-// to the upstream as-is.
+// CONNECT requests are tunneled transparently in both modes — TLS MITM
+// is deliberately out of scope (see vault-proxy-mvp-proposal.md).
 
 import http from "node:http";
 import https from "node:https";
@@ -20,6 +23,13 @@ import net from "node:net";
 import { URL } from "node:url";
 
 import { rewriteHeaders, rewriteUrl, StubError } from "./stub.mjs";
+import {
+  injectCredential,
+  parseRewritePath,
+  prepareUpstreamHeaders,
+  resolveCredential,
+  RewriteError,
+} from "./rewrite.mjs";
 import { appendJsonl } from "../../agent-id-core/lib/state.mjs";
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -118,13 +128,191 @@ export function createProxy({
     }
   }
 
-  const server = http.createServer(async (req, res) => {
-    const start = Date.now();
+  // Stream the agent's request through to the configured upstream. Shared
+  // by both URL-rewrite and stub-injection paths.
+  function forwardUpstream({
+    req,
+    res,
+    upstreamScheme,
+    upstreamHostname,
+    upstreamPort,
+    upstreamPath,
+    upstreamHost,
+    headers,
+    credentialNames,
+    logHost,
+    logPath,
+    start,
+  }) {
     let bytesIn = 0;
     let bytesOut = 0;
+    const client = upstreamScheme === "https" ? https : http;
+    const port = upstreamPort || (upstreamScheme === "https" ? 443 : 80);
+
+    const upstreamReq = client.request({
+      protocol: `${upstreamScheme}:`,
+      hostname: upstreamHostname,
+      port,
+      method: req.method,
+      path: upstreamPath,
+      headers: { ...headers, host: upstreamHost },
+    });
+
+    upstreamReq.on("error", (err) => {
+      if (!res.headersSent) {
+        structuredError(res, 502, { error: "upstream_error", message: err.message });
+      } else {
+        res.destroy();
+      }
+      logAccess({
+        method: req.method,
+        host: logHost,
+        path: logPath,
+        status: 502,
+        credentials: credentialNames,
+        bytesIn,
+        bytesOut,
+        durationMs: Date.now() - start,
+        error: err.code || err.message,
+      });
+    });
+
+    upstreamReq.on("response", (upstreamRes) => {
+      res.writeHead(upstreamRes.statusCode, stripHopByHop(upstreamRes.headers));
+      upstreamRes.on("data", (chunk) => {
+        bytesOut += chunk.length;
+      });
+      upstreamRes.pipe(res);
+      upstreamRes.on("end", () => {
+        logAccess({
+          method: req.method,
+          host: logHost,
+          path: logPath,
+          status: upstreamRes.statusCode,
+          credentials: credentialNames,
+          bytesIn,
+          bytesOut,
+          durationMs: Date.now() - start,
+        });
+      });
+    });
+
+    req.on("data", (chunk) => {
+      bytesIn += chunk.length;
+    });
+    req.pipe(upstreamReq);
+  }
+
+  // ── URL-rewrite mode (recommended) ────────────────────────────────────────
+  function handleUrlRewrite(req, res, parsed, start) {
+    let cred;
+    try {
+      cred = resolveCredential({
+        credname: parsed.credname,
+        host: parsed.host,
+        lookup,
+      });
+    } catch (err) {
+      if (err instanceof RewriteError) {
+        const status = err.code === "credential_not_found" ? 400 : 403;
+        return structuredError(res, status, {
+          error: err.code,
+          message: err.message,
+          credential: err.credential || null,
+          host: err.host || null,
+          allowed: err.allowed || null,
+        });
+      }
+      throw err;
+    }
+
+    // Build upstream URL (default https; credential may opt into http).
+    const upstreamScheme = cred.upstreamScheme || "https";
+    const upstreamUrl = new URL(`${upstreamScheme}://${parsed.host}${parsed.restAndQuery}`);
+
+    const incoming = { ...req.headers };
+    const { headers, search } = injectCredential({
+      headers: prepareUpstreamHeaders({ incoming, upstreamHost: upstreamUrl.host }),
+      search: upstreamUrl.searchParams,
+      cred,
+    });
+    upstreamUrl.search = search.toString();
+
+    if (state.vault) state.vault.touchLastUsed(cred.name);
+
+    forwardUpstream({
+      req,
+      res,
+      upstreamScheme,
+      upstreamHostname: upstreamUrl.hostname,
+      upstreamPort: upstreamUrl.port ? Number(upstreamUrl.port) : null,
+      upstreamPath: `${upstreamUrl.pathname}${upstreamUrl.search}`,
+      upstreamHost: upstreamUrl.host,
+      headers,
+      credentialNames: [cred.name],
+      logHost: upstreamUrl.host,
+      logPath: upstreamUrl.pathname,
+      start,
+    });
+  }
+
+  // ── HTTP_PROXY stub-injection mode (legacy) ───────────────────────────────
+  function handleStubInjection(req, res, target, start) {
     let credentialsUsed = [];
-    let host = null;
-    let path = null;
+    const parsed = new URL(target);
+
+    if (parsed.protocol === "https:") {
+      return structuredError(res, 501, {
+        error: "https_not_supported_yet",
+        message:
+          "Stub-injection mode supports HTTP only. Use the URL-rewrite form " +
+          "(http://<proxy>/<credname>/<host>/<path>) for HTTPS upstream.",
+      });
+    }
+
+    let injectedUrl;
+    try {
+      const rewrittenUrl = rewriteUrl(target, { lookup, host: parsed.hostname });
+      injectedUrl = new URL(rewrittenUrl.url);
+      credentialsUsed = credentialsUsed.concat(rewrittenUrl.used);
+    } catch (err) {
+      return handleStubError(res, err);
+    }
+
+    let injectedHeaders;
+    try {
+      const headerRewrite = rewriteHeaders(req.headers, {
+        lookup,
+        host: parsed.hostname,
+      });
+      injectedHeaders = stripHopByHop(headerRewrite.headers);
+      credentialsUsed = credentialsUsed.concat(headerRewrite.used);
+    } catch (err) {
+      return handleStubError(res, err);
+    }
+
+    if (state.vault) {
+      for (const u of credentialsUsed) state.vault.touchLastUsed(u.name);
+    }
+
+    forwardUpstream({
+      req,
+      res,
+      upstreamScheme: "http",
+      upstreamHostname: injectedUrl.hostname,
+      upstreamPort: injectedUrl.port ? Number(injectedUrl.port) : null,
+      upstreamPath: `${injectedUrl.pathname}${injectedUrl.search || ""}`,
+      upstreamHost: injectedUrl.host,
+      headers: injectedHeaders,
+      credentialNames: credentialsUsed.map((u) => u.name),
+      logHost: injectedUrl.host,
+      logPath: injectedUrl.pathname,
+      start,
+    });
+  }
+
+  const server = http.createServer(async (req, res) => {
+    const start = Date.now();
 
     if (state.locked) {
       return structuredError(res, 401, {
@@ -140,112 +328,21 @@ export function createProxy({
     touchActivity();
 
     try {
-      // HTTP_PROXY requests have an absolute URI on the request line.
-      const target = req.url;
-      if (!/^https?:\/\//i.test(target || "")) {
-        return structuredError(res, 400, {
-          error: "bad_request",
-          message:
-            "Proxy expects absolute URI (use HTTP_PROXY semantics: GET http://host/path)",
-        });
+      const target = req.url || "";
+      // Absolute-URI request → legacy stub-injection (HTTP_PROXY mode).
+      if (/^https?:\/\//i.test(target)) {
+        return handleStubInjection(req, res, target, start);
       }
-      const parsed = new URL(target);
-      host = parsed.host;
-      path = parsed.pathname;
+      // Origin-form path → URL-rewrite mode.
+      const parsed = parseRewritePath(target);
+      if (parsed) return handleUrlRewrite(req, res, parsed, start);
 
-      if (parsed.protocol === "https:") {
-        // Without TLS MITM we cannot inject into HTTPS absolute-URI requests
-        // either (they're rare — most clients use CONNECT for https). Reject
-        // explicitly so the agent gets a structured error instead of a
-        // silent passthrough of a stub.
-        return structuredError(res, 501, {
-          error: "https_not_supported_yet",
-          message:
-            "HTTPS injection requires the local-CA MITM spike; v1 supports HTTP only. " +
-            "Use http:// for now or wait for the proxy TLS milestone.",
-        });
-      }
-
-      // Inject into URL query params.
-      let injectedUrl;
-      try {
-        const rewrittenUrl = rewriteUrl(target, { lookup, host: parsed.hostname });
-        injectedUrl = new URL(rewrittenUrl.url);
-        credentialsUsed = credentialsUsed.concat(rewrittenUrl.used);
-      } catch (err) {
-        return handleStubError(res, err);
-      }
-
-      // Inject into headers.
-      let injectedHeaders;
-      try {
-        const headerRewrite = rewriteHeaders(req.headers, {
-          lookup,
-          host: parsed.hostname,
-        });
-        injectedHeaders = stripHopByHop(headerRewrite.headers);
-        credentialsUsed = credentialsUsed.concat(headerRewrite.used);
-      } catch (err) {
-        return handleStubError(res, err);
-      }
-
-      // Mark every used credential's lastUsedAt (volatile until next vault.save()).
-      if (state.vault) {
-        for (const u of credentialsUsed) state.vault.touchLastUsed(u.name);
-      }
-
-      // Forward.
-      const upstreamReq = http.request({
-        protocol: injectedUrl.protocol,
-        hostname: injectedUrl.hostname,
-        port: injectedUrl.port || 80,
-        method: req.method,
-        path: `${injectedUrl.pathname}${injectedUrl.search || ""}`,
-        headers: { ...injectedHeaders, host: injectedUrl.host },
+      return structuredError(res, 400, {
+        error: "bad_request",
+        message:
+          "Expected either /<credname>/<host>/<path> (URL-rewrite mode) " +
+          "or absolute URI (HTTP_PROXY mode).",
       });
-
-      upstreamReq.on("error", (err) => {
-        structuredError(res, 502, {
-          error: "upstream_error",
-          message: err.message,
-        });
-        logAccess({
-          method: req.method,
-          host,
-          path,
-          status: 502,
-          credentials: credentialsUsed.map((u) => u.name),
-          bytesIn,
-          bytesOut,
-          durationMs: Date.now() - start,
-          error: err.code || err.message,
-        });
-      });
-
-      upstreamReq.on("response", (upstreamRes) => {
-        res.writeHead(upstreamRes.statusCode, stripHopByHop(upstreamRes.headers));
-        upstreamRes.on("data", (chunk) => {
-          bytesOut += chunk.length;
-        });
-        upstreamRes.pipe(res);
-        upstreamRes.on("end", () => {
-          logAccess({
-            method: req.method,
-            host,
-            path,
-            status: upstreamRes.statusCode,
-            credentials: credentialsUsed.map((u) => u.name),
-            bytesIn,
-            bytesOut,
-            durationMs: Date.now() - start,
-          });
-        });
-      });
-
-      req.on("data", (chunk) => {
-        bytesIn += chunk.length;
-      });
-      req.pipe(upstreamReq);
     } catch (err) {
       structuredError(res, 500, { error: "proxy_internal", message: err.message });
     }

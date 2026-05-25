@@ -38,6 +38,8 @@ function requireNonEmpty(rec, fields) {
   }
 }
 
+export const UPSTREAM_SCHEMES = Object.freeze(["https", "http"]);
+
 export function validateRecord(rec) {
   if (!rec || typeof rec !== "object") {
     throw new Error("Record must be an object");
@@ -59,6 +61,11 @@ export function validateRecord(rec) {
     if (typeof d !== "string" || d.length === 0) {
       throw new Error(`Credential ${rec.name}: invalid domain entry`);
     }
+  }
+  if (rec.upstreamScheme != null && !UPSTREAM_SCHEMES.includes(rec.upstreamScheme)) {
+    throw new Error(
+      `Credential ${rec.name}: upstreamScheme must be one of ${UPSTREAM_SCHEMES.join(", ")}`,
+    );
   }
   switch (rec.type) {
     case "bearer":

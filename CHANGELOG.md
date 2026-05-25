@@ -21,12 +21,23 @@ All notable changes are documented here.
 - **Trusted-input channel.** `/dev/tty` reader bypasses the agent's
   stdin pipe so credential entry and passphrase prompts never enter
   the agent transcript or prompt cache.
-- **`agent-id-proxy` plugin (new) — stub-translating local HTTP proxy.**
-  Agent sends `AgentVault <name>` in headers or query params; the
-  proxy looks the name up in the unlocked vault, enforces the host
-  allowlist, and substitutes the materialized value before forwarding.
-  Structured 4xx JSON on missing credential or disallowed host.
-  Metadata-only access log at `~/.agent-id/proxy.log`.
+- **`agent-id-proxy` plugin (new) — credential-injecting local HTTP
+  proxy.** Two request shapes:
+  - **URL-rewrite mode (recommended).** Agent calls
+    `http://<proxy>/<credname>/<upstream-host>/<path>`. Proxy resolves
+    the credential, validates the host against its allowlist,
+    materializes the credential by type (bearer / basic / header /
+    query / cookie / cookie-jar / totp), and forwards to the real
+    upstream over HTTPS. System CA bundle verifies upstream; no TLS
+    interception on our side. Universal across services.
+  - **HTTP_PROXY stub-injection mode (legacy).** Agent sets
+    `HTTP_PROXY` and writes `AgentVault <name>` markers in headers /
+    query params. Works for plain HTTP upstream only.
+  Both modes enforce default-deny host allowlists and return structured
+  4xx JSON on miss. Metadata-only access log at `~/.agent-id/proxy.log`.
+- **`upstreamScheme` credential field.** Optional ("https" default,
+  "http" opt-in) — lets internal/legacy services be reached over plain
+  HTTP from URL-rewrite mode.
 - **Idle auto-lock.** After `--idle-timeout` (default 12h) of no
   traffic the proxy zeroes the master key in memory and refuses
   subsequent requests with `401 vault_locked`. Restart the proxy to
@@ -34,9 +45,9 @@ All notable changes are documented here.
 
 ### v1 scope cuts (deferred)
 
-- **HTTPS injection.** HTTPS upstream is CONNECT-tunneled without MITM.
-  Local-CA + per-host TLS interception is the next spike per the
-  proposal in `documentation/agent-id/vault-proxy-mvp-proposal.md`.
+- **TLS interception for HTTP_PROXY mode.** Mode 2 (stub injection)
+  works for plain HTTP upstream only. Mode 1 (URL-rewrite) covers
+  HTTPS upstream without requiring TLS interception.
 - **Consent prompts.** Per-credential confirmation on first use is
   deferred; the host allowlist is the only authorization gate in v1.
 - **In-process re-unlock.** Restart the proxy to re-unlock after

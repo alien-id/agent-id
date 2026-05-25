@@ -47,8 +47,8 @@
     },
     {
       "name": "agent-id-proxy",
-      "description": "Local stub-translating HTTP proxy: agent sends `AgentVault <name>` headers, proxy injects the real credential from the vault. Enforces per-credential host allowlist.",
-      "version": "0.1.0",
+      "description": "Local credential-injecting HTTP proxy. Agent calls http://<proxy>/<credname>/<upstream-host>/<path>; proxy materializes the credential by type, validates the host allowlist, and forwards over real HTTPS. Universal across services without TLS interception.",
+      "version": "0.2.0",
       "source": "agent-id-proxy",
       "category": "identity",
       "keywords": [
