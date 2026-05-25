@@ -27,6 +27,10 @@ All notable changes are documented here.
   allowlist, and substitutes the materialized value before forwarding.
   Structured 4xx JSON on missing credential or disallowed host.
   Metadata-only access log at `~/.agent-id/proxy.log`.
+- **Idle auto-lock.** After `--idle-timeout` (default 12h) of no
+  traffic the proxy zeroes the master key in memory and refuses
+  subsequent requests with `401 vault_locked`. Restart the proxy to
+  re-unlock. `--idle-timeout never` disables for unattended agents.
 
 ### v1 scope cuts (deferred)
 
@@ -35,7 +39,9 @@ All notable changes are documented here.
   proposal in `documentation/agent-id/vault-proxy-mvp-proposal.md`.
 - **Consent prompts.** Per-credential confirmation on first use is
   deferred; the host allowlist is the only authorization gate in v1.
-- **Auto-lock.** The proxy holds the master key in memory until `stop`.
+- **In-process re-unlock.** Restart the proxy to re-unlock after
+  idle lock. A control-socket `unlock` subcommand is the natural
+  follow-up.
 
 ### Migration
 

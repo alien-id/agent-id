@@ -38,7 +38,28 @@ import {
   promptSecret,
 } from "../../agent-id-vault/lib/trusted-input.mjs";
 
-import { createProxy } from "../lib/proxy.mjs";
+import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
+
+// Parse a duration string. Accepts "12h", "30m", "90s", "never" / "0", or a
+// raw millisecond integer. Returns ms (Infinity for "never").
+function parseDuration(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (s === "never" || s === "off" || s === "0") return Infinity;
+  const m = /^(\d+)\s*(ms|s|m|h|d)?$/.exec(s);
+  if (!m) throw new Error(`Bad duration: ${raw}`);
+  const n = Number(m[1]);
+  const unit = m[2] || "ms";
+  const mult = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit];
+  return n * mult;
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms)) return "never";
+  if (ms >= 3_600_000) return `${(ms / 3_600_000).toFixed(2).replace(/\.?0+$/, "")}h`;
+  if (ms >= 60_000) return `${Math.round(ms / 60_000)}m`;
+  return `${Math.round(ms / 1000)}s`;
+}
 
 async function resolvePassphrase(flags) {
   if (flags["passphrase-file"]) {
@@ -130,10 +151,19 @@ async function cmdStart(flags) {
   const vault = await loadVaultForProxy(stateDir, flags);
   await ensureDir(path.dirname(paths.proxyLog));
 
+  const idleTimeoutMs =
+    flags["idle-timeout"] != null
+      ? parseDuration(flags["idle-timeout"])
+      : DEFAULT_IDLE_TIMEOUT_MS;
+
   const proxy = createProxy({
     vault,
     logPath: paths.proxyLog,
     listen: { port, host },
+    idleTimeoutMs,
+    onLock: (reason) => {
+      stderr(`Vault locked (${reason}). Restart the proxy to re-unlock.`);
+    },
   });
   const addr = await proxy.listen();
   await writeProxyState(paths, {
@@ -141,6 +171,7 @@ async function cmdStart(flags) {
     host: addr.host,
     port: addr.port,
     startedAt: Date.now(),
+    idleTimeoutMs: Number.isFinite(idleTimeoutMs) ? idleTimeoutMs : null,
     stateDir,
   });
 
@@ -148,6 +179,7 @@ async function cmdStart(flags) {
   stderr(`  HTTP_PROXY=http://${addr.host}:${addr.port}`);
   stderr(`Vault: ${paths.vaultFile}`);
   stderr(`Log:   ${paths.proxyLog}`);
+  stderr(`Idle lock: ${formatDuration(idleTimeoutMs)}`);
   stderr("Press Ctrl-C to stop.");
 
   if (flags["print-config"]) {
@@ -198,6 +230,9 @@ async function cmdStatus(flags) {
     ok: true,
     running: alive,
     ...state,
+    idleTimeout: state.idleTimeoutMs
+      ? formatDuration(state.idleTimeoutMs)
+      : "never",
     uptimeMs: alive ? Date.now() - state.startedAt : null,
   });
 }
@@ -230,12 +265,15 @@ function printHelp() {
       "agent-id-proxy — local stub-translating HTTP proxy",
       "",
       "Subcommands:",
-      "  start [--port N] [--host H] [--passphrase-file F | --passphrase-env V] [--no-agent-key]",
+      "  start [--port N] [--host H] [--passphrase-file F | --passphrase-env V]",
+      "        [--no-agent-key] [--idle-timeout 12h|30m|never]",
       "  status",
       "  stop",
       "",
       "Use with HTTP_PROXY=http://<host>:<port> set in the agent's environment.",
       "Stubs: `AgentVault <credential-name>` in headers or query parameter values.",
+      "Idle lock: master key zeroed after `--idle-timeout` (default 12h). Restart the",
+      "  proxy to re-unlock. Use --idle-timeout never to disable.",
       "v1: HTTP only. HTTPS is CONNECT-tunneled without injection — TLS MITM is the next spike.",
     ].join("\n"),
   );

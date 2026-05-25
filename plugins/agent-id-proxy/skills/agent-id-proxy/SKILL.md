@@ -48,11 +48,28 @@ curl -H "X-Api-Key: AgentVault openai-key" http://api.openai.com/v1/models
 curl "http://example.com/api?api_key=AgentVault%20example-key"
 ```
 
+## Idle auto-lock
+
+After `--idle-timeout` of no traffic (default **12h**, 1Password parity), the proxy zeroes the master key + drops the decrypted credential records from memory. Subsequent requests get `401 {error: "vault_locked"}`. Restart the proxy to re-unlock:
+
+```bash
+node CLI stop && node CLI start --passphrase-file ~/.agent-id-pass
+```
+
+Override the default:
+
+```bash
+node CLI start --idle-timeout 30m       # tighter
+node CLI start --idle-timeout never     # disable (unattended agents)
+```
+
+`node CLI status` includes the configured `idleTimeout`.
+
 ## v1 limitations
 
 - **HTTP only.** HTTPS upstream goes through CONNECT tunneling without MITM — stubs in HTTPS requests are NOT injected. The next milestone is the local-CA + per-host TLS interception spike described in `documentation/agent-id/vault-proxy-mvp-proposal.md`.
 - **No consent prompt.** v1 uses the host allowlist as the only authorization gate. Consent dialogs (per-credential, per-agent, persisted) come in a follow-up.
-- **No auto-lock.** The proxy holds the master key in memory until `stop`. Idle re-lock is a known follow-up.
+- **No in-process re-unlock.** After idle lock, restart the proxy to re-unlock. A control-socket `unlock` subcommand is the natural follow-up.
 
 ## Status + stop
 

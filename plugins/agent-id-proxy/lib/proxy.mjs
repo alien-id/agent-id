@@ -52,8 +52,63 @@ function structuredError(res, status, body) {
   res.end(payload);
 }
 
-export function createProxy({ vault, logPath, listen = { port: 0, host: "127.0.0.1" } }) {
-  const lookup = (name) => vault.get(name);
+// Default idle window before the proxy zeros the master key. Mirrors
+// 1Password's default — long enough that an interactive session isn't
+// disrupted, short enough that a long-idle process isn't a fat memory
+// target for an attacker. Override via createProxy({ idleTimeoutMs }) or
+// the CLI `--idle-timeout` flag.
+export const DEFAULT_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
+const IDLE_TICK_MS = 60 * 1000;
+
+export function createProxy({
+  vault,
+  logPath,
+  listen = { port: 0, host: "127.0.0.1" },
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+  now = () => Date.now(),
+  onLock = null,
+}) {
+  // Mutable state — vault gets nulled on idle lock; the request handler
+  // checks `locked` first and refuses with 401.
+  const state = {
+    vault,
+    locked: false,
+    lockedAt: null,
+    lockedReason: null,
+    lastRequestAt: now(),
+    idleTimeoutMs,
+  };
+
+  function touchActivity() {
+    state.lastRequestAt = now();
+  }
+
+  function doLock(reason) {
+    if (state.locked) return;
+    state.locked = true;
+    state.lockedAt = now();
+    state.lockedReason = reason;
+    if (state.vault) {
+      state.vault.lock();
+      state.vault = null;
+    }
+    logAccess({ event: "vault_locked", reason }).catch(() => {});
+    if (onLock) onLock(reason);
+  }
+
+  // Idle ticker. unref()'d so it never holds the process open by itself.
+  let ticker = null;
+  if (Number.isFinite(idleTimeoutMs) && idleTimeoutMs > 0) {
+    ticker = setInterval(() => {
+      if (state.locked) return;
+      if (now() - state.lastRequestAt > idleTimeoutMs) {
+        doLock("idle_timeout");
+      }
+    }, Math.min(IDLE_TICK_MS, idleTimeoutMs));
+    if (ticker.unref) ticker.unref();
+  }
+
+  const lookup = (name) => (state.vault ? state.vault.get(name) : null);
 
   async function logAccess(entry) {
     try {
@@ -70,6 +125,19 @@ export function createProxy({ vault, logPath, listen = { port: 0, host: "127.0.0
     let credentialsUsed = [];
     let host = null;
     let path = null;
+
+    if (state.locked) {
+      return structuredError(res, 401, {
+        error: "vault_locked",
+        reason: state.lockedReason,
+        lockedAt: state.lockedAt,
+        message:
+          "Vault auto-locked after idle timeout. " +
+          "Restart the proxy (`agent-id-proxy stop && start`) to re-unlock.",
+      });
+    }
+
+    touchActivity();
 
     try {
       // HTTP_PROXY requests have an absolute URI on the request line.
@@ -122,7 +190,9 @@ export function createProxy({ vault, logPath, listen = { port: 0, host: "127.0.0
       }
 
       // Mark every used credential's lastUsedAt (volatile until next vault.save()).
-      for (const u of credentialsUsed) vault.touchLastUsed(u.name);
+      if (state.vault) {
+        for (const u of credentialsUsed) state.vault.touchLastUsed(u.name);
+      }
 
       // Forward.
       const upstreamReq = http.request({
@@ -187,11 +257,23 @@ export function createProxy({ vault, logPath, listen = { port: 0, host: "127.0.0
     const [host, portStr] = (req.url || "").split(":");
     const port = parseInt(portStr || "443", 10);
 
+    if (state.locked) {
+      clientSocket.write(
+        "HTTP/1.1 401 Vault Locked\r\n" +
+          "X-AgentVault-Proxy-Error: vault_locked\r\n" +
+          "Content-Length: 0\r\n\r\n",
+      );
+      clientSocket.destroy();
+      return;
+    }
+
     if (!host) {
       clientSocket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
       clientSocket.destroy();
       return;
     }
+
+    touchActivity();
 
     const upstream = net.connect(port, host, () => {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
@@ -255,7 +337,21 @@ export function createProxy({ vault, logPath, listen = { port: 0, host: "127.0.0
       });
     },
     close() {
+      if (ticker) clearInterval(ticker);
+      doLock("proxy_shutdown");
       return new Promise((resolve) => server.close(() => resolve()));
+    },
+    get locked() {
+      return state.locked;
+    },
+    get lastRequestAt() {
+      return state.lastRequestAt;
+    },
+    get idleTimeoutMs() {
+      return state.idleTimeoutMs;
+    },
+    forceLock(reason = "manual") {
+      doLock(reason);
     },
   };
 }
