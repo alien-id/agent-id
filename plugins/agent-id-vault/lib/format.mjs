@@ -11,14 +11,24 @@
 // Slot types:
 //   - passphrase: KEK = scrypt(passphrase, salt, N, r, p);   portability
 //   - agent-key:  KEK = HKDF-SHA256(agent_sk, "vault-unlock"); fast unlock
+//   - mobile:     KEK = HKDF-SHA256(ECDH(ephemeral, device_pk)); phone-approved
 //
 // The proposal targets Argon2id; this v1 substitutes Node's built-in scrypt
 // to remain zero-dep. The KDF is named in the header, so a future Argon2id
 // slot can co-exist with existing scrypt slots.
+//
+// The `mobile` slot is a sealed box: at build time we generate an ephemeral
+// P-256 keypair, ECDH it against the phone's enclave public key, HKDF the
+// shared secret into a KEK, and wrap the master key. To unlock, the phone
+// recomputes the same shared secret with its Secure-Enclave private key
+// (SecKeyCopyKeyExchangeResult, FaceID-gated) — the private key never leaves
+// the device, and only the phone can derive the KEK. See deviceUnsealMasterKey
+// below for the canonical client-side reference implementation.
 
 import {
   createCipheriv,
   createDecipheriv,
+  createECDH,
   createPrivateKey,
   hkdfSync,
   randomBytes,
@@ -148,6 +158,81 @@ export function unwrapSlotWithAgentKey(slot, privateKeyPem) {
   return aeadDecrypt(kek, slot.wrap);
 }
 
+// ─── Mobile slot (phone-approved unlock via ECDH sealed box) ─────────────────────
+//
+// Curve P-256 (the only curve the iOS Secure Enclave supports). Public keys
+// travel as the X9.63 uncompressed point (0x04 || X || Y, 65 bytes) — exactly
+// what iOS `SecKeyCopyExternalRepresentation` emits and what Node's createECDH
+// produces/consumes. The shared secret is the raw ECDH X-coordinate, matching
+// Apple's `SecKeyAlgorithm.ecdhKeyExchangeStandard` (cofactor is 1 on P-256, so
+// standard and cofactor agree).
+
+export const MOBILE_SLOT_ALG = "ecdh-p256-hkdf-sha256-aes256gcm";
+const MOBILE_HKDF_INFO = "agent-id-vault-mobile-v1";
+const MOBILE_CURVE = "prime256v1";
+
+function mobileKek(sharedSecret, salt) {
+  return Buffer.from(
+    hkdfSync("sha256", sharedSecret, salt, MOBILE_HKDF_INFO, 32),
+  );
+}
+
+// devicePubKeyHex: phone's enclave public key, X9.63 uncompressed (hex).
+export function buildMobileSlot(id, masterKey, devicePubKeyHex, deviceId = null) {
+  const devicePubKey = Buffer.from(devicePubKeyHex, "hex");
+  const ephemeral = createECDH(MOBILE_CURVE);
+  ephemeral.generateKeys();
+  const sharedSecret = ephemeral.computeSecret(devicePubKey);
+  const salt = randomBytes(SALT_BYTES);
+  const kek = mobileKek(sharedSecret, salt);
+  const wrap = aeadEncrypt(kek, masterKey);
+  return {
+    id,
+    type: "mobile",
+    deviceId,
+    alg: MOBILE_SLOT_ALG,
+    devicePubKey: devicePubKey.toString("hex"),
+    ephemeralPubKey: ephemeral.getPublicKey().toString("hex"),
+    salt: salt.toString("hex"),
+    wrap,
+  };
+}
+
+// Public material the phone needs to unseal — never includes the master key,
+// only the sealed box. Safe to hand to the control plane / phone while locked.
+export function mobileSlotChallenge(slot) {
+  if (slot.type !== "mobile") {
+    throw new Error(`Slot ${slot.id} is not a mobile slot`);
+  }
+  return {
+    slotId: slot.id,
+    deviceId: slot.deviceId || null,
+    alg: slot.alg,
+    devicePubKey: slot.devicePubKey,
+    ephemeralPubKey: slot.ephemeralPubKey,
+    salt: slot.salt,
+    wrap: slot.wrap,
+  };
+}
+
+// Canonical client-side reference: what the iOS app does in Swift. Given the
+// device's P-256 private scalar (raw bytes — on a phone this is the Secure
+// Enclave key, accessed via SecKeyCopyKeyExchangeResult and never exported),
+// recompute the shared secret and unwrap the master key. Used by tests to
+// stand in for the phone, and as the spec the Swift port mirrors.
+export function deviceUnsealMasterKey(slot, devicePrivateKeyRaw) {
+  if (slot.type !== "mobile") {
+    throw new Error(`Slot ${slot.id} is not a mobile slot`);
+  }
+  const ecdh = createECDH(MOBILE_CURVE);
+  ecdh.setPrivateKey(devicePrivateKeyRaw);
+  const sharedSecret = ecdh.computeSecret(
+    Buffer.from(slot.ephemeralPubKey, "hex"),
+  );
+  const kek = mobileKek(sharedSecret, Buffer.from(slot.salt, "hex"));
+  return aeadDecrypt(kek, slot.wrap);
+}
+
 // ─── Payload (credentials.json) ─────────────────────────────────────────────────
 
 export function encryptPayload(masterKey, plaintextJsonString) {
@@ -200,6 +285,10 @@ export function findPassphraseSlot(slots) {
 
 export function findAgentKeySlot(slots) {
   return slots.find((s) => s.type === "agent-key") || null;
+}
+
+export function findMobileSlots(slots) {
+  return slots.filter((s) => s.type === "mobile");
 }
 
 // Constant-time master-key compare (used in tests + unlock validation).

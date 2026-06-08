@@ -16,6 +16,7 @@
 //   remove --name <N>           — delete a record
 //   rekey add-passphrase        — append a passphrase slot
 //   rekey add-agent-key         — append an agent-key slot
+//   rekey add-mobile            — append a phone-approved (mobile) unlock slot
 //   rekey remove-slot --id <N>  — remove a slot
 //   export --out <PATH>         — copy the encrypted vault file
 //   import --in <PATH>          — install an encrypted vault file
@@ -183,6 +184,9 @@ async function cmdAdd(flags) {
   const vault = await openWithFlags(flags);
   try {
     const record = { name, type, domains, description: flags.description || null };
+    if (flags["upstream-scheme"] != null) {
+      record.upstreamScheme = String(flags["upstream-scheme"]);
+    }
 
     switch (type) {
       case "bearer": {
@@ -322,6 +326,23 @@ async function cmdRekey(flags) {
       await vault.save();
       stderr(`Added agent-key slot ${slot.id} for agent ${agentId || "(unknown)"}.`);
       outputJson({ ok: true, slot: { id: slot.id, type: slot.type, agentId } });
+    } else if (sub === "add-mobile") {
+      const devicePubKey = flags["device-pubkey"];
+      if (!devicePubKey) {
+        return outputError(
+          "--device-pubkey <hex> required (P-256 enclave public key, X9.63 uncompressed: 04||X||Y)",
+        );
+      }
+      if (!/^04[0-9a-fA-F]{128}$/.test(devicePubKey)) {
+        return outputError(
+          "--device-pubkey must be 130 hex chars starting with 04 (uncompressed P-256 point)",
+        );
+      }
+      const deviceId = flags["device-id"] || null;
+      const slot = vault.addMobileSlot(devicePubKey, deviceId);
+      await vault.save();
+      stderr(`Added mobile slot ${slot.id}${deviceId ? ` for device ${deviceId}` : ""}.`);
+      outputJson({ ok: true, slot: { id: slot.id, type: slot.type, deviceId } });
     } else if (sub === "remove-slot") {
       const id = Number(flags.id);
       if (!Number.isFinite(id)) return outputError("--id <N> required");
@@ -331,7 +352,9 @@ async function cmdRekey(flags) {
       stderr(`Removed slot ${id}.`);
       outputJson({ ok: true, removed: id });
     } else {
-      return outputError(`rekey subcommand required: add-passphrase | add-agent-key | remove-slot`);
+      return outputError(
+        `rekey subcommand required: add-passphrase | add-agent-key | add-mobile | remove-slot`,
+      );
     }
   } finally {
     vault.lock();
@@ -449,6 +472,7 @@ function printHelp() {
       "  list",
       "  remove --name N",
       "  rekey add-passphrase | add-agent-key | remove-slot --id N",
+      "        | add-mobile --device-pubkey HEX [--device-id NAME]",
       "  export --out PATH",
       "  import --in PATH [--overwrite]",
       "  migrate [--default-domains H[,H…]] [--force]",

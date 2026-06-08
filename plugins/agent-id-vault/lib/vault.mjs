@@ -17,11 +17,14 @@ import fs from "node:fs/promises";
 
 import {
   buildAgentKeySlot,
+  buildMobileSlot,
   buildPassphraseSlot,
   decryptPayload,
   encryptPayload,
   findAgentKeySlot,
+  findMobileSlots,
   generateMasterKey,
+  mobileSlotChallenge,
   newVaultFile,
   nextSlotId,
   unwrapSlotWithAgentKey,
@@ -141,6 +144,44 @@ export async function openVault({ stateDir, passphrase = null, privateKeyPem = n
   return buildVaultHandle({ stateDir, file, masterKey, payload });
 }
 
+// Open the vault when the master key was recovered out-of-band — e.g. the
+// phone unsealed a mobile slot and handed the master key back to the proxy
+// over the control plane. The bytes were already produced from a vault slot,
+// so a wrong key fails the payload AEAD tag with VAULT_UNLOCK_FAILED.
+export async function openVaultWithMasterKey({ stateDir, masterKey }) {
+  const paths = statePaths(stateDir);
+  const file = await readVaultFile(paths.vaultFile);
+  if (!file) {
+    const err = new Error(
+      `Vault not found at ${paths.vaultFile}. Run \`agent-id-vault init\` first.`,
+    );
+    err.code = "VAULT_NOT_FOUND";
+    throw err;
+  }
+  validateVaultHeader(file);
+
+  let payload;
+  try {
+    payload = parsePayload(decryptPayload(masterKey, file.payload));
+  } catch (err) {
+    const e = new Error(`Master key did not open the vault payload: ${err.message}`);
+    e.code = "VAULT_UNLOCK_FAILED";
+    throw e;
+  }
+
+  return buildVaultHandle({ stateDir, file, masterKey, payload });
+}
+
+// Read the mobile-slot challenges without unlocking. The proxy hands these to
+// the phone while the vault is locked; they contain only the sealed box, never
+// the master key.
+export async function readMobileSlotChallenges(stateDir) {
+  const paths = statePaths(stateDir);
+  const file = await readVaultFile(paths.vaultFile);
+  if (!file) return [];
+  return findMobileSlots(file.slots || []).map(mobileSlotChallenge);
+}
+
 function buildVaultHandle({ stateDir, file, masterKey, payload }) {
   let state = { file, masterKey, payload };
 
@@ -154,7 +195,12 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     },
     get slots() {
       assertOpen();
-      return state.file.slots.map((s) => ({ id: s.id, type: s.type, agentId: s.agentId || null }));
+      return state.file.slots.map((s) => ({
+        id: s.id,
+        type: s.type,
+        agentId: s.agentId || null,
+        deviceId: s.deviceId || null,
+      }));
     },
     list() {
       assertOpen();
@@ -191,6 +237,13 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
       assertOpen();
       const id = nextSlotId(state.file.slots);
       const slot = buildAgentKeySlot(id, state.masterKey, privateKeyPem, agentId);
+      state.file.slots.push(slot);
+      return slot;
+    },
+    addMobileSlot(devicePubKeyHex, deviceId = null) {
+      assertOpen();
+      const id = nextSlotId(state.file.slots);
+      const slot = buildMobileSlot(id, state.masterKey, devicePubKeyHex, deviceId);
       state.file.slots.push(slot);
       return slot;
     },

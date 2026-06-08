@@ -148,7 +148,19 @@ async function cmdStart(flags) {
     }
   }
 
-  const vault = await loadVaultForProxy(stateDir, flags);
+  // Control plane: phone-approved unlock + per-credential consent. On by
+  // default; --no-control disables it. --await-mobile starts the proxy locked
+  // (no eager vault open) so the first request triggers a phone unlock.
+  const controlEnabled = flags.control !== false;
+  const awaitMobile = !!flags["await-mobile"];
+  const requireConsent = !!flags["require-consent"];
+
+  if (awaitMobile && !controlEnabled) {
+    outputError("--await-mobile requires the control plane (drop --no-control).");
+    return;
+  }
+
+  const vault = awaitMobile ? null : await loadVaultForProxy(stateDir, flags);
   await ensureDir(path.dirname(paths.proxyLog));
 
   const idleTimeoutMs =
@@ -156,30 +168,64 @@ async function cmdStart(flags) {
       ? parseDuration(flags["idle-timeout"])
       : DEFAULT_IDLE_TIMEOUT_MS;
 
+  const control = controlEnabled
+    ? {
+        listen: {
+          port: Number(flags["control-port"] || process.env.AGENT_ID_CONTROL_PORT || 48772),
+          host,
+        },
+        approvalTimeoutMs:
+          flags["approval-timeout"] != null
+            ? parseDuration(flags["approval-timeout"])
+            : 2 * 60_000,
+      }
+    : null;
+
+  const grantTtlMs =
+    flags["grant-ttl"] != null ? parseDuration(flags["grant-ttl"]) : 60 * 60_000;
+
   const proxy = createProxy({
     vault,
+    stateDir,
     logPath: paths.proxyLog,
     listen: { port, host },
     idleTimeoutMs,
+    control,
+    requireConsent,
+    grantTtlMs,
     onLock: (reason) => {
-      stderr(`Vault locked (${reason}). Restart the proxy to re-unlock.`);
+      if (controlEnabled) {
+        stderr(`Vault locked (${reason}). Next request will ask the phone to unlock.`);
+      } else {
+        stderr(`Vault locked (${reason}). Restart the proxy to re-unlock.`);
+      }
     },
+    onUnlock: () => stderr("Vault unlocked via phone approval."),
   });
   const addr = await proxy.listen();
+  const controlAddr = proxy.controlAddress;
   await writeProxyState(paths, {
     pid: process.pid,
     host: addr.host,
     port: addr.port,
+    controlHost: controlAddr ? controlAddr.host : null,
+    controlPort: controlAddr ? controlAddr.port : null,
     startedAt: Date.now(),
     idleTimeoutMs: Number.isFinite(idleTimeoutMs) ? idleTimeoutMs : null,
+    requireConsent,
+    awaitMobile,
     stateDir,
   });
 
   stderr(`agent-id-proxy listening on http://${addr.host}:${addr.port}`);
   stderr(`  HTTP_PROXY=http://${addr.host}:${addr.port}`);
-  stderr(`Vault: ${paths.vaultFile}`);
+  if (controlAddr) {
+    stderr(`Control plane: http://${controlAddr.host}:${controlAddr.port} (phone approvals)`);
+  }
+  stderr(`Vault: ${paths.vaultFile}${awaitMobile ? " (locked — awaiting phone unlock)" : ""}`);
   stderr(`Log:   ${paths.proxyLog}`);
   stderr(`Idle lock: ${formatDuration(idleTimeoutMs)}`);
+  if (requireConsent) stderr(`Consent: per-credential, grant TTL ${formatDuration(grantTtlMs)}`);
   stderr("Press Ctrl-C to stop.");
 
   if (flags["print-config"]) {
@@ -187,6 +233,8 @@ async function cmdStart(flags) {
       ok: true,
       host: addr.host,
       port: addr.port,
+      controlHost: controlAddr ? controlAddr.host : null,
+      controlPort: controlAddr ? controlAddr.port : null,
       pid: process.pid,
       vault: paths.vaultFile,
       log: paths.proxyLog,
@@ -203,7 +251,7 @@ async function cmdStart(flags) {
   const shutdown = async (signal) => {
     stderr(`Received ${signal}, shutting down…`);
     await proxy.close();
-    vault.lock();
+    vault?.lock();
     await clearProxyState(paths);
     process.exit(0);
   };
@@ -267,13 +315,20 @@ function printHelp() {
       "Subcommands:",
       "  start [--port N] [--host H] [--passphrase-file F | --passphrase-env V]",
       "        [--no-agent-key] [--idle-timeout 12h|30m|never]",
+      "        [--no-control] [--control-port N] [--await-mobile]",
+      "        [--require-consent] [--approval-timeout 2m] [--grant-ttl 1h]",
       "  status",
       "  stop",
       "",
       "Use with HTTP_PROXY=http://<host>:<port> set in the agent's environment.",
       "Stubs: `AgentVault <credential-name>` in headers or query parameter values.",
-      "Idle lock: master key zeroed after `--idle-timeout` (default 12h). Restart the",
-      "  proxy to re-unlock. Use --idle-timeout never to disable.",
+      "Idle lock: master key zeroed after `--idle-timeout` (default 12h). With the",
+      "  control plane on (default), the next request re-unlocks via a phone approval;",
+      "  otherwise restart the proxy. Use --idle-timeout never to disable.",
+      "Control plane (default port 48772): the phone polls /pending and POSTs",
+      "  /approve | /deny. --await-mobile starts locked so the first request prompts",
+      "  the phone to unlock (sealed-box). --require-consent prompts per (cred,host).",
+      "  Pair a device with `agent-id-vault rekey add-mobile --device-pubkey HEX`.",
       "v1: HTTP only. HTTPS is CONNECT-tunneled without injection — TLS MITM is the next spike.",
     ].join("\n"),
   );
