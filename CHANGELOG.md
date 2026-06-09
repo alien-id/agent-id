@@ -29,6 +29,12 @@ All notable changes are documented here.
 - **New vault subcommands.** `init`, `add`, `show`, `list`, `remove`,
   `rekey add-passphrase | add-agent-key | remove-slot`, `export`,
   `import`, `migrate`.
+- **Clean-room demo + consumer skill** (`examples/clean-room-demo/`). A
+  drop-in `alien-vault` agent skill: starts the proxy if needed, calls
+  `http://<proxy>/<cred>/<host>/<path>`, and walks the phone-approved
+  unlock — so a fresh agent can read the owner's Gmail (or any vaulted
+  service) without ever seeing a secret. Ships the skill only; never the
+  vault file.
 - **Trusted-input channel.** `/dev/tty` reader bypasses the agent's
   stdin pipe so credential entry and passphrase prompts never enter
   the agent transcript or prompt cache.

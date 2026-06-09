@@ -9,6 +9,7 @@ Companion docs:
 - [vault-proxy-mvp-proposal.md](../documentation/agent-id/vault-proxy-mvp-proposal.md) — design proposal (locked decisions + deferred items)
 - [Vault skill](../plugins/agent-id-vault/skills/agent-id-vault/SKILL.md) — operator-facing CLI reference
 - [Proxy skill](../plugins/agent-id-proxy/skills/agent-id-proxy/SKILL.md) — operator-facing CLI reference
+- [Clean-room demo](../examples/clean-room-demo/) — consumer-facing skill: how an agent *uses* vaulted credentials (starts the proxy, calls the service, phone-approved unlock) without ever seeing a secret
 
 ---
 
