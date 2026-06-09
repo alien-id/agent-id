@@ -13,8 +13,19 @@ All notable changes are documented here.
   master key. Copy the file to a second machine, type the passphrase,
   you're in.
 - **Vault credential schema.** Records carry `type` (bearer / basic /
-  header / query / cookie / totp / cookie-jar), a `domains` allowlist
-  (default-deny — required, no fallback), and timestamps.
+  header / query / cookie / totp / cookie-jar / oauth2), a `domains`
+  allowlist (default-deny — required, no fallback), and timestamps.
+- **`oauth2` credential type — refresh-on-demand access tokens.** Stores a
+  refresh token + client credentials + token endpoint; the proxy mints
+  and caches short-lived access tokens (RFC 6749 §6), refreshing within
+  60 s of expiry and injecting them as `Authorization: Bearer …`. A
+  rotated refresh token is persisted back to the vault; `invalid_grant`
+  surfaces as `401 oauth_refresh_token_invalid`, other failures as `502
+  oauth_refresh_failed`. The token endpoint must be `https` (loopback
+  allowed). `agent-id-vault add --type oauth2 --token-endpoint … --client-id …
+  --client-secret-env … --refresh-token-env … [--scope …]`. URL-rewrite mode
+  only. Enables long-lived access to OAuth services (e.g. Gmail) without
+  the agent ever seeing a token.
 - **New vault subcommands.** `init`, `add`, `show`, `list`, `remove`,
   `rekey add-passphrase | add-agent-key | remove-slot`, `export`,
   `import`, `migrate`.

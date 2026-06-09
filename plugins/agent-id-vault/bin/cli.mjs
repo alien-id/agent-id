@@ -100,6 +100,23 @@ async function resolveValue(flags, fieldName = "credential") {
   return null;
 }
 
+// Read a value from --<field>-file / --<field>-env / --<field> (direct), in
+// that order. Unlike resolveValue it never falls back to stdin/tty, so several
+// of these can be read in one command (e.g. oauth2's secret + refresh token).
+async function resolveFileEnvFlag(flags, field) {
+  if (flags[`${field}-file`]) {
+    const raw = await fs.readFile(flags[`${field}-file`], "utf8");
+    return raw.replace(/\n$/, "");
+  }
+  if (flags[`${field}-env`]) {
+    const val = process.env[flags[`${field}-env`]];
+    if (!val) throw new Error(`Env var ${flags[`${field}-env`]} is not set`);
+    return val;
+  }
+  if (flags[field] != null) return String(flags[field]);
+  return null;
+}
+
 function parseDomains(flags) {
   const raw = flags.domains;
   if (!raw) return [];
@@ -239,6 +256,23 @@ async function cmdAdd(flags) {
         const json = await resolveValue(flags, "jar");
         if (!json) return outputError("Cookie jar JSON required");
         record.cookies = JSON.parse(json);
+        break;
+      }
+      case "oauth2": {
+        record.tokenEndpoint = flags["token-endpoint"];
+        record.clientId = flags["client-id"];
+        const clientSecret = await resolveFileEnvFlag(flags, "client-secret");
+        if (clientSecret) record.clientSecret = clientSecret;
+        if (flags.scope) record.scope = String(flags.scope);
+        // The refresh token is the long-lived secret — read it from file/env/
+        // stdin (resolveValue), never argv.
+        record.refreshToken = await resolveValue(flags, "refresh-token");
+        if (!record.tokenEndpoint || !record.clientId || !record.refreshToken) {
+          return outputError(
+            "oauth2 needs --token-endpoint, --client-id, and a refresh token " +
+              "(--refresh-token-file / --refresh-token-env / stdin)",
+          );
+        }
         break;
       }
     }
@@ -468,6 +502,8 @@ function printHelp() {
       "Subcommands:",
       "  init [--passphrase-file F | --passphrase-env V] [--no-agent-key]",
       "  add --name N --type T --domains H[,H…] [type-specific value flags]",
+      "      oauth2: --token-endpoint URL --client-id ID [--client-secret-env V]",
+      "              --refresh-token-file F [--scope S]   (auto-refreshes access tokens)",
       "  show --name N",
       "  list",
       "  remove --name N",

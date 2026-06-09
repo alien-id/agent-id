@@ -51,6 +51,13 @@ export function materializeCredential(cred) {
       return Object.entries(cred.cookies)
         .map(([k, v]) => `${k}=${v}`)
         .join("; ");
+    case "oauth2":
+      // Refreshing a token is an async network call; the legacy stub path is
+      // synchronous and HTTP-only. oauth2 is supported in URL-rewrite mode only.
+      throw new StubError(
+        "oauth2_requires_url_rewrite",
+        "oauth2 credentials require URL-rewrite mode (http://<proxy>/<cred>/<host>/<path>)",
+      );
     default:
       throw new StubError("unknown_type", `Unknown credential type: ${cred.type}`);
   }

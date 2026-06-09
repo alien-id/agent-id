@@ -35,6 +35,7 @@ import {
   createControlServer,
   createPendingRegistry,
 } from "./control.mjs";
+import { OAuthError, refreshAccessToken } from "./oauth.mjs";
 import {
   openVaultWithMasterKey,
   readMobileSlotChallenges,
@@ -117,7 +118,15 @@ export function createProxy({
     // De-dupe concurrent prompts: a single in-flight unlock, one per (cred,host).
     unlockInFlight: null,
     grantInFlight: new Map(),
+    // oauth2 credentials: cached access tokens (name → {accessToken, expiresAt,
+    // refreshToken}) and one in-flight refresh per credential. Cleared on lock.
+    oauthTokens: new Map(),
+    oauthInFlight: new Map(),
   };
+
+  // Refresh an oauth2 access token this far before its stated expiry, so a token
+  // that is valid when injected is still valid when it reaches the upstream.
+  const OAUTH_SKEW_MS = 60 * 1000;
 
   const registry = controlEnabled
     ? createPendingRegistry({ now, timeoutMs: control.approvalTimeoutMs })
@@ -136,6 +145,8 @@ export function createProxy({
       state.vault.lock();
       state.vault = null;
     }
+    // Drop cached oauth2 access tokens with the rest of the decrypted material.
+    state.oauthTokens.clear();
     logAccess({ event: "vault_locked", reason }).catch(() => {});
     if (onLock) onLock(reason);
   }
@@ -202,6 +213,89 @@ export function createProxy({
       state.grantInFlight.set(key, inFlight);
     }
     await inFlight;
+  }
+
+  // ── oauth2: refresh-on-demand access tokens ───────────────────────────────
+  // Return a currently-valid access token for an `oauth2` credential, refreshing
+  // from the stored refresh token when the cached one is missing or near expiry.
+  // Concurrent requests for the same credential share one in-flight refresh.
+  async function resolveOauth2Bearer(cred) {
+    const fresh = (entry) =>
+      entry && entry.accessToken && entry.expiresAt - OAUTH_SKEW_MS > now();
+
+    const cached = state.oauthTokens.get(cred.name);
+    if (fresh(cached)) return cached.accessToken;
+
+    // Honor a seeded access token on the record (skips the first refresh).
+    if (
+      !cached &&
+      cred.accessToken &&
+      cred.accessTokenExpiresAt &&
+      cred.accessTokenExpiresAt - OAUTH_SKEW_MS > now()
+    ) {
+      state.oauthTokens.set(cred.name, {
+        accessToken: cred.accessToken,
+        expiresAt: cred.accessTokenExpiresAt,
+        refreshToken: cred.refreshToken,
+      });
+      return cred.accessToken;
+    }
+
+    let inFlight = state.oauthInFlight.get(cred.name);
+    if (!inFlight) {
+      inFlight = (async () => {
+        const refreshToken = cached?.refreshToken || cred.refreshToken;
+        let res;
+        try {
+          res = await refreshAccessToken({
+            tokenEndpoint: cred.tokenEndpoint,
+            clientId: cred.clientId,
+            clientSecret: cred.clientSecret || null,
+            refreshToken,
+            scope: cred.scope || null,
+          });
+        } catch (err) {
+          // invalid_grant means the refresh token is revoked/expired → the owner
+          // must re-mint it; surface 401. Anything else is an upstream fault → 502.
+          const isAuth = err instanceof OAuthError && err.oauthError === "invalid_grant";
+          const e = new Error(
+            isAuth
+              ? `oauth2 credential '${cred.name}' refresh token rejected (invalid_grant) — re-mint it`
+              : `oauth2 credential '${cred.name}' refresh failed: ${err.message}`,
+          );
+          e.code = isAuth ? "oauth_refresh_token_invalid" : "oauth_refresh_failed";
+          e.status = isAuth ? 401 : 502;
+          logAccess({ event: "oauth_refresh_failed", credential: cred.name, reason: e.code }).catch(
+            () => {},
+          );
+          throw e;
+        }
+
+        const entry = {
+          accessToken: res.accessToken,
+          expiresAt: now() + res.expiresInSec * 1000,
+          refreshToken: res.refreshToken || refreshToken,
+        };
+        state.oauthTokens.set(cred.name, entry);
+
+        // Persist a rotated refresh token so it survives proxy restart / re-unlock.
+        if (res.refreshToken && res.refreshToken !== cred.refreshToken && state.vault) {
+          try {
+            const live = state.vault.get(cred.name);
+            if (live) {
+              live.refreshToken = res.refreshToken;
+              await state.vault.save();
+            }
+          } catch {
+            // best effort — the in-memory cache already carries the new token
+          }
+        }
+        logAccess({ event: "oauth_refreshed", credential: cred.name }).catch(() => {});
+        return entry.accessToken;
+      })().finally(() => state.oauthInFlight.delete(cred.name));
+      state.oauthInFlight.set(cred.name, inFlight);
+    }
+    return inFlight;
   }
 
   // ── Control-plane approval handlers (called by the control server) ────────
@@ -413,6 +507,15 @@ export function createProxy({
     // First use of this (credential, host) pair? Ask for human consent.
     await requireGrant(cred.name, parsed.host);
 
+    // oauth2 credentials refresh an access token here, then inject as a bearer.
+    // Refresh failures throw an error carrying an HTTP status (mapped by the
+    // top-level handler), so they short-circuit before we touch the upstream.
+    let injectCred = cred;
+    if (cred.type === "oauth2") {
+      const accessToken = await resolveOauth2Bearer(cred);
+      injectCred = { ...cred, type: "bearer", value: accessToken };
+    }
+
     // Build upstream URL (default https; credential may opt into http).
     const upstreamScheme = cred.upstreamScheme || "https";
     const upstreamUrl = new URL(`${upstreamScheme}://${parsed.host}${parsed.restAndQuery}`);
@@ -421,7 +524,7 @@ export function createProxy({
     const { headers, search } = injectCredential({
       headers: prepareUpstreamHeaders({ incoming, upstreamHost: upstreamUrl.host }),
       search: upstreamUrl.searchParams,
-      cred,
+      cred: injectCred,
     });
     upstreamUrl.search = search.toString();
 

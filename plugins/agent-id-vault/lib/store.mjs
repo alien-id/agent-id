@@ -26,7 +26,17 @@ export const CREDENTIAL_TYPES = Object.freeze([
   "cookie",
   "totp",
   "cookie-jar",
+  "oauth2",
 ]);
+
+// A token endpoint must be reached over TLS — the refresh token + client secret
+// travel in its request body. The only carve-out is loopback (local dev / tests),
+// where there is no network to eavesdrop.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+function isLoopbackUrl(u) {
+  return LOOPBACK_HOSTS.has(u.hostname);
+}
 
 const NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 
@@ -91,6 +101,35 @@ export function validateRecord(rec) {
         throw new Error(`Credential ${rec.name}: 'cookies' object is required`);
       }
       break;
+    case "oauth2": {
+      // The proxy refreshes an access token from the stored refresh token at
+      // injection time, then materializes it as `Authorization: Bearer …`. The
+      // agent never sees any of these fields. clientSecret is optional (public /
+      // PKCE clients omit it); scope and the seeded accessToken are optional.
+      requireNonEmpty(rec, ["tokenEndpoint", "clientId", "refreshToken"]);
+      let endpoint;
+      try {
+        endpoint = new URL(rec.tokenEndpoint);
+      } catch {
+        throw new Error(`Credential ${rec.name}: tokenEndpoint is not a valid URL`);
+      }
+      if (endpoint.protocol !== "https:" && !isLoopbackUrl(endpoint)) {
+        throw new Error(
+          `Credential ${rec.name}: tokenEndpoint must be https (or loopback) — ` +
+            "it carries the refresh token and client secret",
+        );
+      }
+      if (rec.clientSecret != null && typeof rec.clientSecret !== "string") {
+        throw new Error(`Credential ${rec.name}: clientSecret must be a string`);
+      }
+      if (rec.scope != null && typeof rec.scope !== "string") {
+        throw new Error(`Credential ${rec.name}: scope must be a string`);
+      }
+      if (rec.accessTokenExpiresAt != null && typeof rec.accessTokenExpiresAt !== "number") {
+        throw new Error(`Credential ${rec.name}: accessTokenExpiresAt must be epoch ms`);
+      }
+      break;
+    }
   }
 }
 

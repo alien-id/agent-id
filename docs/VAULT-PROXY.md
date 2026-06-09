@@ -95,7 +95,7 @@ Each record carries:
 - `type`: how to materialize the credential into a request (see table below).
 - `domains`: required, non-empty. Default-deny — the proxy refuses to inject anywhere not on this list. Supports literal hostnames and `*.<suffix>` wildcards.
 - `upstreamScheme`: `"https"` (default) or `"http"` for legacy/internal services reachable over plain HTTP.
-- Type-specific fields: `value` (bearer/header/query/cookie), `username`+`password` (basic), `headerName` (header), `paramName` (query), `cookieName` (cookie), `secret`+`period`+`digits`+`algorithm` (totp), `cookies` (cookie-jar), `otpHeader` (totp).
+- Type-specific fields: `value` (bearer/header/query/cookie), `username`+`password` (basic), `headerName` (header), `paramName` (query), `cookieName` (cookie), `secret`+`period`+`digits`+`algorithm` (totp), `cookies` (cookie-jar), `otpHeader` (totp), `tokenEndpoint`+`clientId`+`refreshToken`+`clientSecret?`+`scope?` (oauth2).
 
 ### Materialization table
 
@@ -108,6 +108,22 @@ Each record carries:
 | `cookie` | `Cookie: <cookieName>=<value>` (appended to existing Cookie) |
 | `cookie-jar` | `Cookie: k1=v1; k2=v2; …` (appended) |
 | `totp` | `<otpHeader \|\| X-OTP-Code>: <6-digit RFC 6238 code>` |
+| `oauth2` | `Authorization: Bearer <access token>` — refreshed on demand from the stored refresh token |
+
+#### oauth2: refresh-on-demand
+
+An `oauth2` credential stores a long-lived refresh token plus the client
+credentials and token endpoint needed to mint short-lived access tokens. On each
+request the proxy serves a cached access token, or — when it is missing or within
+60 s of expiry — POSTs `grant_type=refresh_token` to `tokenEndpoint` (RFC 6749
+§6), caches the result, and injects it as a bearer. Concurrent requests for the
+same credential share one in-flight refresh. A rotated refresh token is written
+back to the vault. `invalid_grant` (refresh token revoked/expired) surfaces as
+`401 oauth_refresh_token_invalid` — re-mint the token; any other token-endpoint
+failure is `502 oauth_refresh_failed`. The agent sees none of this — only the
+credential name in its URL. `tokenEndpoint` must be `https` (loopback allowed for
+local dev). URL-rewrite mode only; the legacy stub path cannot do the async
+refresh. Cached access tokens are zeroed on idle-lock.
 
 ---
 

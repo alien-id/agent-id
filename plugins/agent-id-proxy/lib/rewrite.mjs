@@ -107,6 +107,13 @@ export function injectCredential({ headers, search, cred }) {
       out.cookie = appendCookie(out.cookie, jar);
       break;
     }
+    case "oauth2":
+      // The proxy refreshes oauth2 to an access token and passes a synthesized
+      // `bearer` cred here. A raw oauth2 record reaching this point is a bug.
+      throw new RewriteError(
+        "oauth2_not_materialized",
+        "oauth2 credential must be resolved to an access token before injection",
+      );
     default:
       throw new RewriteError("unknown_type", `Unknown credential type: ${cred.type}`);
   }
