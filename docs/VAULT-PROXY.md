@@ -35,6 +35,51 @@ The trust boundary:
 
 ---
 
+## For AI Agents: The Proxy Interface
+
+AI agents should not handle credentials, API keys, or OAuth2 tokens. Instead, they interact with the proxy using a **credential-naming contract**.
+
+### The URL Contract
+
+To make an authenticated request, the agent replaces the upstream HTTPS URL with a local proxy URL:
+
+```
+http://localhost:48771/<credential-name>/<upstream-host>/<path>
+```
+
+- **credential-name**: the vault name of the credential to use (e.g. `github-pat`, `openai-key`).
+- **upstream-host**: the real host (and optional port) of the target service (e.g. `api.github.com`, `api.openai.com`).
+- **path**: the rest of the URL, including query parameters.
+
+**Example: GitHub API**
+
+| | URL |
+|---|---|
+| Upstream | `https://api.github.com/user` |
+| Proxy call | `http://localhost:48771/github-pat/api.github.com/user` |
+
+**Example: OpenAI**
+
+| | URL |
+|---|---|
+| Upstream | `https://api.openai.com/v1/chat/completions` |
+| Proxy call | `http://localhost:48771/openai-key/api.openai.com/v1/chat/completions` |
+
+### Mental Model Shift
+
+- **Old way**: *"I need my GitHub PAT to call this API. I will add `Authorization: Bearer ghp_xxx` to my request."*
+- **New way**: *"I want to use the `github-pat` credential to talk to `api.github.com`. I will send the request to the proxy."*
+
+The agent never sees the token value, never manages refresh cycles, never handles `401` responses due to expired tokens. The proxy handles the auth mechanism (Bearer, Basic, OAuth2 refresh) transparently.
+
+### Rules for Agents
+
+1. **No secrets in prompts.** Never ask the user for a key. Never print a key to stdout or a transcript.
+2. **Use named credentials.** Only reference names present in the vault (e.g. `openai-key`, `github-pat`). If you need a new credential, ask the user to add it via `agent-id-vault add`.
+3. **Trust the proxy.** If the proxy returns `403 host_not_allowed`, the credential is not scoped for that domain — don't try to work around it. If you get `401 vault_locked`, the proxy needs to be restarted or unlocked.
+
+---
+
 ## Vault: portable format
 
 One file at `~/.agent-id/vault.enc`. LUKS-style: a random master key encrypts the credential payload (AES-256-GCM). The master key is wrapped into one or more **slots**, each holding a different way to derive a key-encryption key (KEK).
