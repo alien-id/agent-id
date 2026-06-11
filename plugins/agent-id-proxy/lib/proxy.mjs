@@ -36,6 +36,8 @@ import {
   createPendingRegistry,
 } from "./control.mjs";
 import { OAuthError, refreshAccessToken } from "./oauth.mjs";
+import { signSolanaRpcBody } from "../../agent-id-core/lib/solana.mjs";
+import { signEvmRpcBody } from "../../agent-id-core/lib/evm.mjs";
 import {
   openVaultWithMasterKey,
   readMobileSlotChallenges,
@@ -60,6 +62,34 @@ function stripHopByHop(headers) {
     out[k] = v;
   }
   return out;
+}
+
+// Wallet-credential JSON-RPC bodies are buffered so transaction-submitting
+// calls (sendTransaction / eth_sendTransaction) can be signed before
+// forwarding. A Solana transaction tops out at 1232 bytes and EVM call data
+// is rarely larger; 1 MiB leaves generous headroom for batches while
+// bounding memory.
+const WALLET_MAX_BODY_BYTES = 1024 * 1024;
+
+function readRequestBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        const err = new Error(`request body exceeds ${maxBytes} bytes`);
+        err.code = "body_too_large";
+        err.status = 413;
+        reject(err);
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
 }
 
 function structuredError(res, status, body) {
@@ -416,11 +446,19 @@ export function createProxy({
     logHost,
     logPath,
     start,
+    // When set, this Buffer is sent as the request body instead of piping the
+    // agent's (already-consumed) stream — used by the solana signing step.
+    bodyOverride = null,
   }) {
     let bytesIn = 0;
     let bytesOut = 0;
     const client = upstreamScheme === "https" ? https : http;
     const port = upstreamPort || (upstreamScheme === "https" ? 443 : 80);
+
+    const finalHeaders = { ...headers, host: upstreamHost };
+    if (bodyOverride != null) {
+      finalHeaders["content-length"] = String(bodyOverride.length);
+    }
 
     const upstreamReq = client.request({
       protocol: `${upstreamScheme}:`,
@@ -428,7 +466,7 @@ export function createProxy({
       port,
       method: req.method,
       path: upstreamPath,
-      headers: { ...headers, host: upstreamHost },
+      headers: finalHeaders,
     });
 
     upstreamReq.on("error", (err) => {
@@ -470,10 +508,15 @@ export function createProxy({
       });
     });
 
-    req.on("data", (chunk) => {
-      bytesIn += chunk.length;
-    });
-    req.pipe(upstreamReq);
+    if (bodyOverride != null) {
+      bytesIn = bodyOverride.length;
+      upstreamReq.end(bodyOverride);
+    } else {
+      req.on("data", (chunk) => {
+        bytesIn += chunk.length;
+      });
+      req.pipe(upstreamReq);
+    }
   }
 
   // ── URL-rewrite mode (recommended) ────────────────────────────────────────
@@ -516,6 +559,41 @@ export function createProxy({
       injectCred = { ...cred, type: "bearer", value: accessToken };
     }
 
+    // Wallet credentials (solana-keypair / evm-keypair) materialize INSIDE the
+    // body: buffer the JSON-RPC request, sign any transaction-submitting call
+    // with the vaulted key, and forward the re-encoded body. The agent submits
+    // unsigned transactions and never sees the key — only the (public)
+    // signature / tx hash that lands on chain anyway.
+    let bodyOverride = null;
+    if (cred.type === "solana-keypair" || cred.type === "evm-keypair") {
+      const raw = await readRequestBody(req, WALLET_MAX_BODY_BYTES);
+      if (raw.length > 0) {
+        let result;
+        let event;
+        try {
+          if (cred.type === "solana-keypair") {
+            result = signSolanaRpcBody(raw.toString("utf8"), cred.secretSeed);
+            event = { event: "solana_signed", signatures: result.signatures };
+          } else {
+            result = signEvmRpcBody(raw.toString("utf8"), cred.privateKey, cred.address);
+            event = { event: "evm_signed", txHashes: result.hashes };
+          }
+        } catch (err) {
+          return structuredError(res, 400, {
+            error: cred.type === "solana-keypair" ? "solana_sign_failed" : "evm_sign_failed",
+            message: err.message,
+            credential: cred.name,
+          });
+        }
+        bodyOverride = Buffer.from(result.body, "utf8");
+        if (result.signed) {
+          logAccess({ ...event, credential: cred.name, host: parsed.host });
+        }
+      } else {
+        bodyOverride = raw; // bodyless request (e.g. GET) — stream already consumed
+      }
+    }
+
     // Build upstream URL (default https; credential may opt into http).
     const upstreamScheme = cred.upstreamScheme || "https";
     const upstreamUrl = new URL(`${upstreamScheme}://${parsed.host}${parsed.restAndQuery}`);
@@ -543,6 +621,7 @@ export function createProxy({
       logHost: upstreamUrl.host,
       logPath: upstreamUrl.pathname,
       start,
+      bodyOverride,
     });
   }
 

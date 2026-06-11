@@ -76,8 +76,57 @@ The credential is materialized into the request based on its type:
 | `cookie` | `Cookie: <cookieName>=<value>` (appended if Cookie present) |
 | `cookie-jar` | `Cookie: k1=v1; k2=v2; …` |
 | `totp` | `<otpHeader || X-OTP-Code>: <6-digit code>` |
+| `solana-keypair` | signature inside the JSON-RPC body (see below) |
+| `evm-keypair` | signature inside the JSON-RPC body (see below) |
 
 Upstream scheme defaults to **HTTPS**. Set `upstreamScheme: "http"` on the credential to opt into plain HTTP (legacy/internal services). The proxy rewrites the `Host` header and strips `Origin` / `Referer` before forwarding.
+
+## Wallet credentials — transaction signing in the proxy
+
+`solana-keypair` / `evm-keypair` credentials (created with
+`agent-id-vault generate`) don't inject headers — the proxy signs
+**transactions inside the JSON-RPC request body**. The agent builds an
+*unsigned* transaction from public material only and submits it through the
+proxy; the private key never leaves the proxy process.
+
+**Solana** — `sendTransaction` params are signed (base58 or base64 per the
+request's own `encoding`); every other method (`getBalance`,
+`getLatestBlockhash`, `simulateTransaction`, …) passes through:
+
+```bash
+# Balance check (passthrough):
+curl http://localhost:48771/sol-hot/api.mainnet-beta.solana.com/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["<address>"]}'
+
+# Submit an UNSIGNED tx — the proxy fills the signature slot(s) for its key:
+curl http://localhost:48771/sol-hot/api.mainnet-beta.solana.com/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"sendTransaction",
+       "params":["<unsigned tx, base64>", {"encoding":"base64"}]}'
+```
+
+Partial signing is preserved: existing co-signatures (e.g. an x402
+facilitator fee-payer) stay in place; only slots matching the vault key are
+filled.
+
+**EVM** — `eth_sendTransaction` is rewritten to `eth_sendRawTransaction`
+with an EIP-1559 tx signed by the vaulted key. The agent must supply
+`chainId`, `nonce`, `gas`, `maxFeePerGas`, `maxPriorityFeePerGas` explicitly
+(read them through the proxy first). A `from` field, if present, must match
+the credential's address:
+
+```bash
+curl http://localhost:48771/polygon-hot/polygon-bor-rpc.publicnode.com/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_sendTransaction","params":[{
+        "to":"0x…","value":"0x38d7ea4c68000","chainId":137,"nonce":"0x0",
+        "gas":21000,"maxFeePerGas":120000000000,"maxPriorityFeePerGas":30000000000}]}'
+```
+
+Signing failures return `400 {error: "solana_sign_failed" | "evm_sign_failed"}`.
+The access log records `solana_signed` / `evm_signed` events with signatures/
+tx hashes (public on-chain data) — never key material.
 
 ## Mode 2 — HTTP_PROXY stub injection (legacy, HTTP only)
 

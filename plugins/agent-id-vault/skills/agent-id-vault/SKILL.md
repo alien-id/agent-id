@@ -78,11 +78,35 @@ Value-input channels — pick the one with the smallest attack surface:
 
 Never paste a secret into chat. The agent transcript persists.
 
+## Generate a wallet keypair (the key never leaves the vault)
+
+For blockchain wallets the vault can create the private key **itself** — the
+key material is generated inside the vault process and sealed
+(`exportable: false`): `show` redacts it, `add` refuses the type, and the only
+way to exercise it is transaction signing inside the proxy. The command prints
+**only the public address**.
+
+```bash
+# Solana wallet (ed25519). Domains = RPC hosts the proxy may sign for:
+node CLI generate --name sol-hot --type solana-keypair \
+  --domains api.mainnet-beta.solana.com
+
+# EVM wallet (secp256k1) — Ethereum, Polygon, Base, any EIP-1559 chain:
+node CLI generate --name polygon-hot --type evm-keypair \
+  --domains polygon-bor-rpc.publicnode.com,ethereum-rpc.publicnode.com
+```
+
+Output (and `list`) carries the address (`publicKey` for Solana, `address` for
+EVM) — that is all an agent ever needs: fund the address, build unsigned
+transactions against it, and submit them through the proxy, which signs them
+in-process (see the proxy skill, "Wallet credentials").
+
 ## List, show, remove
 
 ```bash
 node CLI list                     # metadata only; never plaintext
 node CLI show --name github-pat   # plaintext export; prefer the proxy for runtime use
+                                  # (sealed/generated records stay redacted)
 node CLI remove --name github-pat
 ```
 

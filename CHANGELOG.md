@@ -6,6 +6,28 @@ All notable changes are documented here.
 
 ### Added
 
+- **Wallet credentials: keys born in the vault, never exported.**
+  `agent-id-vault generate --type solana-keypair|evm-keypair` creates the
+  keypair *inside* the vault process and prints only the public address.
+  Records are sealed (`exportable: false`): `show` redacts the key,
+  `add` refuses the type, `list` carries the address. The only way to
+  exercise the key is transaction signing inside the proxy, gated by the
+  per-credential RPC-host allowlist.
+- **Proxy-side transaction signing.** `solana-keypair`: unsigned
+  transactions inside `sendTransaction` JSON-RPC bodies are ed25519-signed
+  at injection time (legacy + v0 messages, partial multi-sig preserved,
+  base58/base64 encodings, batched requests). `evm-keypair`:
+  `eth_sendTransaction` is rewritten to a signed EIP-1559
+  `eth_sendRawTransaction` (RFC 6979 deterministic ECDSA, low-s,
+  cross-validated byte-for-byte against eth-account). All other JSON-RPC
+  methods pass through untouched. Access log records `solana_signed` /
+  `evm_signed` events with public signatures / tx hashes only.
+- **Zero-dependency chain primitives** in `agent-id-core`:
+  `lib/solana.mjs` (base58, compact-u16, tx wire format, System Program
+  transfer builder) and `lib/evm.mjs` (keccak-256, RLP, secp256k1 with
+  public-key recovery parity, EIP-55 checksum addresses).
+  Verified end-to-end on Solana and Polygon mainnet — see
+  `examples/solana-transfer-via-proxy.mjs`.
 - **`agent-id-vault` v5.0.0 — portable LUKS-style vault format.**
   Single file at `~/.agent-id/vault.enc` with a slot-wrapped master key:
   slot 0 = passphrase-wrapped (scrypt), slot 1 = agent-key-wrapped

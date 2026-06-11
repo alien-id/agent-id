@@ -58,6 +58,8 @@ import {
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
 import { CREDENTIAL_TYPES } from "../lib/store.mjs";
+import { generateSolanaKeypair } from "../../agent-id-core/lib/solana.mjs";
+import { generateEvmKeypair } from "../../agent-id-core/lib/evm.mjs";
 
 // ─── Input helpers ──────────────────────────────────────────────────────────────
 
@@ -258,6 +260,13 @@ async function cmdAdd(flags) {
         record.cookies = JSON.parse(json);
         break;
       }
+      case "solana-keypair":
+      case "evm-keypair": {
+        return outputError(
+          `${type} credentials are created with \`agent-id-vault generate\` — ` +
+            "the private key is generated inside the vault and never crosses a process boundary",
+        );
+      }
       case "oauth2": {
         record.tokenEndpoint = flags["token-endpoint"];
         record.clientId = flags["client-id"];
@@ -293,6 +302,18 @@ async function cmdAdd(flags) {
   }
 }
 
+// Secret-bearing fields per type, redacted by `show` for sealed (generated
+// in-vault, exportable: false) records.
+const SEALED_FIELDS = [
+  "secretSeed",
+  "privateKey",
+  "value",
+  "password",
+  "secret",
+  "refreshToken",
+  "clientSecret",
+];
+
 async function cmdShow(flags) {
   const name = flags.name;
   if (!name) return outputError("--name <NAME> is required");
@@ -300,7 +321,81 @@ async function cmdShow(flags) {
   try {
     const rec = vault.get(name);
     if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.exportable === false) {
+      const redacted = { ...rec };
+      for (const f of SEALED_FIELDS) {
+        if (redacted[f] != null) redacted[f] = "[sealed — generated in-vault, not exportable]";
+      }
+      stderr(
+        `Credential '${name}' was generated inside the vault; its secret is sealed ` +
+          "and cannot be exported. Use the proxy to exercise it.",
+      );
+      outputJson({ ok: true, credential: redacted, sealed: true });
+      return;
+    }
     outputJson({ ok: true, credential: rec });
+  } finally {
+    vault.lock();
+  }
+}
+
+// ─── generate: create a keypair INSIDE the vault; only the public key leaves ───
+
+const GENERATE_TYPES = ["solana-keypair", "evm-keypair"];
+
+async function cmdGenerate(flags) {
+  const name = flags.name;
+  const type = flags.type || "solana-keypair";
+  if (!name) return outputError("--name <NAME> is required");
+  if (!GENERATE_TYPES.includes(type)) {
+    return outputError(`generate supports types: ${GENERATE_TYPES.join(", ")} (got '${type}')`);
+  }
+  const domains = parseDomains(flags);
+  if (domains.length === 0) {
+    return outputError(
+      "--domains <host[,host…]> is required (RPC hosts the proxy may sign for, default-deny)",
+    );
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    if (vault.has(name) && !flags.overwrite) {
+      return outputError(`Credential '${name}' already exists (pass --overwrite to replace it)`);
+    }
+    const record = {
+      name,
+      type,
+      domains,
+      description: flags.description || null,
+      exportable: false,
+    };
+    let address;
+    if (type === "solana-keypair") {
+      const { publicKey, secretSeedHex } = generateSolanaKeypair();
+      record.publicKey = publicKey;
+      record.secretSeed = secretSeedHex;
+      address = publicKey;
+    } else {
+      const { address: evmAddress, privateKeyHex } = generateEvmKeypair();
+      record.address = evmAddress;
+      record.privateKey = privateKeyHex;
+      address = evmAddress;
+    }
+    const stored = vault.add(record);
+    await vault.save();
+    stderr(`Generated ${type === "solana-keypair" ? "Solana" : "EVM"} keypair '${name}'.`);
+    stderr(`  Address: ${address}`);
+    stderr("  The private key is sealed in the vault and will never be shown.");
+    outputJson({
+      ok: true,
+      name: stored.name,
+      type: stored.type,
+      ...(record.publicKey ? { publicKey: record.publicKey } : {}),
+      ...(record.address ? { address: record.address } : {}),
+      domains: stored.domains,
+      exportable: false,
+      createdAt: stored.createdAt,
+    });
   } finally {
     vault.lock();
   }
@@ -504,7 +599,9 @@ function printHelp() {
       "  add --name N --type T --domains H[,H…] [type-specific value flags]",
       "      oauth2: --token-endpoint URL --client-id ID [--client-secret-env V]",
       "              --refresh-token-file F [--scope S]   (auto-refreshes access tokens)",
-      "  show --name N",
+      "  generate --name N --type solana-keypair|evm-keypair --domains H[,H…] [--overwrite]",
+      "      creates the keypair inside the vault; prints ONLY the public address",
+      "  show --name N    (sealed/generated secrets are redacted)",
       "  list",
       "  remove --name N",
       "  rekey add-passphrase | add-agent-key | remove-slot --id N",
@@ -533,6 +630,7 @@ function makeRekeyHandler() {
 const commands = {
   init: cmdInit,
   add: cmdAdd,
+  generate: cmdGenerate,
   show: cmdShow,
   list: cmdList,
   remove: cmdRemove,

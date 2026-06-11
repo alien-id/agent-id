@@ -27,6 +27,8 @@ export const CREDENTIAL_TYPES = Object.freeze([
   "totp",
   "cookie-jar",
   "oauth2",
+  "solana-keypair",
+  "evm-keypair",
 ]);
 
 // A token endpoint must be reached over TLS — the refresh token + client secret
@@ -130,6 +132,32 @@ export function validateRecord(rec) {
       }
       break;
     }
+    case "solana-keypair": {
+      // Generated INSIDE the vault (`agent-id-vault generate`) — the seed never
+      // crosses a process boundary. The proxy signs transactions with it; the
+      // agent only ever sees the public key (the wallet address).
+      requireNonEmpty(rec, ["secretSeed", "publicKey"]);
+      if (!/^[0-9a-fA-F]{64}$/.test(rec.secretSeed)) {
+        throw new Error(`Credential ${rec.name}: secretSeed must be 32 bytes of hex`);
+      }
+      if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(rec.publicKey)) {
+        throw new Error(`Credential ${rec.name}: publicKey must be a base58 Solana address`);
+      }
+      break;
+    }
+    case "evm-keypair": {
+      // Same sealed treatment as solana-keypair: generated in-vault, the
+      // secp256k1 key signs EIP-1559 transactions inside the proxy. Only the
+      // EIP-55 address is public.
+      requireNonEmpty(rec, ["privateKey", "address"]);
+      if (!/^[0-9a-fA-F]{64}$/.test(rec.privateKey)) {
+        throw new Error(`Credential ${rec.name}: privateKey must be 32 bytes of hex`);
+      }
+      if (!/^0x[0-9a-fA-F]{40}$/.test(rec.address)) {
+        throw new Error(`Credential ${rec.name}: address must be a 0x-prefixed EVM address`);
+      }
+      break;
+    }
   }
 }
 
@@ -188,6 +216,10 @@ export function listMetadata(payload) {
     type: c.type,
     domains: c.domains,
     description: c.description || null,
+    // The wallet address is public by design — agents need it to build
+    // transactions and check balances without opening the record.
+    ...(c.publicKey ? { publicKey: c.publicKey } : {}),
+    ...(c.address ? { address: c.address } : {}),
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     lastUsedAt: c.lastUsedAt || null,

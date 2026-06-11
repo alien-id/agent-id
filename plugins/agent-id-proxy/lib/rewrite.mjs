@@ -114,6 +114,13 @@ export function injectCredential({ headers, search, cred }) {
         "oauth2_not_materialized",
         "oauth2 credential must be resolved to an access token before injection",
       );
+    case "solana-keypair":
+    case "evm-keypair":
+      // Nothing to inject into headers — wallet credentials materialize as a
+      // signature inside the request BODY (sendTransaction /
+      // eth_sendTransaction), handled by the proxy's signing step before
+      // forwarding.
+      break;
     default:
       throw new RewriteError("unknown_type", `Unknown credential type: ${cred.type}`);
   }

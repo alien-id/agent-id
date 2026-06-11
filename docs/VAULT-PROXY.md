@@ -155,6 +155,8 @@ Each record carries:
 | `cookie-jar` | `Cookie: k1=v1; k2=v2; …` (appended) |
 | `totp` | `<otpHeader \|\| X-OTP-Code>: <6-digit RFC 6238 code>` |
 | `oauth2` | `Authorization: Bearer <access token>` — refreshed on demand from the stored refresh token |
+| `solana-keypair` | ed25519 signature filled into the `sendTransaction` JSON-RPC body |
+| `evm-keypair` | `eth_sendTransaction` → signed EIP-1559 `eth_sendRawTransaction` |
 
 #### oauth2: refresh-on-demand
 
@@ -170,6 +172,53 @@ failure is `502 oauth_refresh_failed`. The agent sees none of this — only the
 credential name in its URL. `tokenEndpoint` must be `https` (loopback allowed for
 local dev). URL-rewrite mode only; the legacy stub path cannot do the async
 refresh. Cached access tokens are zeroed on idle-lock.
+
+### Wallet credentials: keys that are BORN in the vault
+
+`solana-keypair` and `evm-keypair` records are not imported — they are
+**generated inside the vault process** by `agent-id-vault generate` and sealed
+(`exportable: false`):
+
+- `generate` prints only the public address (`publicKey` base58 for Solana,
+  EIP-55 `address` for EVM). `list` carries it too.
+- `show` redacts the private key; `add` refuses the type outright. There is no
+  code path that emits the key material.
+- The only way to *use* the key is transaction signing inside the proxy, gated
+  by the record's RPC-host allowlist.
+
+```bash
+agent-id-vault generate --name sol-hot --type solana-keypair \
+  --domains api.mainnet-beta.solana.com
+# → Address: A2Rc…Tpzk   (the seed never leaves the vault)
+
+agent-id-vault generate --name polygon-hot --type evm-keypair \
+  --domains polygon-bor-rpc.publicnode.com
+# → Address: 0x1135…485f
+```
+
+At request time the credential materializes **inside the JSON-RPC body**, not
+in a header:
+
+- **Solana** — the agent submits a normal `sendTransaction` carrying an
+  *unsigned* transaction (base58/base64 per the request's own `encoding`); the
+  proxy fills every signature slot whose account key matches the vaulted key
+  and forwards. Legacy and v0 messages are supported; existing co-signatures
+  (e.g. an x402 facilitator fee-payer) are preserved — partial signing works.
+  All other methods (`getBalance`, `getLatestBlockhash`, …) pass through.
+- **EVM** — the agent submits `eth_sendTransaction` with an explicit tx object
+  (`chainId`, `nonce`, `gas`, `maxFeePerGas`, `maxPriorityFeePerGas`,
+  `to`/`value`/`data`); the proxy signs an EIP-1559 transaction (RFC 6979
+  deterministic ECDSA, low-s) and forwards it as `eth_sendRawTransaction`. A
+  `from` field, if present, must equal the credential address.
+
+The agent-visible artifacts — request URLs, unsigned transactions, signatures,
+tx hashes — are all public-by-design data (they land on chain anyway). The
+access log records `solana_signed` / `evm_signed` events with signatures / tx
+hashes, never key material.
+
+See `examples/solana-transfer-via-proxy.mjs` for the full agent-side flow
+(blockhash → build unsigned → submit via proxy → confirm), verified end-to-end
+on Solana and Polygon mainnet.
 
 ---
 
