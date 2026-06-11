@@ -1,10 +1,10 @@
 ---
 name: agent-id-proxy
-description: Local credential-injecting HTTP proxy. The agent calls `http://localhost:PORT/<credname>/<upstream-host>/<path>`; the proxy looks up the credential in the vault, validates the host against that credential's allowlist (default-deny), materializes the credential into the appropriate request location, and forwards over real HTTPS. The agent never sees the credential value. Use whenever the agent calls an external service and the credential must not enter the transcript, argv, or environment.
+description: Local credential-injecting HTTP proxy. The agent calls `http://localhost:PORT/<credname>/<upstream-host>/<path>`; the proxy looks up the credential in the vault, validates the host against that credential's allowlist (default-deny), materializes the credential into the appropriate request location, and forwards over real HTTPS. For vault-generated wallet credentials it signs blockchain transactions in-process — Solana `sendTransaction` bodies are ed25519-signed, EVM `eth_sendTransaction` becomes a signed EIP-1559 `eth_sendRawTransaction`. The agent never sees the credential value or private key. Use whenever the agent calls an external service with a vaulted credential, or needs to send a blockchain transaction from a vault-held wallet (payments, trading, x402, transfers).
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "0.2.0"
+  version: "0.3.0"
 allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
 ---
 

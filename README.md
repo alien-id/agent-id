@@ -65,8 +65,8 @@ Alien Agent ID ships as a Claude Code plugin marketplace with five focused plugi
 | --- | --- | --- |
 | `agent-id-core` | `/agent-id-core` | Bootstrap (`init` / `auth` / `bind` / `bootstrap`), session lifecycle (`refresh`, `status`, `setup-owner-session`), and universal operations (`sign`, `verify`, `export-proof`). Owns the shared library that every other plugin imports: crypto primitives, the v3 bundle format + universal verifier (`verifyBundle`), `SignatureEngine`, OIDC, state I/O. |
 | `agent-id-git` | `/agent-id-git` | SSH-signed git commits with Agent-ID provenance trailers and v3 proof notes. `setup`, `commit`, `verify`. Verify calls into core's universal verifier and adds the SSH-signature + trailer checks on top — auditors and CI runners can verify any commit without a bound identity. |
-| `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slot construction: slot 0 passphrase-wrapped (scrypt), slot 1 agent-key-wrapped (HKDF) for fast unattended unlock. Typed, domain-scoped credential records. `init`, `add`, `show`, `list`, `remove`, `rekey`, `export`, `import`, `migrate`. |
-| `agent-id-proxy` | `/agent-id-proxy` | Local credential-injecting HTTP proxy. Agent calls `http://<proxy>/<credname>/<upstream-host>/<path>`; proxy materializes the credential into the request by type and forwards over real HTTPS. System CA bundle verifies upstream — no TLS interception, no local CA. Enforces per-credential host allowlist (default-deny). `start`, `status`, `stop`. |
+| `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slot construction: slot 0 passphrase-wrapped (scrypt), slot 1 agent-key-wrapped (HKDF) for fast unattended unlock. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `init`, `add`, `generate`, `show`, `list`, `remove`, `rekey`, `export`, `import`, `migrate`. |
+| `agent-id-proxy` | `/agent-id-proxy` | Local credential-injecting HTTP proxy. Agent calls `http://<proxy>/<credname>/<upstream-host>/<path>`; proxy materializes the credential into the request by type and forwards over real HTTPS. Signs Solana/EVM transactions in-process for wallet credentials — the agent submits unsigned transactions. System CA bundle verifies upstream — no TLS interception, no local CA. Enforces per-credential host allowlist (default-deny). `start`, `status`, `stop`. |
 | `agent-id-auth` | `/agent-id-auth` | RFC 9449 DPoP-signed calls to Alien-aware services. `header` emits the two-header pair for one request; `call` is a one-shot signed HTTP request. `discover` fetches and validates `/.well-known/alien-agent-id.json`; `capabilities` renders the manifest as actionable markdown; `support` probes for the meta-tag support signal. |
 
 Repository layout:
@@ -308,7 +308,42 @@ node plugins/agent-id-vault/bin/cli.mjs list
 node plugins/agent-id-vault/bin/cli.mjs remove --name github-pat
 ```
 
-Supported credential types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`. Value-input channels — pick the smallest attack surface: `--<field>-file`, `--<field>-env`, piped stdin, raw `--<field>` arg (visible in `ps`; avoid). **Never paste a secret into chat; transcripts persist.**
+Supported credential types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `solana-keypair`, `evm-keypair`. Value-input channels — pick the smallest attack surface: `--<field>-file`, `--<field>-env`, piped stdin, raw `--<field>` arg (visible in `ps`; avoid). **Never paste a secret into chat; transcripts persist.**
+
+### Blockchain wallets — keys born in the vault
+
+For Solana and EVM (Ethereum, Polygon, Base, …) wallets the vault goes one step
+further than storing a secret: it **creates the private key itself** and seals
+it. The key never crosses a process boundary — `generate` prints only the
+public address, `show` redacts, `add` refuses the type. The only way to use
+the key is transaction signing inside the proxy, scoped to the credential's
+RPC-host allowlist.
+
+```bash
+# Create wallets — output is the address, nothing else:
+node plugins/agent-id-vault/bin/cli.mjs generate --name sol-hot \
+  --type solana-keypair --domains api.mainnet-beta.solana.com
+node plugins/agent-id-vault/bin/cli.mjs generate --name polygon-hot \
+  --type evm-keypair --domains polygon-bor-rpc.publicnode.com
+
+# The agent submits an UNSIGNED transaction through the proxy; the proxy signs:
+curl http://localhost:48771/sol-hot/api.mainnet-beta.solana.com/ \
+  -d '{"jsonrpc":"2.0","id":1,"method":"sendTransaction",
+       "params":["<unsigned tx, base64>",{"encoding":"base64"}]}'
+
+# EVM: eth_sendTransaction is rewritten to a signed eth_sendRawTransaction:
+curl http://localhost:48771/polygon-hot/polygon-bor-rpc.publicnode.com/ \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_sendTransaction","params":[{
+       "to":"0x…","value":"0x38d7ea4c68000","chainId":137,"nonce":"0x0",
+       "gas":21000,"maxFeePerGas":120000000000,"maxPriorityFeePerGas":30000000000}]}'
+```
+
+Solana signing handles legacy + v0 messages and preserves co-signatures
+(partial signing — e.g. an x402 facilitator fee-payer). EVM signing produces
+EIP-1559 transactions with RFC 6979 deterministic ECDSA. Both paths are
+zero-dependency and verified end-to-end on Solana and Polygon mainnet — the
+agent-side flow lives in
+[`examples/solana-transfer-via-proxy.mjs`](examples/solana-transfer-via-proxy.mjs).
 
 ### Portability
 

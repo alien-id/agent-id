@@ -1,10 +1,10 @@
 ---
 name: agent-id-vault
-description: Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key) and typed/domain-scoped credential records. Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them by substituting `AgentVault <name>` stubs. Use whenever the user asks to save, fetch, or remove a service credential, or whenever a downstream tool needs an external-service secret that must not appear in shell history, source files, or process arguments.
+description: Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key) and typed/domain-scoped credential records. Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them at request time. Can also GENERATE blockchain wallet keys (Solana ed25519, EVM secp256k1) inside the vault: the private key is sealed, only the address is printed, and transactions are signed by the proxy. Use whenever the user asks to save, fetch, or remove a service credential, create a crypto wallet for the agent, or whenever a downstream tool needs an external-service secret that must not appear in shell history, source files, or process arguments.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "5.0.0"
+  version: "5.1.0"
 allowed-tools: Bash(node *agent-id-vault/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
 ---
 
