@@ -18,10 +18,17 @@ All notable changes are documented here.
   that key out-of-band via the pairing QR, so even over a plain-HTTP control plane
   on a LAN the master key crosses the link only as ciphertext. A new
   `agent-id-proxy pair` subcommand renders a QR / `alien-vault://pair` deep-link
-  carrying the reachable control URL, token, and seal public key, so an external
-  phone can drive the mobile-slot unlock; pairing needs a reachable `--control-host`.
-  (Residual: the bearer *token* still rides plain HTTP, so mobile-over-LAN is
-  trusted-network only — owner-approval is the untrusted-network path.)
+  carrying the reachable control URL, token, seal public key, and TLS cert
+  fingerprint, so an external phone can drive the mobile-slot unlock; pairing
+  needs a reachable `--control-host`.
+- **Control-plane TLS when network-exposed.** A control plane bound beyond
+  loopback serves HTTPS with a per-run self-signed cert (zero-dep, hand-rolled
+  X.509 over a P-256 key); there's no CA — the approver/phone **pins the cert's
+  SHA-256 fingerprint** from the pairing QR. So the bearer token is encrypted on
+  the wire and the connection is authenticated to the right proxy. Loopback stays
+  plain HTTP (no network to sniff). `--control-tls` forces it on loopback;
+  `--no-control-tls` opts out. This closes the cleartext-token residual — mobile
+  master key (sealed) and channel (TLS, pinned) are now both protected end-to-end.
 - **SSRF guard on upstream connections.** Link-local (incl. the
   `169.254.169.254` cloud-metadata service), unspecified, and multicast targets
   are always refused (`403 upstream_blocked`); `--block-private-hosts` also

@@ -33,10 +33,15 @@ export function pickReachableHost(boundHost, interfaces = os.networkInterfaces()
   return null;
 }
 
-export function buildPairingPayload({ controlUrl, token, publicKey, version = 1 }) {
+export function buildPairingPayload({ controlUrl, token, publicKey, fingerprint = null, version = 1 }) {
   if (!controlUrl || !token) throw new Error("controlUrl and token are required");
   if (!publicKey) throw new Error("publicKey (control-plane seal key) is required");
+  const isHttps = /^https:/i.test(controlUrl);
+  if (isHttps && !fingerprint) {
+    throw new Error("fingerprint (TLS cert pin) is required for an https control URL");
+  }
   const q = new URLSearchParams({ v: String(version), control: controlUrl, token, pk: publicKey });
+  if (fingerprint) q.set("fp", fingerprint);
   return `${PAIRING_SCHEME}://pair?${q.toString()}`;
 }
 
@@ -65,7 +70,12 @@ export function parsePairingPayload(uri) {
   } catch {
     throw new Error("pairing payload has an invalid control URL");
   }
+  // An https control URL must carry the cert fingerprint to pin (no CA trust).
+  const fingerprint = u.searchParams.get("fp");
+  if (/^https:/i.test(control) && !fingerprint) {
+    throw new Error("pairing payload for an https control URL is missing the cert fingerprint (fp)");
+  }
   // The phone seals the master key to THIS key (pinned here, out-of-band) so a
   // network attacker can't substitute their own and capture it.
-  return { version: Number(u.searchParams.get("v") || 1), control, token, publicKey };
+  return { version: Number(u.searchParams.get("v") || 1), control, token, publicKey, fingerprint };
 }

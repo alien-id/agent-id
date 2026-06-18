@@ -16,6 +16,7 @@
 
 import fs from "node:fs/promises";
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import { createRequire } from "node:module";
 
@@ -47,6 +48,7 @@ import {
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
 import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
+import { normalizeFingerprint } from "../lib/control-tls.mjs";
 
 // The QR renderer is a CommonJS module vendored in agent-id-core.
 const qrcode = createRequire(import.meta.url)("../../agent-id-core/bin/qrcode.cjs");
@@ -147,7 +149,13 @@ async function clearProxyState(paths) {
 // on their Alien app), recover the master key from the released KEK, and POST it
 // to our own control plane's /approve.
 
-function controlJson(host, port, method, p, body, token = null) {
+// Pinning needs a full handshake every time (a resumed TLS session doesn't
+// re-send the cert), so the https path disables session caching.
+const pinAgent = new https.Agent({ maxCachedSessions: 0 });
+
+// Speaks to the control plane. `tls` (when the plane is HTTPS) is { fingerprint }:
+// the connection trusts no CA and instead pins that SHA-256 cert fingerprint.
+function controlJson(host, port, method, p, body, token = null, tls = null) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
     const headers = {};
@@ -156,26 +164,30 @@ function controlJson(host, port, method, p, body, token = null) {
       headers["Content-Length"] = Buffer.byteLength(payload);
     }
     if (token) headers["Authorization"] = `Bearer ${token}`;
-    const req = http.request(
-      {
-        host,
-        port,
-        path: p,
-        method,
-        headers,
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
-          } catch (err) {
-            reject(err);
-          }
-        });
-      },
-    );
+    const opts = { host, port, path: p, method, headers };
+    if (tls) {
+      opts.rejectUnauthorized = false;
+      opts.agent = pinAgent;
+    }
+    const client = tls ? https : http;
+    const req = client.request(opts, (res) => {
+      if (tls) {
+        const peer = normalizeFingerprint(res.socket.getPeerCertificate().fingerprint256);
+        if (peer !== normalizeFingerprint(tls.fingerprint)) {
+          res.destroy();
+          return reject(new Error("control-plane TLS fingerprint pin mismatch"));
+        }
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
     req.on("error", reject);
     req.end(payload);
   });
@@ -189,6 +201,7 @@ async function startOwnerApprovalApprover({
   controlPort,
   controlToken = null,
   controlPublicKey,
+  controlTls = null,
 }) {
   const challenge = await readOwnerApprovalChallenge(stateDir);
   if (!challenge) return null;
@@ -198,12 +211,13 @@ async function startOwnerApprovalApprover({
   if (!main?.privateKeyPem) return null;
 
   const host = controlHost || "127.0.0.1";
+  const tls = controlTls; // { fingerprint } when the control plane is HTTPS
   const state = { stop: false, seen: new Set() };
 
   (async function loop() {
     while (!state.stop) {
       try {
-        const { pending } = await controlJson(host, controlPort, "GET", "/pending", null, controlToken);
+        const { pending } = await controlJson(host, controlPort, "GET", "/pending", null, controlToken, tls);
         for (const entry of pending || []) {
           if (state.seen.has(entry.id)) continue;
           if (entry.action !== "unlock" || !entry.ownerApproval) continue;
@@ -219,7 +233,7 @@ async function startOwnerApprovalApprover({
               await controlJson(host, controlPort, "POST", "/deny", {
                 id: entry.id,
                 reason: "no_owner_session",
-              }, controlToken);
+              }, controlToken, tls);
             } catch {
               /* best effort */
             }
@@ -239,7 +253,7 @@ async function startOwnerApprovalApprover({
               await controlJson(host, controlPort, "POST", "/deny", {
                 id: entry.id,
                 reason: "no_sso_url",
-              }, controlToken);
+              }, controlToken, tls);
             } catch {
               /* best effort */
             }
@@ -276,14 +290,14 @@ async function startOwnerApprovalApprover({
             await controlJson(host, controlPort, "POST", "/approve", {
               id: entry.id,
               sealedMasterKey: sealToPublicKey(mk, controlPublicKey),
-            }, controlToken);
+            }, controlToken, tls);
           } catch (err) {
             stderr(`Owner-approval unlock failed: ${err.message}`);
             try {
               await controlJson(host, controlPort, "POST", "/deny", {
                 id: entry.id,
                 reason: "owner_approval_failed",
-              }, controlToken);
+              }, controlToken, tls);
             } catch {
               /* best effort */
             }
@@ -364,6 +378,10 @@ async function cmdStart(flags) {
           flags["approval-timeout"] != null
             ? parseDuration(flags["approval-timeout"])
             : 2 * 60_000,
+        // Default: TLS iff non-loopback. --control-tls forces it on loopback too;
+        // --no-control-tls opts out (only sane on loopback).
+        ...(flags["control-tls"] ? { tls: true } : {}),
+        ...(flags["control-tls"] === false ? { tls: false } : {}),
       }
     : null;
 
@@ -401,6 +419,8 @@ async function cmdStart(flags) {
     controlPort: controlAddr ? controlAddr.port : null,
     controlToken: proxy.controlToken || null,
     controlPublicKey: proxy.controlPublicKey || null,
+    controlScheme: proxy.controlScheme || "http",
+    controlCertFingerprint: proxy.controlCertFingerprint || null,
     startedAt: Date.now(),
     idleTimeoutMs: Number.isFinite(idleTimeoutMs) ? idleTimeoutMs : null,
     requireConsent,
@@ -424,6 +444,8 @@ async function cmdStart(flags) {
       controlPort: controlAddr.port,
       controlToken: proxy.controlToken,
       controlPublicKey: proxy.controlPublicKey,
+      controlTls:
+        proxy.controlScheme === "https" ? { fingerprint: proxy.controlCertFingerprint } : null,
     });
   }
 
@@ -431,14 +453,15 @@ async function cmdStart(flags) {
   stderr(`  HTTP_PROXY=http://${addr.host}:${addr.port}`);
   if (controlAddr) {
     const how = approver ? "phone or owner approvals" : "phone approvals";
-    stderr(`Control plane: http://${controlAddr.host}:${controlAddr.port} (${how})`);
-    if (!controlIsLoopback) {
+    const cScheme = proxy.controlScheme === "https" ? "https" : "http";
+    stderr(`Control plane: ${cScheme}://${controlAddr.host}:${controlAddr.port} (${how})`);
+    if (proxy.controlScheme === "https") {
+      stderr(`  TLS on (self-signed, cert pinned via \`pair\`): ${proxy.controlCertFingerprint}`);
+    } else if (!controlIsLoopback) {
+      // Non-loopback without TLS only happens if explicitly disabled.
       stderr(
-        `  ⚠ control plane on non-loopback ${controlHost}: the master key on /approve is sealed ` +
-          "(never cleartext), but the bearer token rides plain HTTP and could be replayed here.",
-      );
-      stderr(
-        "    Trusted-LAN only; use owner-approval (SSO/TLS, no phone↔proxy link) on untrusted networks.",
+        `  ⚠ control plane on non-loopback ${controlHost} WITHOUT TLS (--no-control-tls): the ` +
+          "bearer token rides plain HTTP and could be sniffed/replayed. Drop --no-control-tls.",
       );
     }
   }
@@ -560,11 +583,13 @@ async function cmdPair(flags) {
     );
   }
 
-  const controlUrl = `http://${reachableHost}:${state.controlPort}`;
+  const scheme = state.controlScheme === "https" ? "https" : "http";
+  const controlUrl = `${scheme}://${reachableHost}:${state.controlPort}`;
   const payload = buildPairingPayload({
     controlUrl,
     token: state.controlToken,
     publicKey: state.controlPublicKey,
+    fingerprint: scheme === "https" ? state.controlCertFingerprint : null,
   });
 
   stderr("Scan with the Alien app to pair this phone for vault unlock:\n");
@@ -576,13 +601,19 @@ async function cmdPair(flags) {
   });
   stderr(`Control URL : ${controlUrl}`);
   stderr(`Pair token  : ${state.controlToken}`);
-  stderr("This token authorizes /register, /pending, and /approve — keep it private.");
-  stderr(
-    "Note: the master key is sealed to this proxy's key (never cleartext), but the token above",
-  );
-  stderr(
-    "  rides plain HTTP — pair only on a trusted network, or use owner-approval (SSO/TLS) instead.",
-  );
+  if (scheme === "https") {
+    stderr(`Cert SHA-256: ${state.controlCertFingerprint}  (the phone pins this)`);
+    stderr(
+      "Master key is sealed to this proxy's key and the channel is TLS (cert pinned via this QR)",
+    );
+    stderr("  — the token is not exposed. Keep the token private regardless.");
+  } else {
+    stderr("This token authorizes /register, /pending, and /approve — keep it private.");
+    stderr(
+      "Note: control plane is plain HTTP (loopback). For a networked phone, restart with",
+    );
+    stderr("  --control-host <lan-ip> so the plane runs over TLS with the cert pinned here.");
+  }
   outputJson({ ok: true, control: controlUrl, payload });
 }
 
@@ -594,7 +625,8 @@ function printHelp() {
       "Subcommands:",
       "  start [--port N] [--host H] [--passphrase-file F | --passphrase-env V]",
       "        [--no-agent-key] [--idle-timeout 12h|30m|never]",
-      "        [--no-control] [--control-port N] [--control-host H] [--await-mobile]",
+      "        [--no-control] [--control-port N] [--control-host H] [--control-tls|--no-control-tls]",
+      "        [--await-mobile]",
       "        [--require-consent] [--approval-timeout 2m] [--grant-ttl 1h]",
       "        [--block-private-hosts]",
       "  pair [--control-host H]   show a QR for a phone to scan (control URL + token)",
@@ -609,9 +641,12 @@ function printHelp() {
       "Control plane (default 127.0.0.1:48772, loopback only — NOT the data-plane",
       "  --host): the phone polls /pending and POSTs /approve | /deny. Those routes",
       "  (and /register) require a bearer token (auto-generated, written to the 0600",
-      "  proxy state file); /status is open for liveness. Use --control-host to expose",
-      "  it to a LAN phone. --await-mobile starts locked so the first request prompts",
-      "  for an unlock. --require-consent prompts per (cred,host).",
+      "  proxy state file); /status is open for liveness. The master key on /approve",
+      "  is always sealed to the proxy's control key. Use --control-host to expose it",
+      "  to a LAN phone — then it runs over TLS (self-signed, the phone pins the cert",
+      "  fingerprint from `pair`); loopback stays plain HTTP. --await-mobile starts",
+      "  locked so the first request prompts for an unlock. --require-consent prompts",
+      "  per (cred,host).",
       "  Unlock methods: pair a device with",
       "    `agent-id-vault rekey add-mobile --device-pubkey HEX`, or add an SSO",
       "    owner-approval slot with `agent-id-vault rekey add-owner-approval`",

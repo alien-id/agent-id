@@ -46,6 +46,7 @@ import {
   readOwnerApprovalChallenge,
 } from "../../agent-id-vault/lib/vault.mjs";
 import { unsealFromPublicKey } from "../../agent-id-vault/lib/format.mjs";
+import { fingerprintOfCertPem, generateControlCert } from "./control-tls.mjs";
 import { appendJsonl } from "../../agent-id-core/lib/state.mjs";
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -152,10 +153,34 @@ export function createProxy({
   // cleartext. The private scalar never leaves this process.
   let controlEcdh = null;
   let controlPublicKey = null;
+  // TLS for the control plane: on when exposed beyond loopback (or forced via
+  // control.tls) so the bearer token isn't sniffable. Loopback stays HTTP.
+  let controlTls = null;
+  let controlScheme = "http";
+  let controlCertFingerprint = null;
   if (controlEnabled) {
     controlEcdh = createECDH("prime256v1");
     controlEcdh.generateKeys();
     controlPublicKey = controlEcdh.getPublicKey().toString("hex");
+
+    const controlHost = (control.listen && control.listen.host) || "127.0.0.1";
+    const hostIsLoopback =
+      controlHost === "127.0.0.1" || controlHost === "::1" || controlHost === "localhost";
+    const wantTls =
+      control.tls === true ||
+      (control.tls && typeof control.tls === "object") ||
+      (control.tls !== false && !hostIsLoopback);
+    if (wantTls) {
+      if (control.tls && control.tls.certPem && control.tls.keyPem) {
+        controlTls = { certPem: control.tls.certPem, keyPem: control.tls.keyPem };
+        controlCertFingerprint = control.tls.fingerprint || fingerprintOfCertPem(control.tls.certPem);
+      } else {
+        const gen = generateControlCert();
+        controlTls = { certPem: gen.certPem, keyPem: gen.keyPem };
+        controlCertFingerprint = gen.fingerprint;
+      }
+      controlScheme = "https";
+    }
   }
 
   // Mutable state — vault gets nulled on idle lock; the request handler
@@ -907,6 +932,7 @@ export function createProxy({
       onDeny,
       onRegister,
       authToken: controlToken,
+      tls: controlTls,
       listen: control.listen || { port: 0, host: "127.0.0.1" },
     });
   }
@@ -947,6 +973,12 @@ export function createProxy({
     },
     get controlPublicKey() {
       return controlPublicKey;
+    },
+    get controlScheme() {
+      return controlScheme;
+    },
+    get controlCertFingerprint() {
+      return controlCertFingerprint;
     },
     get pendingCount() {
       return registry ? registry.list().length : 0;

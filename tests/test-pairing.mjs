@@ -60,6 +60,30 @@ describe("pairing payload round-trip", () => {
     assert.equal(parsed.version, 1);
   });
 
+  it("round-trips an https control URL with the cert fingerprint", () => {
+    const fp = "ab".repeat(32);
+    const payload = buildPairingPayload({
+      controlUrl: "https://192.168.1.50:48772",
+      token: "t",
+      publicKey: PK,
+      fingerprint: fp,
+    });
+    const parsed = parsePairingPayload(payload);
+    assert.equal(parsed.control, "https://192.168.1.50:48772");
+    assert.equal(parsed.fingerprint, fp);
+  });
+
+  it("requires a fingerprint for an https control URL", () => {
+    assert.throws(
+      () => buildPairingPayload({ controlUrl: "https://x:1", token: "t", publicKey: PK }),
+      /fingerprint/,
+    );
+    assert.throws(
+      () => parsePairingPayload(`${PAIRING_SCHEME}://pair?v=1&control=${encodeURIComponent("https://x:1")}&token=t&pk=${PK}`),
+      /missing the cert fingerprint/,
+    );
+  });
+
   it("requires controlUrl, token, and publicKey to build", () => {
     assert.throws(() => buildPairingPayload({ controlUrl: "http://x:1", publicKey: PK }), /required/);
     assert.throws(() => buildPairingPayload({ token: "t", publicKey: PK }), /required/);

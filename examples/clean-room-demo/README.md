@@ -94,14 +94,15 @@ is what teaches an agent to use them.
      ```
      (Today the SSO escrow contract is implemented only by `examples/dev-sso.mjs`;
      production use waits on the Alien SSO shipping it.)
-   - **Mobile slot (same machine / trusted LAN).** A phone unseals the master
-     key and re-seals it to the proxy's control key (from the pairing QR) before
-     POSTing — so the master key is **never** sent in cleartext. The residual is
-     the control-plane bearer token, which rides plain HTTP; a LAN sniffer could
-     replay it (e.g. register a device while unlocked). Fine for a same-host
-     approver or a trusted LAN; on an untrusted network use owner-approval. Pair
-     with `agent-id-proxy pair` (shows a QR) or
-     `agent-id-vault rekey add-mobile --device-pubkey <hex>`.
+   - **Mobile slot (phone Secure Enclave).** A phone unseals the master key and
+     re-seals it to the proxy's control key (from the pairing QR) before POSTing
+     — so the master key is **never** sent in cleartext. When the control plane
+     is network-exposed (`--control-host 0.0.0.0`) it runs over **TLS** with a
+     self-signed cert whose fingerprint the phone pins from the QR, so the bearer
+     token isn't sniffable either. Pair with `agent-id-proxy pair` (shows a QR)
+     or `agent-id-vault rekey add-mobile --device-pubkey <hex>`. (The cert is
+     per-run, so re-pair after a restart; owner-approval needs no phone↔proxy
+     link at all.)
 
 4. **Install the skill** into the demo project:
 

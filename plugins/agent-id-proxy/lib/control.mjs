@@ -19,6 +19,7 @@
 // private key, can turn that into the master key it POSTs back to /approve.
 
 import http from "node:http";
+import https from "node:https";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -186,13 +187,17 @@ export function createControlServer({
   onDeny,
   onRegister,
   authToken = null,
+  tls = null,
   listen = { port: 0, host: "127.0.0.1" },
 }) {
   // Routes that read or act on credential material require the token; /status
   // (and GET /) are liveness-only and stay open.
   const requireToken = (req) => !authToken || tokenMatches(presentedToken(req), authToken);
 
-  const server = http.createServer(async (req, res) => {
+  // When exposed beyond loopback the plane runs over TLS (self-signed, the
+  // approver pins the fingerprint from the pairing QR) so the token isn't
+  // sniffable; loopback stays plain HTTP.
+  const handler = async (req, res) => {
     try {
       const url = new URL(req.url, "http://127.0.0.1");
       const route = `${req.method} ${url.pathname}`;
@@ -237,7 +242,11 @@ export function createControlServer({
       const status = err.status || 500;
       sendJson(res, status, { ok: false, error: err.code || "control_error", message: err.message });
     }
-  });
+  };
+
+  const server = tls
+    ? https.createServer({ cert: tls.certPem, key: tls.keyPem }, handler)
+    : http.createServer(handler);
 
   return {
     server,
