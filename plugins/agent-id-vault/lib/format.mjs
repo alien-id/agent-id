@@ -233,6 +233,53 @@ export function deviceUnsealMasterKey(slot, devicePrivateKeyRaw) {
   return aeadDecrypt(kek, slot.wrap);
 }
 
+// ─── Generic ECDH sealed box (control-plane master-key transport) ────────────────
+//
+// Same construction as the mobile slot, used in reverse: instead of the proxy
+// sealing the master key TO a phone, an approver seals the recovered master key
+// BACK to the proxy's control-plane key so it never crosses the control link in
+// cleartext. The proxy's public key is pinned out-of-band (the pairing QR), so a
+// network attacker can't substitute their own and capture the master key.
+
+const CONTROL_SEAL_INFO = "agent-id-control-seal-v1";
+
+function controlSealKek(sharedSecret, salt) {
+  return Buffer.from(hkdfSync("sha256", sharedSecret, salt, CONTROL_SEAL_INFO, 32));
+}
+
+// Seal `plaintext` (a Buffer, e.g. the 32-byte master key) to `recipientPubKeyHex`
+// (X9.63 uncompressed P-256 point). Returns a self-describing sealed box.
+export function sealToPublicKey(plaintext, recipientPubKeyHex) {
+  const recipientPub = Buffer.from(recipientPubKeyHex, "hex");
+  const ephemeral = createECDH(MOBILE_CURVE);
+  ephemeral.generateKeys();
+  const sharedSecret = ephemeral.computeSecret(recipientPub);
+  const salt = randomBytes(SALT_BYTES);
+  const kek = controlSealKek(sharedSecret, salt);
+  const box = aeadEncrypt(kek, plaintext);
+  return {
+    alg: MOBILE_SLOT_ALG,
+    ephemeralPubKey: ephemeral.getPublicKey().toString("hex"),
+    salt: salt.toString("hex"),
+    iv: box.iv,
+    ct: box.ct,
+    tag: box.tag,
+  };
+}
+
+// Recover the plaintext from a sealed box with the recipient's P-256 private
+// scalar (raw bytes). Throws on a wrong key (GCM tag mismatch) or a malformed box.
+export function unsealFromPublicKey(box, recipientPrivateKeyRaw) {
+  if (!box || typeof box !== "object" || !box.ephemeralPubKey || !box.salt) {
+    throw new Error("malformed sealed box");
+  }
+  const ecdh = createECDH(MOBILE_CURVE);
+  ecdh.setPrivateKey(recipientPrivateKeyRaw);
+  const sharedSecret = ecdh.computeSecret(Buffer.from(box.ephemeralPubKey, "hex"));
+  const kek = controlSealKek(sharedSecret, Buffer.from(box.salt, "hex"));
+  return aeadDecrypt(kek, { iv: box.iv, ct: box.ct, tag: box.tag });
+}
+
 // ─── Owner-approval slot (SSO-released KEK) ──────────────────────────────────────
 //
 // Symmetric counterpart to the mobile slot: instead of sealing the master key to

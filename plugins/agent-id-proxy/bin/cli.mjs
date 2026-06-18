@@ -38,6 +38,7 @@ import {
   vaultFileExists,
 } from "../../agent-id-vault/lib/vault.mjs";
 import { requestUnlockSecret } from "../../agent-id-vault/lib/owner-approval.mjs";
+import { sealToPublicKey } from "../../agent-id-vault/lib/format.mjs";
 import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
 import {
   hasTty,
@@ -182,7 +183,13 @@ function controlJson(host, port, method, p, body, token = null) {
 
 // Returns a { stop() } handle, or null when there's nothing to drive (no
 // owner-approval slot, or no agent key on disk).
-async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort, controlToken = null }) {
+async function startOwnerApprovalApprover({
+  stateDir,
+  controlHost,
+  controlPort,
+  controlToken = null,
+  controlPublicKey,
+}) {
   const challenge = await readOwnerApprovalChallenge(stateDir);
   if (!challenge) return null;
 
@@ -264,9 +271,11 @@ async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort, 
               },
             }));
             mk = await recoverMasterKeyViaOwnerApproval(stateDir, secret);
+            // Seal the master key to the proxy's control key — never send it in
+            // cleartext, even over loopback.
             await controlJson(host, controlPort, "POST", "/approve", {
               id: entry.id,
-              masterKey: mk.toString("hex"),
+              sealedMasterKey: sealToPublicKey(mk, controlPublicKey),
             }, controlToken);
           } catch (err) {
             stderr(`Owner-approval unlock failed: ${err.message}`);
@@ -391,6 +400,7 @@ async function cmdStart(flags) {
     controlHost: controlAddr ? controlAddr.host : null,
     controlPort: controlAddr ? controlAddr.port : null,
     controlToken: proxy.controlToken || null,
+    controlPublicKey: proxy.controlPublicKey || null,
     startedAt: Date.now(),
     idleTimeoutMs: Number.isFinite(idleTimeoutMs) ? idleTimeoutMs : null,
     requireConsent,
@@ -402,11 +412,18 @@ async function cmdStart(flags) {
   // SSO (the phone plays this role for mobile slots). No-op without the slot.
   let approver = null;
   if (controlAddr) {
+    // The in-process approver is same-machine: connect over loopback when the
+    // control plane is on a wildcard bind, else the specific bound host.
+    const approverHost =
+      controlAddr.host === "0.0.0.0" || controlAddr.host === "::"
+        ? "127.0.0.1"
+        : controlAddr.host;
     approver = await startOwnerApprovalApprover({
       stateDir,
-      controlHost: controlAddr.host,
+      controlHost: approverHost,
       controlPort: controlAddr.port,
       controlToken: proxy.controlToken,
+      controlPublicKey: proxy.controlPublicKey,
     });
   }
 
@@ -417,12 +434,11 @@ async function cmdStart(flags) {
     stderr(`Control plane: http://${controlAddr.host}:${controlAddr.port} (${how})`);
     if (!controlIsLoopback) {
       stderr(
-        `  ⚠ control plane on non-loopback ${controlHost}: a mobile-slot unlock POSTs the ` +
-          "master key over plain HTTP, so it (and the token) cross this network in cleartext.",
+        `  ⚠ control plane on non-loopback ${controlHost}: the master key on /approve is sealed ` +
+          "(never cleartext), but the bearer token rides plain HTTP and could be replayed here.",
       );
       stderr(
-        "    Treat this as trusted-LAN only; for separate-device unlock without that exposure, " +
-          "use owner-approval (relays via the SSO over TLS).",
+        "    Trusted-LAN only; use owner-approval (SSO/TLS, no phone↔proxy link) on untrusted networks.",
       );
     }
   }
@@ -527,7 +543,7 @@ async function cmdPair(flags) {
     await clearProxyState(paths);
     return outputError("Proxy not running (cleared stale state). Start it, then pair.");
   }
-  if (!state.controlPort || !state.controlToken) {
+  if (!state.controlPort || !state.controlToken || !state.controlPublicKey) {
     return outputError(
       "This proxy has no control plane (started with --no-control). Pairing needs it.",
     );
@@ -545,7 +561,11 @@ async function cmdPair(flags) {
   }
 
   const controlUrl = `http://${reachableHost}:${state.controlPort}`;
-  const payload = buildPairingPayload({ controlUrl, token: state.controlToken });
+  const payload = buildPairingPayload({
+    controlUrl,
+    token: state.controlToken,
+    publicKey: state.controlPublicKey,
+  });
 
   stderr("Scan with the Alien app to pair this phone for vault unlock:\n");
   await new Promise((resolve) => {
@@ -558,10 +578,10 @@ async function cmdPair(flags) {
   stderr(`Pair token  : ${state.controlToken}`);
   stderr("This token authorizes /register, /pending, and /approve — keep it private.");
   stderr(
-    "⚠ Mobile unlock POSTs the master key over plain HTTP — only pair on a trusted network.",
+    "Note: the master key is sealed to this proxy's key (never cleartext), but the token above",
   );
   stderr(
-    "  For separate-device unlock without that exposure, use owner-approval (SSO/TLS relay).",
+    "  rides plain HTTP — pair only on a trusted network, or use owner-approval (SSO/TLS) instead.",
   );
   outputJson({ ok: true, control: controlUrl, payload });
 }

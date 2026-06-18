@@ -20,7 +20,7 @@
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
-import { randomBytes } from "node:crypto";
+import { createECDH, randomBytes } from "node:crypto";
 import { URL } from "node:url";
 
 import { rewriteHeaders, rewriteUrl, StubError } from "./stub.mjs";
@@ -45,6 +45,7 @@ import {
   readMobileSlotChallenges,
   readOwnerApprovalChallenge,
 } from "../../agent-id-vault/lib/vault.mjs";
+import { unsealFromPublicKey } from "../../agent-id-vault/lib/format.mjs";
 import { appendJsonl } from "../../agent-id-core/lib/state.mjs";
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -146,6 +147,16 @@ export function createProxy({
   const controlToken = controlEnabled
     ? control.authToken || randomBytes(32).toString("base64url")
     : null;
+  // Per-run control-plane ECDH keypair. Approvers seal the master key to this
+  // public key (pinned out-of-band via the pairing QR) so it's never sent in
+  // cleartext. The private scalar never leaves this process.
+  let controlEcdh = null;
+  let controlPublicKey = null;
+  if (controlEnabled) {
+    controlEcdh = createECDH("prime256v1");
+    controlEcdh.generateKeys();
+    controlPublicKey = controlEcdh.getPublicKey().toString("hex");
+  }
 
   // Mutable state — vault gets nulled on idle lock; the request handler
   // checks `locked` first and refuses with 401 (or, when the control plane is
@@ -359,9 +370,20 @@ export function createProxy({
     if (!entry) return { ok: false, error: "unknown_request", status: 404 };
 
     if (entry.action === "unlock") {
-      if (!body.masterKey) return { ok: false, error: "master_key_required", status: 400 };
+      // The master key is ALWAYS delivered sealed to the proxy's control-plane
+      // public key — never in cleartext — so it stays confidential even over a
+      // plain-HTTP control plane on a LAN. The approver gets that public key
+      // out-of-band (the pairing QR), so an on-path attacker can't substitute it.
+      if (!body.sealedMasterKey) {
+        return { ok: false, error: "sealed_master_key_required", status: 400 };
+      }
+      let mk;
+      try {
+        mk = unsealFromPublicKey(body.sealedMasterKey, controlEcdh.getPrivateKey());
+      } catch {
+        return { ok: false, error: "unseal_failed", status: 400 };
+      }
       let opened;
-      const mk = Buffer.from(body.masterKey, "hex");
       try {
         opened = await openVaultWithMasterKey({ stateDir, masterKey: mk });
       } catch {
@@ -371,7 +393,7 @@ export function createProxy({
       }
       applyUnlock(opened);
       registry.resolve(id, { unlocked: true });
-      logAccess({ event: "vault_unlocked", via: "mobile", requestId: id }).catch(() => {});
+      logAccess({ event: "vault_unlocked", via: "control_plane", requestId: id }).catch(() => {});
       if (onUnlock) onUnlock(entry);
       return { ok: true, body: { action: "unlock", unlocked: true } };
     }
@@ -922,6 +944,9 @@ export function createProxy({
     },
     get controlToken() {
       return controlToken;
+    },
+    get controlPublicKey() {
+      return controlPublicKey;
     },
     get pendingCount() {
       return registry ? registry.list().length : 0;

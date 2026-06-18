@@ -12,10 +12,16 @@ All notable changes are documented here.
   (`/pending`, `/approve`, `/deny`, `/register`) require a bearer token
   (auto-generated, written to the `0600` proxy state file). `/status` stays open
   for liveness. A co-resident process or LAN host can no longer drive an approval
-  or pair a rogue device. A new `agent-id-proxy pair` subcommand renders a QR /
-  `alien-vault://pair` deep-link carrying the reachable control URL + token, so
-  an external phone can learn the token and drive the mobile-slot unlock; the
-  control plane must be bound to a reachable `--control-host` to pair.
+  or pair a rogue device. **The master key is never sent in cleartext:** `/approve`
+  accepts only a master key sealed (ECDH-P256 + HKDF + AES-256-GCM) to the proxy's
+  per-run control-plane public key — there is no plaintext path. The approver pins
+  that key out-of-band via the pairing QR, so even over a plain-HTTP control plane
+  on a LAN the master key crosses the link only as ciphertext. A new
+  `agent-id-proxy pair` subcommand renders a QR / `alien-vault://pair` deep-link
+  carrying the reachable control URL, token, and seal public key, so an external
+  phone can drive the mobile-slot unlock; pairing needs a reachable `--control-host`.
+  (Residual: the bearer *token* still rides plain HTTP, so mobile-over-LAN is
+  trusted-network only — owner-approval is the untrusted-network path.)
 - **SSRF guard on upstream connections.** Link-local (incl. the
   `169.254.169.254` cloud-metadata service), unspecified, and multicast targets
   are always refused (`403 upstream_blocked`); `--block-private-hosts` also

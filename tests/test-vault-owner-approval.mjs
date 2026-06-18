@@ -31,6 +31,7 @@ import {
   masterKeyEquals,
   newVaultFile,
   ownerApprovalKekBytes,
+  sealToPublicKey,
   unwrapSlotWithOwnerApproval,
 } from "../plugins/agent-id-vault/lib/format.mjs";
 import {
@@ -363,7 +364,7 @@ function controlPost(port, p, body, token) {
 
 // Background owner-approval approver: handles each pending unlock once by
 // driving the SSO release and posting the recovered master key.
-function startApprover({ controlPort, stateDir, ssoBaseUrl, accessToken, agentPrivateKeyPem, controlToken }) {
+function startApprover({ controlPort, stateDir, ssoBaseUrl, accessToken, agentPrivateKeyPem, controlToken, controlPublicKey }) {
   const state = { stop: false, handled: 0, prompts: 0, seen: new Set() };
   (async function loop() {
     while (!state.stop) {
@@ -385,7 +386,8 @@ function startApprover({ controlPort, stateDir, ssoBaseUrl, accessToken, agentPr
           let mk;
           try {
             mk = await recoverMasterKeyViaOwnerApproval(stateDir, secret);
-            await controlPost(controlPort, "/approve", { id: entry.id, masterKey: mk.toString("hex") }, controlToken);
+            const sealedMasterKey = sealToPublicKey(mk, controlPublicKey);
+            await controlPost(controlPort, "/approve", { id: entry.id, sealedMasterKey }, controlToken);
             state.handled++;
           } finally {
             secret.fill(0);
@@ -466,6 +468,7 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         accessToken,
         agentPrivateKeyPem: keys.privateKeyPem,
         controlToken: proxy.controlToken,
+        controlPublicKey: proxy.controlPublicKey,
       });
 
       const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: upstream.host });
@@ -528,6 +531,7 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         accessToken,
         agentPrivateKeyPem: keys.privateKeyPem,
         controlToken: proxy.controlToken,
+        controlPublicKey: proxy.controlPublicKey,
       });
 
       // Simulate an idle auto-lock; the next request must re-unlock.

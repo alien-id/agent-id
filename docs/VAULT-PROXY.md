@@ -311,6 +311,7 @@ When the vault is locked — after idle-lock, or when started locked with `--awa
 
 - **Loopback by default.** The control plane binds to `--control-host` (default `127.0.0.1`), independent of the data-plane `--host` — so `--host 0.0.0.0` does **not** expose it.
 - **Token-gated.** `/pending`, `/approve`, `/deny`, `/register` require a bearer token (auto-generated at start, written to the `0600` proxy state file). `/status` stays open for liveness. A co-resident process or LAN host cannot drive an approval or pair a device without the token.
+- **The master key is never sent in cleartext.** `/approve` accepts *only* a master key **sealed** (ECDH-P256 + HKDF + AES-256-GCM) to the proxy's per-run control-plane public key — there is no plaintext path. The approver pins that public key out-of-band (it's in the pairing QR), so an on-path attacker can't substitute their own and capture the key. Even over a plain-HTTP control plane on a LAN, the master key crosses the link only as ciphertext.
 
 ### Owner-approval slot — recommended for a separate approver
 
@@ -346,16 +347,17 @@ Why this is the sound separate-device path:
 
 **Status / caveat.** The escrow contract (`/vault/enroll`, `/vault/unlock/{start,poll}`) and the human push are implemented in this repo **only by `examples/dev-sso.mjs`, which auto-approves** (no human, no real app) for the tests. The client half — slot crypto, the DPoP-bound SSO client, and the proxy wiring — is real and tested; real-world use depends on the production Alien SSO shipping these endpoints plus the app-side approval.
 
-### Mobile slot — same machine, or a trusted LAN only
+### Mobile slot — for a separate phone, prefer owner-approval
 
-A `mobile` slot seals the master key to a phone's P-256 Secure-Enclave key (ephemeral ECDH + HKDF). To unlock, the phone recomputes the shared secret, unseals the master key, and POSTs it back to `/approve`.
+A `mobile` slot seals the master key to a phone's P-256 Secure-Enclave key (ephemeral ECDH + HKDF). To unlock, the phone recomputes the shared secret, unseals the master key, **re-seals it to the proxy's control-plane key** (from the pairing QR), and POSTs that sealed box to `/approve`. The master key is therefore **never in cleartext on the wire**, even over a LAN.
 
-**Transport caveat — read before exposing it.** The control plane is plain **HTTP**, and the phone POSTs the **unsealed master key** over it. On `127.0.0.1` that's fine (a local approver process). But a *separate* phone requires binding the listener to a network address (`--control-host <lan-ip>`), which puts the **master key and the token in cleartext on that network** — a same-subnet sniffer captures the master key and compromises the whole vault. So the mobile slot is appropriate only for:
+**Residual caveat.** What still travels in cleartext on a network-exposed control plane is the **bearer token** (in the `Authorization` header — the control plane is plain HTTP). A same-subnet sniffer can capture it and replay the token-gated routes: read `/pending`, `/deny` (DoS), or — most importantly — `/register` a device of their own **while the vault is unlocked** (a future unlock backdoor). The master key is safe; the token is not. So:
 
-- a **same-machine / loopback** approver, or
-- a **trusted-LAN demo** where you knowingly accept the cleartext tradeoff.
+- **Same machine / loopback approver** (e.g. the owner-approval driver): fully safe.
+- **Trusted LAN** (a phone you pair via `agent-id-proxy pair`): the master key is confidential; accept the token-replay residual for a trusted network.
+- **Untrusted network**: don't expose the control plane — use **owner-approval**, which relays through the SSO over TLS and needs no phone↔proxy link at all.
 
-For a real separate-device, human-in-the-loop unlock, use **owner-approval** instead — it relays through the SSO over TLS and never puts the master key on the wire. The `agent-id-proxy pair` command (a QR / `alien-vault://pair` deep-link carrying the control URL + token) exists for the trusted-LAN case; it refuses to print a loopback URL, but it does **not** make the transport confidential — that's the reason owner-approval is preferred.
+`agent-id-proxy pair` (a QR / `alien-vault://pair` deep-link carrying the control URL, token, **and the proxy's seal public key**) exists for the trusted-LAN case; it refuses to print a loopback URL. Closing the token residual too (control-plane TLS, or phone-signed requests instead of a bearer token) is the remaining follow-up.
 
 ---
 
@@ -370,7 +372,7 @@ For a real separate-device, human-in-the-loop unlock, use **owner-approval** ins
 | Has the upstream URL the agent typed | Sees the upstream hostname (also visible in DNS / TLS SNI / access logs anyway). |
 | On-path network attacker between proxy and upstream | Bounded by upstream's TLS — the proxy verifies the upstream cert against the system CA bundle. |
 | On-path attacker between agent and proxy | Plain HTTP on `127.0.0.1` loopback. Same-host non-root user processes are the realistic concern; mitigation is OS file/socket perms. |
-| Reach the control plane (local process or LAN host) | Mutating routes require the bearer token; loopback-bound by default. **But** if the operator exposes it (`--control-host <lan>`) for a mobile phone, the mobile flow's master key + token travel in cleartext — use owner-approval (SSO/TLS) for separate-device unlock. |
+| Reach the control plane (local process or LAN host) | Mutating routes require the bearer token; loopback-bound by default. The master key on `/approve` is always sealed to the proxy's pinned key, so it's never captured. If the operator exposes the plane (`--control-host <lan>`), the *token* still travels in cleartext and could be replayed (e.g. `/register` while unlocked) — trusted-LAN only; use owner-approval (SSO/TLS) on untrusted networks. |
 | Drive the agent to hit an internal/metadata host | SSRF guard refuses link-local (incl. `169.254.169.254`), unspecified, and multicast upstreams; `--block-private-hosts` adds loopback/RFC1918. Independent of the per-credential allowlist. |
 | Get the wallet key to sign an arbitrary tx | Bounded by the credential's RPC-host allowlist, plus optional `chainIdAllowlist` / `toAllowlist` (EVM) and `programAllowlist` (Solana) enforced before signing. |
 | Steal proxy CA private key | Not applicable. **There is no CA**, because we use URL-rewrite instead of TLS interception. |
@@ -380,7 +382,7 @@ For a real separate-device, human-in-the-loop unlock, use **owner-approval** ins
 ## Operational scope and explicit non-goals (v1)
 
 - **Inbound TLS interception is out of scope.** The proposal sketched a local-CA + system-trust-store install for full HTTPS_PROXY transparency. Shipping URL-rewrite mode eliminates the need: HTTPS upstream coverage without the CA-management blast radius. If/when transparent HTTPS_PROXY semantics become a hard customer ask, the spike is documented in the proposal.
-- **Mobile-slot transport is not confidential over a network.** The control plane is plain HTTP and the phone POSTs the master key; over a LAN that's cleartext. Mobile is loopback / trusted-LAN only — owner-approval (SSO/TLS relay) is the separate-device path. Routing mobile approvals through the SSO relay (so the master key never crosses any link) is the follow-up.
+- **Control-plane bearer token is not confidential over a network.** The master key on `/approve` is sealed (never cleartext), but the control plane is plain HTTP so the *token* is visible to a LAN sniffer, who could replay token-gated routes (notably `/register` while unlocked). Mobile-over-LAN is therefore trusted-LAN only; owner-approval (SSO/TLS, no phone↔proxy link) is the untrusted-network path. Control-plane TLS or phone-signed requests (to close the token residual) is the follow-up.
 - **Owner-approval depends on the SSO.** Only `examples/dev-sso.mjs` (auto-approving) implements the escrow + human-push contract today; production use waits on the Alien SSO.
 - **No browser proxying / form login / cookie auto-refresh.** Cookie-jar credentials can be imported and used, but expired-session re-login is the user's job. (Wallet recipient/program allowlists and per-credential consent are now available; see the records and control-plane sections.)
 - **POSIX trusted-input only.** Windows `CONIN$` direct open is not implemented in v1.

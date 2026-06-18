@@ -32,6 +32,7 @@ import {
 import {
   buildMobileSlot,
   deviceUnsealMasterKey,
+  sealToPublicKey,
 } from "../plugins/agent-id-vault/lib/format.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
 
@@ -111,7 +112,7 @@ function controlPost(port, p, body, token) {
 }
 
 // Background "phone": handles each pending request once.
-function startPhone({ port, devicePrivRaw, denyAuthorize = false, token }) {
+function startPhone({ port, devicePrivRaw, denyAuthorize = false, token, controlPubKey }) {
   const state = { stop: false, handled: { unlock: 0, authorize: 0 }, seen: new Set() };
   (async function loop() {
     while (!state.stop) {
@@ -123,7 +124,10 @@ function startPhone({ port, devicePrivRaw, denyAuthorize = false, token }) {
           if (entry.action === "unlock") {
             const ch = entry.challenges[0];
             const mk = deviceUnsealMasterKey({ ...ch, type: "mobile" }, devicePrivRaw);
-            await controlPost(port, "/approve", { id: entry.id, masterKey: mk.toString("hex") }, token);
+            // Seal the master key to the proxy's control key (pinned via the
+            // pairing QR) — never POST it in cleartext.
+            const sealedMasterKey = sealToPublicKey(mk, controlPubKey);
+            await controlPost(port, "/approve", { id: entry.id, sealedMasterKey }, token);
             state.handled.unlock++;
           } else if (entry.action === "authorize") {
             if (denyAuthorize) {
@@ -224,7 +228,7 @@ describe("proxy: phone-approved unlock", () => {
     });
     dataPort = (await proxy.listen()).port;
     controlPort = proxy.controlAddress.port;
-    phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, token: proxy.controlToken });
+    phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, token: proxy.controlToken, controlPubKey: proxy.controlPublicKey });
   });
 
   after(async () => {
@@ -321,7 +325,7 @@ describe("proxy: self-registration (no rekey)", () => {
 
     // Idle lock, then the registered device unlocks on the next request.
     proxy.forceLock("test_idle");
-    const phone = startPhone({ port: controlPort, devicePrivRaw, token: proxy.controlToken });
+    const phone = startPhone({ port: controlPort, devicePrivRaw, token: proxy.controlToken, controlPubKey: proxy.controlPublicKey });
     record.value = null;
     const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: upstream.host });
     assert.equal(r.status, 200);
@@ -373,7 +377,7 @@ describe("proxy: per-credential consent", () => {
     });
     const dataPort = (await proxy.listen()).port;
     const controlPort = proxy.controlAddress.port;
-    const phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, token: proxy.controlToken });
+    const phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, token: proxy.controlToken, controlPubKey: proxy.controlPublicKey });
 
     const r1 = await rewriteRequest({ port: dataPort, cred: "tok", upstream: ctx.upstream.host });
     assert.equal(r1.status, 200);
@@ -402,7 +406,7 @@ describe("proxy: per-credential consent", () => {
     });
     const dataPort = (await proxy.listen()).port;
     const controlPort = proxy.controlAddress.port;
-    const phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, denyAuthorize: true, token: proxy.controlToken });
+    const phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, denyAuthorize: true, token: proxy.controlToken, controlPubKey: proxy.controlPublicKey });
 
     ctx.record.value = null;
     const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: ctx.upstream.host });
