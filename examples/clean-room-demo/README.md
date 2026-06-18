@@ -22,32 +22,72 @@ is what teaches an agent to use them.
 
 ## Setup (one time)
 
-1. **Build a vault and add a credential** (see the
-   [`agent-id-vault`](../../plugins/agent-id-vault/) skill). For the Gmail demo,
-   an `oauth2` credential auto-refreshes access tokens from a stored refresh
-   token:
+1. **Build a vault** (see the [`agent-id-vault`](../../plugins/agent-id-vault/)
+   skill):
 
    ```bash
    node <AGENT_ID_REPO>/plugins/agent-id-vault/bin/cli.mjs \
      init --state-dir <VAULT_DIR> --passphrase-file <passfile>
-   node <AGENT_ID_REPO>/plugins/agent-id-vault/bin/cli.mjs \
-     add --state-dir <VAULT_DIR> --name gmail --type oauth2 \
-     --domains gmail.googleapis.com \
-     --token-endpoint https://oauth2.googleapis.com/token \
-     --client-id <CLIENT_ID> --client-secret-file <secretfile> \
-     --refresh-token-file <refreshfile> \
-     --scope https://www.googleapis.com/auth/gmail.readonly
    ```
 
-   (Mint the Google refresh token with your **own** OAuth client via a loopback
-   flow or the OAuth Playground with *offline access*; set the consent screen to
-   **In production** so the refresh token doesn't expire after 7 days.)
+2. **Log in once and let the vault capture the credential.** Two ways:
 
-2. **Pair a phone** — the Alien vault-approver app self-registers over the
+   **Option A — capture your browser session (no Cloud Console).** The
+   [`gmail-cookie-bootstrap.mjs`](../gmail-cookie-bootstrap.mjs) script captures
+   your Gmail web session's cookies into a `cookie-jar` credential via a `0600`
+   temp file that's shredded immediately. Nothing from Google Cloud Console is
+   needed; the agent reads the cookie-authed **Gmail Atom feed** through the
+   proxy. Two modes (it auto-picks Firefox if a profile is found):
+
+   ```bash
+   # Firefox — reuses the session you ALREADY have open. Firefox stores cookies
+   # unencrypted, so there's no browser launch and no re-login.
+   node <AGENT_ID_REPO>/examples/gmail-cookie-bootstrap.mjs \
+     --state-dir <VAULT_DIR> --passphrase-file <passfile> --name gmail \
+     --browser firefox            # add --profile <name|dir> for a non-default profile
+
+   # Chrome — launches Chrome; you sign into Gmail once (Chrome encrypts cookies
+   # on disk, so they can't be read without a live session). Requires Node >= 22.
+   node <AGENT_ID_REPO>/examples/gmail-cookie-bootstrap.mjs \
+     --state-dir <VAULT_DIR> --passphrase-file <passfile> --name gmail \
+     --browser chrome             # add --reuse-profile <dir> (Chrome must be closed)
+   ```
+
+   The agent then reads via
+   `http://127.0.0.1:48771/gmail/mail.google.com/mail/u/0/feed/atom` (the bare
+   `/mail/feed/atom` 302-redirects to this account-indexed path). **Tradeoff:**
+   Google rotates session cookies, so a captured jar isn't durable — re-run the
+   bootstrap when reads start redirecting to login. Smoothest for a demo; for
+   something you rely on daily, prefer Option B.
+
+   **Option B — OAuth refresh token (durable, needs a one-time OAuth client).**
+   The [`gmail-login-bootstrap.mjs`](../gmail-login-bootstrap.mjs) script runs a
+   loopback OAuth flow: it opens your browser to Google's consent screen
+   (reusing your existing Google session — you just click **Allow**), captures
+   the grant on `http://127.0.0.1:<port>`, exchanges it for a long-lived
+   **refresh token**, and pipes that token straight into an `oauth2` credential
+   via a `0600` temp file that's shredded immediately.
+
+   ```bash
+   node <AGENT_ID_REPO>/examples/gmail-login-bootstrap.mjs \
+     --client-id <CLIENT_ID> --client-secret-file <secretfile> \
+     --state-dir <VAULT_DIR> --passphrase-file <passfile> \
+     --name gmail --scope https://www.googleapis.com/auth/gmail.readonly
+   ```
+
+   The proxy then auto-refreshes short-lived access tokens from that stored
+   refresh token on every request — the agent never sees any token. This is the
+   only option with true read-only scoping, but it needs a **one-time Google
+   setup:** create an OAuth client (Google Cloud Console → APIs & Services →
+   Credentials → **OAuth client ID** → *Desktop app*), enable the **Gmail API**,
+   and set the consent screen to **In production** so the refresh token doesn't
+   expire after 7 days.
+
+3. **Pair a phone** — the Alien vault-approver app self-registers over the
    control plane while the proxy is unlocked (or use
    `agent-id-vault rekey add-mobile --device-pubkey <hex>`).
 
-3. **Install the skill** into the demo project:
+4. **Install the skill** into the demo project:
 
    ```bash
    mkdir -p <project>/.claude/skills/alien-vault

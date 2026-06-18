@@ -75,10 +75,20 @@ body back. You do **not** do TLS or auth yourself — just call the local URL.
 
 | Name | Upstream host | What it is |
 |---|---|---|
-| `gmail` | `gmail.googleapis.com` | The owner's Gmail (read-only) |
+| `gmail` | `gmail.googleapis.com` | The owner's Gmail via the OAuth2 REST API (read-only) |
+| `gmail` | `mail.google.com` | The owner's Gmail via a captured browser session (cookie-jar) |
 
-(If you need a credential that isn't listed, tell the owner its name and what
-it's for — don't guess or ask for the raw secret.)
+A `gmail` credential is set up one of two ways, and which one you have decides
+the host **and** how you read mail:
+
+- **OAuth2 (`gmail.googleapis.com`)** → use the REST recipes below.
+- **cookie-jar (`mail.google.com`)** → the REST API is not available; read the
+  **Atom feed** instead (see "Reading Gmail via a captured session").
+
+If a `gmail.googleapis.com` call returns `host_not_allowed`, the credential is a
+cookie-jar — switch to the Atom-feed recipe. (If you need a credential that
+isn't listed, tell the owner its name and what it's for — don't guess or ask for
+the raw secret.)
 
 ## Step 3 — The owner unlocks on their phone
 
@@ -134,6 +144,47 @@ for i, mid in enumerate(ids, 1):
     print("      " + d.get("snippet","")[:90])
 PY
 ```
+
+## Reading Gmail via a captured session (cookie-jar → Atom feed)
+
+If the `gmail` credential is a **cookie-jar** (host `mail.google.com`), the
+Gmail REST API isn't reachable — read the authenticated **Atom feed** of unread
+mail instead. The single working path is:
+
+```
+http://127.0.0.1:48771/gmail/mail.google.com/mail/u/0/feed/atom
+```
+
+Use `/mail/u/0/...` (the primary signed-in account). The bare `/mail/feed/atom`
+**302-redirects** to this account-indexed path, so always include `u/0`.
+
+The response is Atom XML: a `<fullcount>` of unread messages, then one `<entry>`
+per unread mail with `<title>`, `<author><name>/<email>`, `<issued>`, and a
+`<summary>` snippet. To list unread sender + subject + snippet:
+
+```bash
+python3 - <<'PY'
+import urllib.request, xml.etree.ElementTree as ET
+URL = "http://127.0.0.1:48771/gmail/mail.google.com/mail/u/0/feed/atom"
+with urllib.request.urlopen(URL, timeout=180) as r:
+    root = ET.fromstring(r.read())
+ns = {"a": "http://purl.org/atom/ns#"}
+count = root.findtext("a:fullcount", default="?", namespaces=ns)
+print("unread:", count)
+for i, e in enumerate(root.findall("a:entry", ns), 1):
+    title = (e.findtext("a:title", "", ns) or "").strip()
+    name = e.findtext("a:author/a:name", "", ns)
+    summ = (e.findtext("a:summary", "", ns) or "").strip()
+    print("%2d. %-30s | %s" % (i, name[:30], title[:60]))
+    print("      " + summ[:90])
+PY
+```
+
+The Atom feed lists **unread** mail only and carries no message IDs / full
+bodies — it's a read-only inbox glance. If reads start returning a Google login
+page, the captured session expired; tell the owner to re-run the cookie
+bootstrap. For durable, scoped access, the owner can switch to the OAuth2
+credential (REST recipes above).
 
 ## Errors
 
