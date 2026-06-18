@@ -197,16 +197,63 @@ export function signSolanaTransactionWire(wire, seed) {
 }
 
 /**
+ * Decode the base58 program id of every instruction in a (signed or unsigned)
+ * transaction wire buffer. Program ids always index into the static account
+ * keys, so this does not need to resolve v0 address-table lookups. Used to
+ * enforce a credential's optional programAllowlist before signing.
+ */
+export function solanaProgramIds(wire) {
+  wire = Buffer.from(wire);
+  const [numSigs, sigCountLen] = decodeCompactU16(wire, 0);
+  const message = wire.subarray(sigCountLen + numSigs * 64);
+
+  let idx = 0;
+  if (message[0] & 0x80) {
+    if ((message[0] & 0x7f) !== 0) throw new Error("solana tx: unsupported message version");
+    idx = 1;
+  }
+  if (message.length < idx + 4) throw new Error("solana tx: truncated message header");
+  const [numKeys, keyCountLen] = decodeCompactU16(message, idx + 3);
+  const keysOff = idx + 3 + keyCountLen;
+  if (keysOff + numKeys * 32 + 32 > message.length) {
+    throw new Error("solana tx: truncated account keys");
+  }
+  const keyAt = (i) => message.subarray(keysOff + i * 32, keysOff + (i + 1) * 32);
+
+  let off = keysOff + numKeys * 32 + 32; // skip the recent blockhash
+  const [numIx, ixCountLen] = decodeCompactU16(message, off);
+  off += ixCountLen;
+  const programIds = [];
+  for (let i = 0; i < numIx; i++) {
+    if (off >= message.length) throw new Error("solana tx: truncated instructions");
+    const programIdIndex = message[off];
+    off += 1;
+    const [numAcc, accLen] = decodeCompactU16(message, off);
+    off += accLen + numAcc;
+    const [dataLen, dataLenLen] = decodeCompactU16(message, off);
+    off += dataLenLen + dataLen;
+    if (programIdIndex >= numKeys) {
+      throw new Error("solana tx: instruction program id index out of range");
+    }
+    programIds.push(base58Encode(keyAt(programIdIndex)));
+  }
+  return programIds;
+}
+
+/**
  * Transform a Solana JSON-RPC request body: any `sendTransaction` call has its
  * transaction parameter signed with the vaulted seed (base58 or base64 param
  * encoding, per the request's own config). Every other method — getBalance,
  * getLatestBlockhash, simulateTransaction, … — passes through untouched.
  * Batched (array) requests are handled element-wise.
  *
+ * `constraints.programAllowlist` (optional): when set, every instruction's
+ * program id must be on the list or signing is refused.
+ *
  * Returns { body, signed, signatures } — `body` is the JSON to forward.
  * Throws on a malformed transaction inside a sendTransaction call.
  */
-export function signSolanaRpcBody(bodyText, secretSeedHex) {
+export function signSolanaRpcBody(bodyText, secretSeedHex, constraints = {}) {
   let parsed;
   try {
     parsed = JSON.parse(bodyText);
@@ -218,6 +265,9 @@ export function signSolanaRpcBody(bodyText, secretSeedHex) {
   }
   const seed = Buffer.from(secretSeedHex, "hex");
   const signatures = [];
+  const programAllowlist = Array.isArray(constraints.programAllowlist)
+    ? constraints.programAllowlist
+    : null;
 
   const signOne = (msg) => {
     if (!msg || typeof msg !== "object" || msg.method !== "sendTransaction") return msg;
@@ -232,6 +282,13 @@ export function signSolanaRpcBody(bodyText, secretSeedHex) {
       encoding === "base64"
         ? Buffer.from(msg.params[0], "base64")
         : base58Decode(msg.params[0]);
+    if (programAllowlist) {
+      for (const pid of solanaProgramIds(txBytes)) {
+        if (!programAllowlist.includes(pid)) {
+          throw new Error(`sendTransaction: program ${pid} not in this credential's programAllowlist`);
+        }
+      }
+    }
     const { wire, signature } = signSolanaTransactionWire(txBytes, seed);
     signatures.push(signature);
     const out =

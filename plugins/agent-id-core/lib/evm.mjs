@@ -390,7 +390,7 @@ export function signEip1559Transaction(tx, privKey32) {
  *
  * Returns { body, signed, hashes }.
  */
-export function signEvmRpcBody(bodyText, privateKeyHex, credAddress) {
+export function signEvmRpcBody(bodyText, privateKeyHex, credAddress, constraints = {}) {
   let parsed;
   try {
     parsed = JSON.parse(bodyText);
@@ -403,6 +403,14 @@ export function signEvmRpcBody(bodyText, privateKeyHex, credAddress) {
   const priv = Buffer.from(privateKeyHex, "hex");
   const hashes = [];
 
+  // Optional, default-allow signing constraints from the credential record.
+  const chainIdAllowlist = Array.isArray(constraints.chainIdAllowlist)
+    ? constraints.chainIdAllowlist
+    : null;
+  const toAllowlist = Array.isArray(constraints.toAllowlist)
+    ? constraints.toAllowlist.map((a) => a.toLowerCase())
+    : null;
+
   const signOne = (msg) => {
     if (!msg || typeof msg !== "object" || msg.method !== "eth_sendTransaction") return msg;
     if (!Array.isArray(msg.params) || typeof msg.params[0] !== "object" || msg.params[0] == null) {
@@ -413,6 +421,25 @@ export function signEvmRpcBody(bodyText, privateKeyHex, credAddress) {
       throw new Error(
         `eth_sendTransaction: 'from' (${tx.from}) does not match the credential address (${credAddress})`,
       );
+    }
+    // Pin 'from' to the credential address when the agent omitted it, so the
+    // wallet actually being spent is always explicit.
+    if (!tx.from) tx.from = credAddress;
+    if (chainIdAllowlist) {
+      const chainId = Number(qty(tx.chainId, "chainId"));
+      if (!chainIdAllowlist.includes(chainId)) {
+        throw new Error(
+          `eth_sendTransaction: chainId ${chainId} not in this credential's chainIdAllowlist`,
+        );
+      }
+    }
+    if (toAllowlist) {
+      const to = tx.to == null ? "" : String(tx.to).toLowerCase();
+      if (!toAllowlist.includes(to)) {
+        throw new Error(
+          `eth_sendTransaction: recipient ${tx.to || "(contract-creation)"} not in this credential's toAllowlist`,
+        );
+      }
     }
     const { raw, hash } = signEip1559Transaction(tx, priv);
     hashes.push(hash);

@@ -45,6 +45,7 @@ import {
   removeCredential,
   serializePayload,
   touchLastUsed,
+  wipePayload,
 } from "./store.mjs";
 
 import {
@@ -334,6 +335,10 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     lock() {
       if (state !== VAULT_LOCKED) {
         state.masterKey.fill(0);
+        // Drop the decrypted credential secrets too, not just the master key —
+        // otherwise every bearer/cookie/password and wallet private key lingers
+        // in the heap past idle-lock.
+        wipePayload(state.payload);
         state = VAULT_LOCKED;
       }
     },

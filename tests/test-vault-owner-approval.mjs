@@ -320,28 +320,33 @@ function rewriteRequest({ port, cred, upstream, path: p = "/x" }) {
   });
 }
 
-function controlGet(port, p) {
+function controlGet(port, p, token) {
   return new Promise((resolve, reject) => {
     http
-      .get({ host: "127.0.0.1", port, path: p }, (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
-      })
+      .get(
+        { host: "127.0.0.1", port, path: p, headers: token ? { Authorization: `Bearer ${token}` } : {} },
+        (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
+        },
+      )
       .on("error", reject);
   });
 }
 
-function controlPost(port, p, body) {
+function controlPost(port, p, body, token) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
+    const headers = { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) };
+    if (token) headers.Authorization = `Bearer ${token}`;
     const req = http.request(
       {
         host: "127.0.0.1",
         port,
         path: p,
         method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+        headers,
       },
       (res) => {
         const chunks = [];
@@ -358,12 +363,12 @@ function controlPost(port, p, body) {
 
 // Background owner-approval approver: handles each pending unlock once by
 // driving the SSO release and posting the recovered master key.
-function startApprover({ controlPort, stateDir, ssoBaseUrl, accessToken, agentPrivateKeyPem }) {
+function startApprover({ controlPort, stateDir, ssoBaseUrl, accessToken, agentPrivateKeyPem, controlToken }) {
   const state = { stop: false, handled: 0, prompts: 0, seen: new Set() };
   (async function loop() {
     while (!state.stop) {
       try {
-        const { pending } = await controlGet(controlPort, "/pending");
+        const { pending } = await controlGet(controlPort, "/pending", controlToken);
         for (const entry of pending) {
           if (state.seen.has(entry.id)) continue;
           if (entry.action !== "unlock" || !entry.ownerApproval) continue;
@@ -380,7 +385,7 @@ function startApprover({ controlPort, stateDir, ssoBaseUrl, accessToken, agentPr
           let mk;
           try {
             mk = await recoverMasterKeyViaOwnerApproval(stateDir, secret);
-            await controlPost(controlPort, "/approve", { id: entry.id, masterKey: mk.toString("hex") });
+            await controlPost(controlPort, "/approve", { id: entry.id, masterKey: mk.toString("hex") }, controlToken);
             state.handled++;
           } finally {
             secret.fill(0);
@@ -460,6 +465,7 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         ssoBaseUrl,
         accessToken,
         agentPrivateKeyPem: keys.privateKeyPem,
+        controlToken: proxy.controlToken,
       });
 
       const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: upstream.host });
@@ -521,6 +527,7 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         ssoBaseUrl,
         accessToken,
         agentPrivateKeyPem: keys.privateKeyPem,
+        controlToken: proxy.controlToken,
       });
 
       // Simulate an idle auto-lock; the next request must re-unlock.

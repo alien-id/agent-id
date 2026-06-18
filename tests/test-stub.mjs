@@ -133,6 +133,65 @@ describe("rewriteHeaders", () => {
   });
 });
 
+describe("injection-site enforcement (stub mode)", () => {
+  const lookup = (name) => {
+    const creds = {
+      tok: { type: "bearer", value: "ghp_xxx", domains: ["api.example.com"] },
+      jar: { type: "cookie-jar", cookies: { sid: "abc" }, domains: ["api.example.com"] },
+      key: { type: "header", headerName: "X-Api-Key", value: "xyz", domains: ["api.example.com"] },
+      q: { type: "query", paramName: "k", value: "v", domains: ["api.example.com"] },
+    };
+    return creds[name] || null;
+  };
+  const opts = { lookup, host: "api.example.com" };
+
+  it("allows a bearer in the Authorization header", () => {
+    const r = rewriteHeaders({ Authorization: "AgentVault tok" }, opts);
+    assert.equal(r.headers.Authorization, "Bearer ghp_xxx");
+  });
+
+  it("refuses a bearer placed in some other (reflectable) header", () => {
+    assert.throws(
+      () => rewriteHeaders({ "X-Debug": "AgentVault tok" }, opts),
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
+    );
+  });
+
+  it("refuses a cookie-jar placed outside the Cookie header", () => {
+    assert.throws(
+      () => rewriteHeaders({ "X-Leak": "AgentVault jar" }, opts),
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
+    );
+    const ok = rewriteHeaders({ Cookie: "AgentVault jar" }, opts);
+    assert.equal(ok.headers.Cookie, "sid=abc");
+  });
+
+  it("pins a header credential to its declared headerName", () => {
+    const ok = rewriteHeaders({ "X-Api-Key": "AgentVault key" }, opts);
+    assert.equal(ok.headers["X-Api-Key"], "xyz");
+    assert.throws(
+      () => rewriteHeaders({ "X-Wrong": "AgentVault key" }, opts),
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
+    );
+  });
+
+  it("refuses a bearer smuggled into a query parameter", () => {
+    assert.throws(
+      () => rewriteUrl("http://api.example.com/x?leak=AgentVault%20tok", opts),
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
+    );
+  });
+
+  it("pins a query credential to its declared paramName", () => {
+    const ok = rewriteUrl("http://api.example.com/x?k=AgentVault%20q", opts);
+    assert.equal(new URL(ok.url).searchParams.get("k"), "v");
+    assert.throws(
+      () => rewriteUrl("http://api.example.com/x?other=AgentVault%20q", opts),
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
+    );
+  });
+});
+
 describe("rewriteUrl", () => {
   const lookup = (name) =>
     name === "key"

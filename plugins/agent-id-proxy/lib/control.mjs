@@ -19,9 +19,26 @@
 // private key, can turn that into the master key it POSTs back to /approve.
 
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 const MAX_BODY_BYTES = 256 * 1024;
+
+// Constant-time bearer-token check. /status stays open (liveness only); the
+// pending/approve/deny/register routes carry or act on credential material and
+// require the token, so a co-resident process or LAN host that can reach the
+// control port still cannot drive an approval or read pending requests.
+function tokenMatches(provided, expected) {
+  if (typeof provided !== "string" || provided.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+}
+
+function presentedToken(req) {
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (m) return m[1];
+  const hdr = req.headers["x-agentvault-control-token"];
+  return typeof hdr === "string" ? hdr : null;
+}
 
 export function approvalError(reason, status = 403) {
   const err = new Error(reason);
@@ -168,8 +185,13 @@ export function createControlServer({
   onApprove,
   onDeny,
   onRegister,
+  authToken = null,
   listen = { port: 0, host: "127.0.0.1" },
 }) {
+  // Routes that read or act on credential material require the token; /status
+  // (and GET /) are liveness-only and stay open.
+  const requireToken = (req) => !authToken || tokenMatches(presentedToken(req), authToken);
+
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://127.0.0.1");
@@ -177,6 +199,9 @@ export function createControlServer({
 
       if (route === "GET /status" || route === "GET /") {
         return sendJson(res, 200, { ok: true, ...(await getStatus()) });
+      }
+      if (!requireToken(req)) {
+        return sendJson(res, 401, { ok: false, error: "control_unauthorized" });
       }
       if (route === "GET /pending") {
         return sendJson(res, 200, { ok: true, pending: registry.list() });

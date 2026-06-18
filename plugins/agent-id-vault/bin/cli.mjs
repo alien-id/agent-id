@@ -133,6 +133,16 @@ function parseDomains(flags) {
     .filter(Boolean);
 }
 
+// Parse a comma-separated flag into a trimmed string array, or null when absent
+// (so callers can distinguish "unset" from "empty").
+function parseCsvFlag(raw) {
+  if (raw == null) return null;
+  const list = (Array.isArray(raw) ? raw : String(raw).split(","))
+    .map((s) => String(s).trim())
+    .filter(Boolean);
+  return list.length ? list : null;
+}
+
 async function openWithFlags(flags, { allowPrompt = true } = {}) {
   const stateDir = resolveStateDir(flags);
   const useAgentKey = flags["agent-key"] !== false; // `--no-agent-key` opts out
@@ -379,11 +389,19 @@ async function cmdGenerate(flags) {
       record.publicKey = publicKey;
       record.secretSeed = secretSeedHex;
       address = publicKey;
+      // Optional signing constraint: restrict which programs the key will sign for.
+      const programAllowlist = parseCsvFlag(flags["program-allowlist"]);
+      if (programAllowlist) record.programAllowlist = programAllowlist;
     } else {
       const { address: evmAddress, privateKeyHex } = generateEvmKeypair();
       record.address = evmAddress;
       record.privateKey = privateKeyHex;
       address = evmAddress;
+      // Optional signing constraints: bound chains and recipients.
+      const chainIds = parseCsvFlag(flags["chain-id-allowlist"]);
+      if (chainIds) record.chainIdAllowlist = chainIds.map((n) => Number(n));
+      const toAllowlist = parseCsvFlag(flags["to-allowlist"]);
+      if (toAllowlist) record.toAllowlist = toAllowlist;
     }
     const stored = vault.add(record);
     await vault.save();
@@ -639,6 +657,8 @@ function printHelp() {
       "              --refresh-token-file F [--scope S]   (auto-refreshes access tokens)",
       "  generate --name N --type solana-keypair|evm-keypair --domains H[,H…] [--overwrite]",
       "      creates the keypair inside the vault; prints ONLY the public address",
+      "      evm:    [--chain-id-allowlist 1,137] [--to-allowlist 0x..,0x..]",
+      "      solana: [--program-allowlist <base58>,..]   (default-allow when omitted)",
       "  show --name N    (sealed/generated secrets are redacted)",
       "  list",
       "  remove --name N",

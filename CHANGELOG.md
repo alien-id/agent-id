@@ -4,6 +4,37 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- **Control plane is no longer trusted by loopback alone.** It binds to its own
+  `--control-host` (default `127.0.0.1`, decoupled from the data-plane `--host`,
+  so `--host 0.0.0.0` no longer exposes it), and the credential-bearing routes
+  (`/pending`, `/approve`, `/deny`, `/register`) require a bearer token
+  (auto-generated, written to the `0600` proxy state file). `/status` stays open
+  for liveness. A co-resident process or LAN host can no longer drive an approval
+  or pair a rogue device.
+- **SSRF guard on upstream connections.** Link-local (incl. the
+  `169.254.169.254` cloud-metadata service), unspecified, and multicast targets
+  are always refused (`403 upstream_blocked`); `--block-private-hosts` also
+  refuses loopback/RFC1918/ULA/CGNAT. The check runs both synchronously on
+  literal-IP hosts and at connect time via a custom DNS `lookup` (closing the
+  DNS-rebinding gap), independent of the per-credential allowlist.
+- **Wallet signing constraints (optional, default-allow).** `evm-keypair`
+  records may pin a `chainIdAllowlist` and a recipient `toAllowlist`;
+  `solana-keypair` records may pin a `programAllowlist` (every instruction's
+  program id must be listed). The proxy refuses any transaction that violates a
+  set constraint before signing. EVM `from` is pinned to the credential address
+  when omitted. Set via `generate --chain-id-allowlist / --to-allowlist /
+  --program-allowlist`.
+- **Decrypted secrets dropped on lock.** Idle-lock now releases the whole
+  decrypted credential payload (every bearer/cookie/password and wallet private
+  key), not just the master key, so secrets don't linger in the heap past lock.
+- **Stub-mode injection sites are pinned.** In legacy stub mode a bearer/basic
+  stub is only materialized in `Authorization` and a cookie/cookie-jar stub only
+  in `Cookie`; `header`/`query` credentials are pinned to their declared
+  name. A stub the agent placed in some other (reflectable) header is refused,
+  closing a credential-reflection leak.
+
 ### Added
 
 - **Wallet credentials: keys born in the vault, never exported.**

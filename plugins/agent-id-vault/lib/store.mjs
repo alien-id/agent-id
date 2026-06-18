@@ -52,6 +52,44 @@ function requireNonEmpty(rec, fields) {
 
 export const UPSTREAM_SCHEMES = Object.freeze(["https", "http"]);
 
+// ─── Wallet signing-constraint validators (all optional / default-allow) ──────
+
+function validateChainIdAllowlist(rec) {
+  if (rec.chainIdAllowlist == null) return;
+  if (!Array.isArray(rec.chainIdAllowlist) || rec.chainIdAllowlist.length === 0) {
+    throw new Error(`Credential ${rec.name}: chainIdAllowlist must be a non-empty array`);
+  }
+  for (const c of rec.chainIdAllowlist) {
+    if (!Number.isInteger(c) || c <= 0) {
+      throw new Error(`Credential ${rec.name}: chainIdAllowlist entries must be positive integers`);
+    }
+  }
+}
+
+function validateToAllowlist(rec) {
+  if (rec.toAllowlist == null) return;
+  if (!Array.isArray(rec.toAllowlist) || rec.toAllowlist.length === 0) {
+    throw new Error(`Credential ${rec.name}: toAllowlist must be a non-empty array`);
+  }
+  for (const a of rec.toAllowlist) {
+    if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) {
+      throw new Error(`Credential ${rec.name}: toAllowlist entries must be 0x EVM addresses`);
+    }
+  }
+}
+
+function validateProgramAllowlist(rec) {
+  if (rec.programAllowlist == null) return;
+  if (!Array.isArray(rec.programAllowlist) || rec.programAllowlist.length === 0) {
+    throw new Error(`Credential ${rec.name}: programAllowlist must be a non-empty array`);
+  }
+  for (const p of rec.programAllowlist) {
+    if (typeof p !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(p)) {
+      throw new Error(`Credential ${rec.name}: programAllowlist entries must be base58 program ids`);
+    }
+  }
+}
+
 export function validateRecord(rec) {
   if (!rec || typeof rec !== "object") {
     throw new Error("Record must be an object");
@@ -143,6 +181,9 @@ export function validateRecord(rec) {
       if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(rec.publicKey)) {
         throw new Error(`Credential ${rec.name}: publicKey must be a base58 Solana address`);
       }
+      // Optional signing constraint: every instruction's program must be on this
+      // allowlist (e.g. restrict to the System Program for transfers only).
+      validateProgramAllowlist(rec);
       break;
     }
     case "evm-keypair": {
@@ -156,6 +197,10 @@ export function validateRecord(rec) {
       if (!/^0x[0-9a-fA-F]{40}$/.test(rec.address)) {
         throw new Error(`Credential ${rec.name}: address must be a 0x-prefixed EVM address`);
       }
+      // Optional signing constraints (default-allow when absent): bound which
+      // chains and recipients the in-vault key will sign for.
+      validateChainIdAllowlist(rec);
+      validateToAllowlist(rec);
       break;
     }
   }
@@ -229,6 +274,45 @@ export function listMetadata(payload) {
 export function touchLastUsed(payload, name) {
   const rec = getCredential(payload, name);
   if (rec) rec.lastUsedAt = nowMs();
+}
+
+// Every per-type field that holds secret material. Used to scrub the decrypted
+// payload when the vault locks.
+const SENSITIVE_FIELDS = Object.freeze([
+  "value", // bearer / header / query / cookie
+  "username",
+  "password", // basic
+  "secret", // totp
+  "cookies", // cookie-jar (object of name → value)
+  "refreshToken",
+  "clientSecret",
+  "accessToken", // oauth2
+  "secretSeed", // solana-keypair
+  "privateKey", // evm-keypair
+]);
+
+// Best-effort scrub of decrypted secret material when the vault locks. JS
+// strings are immutable and cannot be overwritten in place, so the strongest
+// achievable guarantee is to drop every reference (Buffers are zero-filled) so
+// the values become GC-eligible immediately instead of lingering in the live
+// object graph (and any later heap dump / core file) until the next GC.
+export function wipePayload(payload) {
+  if (!payload || !Array.isArray(payload.credentials)) return;
+  for (const cred of payload.credentials) {
+    if (!cred || typeof cred !== "object") continue;
+    for (const f of SENSITIVE_FIELDS) {
+      const v = cred[f];
+      if (Buffer.isBuffer(v)) v.fill(0);
+      // Drop the vault's reference to the secret (string or nested object) so it
+      // becomes GC-eligible. We deliberately do NOT recurse into nested objects
+      // to delete their keys: a record's object fields (e.g. a cookie-jar's
+      // `cookies`) may be aliased by the caller that supplied them via
+      // vault.add(), and the vault must not destroy objects it doesn't
+      // exclusively own. Releasing the reference is the achievable guarantee.
+      if (f in cred) delete cred[f];
+    }
+  }
+  payload.credentials.length = 0;
 }
 
 // ─── Domain allowlist matching ──────────────────────────────────────────────────

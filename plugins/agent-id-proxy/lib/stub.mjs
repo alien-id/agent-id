@@ -63,6 +63,49 @@ export function materializeCredential(cred) {
   }
 }
 
+// Canonical injection site per credential type. High-value secrets (bearer,
+// basic, cookie, cookie-jar) are pinned to the header that legitimately carries
+// them, so a stub the agent placed in some other, reflected header (e.g.
+// `X-Debug: AgentVault tok`) is refused rather than materialized and echoed back
+// to the agent. `header`/`query` stay flexible (their placement is
+// service-specific by design); when the record names a headerName/paramName,
+// that exact name is enforced. `totp` has no canonical site.
+//
+// `location` is { kind: "header"|"query", name } and is optional: low-level
+// callers (and the unit tests) that pass no location opt out of the check.
+function assertInjectionSite(cred, name, location) {
+  if (!location) return;
+  const here = `${location.kind}:${location.name}`.toLowerCase();
+  const deny = (expected) => {
+    throw new StubError(
+      "injection_site_not_allowed",
+      `Credential ${name} (${cred.type}) may not be injected at ${location.kind} '${location.name}' (expected ${expected})`,
+      { credential: name, site: here, expected },
+    );
+  };
+  switch (cred.type) {
+    case "bearer":
+    case "basic":
+      if (here !== "header:authorization") deny("header:authorization");
+      break;
+    case "cookie":
+    case "cookie-jar":
+      if (here !== "header:cookie") deny("header:cookie");
+      break;
+    case "header":
+      if (location.kind !== "header") deny("a request header");
+      if (cred.headerName && location.name.toLowerCase() !== cred.headerName.toLowerCase()) {
+        deny(`header:${cred.headerName.toLowerCase()}`);
+      }
+      break;
+    case "query":
+      if (location.kind !== "query") deny("a query parameter");
+      if (cred.paramName && location.name !== cred.paramName) deny(`query:${cred.paramName}`);
+      break;
+    // totp: agent-placed, service-specific — no canonical site to enforce.
+  }
+}
+
 export function findStubsInString(s) {
   if (typeof s !== "string") return [];
   const out = [];
@@ -88,7 +131,7 @@ export function hasStub(s) {
  * `encode` is applied to each materialized replacement (e.g. encodeURIComponent
  * for query-string substitutions).
  */
-export function replaceStubs(s, { lookup, host, encode = (v) => v }) {
+export function replaceStubs(s, { lookup, host, encode = (v) => v, location = null }) {
   if (!hasStub(s)) return { value: s, used: [] };
   const used = [];
   const replaced = s.replace(STUB_RE, (_full, name) => {
@@ -107,6 +150,7 @@ export function replaceStubs(s, { lookup, host, encode = (v) => v }) {
         { credential: name, host, allowed: cred.domains },
       );
     }
+    assertInjectionSite(cred, name, location);
     used.push({ name, type: cred.type });
     return encode(materializeCredential(cred));
   });
@@ -125,7 +169,7 @@ export function rewriteUrl(rawUrl, { lookup, host }) {
   for (const [k, v] of url.searchParams.entries()) {
     if (hasStub(v)) {
       touched = true;
-      const result = replaceStubs(v, { lookup, host });
+      const result = replaceStubs(v, { lookup, host, location: { kind: "query", name: k } });
       newParams.append(k, result.value);
       used = used.concat(result.used);
     } else {
@@ -150,7 +194,7 @@ export function rewriteHeaders(headers, { lookup, host }) {
       out[k] = v;
       continue;
     }
-    const result = replaceStubs(v, { lookup, host });
+    const result = replaceStubs(v, { lookup, host, location: { kind: "header", name: k } });
     out[k] = result.value;
     used = used.concat(result.used);
   }

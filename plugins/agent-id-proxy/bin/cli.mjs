@@ -141,18 +141,22 @@ async function clearProxyState(paths) {
 // on their Alien app), recover the master key from the released KEK, and POST it
 // to our own control plane's /approve.
 
-function controlJson(host, port, method, p, body) {
+function controlJson(host, port, method, p, body, token = null) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
+    const headers = {};
+    if (payload) {
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = Buffer.byteLength(payload);
+    }
+    if (token) headers["Authorization"] = `Bearer ${token}`;
     const req = http.request(
       {
         host,
         port,
         path: p,
         method,
-        headers: payload
-          ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
-          : {},
+        headers,
       },
       (res) => {
         const chunks = [];
@@ -173,7 +177,7 @@ function controlJson(host, port, method, p, body) {
 
 // Returns a { stop() } handle, or null when there's nothing to drive (no
 // owner-approval slot, or no agent key on disk).
-async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort }) {
+async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort, controlToken = null }) {
   const challenge = await readOwnerApprovalChallenge(stateDir);
   if (!challenge) return null;
 
@@ -187,7 +191,7 @@ async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort }
   (async function loop() {
     while (!state.stop) {
       try {
-        const { pending } = await controlJson(host, controlPort, "GET", "/pending");
+        const { pending } = await controlJson(host, controlPort, "GET", "/pending", null, controlToken);
         for (const entry of pending || []) {
           if (state.seen.has(entry.id)) continue;
           if (entry.action !== "unlock" || !entry.ownerApproval) continue;
@@ -203,7 +207,7 @@ async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort }
               await controlJson(host, controlPort, "POST", "/deny", {
                 id: entry.id,
                 reason: "no_owner_session",
-              });
+              }, controlToken);
             } catch {
               /* best effort */
             }
@@ -223,7 +227,7 @@ async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort }
               await controlJson(host, controlPort, "POST", "/deny", {
                 id: entry.id,
                 reason: "no_sso_url",
-              });
+              }, controlToken);
             } catch {
               /* best effort */
             }
@@ -258,14 +262,14 @@ async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort }
             await controlJson(host, controlPort, "POST", "/approve", {
               id: entry.id,
               masterKey: mk.toString("hex"),
-            });
+            }, controlToken);
           } catch (err) {
             stderr(`Owner-approval unlock failed: ${err.message}`);
             try {
               await controlJson(host, controlPort, "POST", "/deny", {
                 id: entry.id,
                 reason: "owner_approval_failed",
-              });
+              }, controlToken);
             } catch {
               /* best effort */
             }
@@ -327,11 +331,20 @@ async function cmdStart(flags) {
       ? parseDuration(flags["idle-timeout"])
       : DEFAULT_IDLE_TIMEOUT_MS;
 
+  // The control plane binds to its OWN host, defaulting to loopback — it is NOT
+  // tied to the data plane's --host. Exposing it to the LAN (so a phone can
+  // reach it) is an explicit --control-host choice, and the bearer token still
+  // gates every credential-bearing route.
+  const controlHost = String(
+    flags["control-host"] || process.env.AGENT_ID_CONTROL_HOST || "127.0.0.1",
+  );
+  const controlIsLoopback =
+    controlHost === "127.0.0.1" || controlHost === "::1" || controlHost === "localhost";
   const control = controlEnabled
     ? {
         listen: {
           port: Number(flags["control-port"] || process.env.AGENT_ID_CONTROL_PORT || 48772),
-          host,
+          host: controlHost,
         },
         approvalTimeoutMs:
           flags["approval-timeout"] != null
@@ -352,6 +365,7 @@ async function cmdStart(flags) {
     control,
     requireConsent,
     grantTtlMs,
+    blockPrivateHosts: !!flags["block-private-hosts"],
     onLock: (reason) => {
       if (controlEnabled) {
         stderr(`Vault locked (${reason}). Next request will ask for an unlock approval.`);
@@ -363,12 +377,15 @@ async function cmdStart(flags) {
   });
   const addr = await proxy.listen();
   const controlAddr = proxy.controlAddress;
+  // The control token is written to the 0600 proxy state file so same-user
+  // tooling (and external approvers) can present it; it never goes to stdout.
   await writeProxyState(paths, {
     pid: process.pid,
     host: addr.host,
     port: addr.port,
     controlHost: controlAddr ? controlAddr.host : null,
     controlPort: controlAddr ? controlAddr.port : null,
+    controlToken: proxy.controlToken || null,
     startedAt: Date.now(),
     idleTimeoutMs: Number.isFinite(idleTimeoutMs) ? idleTimeoutMs : null,
     requireConsent,
@@ -384,6 +401,7 @@ async function cmdStart(flags) {
       stateDir,
       controlHost: controlAddr.host,
       controlPort: controlAddr.port,
+      controlToken: proxy.controlToken,
     });
   }
 
@@ -392,6 +410,12 @@ async function cmdStart(flags) {
   if (controlAddr) {
     const how = approver ? "phone or owner approvals" : "phone approvals";
     stderr(`Control plane: http://${controlAddr.host}:${controlAddr.port} (${how})`);
+    if (!controlIsLoopback) {
+      stderr(
+        `  ⚠ control plane bound to non-loopback ${controlHost} — reachable on the network; ` +
+          "the control token in the proxy state file is the only gate.",
+      );
+    }
   }
   stderr(`Vault: ${paths.vaultFile}${awaitMobile ? " (locked — awaiting phone unlock)" : ""}`);
   stderr(`Log:   ${paths.proxyLog}`);
@@ -487,8 +511,9 @@ function printHelp() {
       "Subcommands:",
       "  start [--port N] [--host H] [--passphrase-file F | --passphrase-env V]",
       "        [--no-agent-key] [--idle-timeout 12h|30m|never]",
-      "        [--no-control] [--control-port N] [--await-mobile]",
+      "        [--no-control] [--control-port N] [--control-host H] [--await-mobile]",
       "        [--require-consent] [--approval-timeout 2m] [--grant-ttl 1h]",
+      "        [--block-private-hosts]",
       "  status",
       "  stop",
       "",
@@ -497,13 +522,19 @@ function printHelp() {
       "Idle lock: master key zeroed after `--idle-timeout` (default 12h). With the",
       "  control plane on (default), the next request re-unlocks via a phone approval;",
       "  otherwise restart the proxy. Use --idle-timeout never to disable.",
-      "Control plane (default port 48772): the phone polls /pending and POSTs",
-      "  /approve | /deny. --await-mobile starts locked so the first request prompts",
+      "Control plane (default 127.0.0.1:48772, loopback only — NOT the data-plane",
+      "  --host): the phone polls /pending and POSTs /approve | /deny. Those routes",
+      "  (and /register) require a bearer token (auto-generated, written to the 0600",
+      "  proxy state file); /status is open for liveness. Use --control-host to expose",
+      "  it to a LAN phone. --await-mobile starts locked so the first request prompts",
       "  for an unlock. --require-consent prompts per (cred,host).",
       "  Unlock methods: pair a device with",
       "    `agent-id-vault rekey add-mobile --device-pubkey HEX`, or add an SSO",
       "    owner-approval slot with `agent-id-vault rekey add-owner-approval`",
       "    (the proxy then drives owner approvals itself — no phone app needed).",
+      "SSRF guard: link-local (incl. 169.254.169.254 cloud metadata), unspecified,",
+      "  and multicast upstreams are always refused (403 upstream_blocked).",
+      "  --block-private-hosts also refuses loopback/RFC1918/ULA targets.",
       "v1: HTTP only. HTTPS is CONNECT-tunneled without injection — TLS MITM is the next spike.",
     ].join("\n"),
   );

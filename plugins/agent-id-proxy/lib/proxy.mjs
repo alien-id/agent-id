@@ -20,6 +20,7 @@
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
+import { randomBytes } from "node:crypto";
 import { URL } from "node:url";
 
 import { rewriteHeaders, rewriteUrl, StubError } from "./stub.mjs";
@@ -36,6 +37,7 @@ import {
   createPendingRegistry,
 } from "./control.mjs";
 import { OAuthError, refreshAccessToken } from "./oauth.mjs";
+import { blockedAddressReason, makeUpstreamLookup } from "./ssrf.mjs";
 import { signSolanaRpcBody } from "../../agent-id-core/lib/solana.mjs";
 import { signEvmRpcBody } from "../../agent-id-core/lib/evm.mjs";
 import {
@@ -125,6 +127,10 @@ export function createProxy({
   control = null,
   // Per-credential consent: prompt on first use of a (credential, host) pair.
   requireConsent = false,
+  // SSRF guard: link-local (incl. cloud metadata), unspecified, and multicast
+  // upstream addresses are always refused. Set true to additionally refuse all
+  // loopback/RFC1918/ULA/CGNAT targets.
+  blockPrivateHosts = false,
   // How long an approved (credential, host) grant stays valid. Infinity = for
   // the life of the process.
   grantTtlMs = 60 * 60 * 1000,
@@ -133,6 +139,13 @@ export function createProxy({
   if (controlEnabled && !stateDir) {
     throw new Error("createProxy: control plane requires `stateDir` to unlock the vault");
   }
+  // Bearer token gating the control plane's credential-bearing routes (pending /
+  // approve / deny / register). Auto-generated unless the caller supplies one;
+  // exposed as `proxy.controlToken` so the local approver and the pairing flow
+  // can present it. Loopback is no longer the sole trust boundary.
+  const controlToken = controlEnabled
+    ? control.authToken || randomBytes(32).toString("base64url")
+    : null;
 
   // Mutable state — vault gets nulled on idle lock; the request handler
   // checks `locked` first and refuses with 401 (or, when the control plane is
@@ -162,6 +175,9 @@ export function createProxy({
   const registry = controlEnabled
     ? createPendingRegistry({ now, timeoutMs: control.approvalTimeoutMs })
     : null;
+
+  // Connect-time SSRF guard for every upstream request (both modes).
+  const upstreamLookup = makeUpstreamLookup({ blockPrivate: blockPrivateHosts });
 
   function touchActivity() {
     state.lastRequestAt = now();
@@ -461,6 +477,30 @@ export function createProxy({
   }) {
     let bytesIn = 0;
     let bytesOut = 0;
+
+    // SSRF guard, layer 1: a literal-IP upstream is checked synchronously, since
+    // Node skips `lookup` for IP literals (so the connect-time guard below only
+    // covers hostnames / DNS rebinding). 169.254.169.254 et al. are refused here.
+    const literalBlock = blockedAddressReason(upstreamHostname, {
+      blockPrivate: blockPrivateHosts,
+    });
+    if (literalBlock) {
+      structuredError(res, 403, {
+        error: "upstream_blocked",
+        message: `blocked upstream address: ${upstreamHostname} (${literalBlock})`,
+      });
+      logAccess({
+        method: req.method,
+        host: logHost,
+        path: logPath,
+        status: 403,
+        credentials: credentialNames,
+        durationMs: Date.now() - start,
+        error: "upstream_blocked",
+      });
+      return;
+    }
+
     const client = upstreamScheme === "https" ? https : http;
     const port = upstreamPort || (upstreamScheme === "https" ? 443 : 80);
 
@@ -476,11 +516,18 @@ export function createProxy({
       method: req.method,
       path: upstreamPath,
       headers: finalHeaders,
+      lookup: upstreamLookup,
     });
 
     upstreamReq.on("error", (err) => {
+      // SSRF guard rejected the resolved address → 403, not a generic 502.
+      const blocked = err.code === "ESSRFBLOCKED";
       if (!res.headersSent) {
-        structuredError(res, 502, { error: "upstream_error", message: err.message });
+        if (blocked) {
+          structuredError(res, 403, { error: "upstream_blocked", message: err.message });
+        } else {
+          structuredError(res, 502, { error: "upstream_error", message: err.message });
+        }
       } else {
         res.destroy();
       }
@@ -581,10 +628,15 @@ export function createProxy({
         let event;
         try {
           if (cred.type === "solana-keypair") {
-            result = signSolanaRpcBody(raw.toString("utf8"), cred.secretSeed);
+            result = signSolanaRpcBody(raw.toString("utf8"), cred.secretSeed, {
+              programAllowlist: cred.programAllowlist,
+            });
             event = { event: "solana_signed", signatures: result.signatures };
           } else {
-            result = signEvmRpcBody(raw.toString("utf8"), cred.privateKey, cred.address);
+            result = signEvmRpcBody(raw.toString("utf8"), cred.privateKey, cred.address, {
+              chainIdAllowlist: cred.chainIdAllowlist,
+              toAllowlist: cred.toAllowlist,
+            });
             event = { event: "evm_signed", txHashes: result.hashes };
           }
         } catch (err) {
@@ -832,6 +884,7 @@ export function createProxy({
       onApprove,
       onDeny,
       onRegister,
+      authToken: controlToken,
       listen: control.listen || { port: 0, host: "127.0.0.1" },
     });
   }
@@ -866,6 +919,9 @@ export function createProxy({
     },
     get controlAddress() {
       return controlAddr;
+    },
+    get controlToken() {
+      return controlToken;
     },
     get pendingCount() {
       return registry ? registry.list().length : 0;
