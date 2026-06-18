@@ -1,0 +1,20 @@
+{
+  "name": "agent-id-proxy",
+  "version": "0.2.0",
+  "description": "Local credential-injecting HTTP proxy. Agent calls http://<proxy>/<credname>/<upstream-host>/<path>; proxy materializes the credential by type, validates the host allowlist, and forwards over real HTTPS. Universal across services without TLS interception.",
+  "keywords": [
+    "credential-injection",
+    "proxy",
+    "agent-identity"
+  ],
+  "dependencies": [
+    {
+      "name": "agent-id-core",
+      "version": "^4.0.0"
+    },
+    {
+      "name": "agent-id-vault",
+      "version": "^5.0.0"
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 {
   "name": "agent-id-vault",
-  "version": "4.0.0",
-  "description": "Encrypted credential vault keyed off the agent's private key. Store, retrieve, list, and remove external-service credentials.",
+  "version": "5.0.0",
+  "description": "Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key + phone/owner-approval) and typed/domain-scoped credential records.",
   "keywords": [
     "credential-vault",
     "agent-identity"

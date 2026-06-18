@@ -49,8 +49,28 @@ All notable changes are documented here.
   only. Enables long-lived access to OAuth services (e.g. Gmail) without
   the agent ever seeing a token.
 - **New vault subcommands.** `init`, `add`, `show`, `list`, `remove`,
-  `rekey add-passphrase | add-agent-key | remove-slot`, `export`,
-  `import`, `migrate`.
+  `rekey add-passphrase | add-agent-key | add-mobile | add-owner-approval |
+  remove-slot`, `export`, `import`, `migrate`.
+- **Phone- and owner-approval unlock + per-credential consent (control
+  plane).** A locked vault re-unlocks on demand without restarting the
+  proxy. Two unlock methods: a `mobile` slot (the phone unseals an ECDH
+  sealed box and POSTs the master key — the private key never leaves the
+  Secure Enclave) and an `owner-approval` slot (a random KEK escrowed with
+  the Alien SSO, released only after the owner approves; every call is
+  DPoP-bound and access-token-bound, and the KEK is single-use). For an
+  owner-approval vault the proxy drives the approval itself — no phone app.
+  `--require-consent` adds a per-`(credential, host)` prompt on first use,
+  cached for `--grant-ttl`. Enrolled with `rekey add-mobile` /
+  `rekey add-owner-approval`.
+- **Gmail onboarding without Google Cloud Console.**
+  `examples/gmail-cookie-bootstrap.mjs` captures the owner's existing Gmail
+  web session (Firefox `cookies.sqlite`, or Chrome over the DevTools
+  Protocol) into a `cookie-jar` credential; the agent then reads the
+  cookie-authed Atom feed (`mail.google.com/mail/u/0/feed/atom`) through the
+  proxy. `examples/gmail-login-bootstrap.mjs` is the durable alternative — a
+  one-time PKCE OAuth flow that stores a refresh token. Both hand the secret
+  to the vault via a `0600` temp file that is removed on exit (incl. Ctrl-C);
+  nothing sensitive is printed.
 - **Clean-room demo + consumer skill** (`examples/clean-room-demo/`). A
   drop-in `alien-vault` agent skill: starts the proxy if needed, calls
   `http://<proxy>/<cred>/<host>/<path>`, and walks the phone-approved
@@ -87,11 +107,9 @@ All notable changes are documented here.
 - **TLS interception for HTTP_PROXY mode.** Mode 2 (stub injection)
   works for plain HTTP upstream only. Mode 1 (URL-rewrite) covers
   HTTPS upstream without requiring TLS interception.
-- **Consent prompts.** Per-credential confirmation on first use is
-  deferred; the host allowlist is the only authorization gate in v1.
-- **In-process re-unlock.** Restart the proxy to re-unlock after
-  idle lock. A control-socket `unlock` subcommand is the natural
-  follow-up.
+- **TLS interception for HTTP_PROXY mode** remains deferred (URL-rewrite
+  mode covers HTTPS upstream without it). Consent prompts and in-process
+  re-unlock, previously deferred, shipped this cycle (see above).
 
 ### Migration
 
