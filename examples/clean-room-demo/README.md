@@ -35,7 +35,7 @@ is what teaches an agent to use them.
    **Option A — capture your browser session (no Cloud Console).** The
    [`gmail-cookie-bootstrap.mjs`](../gmail-cookie-bootstrap.mjs) script captures
    your Gmail web session's cookies into a `cookie-jar` credential via a `0600`
-   temp file that's shredded immediately. Nothing from Google Cloud Console is
+   temp file that's removed on exit (including on Ctrl-C). Nothing from Google Cloud Console is
    needed; the agent reads the cookie-authed **Gmail Atom feed** through the
    proxy. Two modes (it auto-picks Firefox if a profile is found):
 
@@ -66,7 +66,7 @@ is what teaches an agent to use them.
    (reusing your existing Google session — you just click **Allow**), captures
    the grant on `http://127.0.0.1:<port>`, exchanges it for a long-lived
    **refresh token**, and pipes that token straight into an `oauth2` credential
-   via a `0600` temp file that's shredded immediately.
+   via a `0600` temp file that's removed on exit (including on Ctrl-C).
 
    ```bash
    node <AGENT_ID_REPO>/examples/gmail-login-bootstrap.mjs \
@@ -83,9 +83,23 @@ is what teaches an agent to use them.
    and set the consent screen to **In production** so the refresh token doesn't
    expire after 7 days.
 
-3. **Pair a phone** — the Alien vault-approver app self-registers over the
-   control plane while the proxy is unlocked (or use
-   `agent-id-vault rekey add-mobile --device-pubkey <hex>`).
+3. **Add an unlock method** so a locked vault can be re-opened on demand:
+
+   - **Owner-approval (recommended).** The proxy drives the approval through the
+     Alien SSO over TLS — your phone (on any network, even cellular) approves in
+     the Alien app, and the master key never crosses a link. Needs an owner
+     session (`agent-id-core auth`), then:
+     ```bash
+     agent-id-vault rekey add-owner-approval --state-dir <VAULT_DIR>
+     ```
+     (Today the SSO escrow contract is implemented only by `examples/dev-sso.mjs`;
+     production use waits on the Alien SSO shipping it.)
+   - **Mobile slot (same machine / trusted LAN only).** A phone unseals the
+     master key and POSTs it to the control plane. That POST is plain HTTP, so a
+     *separate* phone means binding the control plane to the LAN and sending the
+     master key in cleartext — fine for a same-host approver or a trusted-LAN
+     demo, not the open network. Pair with `agent-id-proxy pair` (shows a QR) or
+     `agent-id-vault rekey add-mobile --device-pubkey <hex>`.
 
 4. **Install the skill** into the demo project:
 
@@ -106,7 +120,8 @@ Then tell the agent: **"Read my latest Gmail."**
 
 1. The agent invokes the skill, finds the proxy down, and **starts it** (locked).
 2. It calls the proxy; the request **parks** — the vault is locked.
-3. Your phone shows the approval → **slide to unlock**.
+3. You **approve in the Alien app** (owner-approval: the proxy drives the SSO and
+   you tap Approve; or, for a mobile slot, your phone slides to unlock).
 4. The request completes; the agent prints your inbox. No secret ever entered the
    agent's context, transcript, or prompt cache — it only ever typed `gmail`.
 

@@ -96,12 +96,20 @@ One file at `~/.agent-id/vault.enc`. LUKS-style: a random master key encrypts th
 |   KEK = HKDF-SHA256(agent_ed25519_sk, salt)       |
 |   wrapped_mk = AES-256-GCM(KEK, master_key)       |
 +---------------------------------------------------+
-| slot 2..N  reserved for future KDFs (Argon2id,    |
-|            hardware-backed, recovery)             |
+| slot 2  type=mobile     (phone-approved unlock)   |
+|   KEK = HKDF(ECDH(ephemeral, device_enclave_pk))  |
+|   wrapped_mk = AES-256-GCM(KEK, master_key)       |
++---------------------------------------------------+
+| slot 3  type=owner-approval (SSO-escrowed unlock) |
+|   KEK = random 32 bytes, escrowed with the SSO    |
+|   (slot stores only an opaque keyRef, never KEK)  |
+|   wrapped_mk = AES-256-GCM(KEK, master_key)       |
 +---------------------------------------------------+
 | payload: AES-256-GCM(master_key, credentials.json)|
 +---------------------------------------------------+
 ```
+
+Slots 0–1 are **startup** unlock (below); slots 2–3 are **re-unlock-while-running** approvals driven over the control plane ([Re-unlock without restart](#re-unlock-without-restart-the-control-plane)).
 
 ### Two unlock paths
 
@@ -278,7 +286,7 @@ New code should prefer Mode 1. Mode 2 stays for backward compatibility.
 
 ## Idle auto-lock
 
-After `--idle-timeout` (default **12 h**, 1Password parity) of no traffic, the proxy zeroes the master key + drops decrypted credential records from process memory. Subsequent requests return `401 {error: "vault_locked", reason: "idle_timeout"}`. The proxy must be restarted to re-unlock:
+After `--idle-timeout` (default **12 h**, 1Password parity) of no traffic, the proxy zeroes the master key **and the whole decrypted credential payload** (every bearer/cookie/password and wallet private key) from process memory. A subsequent request to a locked vault doesn't hard-fail: if the vault carries a re-unlock slot (mobile or owner-approval) and the control plane is on, the request **parks** and an approval re-unlocks it without restarting (see the next section). With no re-unlock slot it returns `401 {error: "vault_locked"}` and the proxy must be restarted:
 
 ```bash
 agent-id-proxy stop && agent-id-proxy start --passphrase-file ~/.agent-id-pass
@@ -293,7 +301,61 @@ agent-id-proxy start --idle-timeout never     # disable, for unattended agents
 
 `agent-id-proxy status` reports the configured `idleTimeout`.
 
-In-process re-unlock (`agent-id-proxy unlock` via a control socket) is the natural follow-up.
+---
+
+## Re-unlock without restart: the control plane
+
+When the vault is locked — after idle-lock, or when started locked with `--await-mobile` — a request doesn't fail. The proxy **parks** it and asks for an approval over a second listener, the **control plane** (default `127.0.0.1:48772`). Two slot types can satisfy the approval: a **mobile** slot (a phone's Secure-Enclave key) or an **owner-approval** slot (a KEK escrowed with the Alien SSO). In both cases the approver POSTs the recovered master key to `/approve` and the parked request completes.
+
+### Control-plane security
+
+- **Loopback by default.** The control plane binds to `--control-host` (default `127.0.0.1`), independent of the data-plane `--host` — so `--host 0.0.0.0` does **not** expose it.
+- **Token-gated.** `/pending`, `/approve`, `/deny`, `/register` require a bearer token (auto-generated at start, written to the `0600` proxy state file). `/status` stays open for liveness. A co-resident process or LAN host cannot drive an approval or pair a device without the token.
+
+### Owner-approval slot — recommended for a separate approver
+
+The master key is wrapped by a random 32-byte KEK that is **escrowed with the Alien SSO**; the vault file stores only an opaque `keyRef`, never the KEK. A stolen `vault.enc` is therefore inert — the only thing that can unwrap the slot lives behind an owner approval at the SSO. The KEK is released **once per approval**, bound to the owner and the enrolling agent key.
+
+**Enroll once** (needs an owner session from `agent-id-core auth`):
+
+```bash
+agent-id-vault rekey add-owner-approval
+# mint KEK → POST /vault/enroll (DPoP + owner-token bound) → SSO returns keyRef
+# → wrap the master key with the KEK, store the slot → zero the KEK locally
+```
+
+**Unlock at runtime** — the proxy drives it itself; no phone app runs on the proxy host:
+
+```
+agent     → locked proxy             request parks
+proxy     → control /pending         surfaces the owner-approval keyRef (no secret)
+approver  → SSO /vault/unlock/start  (DPoP + access-token bound)
+              SSO checks jkt+sub match the enrolled keyRef, PUSHES a prompt to the
+              owner's Alien app, returns { polling_code, deep_link }
+owner taps Approve in the Alien app
+approver  → SSO /vault/unlock/poll   → status "authorized" → one-time KEK  (over TLS)
+approver  unwraps the slot locally → master key → POST 127.0.0.1/approve
+agent     ← 200                       parked request completes
+```
+
+Why this is the sound separate-device path:
+
+- **No phone↔proxy link.** The phone talks to the SSO; the proxy talks to the SSO. They need not share a network — the phone can be on cellular.
+- **No master key on the network.** The SSO releases a *KEK* over **TLS** (`assertTransportSafe` enforces https; loopback exempt for dev). The proxy unwraps the slot itself, so the master key crosses only **loopback inside the proxy process**.
+- **Bound + replay-resistant.** Every SSO call carries a single-use DPoP proof (`jti` cache) plus the owner access token; the SSO binds the `keyRef` to the enrolling agent key — a foreign key gets `403`, an unknown `keyRef` `404`. The approver pins the SSO URL to the locally-trusted owner session, never the slot's cleartext field, so a tampered vault can't redirect the owner's access token.
+
+**Status / caveat.** The escrow contract (`/vault/enroll`, `/vault/unlock/{start,poll}`) and the human push are implemented in this repo **only by `examples/dev-sso.mjs`, which auto-approves** (no human, no real app) for the tests. The client half — slot crypto, the DPoP-bound SSO client, and the proxy wiring — is real and tested; real-world use depends on the production Alien SSO shipping these endpoints plus the app-side approval.
+
+### Mobile slot — same machine, or a trusted LAN only
+
+A `mobile` slot seals the master key to a phone's P-256 Secure-Enclave key (ephemeral ECDH + HKDF). To unlock, the phone recomputes the shared secret, unseals the master key, and POSTs it back to `/approve`.
+
+**Transport caveat — read before exposing it.** The control plane is plain **HTTP**, and the phone POSTs the **unsealed master key** over it. On `127.0.0.1` that's fine (a local approver process). But a *separate* phone requires binding the listener to a network address (`--control-host <lan-ip>`), which puts the **master key and the token in cleartext on that network** — a same-subnet sniffer captures the master key and compromises the whole vault. So the mobile slot is appropriate only for:
+
+- a **same-machine / loopback** approver, or
+- a **trusted-LAN demo** where you knowingly accept the cleartext tradeoff.
+
+For a real separate-device, human-in-the-loop unlock, use **owner-approval** instead — it relays through the SSO over TLS and never puts the master key on the wire. The `agent-id-proxy pair` command (a QR / `alien-vault://pair` deep-link carrying the control URL + token) exists for the trusted-LAN case; it refuses to print a loopback URL, but it does **not** make the transport confidential — that's the reason owner-approval is preferred.
 
 ---
 
@@ -308,6 +370,9 @@ In-process re-unlock (`agent-id-proxy unlock` via a control socket) is the natur
 | Has the upstream URL the agent typed | Sees the upstream hostname (also visible in DNS / TLS SNI / access logs anyway). |
 | On-path network attacker between proxy and upstream | Bounded by upstream's TLS — the proxy verifies the upstream cert against the system CA bundle. |
 | On-path attacker between agent and proxy | Plain HTTP on `127.0.0.1` loopback. Same-host non-root user processes are the realistic concern; mitigation is OS file/socket perms. |
+| Reach the control plane (local process or LAN host) | Mutating routes require the bearer token; loopback-bound by default. **But** if the operator exposes it (`--control-host <lan>`) for a mobile phone, the mobile flow's master key + token travel in cleartext — use owner-approval (SSO/TLS) for separate-device unlock. |
+| Drive the agent to hit an internal/metadata host | SSRF guard refuses link-local (incl. `169.254.169.254`), unspecified, and multicast upstreams; `--block-private-hosts` adds loopback/RFC1918. Independent of the per-credential allowlist. |
+| Get the wallet key to sign an arbitrary tx | Bounded by the credential's RPC-host allowlist, plus optional `chainIdAllowlist` / `toAllowlist` (EVM) and `programAllowlist` (Solana) enforced before signing. |
 | Steal proxy CA private key | Not applicable. **There is no CA**, because we use URL-rewrite instead of TLS interception. |
 
 ---
@@ -315,9 +380,9 @@ In-process re-unlock (`agent-id-proxy unlock` via a control socket) is the natur
 ## Operational scope and explicit non-goals (v1)
 
 - **Inbound TLS interception is out of scope.** The proposal sketched a local-CA + system-trust-store install for full HTTPS_PROXY transparency. Shipping URL-rewrite mode eliminates the need: HTTPS upstream coverage without the CA-management blast radius. If/when transparent HTTPS_PROXY semantics become a hard customer ask, the spike is documented in the proposal.
-- **No consent prompts.** Host allowlist is the only authorization gate in v1. Per-credential "agent X wants to use Y for Z" prompts on first use are a planned follow-up.
-- **No in-process re-unlock.** Restart the proxy after idle lock. A control-socket `unlock` subcommand is the natural follow-up.
-- **No browser proxying / form login / cookie auto-refresh.** Cookie-jar credentials can be imported and used, but expired-session re-login is the user's job.
+- **Mobile-slot transport is not confidential over a network.** The control plane is plain HTTP and the phone POSTs the master key; over a LAN that's cleartext. Mobile is loopback / trusted-LAN only — owner-approval (SSO/TLS relay) is the separate-device path. Routing mobile approvals through the SSO relay (so the master key never crosses any link) is the follow-up.
+- **Owner-approval depends on the SSO.** Only `examples/dev-sso.mjs` (auto-approving) implements the escrow + human-push contract today; production use waits on the Alien SSO.
+- **No browser proxying / form login / cookie auto-refresh.** Cookie-jar credentials can be imported and used, but expired-session re-login is the user's job. (Wallet recipient/program allowlists and per-credential consent are now available; see the records and control-plane sections.)
 - **POSIX trusted-input only.** Windows `CONIN$` direct open is not implemented in v1.
 
 ---
@@ -329,7 +394,7 @@ In-process re-unlock (`agent-id-proxy unlock` via a control socket) is the natur
 ├── keys/main.json           # Ed25519 agent keypair (mode 0600)
 ├── vault.enc                # Portable encrypted vault (mode 0600)
 ├── vault.bak/               # Legacy v4 vault dir, if migrated (mode 0700)
-├── proxy.json               # Running-proxy state (pid, port, idleTimeoutMs)
+├── proxy.json               # Running-proxy state (pid, ports, idleTimeoutMs, control token) — 0600
 ├── proxy.log                # Append-only JSONL access log (no values, no bodies)
 ├── owner-session.json       # SSO tokens
 └── …

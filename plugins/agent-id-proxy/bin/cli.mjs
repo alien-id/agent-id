@@ -417,8 +417,12 @@ async function cmdStart(flags) {
     stderr(`Control plane: http://${controlAddr.host}:${controlAddr.port} (${how})`);
     if (!controlIsLoopback) {
       stderr(
-        `  ⚠ control plane bound to non-loopback ${controlHost} — reachable on the network; ` +
-          "the control token in the proxy state file is the only gate.",
+        `  ⚠ control plane on non-loopback ${controlHost}: a mobile-slot unlock POSTs the ` +
+          "master key over plain HTTP, so it (and the token) cross this network in cleartext.",
+      );
+      stderr(
+        "    Treat this as trusted-LAN only; for separate-device unlock without that exposure, " +
+          "use owner-approval (relays via the SSO over TLS).",
       );
     }
   }
@@ -553,9 +557,12 @@ async function cmdPair(flags) {
   stderr(`Control URL : ${controlUrl}`);
   stderr(`Pair token  : ${state.controlToken}`);
   stderr("This token authorizes /register, /pending, and /approve — keep it private.");
-  if (state.controlHost === "0.0.0.0" || state.controlHost === "::") {
-    stderr("(control plane is on all interfaces; the token is the only gate.)");
-  }
+  stderr(
+    "⚠ Mobile unlock POSTs the master key over plain HTTP — only pair on a trusted network.",
+  );
+  stderr(
+    "  For separate-device unlock without that exposure, use owner-approval (SSO/TLS relay).",
+  );
   outputJson({ ok: true, control: controlUrl, payload });
 }
 
