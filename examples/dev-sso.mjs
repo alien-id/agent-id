@@ -115,6 +115,15 @@ const authzCodes = new Map();
 const refreshTokens = new Map();
 // accessToken → { clientId, dpopJkt, sub, exp }
 const accessTokens = new Map();
+// Owner-approval vault KEK escrow (RFC-less Alien extension, see
+// docs/VAULT-PROXY.md + lib/owner-approval.mjs):
+//   keyRef        → { secret (b64url KEK), jkt, sub }
+//   pollingCode   → { keyRef, status, released, jkt, sub, expiredAt }
+const vaultKeks = new Map();
+const vaultUnlocks = new Map();
+// DPoP jti replay cache for the escrow endpoints. A real SSO bounds this by the
+// proof's iat window; the fixture just remembers every jti for the process life.
+const seenVaultJti = new Set();
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -211,7 +220,7 @@ function verifyDPoPProof({ proof, htm, htu, accessToken: at }) {
     fromB64url(sigB),
   );
   if (!ok) throw new Error("DPoP: signature invalid");
-  return { ok: true, jkt: jwkThumbprint(header.jwk), jwk: header.jwk };
+  return { ok: true, jkt: jwkThumbprint(header.jwk), jwk: header.jwk, jti: payload.jti };
 }
 
 // Sign an RS256 JWT with the dev RSA key. Used for id_token issuance.
@@ -521,6 +530,137 @@ async function routeUserinfo(req, res) {
   });
 }
 
+// ─── Owner-approval vault endpoints (Alien extension) ────────────────────────
+//
+// These are NOT part of OIDC/OAuth — they model the Alien SSO's vault-KEK
+// escrow that the owner-approval slot relies on. Every call is bound to a
+// DPoP-proofed owner-session access token; the KEK is released only after the
+// owner approves (auto-approved here) and is single-use per polling code.
+
+// Authenticate an access-token-bound DPoP request. On success returns
+// { at, jkt, sub }; on failure sends the error response and returns null.
+function requireDpopSession(req, res, htu) {
+  const auth = req.headers.authorization || "";
+  const m = /^DPoP\s+(.+)$/i.exec(auth);
+  if (!m) {
+    send(res, 401, { error: "invalid_token", error_description: "DPoP access token required" });
+    return null;
+  }
+  const at = m[1];
+  const atRec = accessTokens.get(at);
+  if (!atRec) {
+    send(res, 401, { error: "invalid_token" });
+    return null;
+  }
+  if (atRec.exp <= nowSec()) {
+    send(res, 401, { error: "invalid_token", error_description: "expired" });
+    return null;
+  }
+  const dpopHeader = req.headers["dpop"];
+  if (!dpopHeader) {
+    send(res, 401, { error: "invalid_dpop_proof", error_description: "DPoP proof required" });
+    return null;
+  }
+  let proof;
+  try {
+    proof = verifyDPoPProof({ proof: dpopHeader, htm: "POST", htu, accessToken: at });
+  } catch (err) {
+    send(res, 401, { error: "invalid_dpop_proof", error_description: err.message });
+    return null;
+  }
+  if (proof.jkt !== atRec.jkt) {
+    send(res, 401, { error: "invalid_token", error_description: "cnf.jkt mismatch" });
+    return null;
+  }
+  // Single-use proof: reject a replayed jti so a captured enroll/unlock proof
+  // can't be replayed within its iat window (the escrow endpoints release key
+  // material, so replay matters more here than on a read-only resource).
+  if (proof.jti && seenVaultJti.has(proof.jti)) {
+    send(res, 401, { error: "invalid_dpop_proof", error_description: "DPoP replay (jti seen)" });
+    return null;
+  }
+  if (proof.jti) seenVaultJti.add(proof.jti);
+  return { at, jkt: proof.jkt, sub: atRec.sub };
+}
+
+async function readJsonBody(req, res) {
+  const raw = await readBody(req);
+  try {
+    return JSON.parse(raw || "{}");
+  } catch {
+    send(res, 400, { error: "invalid_json" });
+    return null;
+  }
+}
+
+// POST /vault/enroll { secret }  → { key_ref }
+async function routeVaultEnroll(req, res) {
+  const session = requireDpopSession(req, res, `${ISSUER}/vault/enroll`);
+  if (!session) return;
+  const body = await readJsonBody(req, res);
+  if (!body) return;
+  if (typeof body.secret !== "string" || !body.secret) {
+    return send(res, 400, { error: "invalid_request", error_description: "secret required" });
+  }
+  const keyRef = `oa-${b64url(randomBytes(12))}`;
+  // Bind the escrowed KEK to the enrolling agent key (jkt) and owner (sub).
+  vaultKeks.set(keyRef, { secret: body.secret, jkt: session.jkt, sub: session.sub });
+  trace(`vault enroll key_ref=${keyRef.slice(0, 12)}… jkt=${session.jkt.slice(0, 8)}…`);
+  send(res, 200, { key_ref: keyRef });
+}
+
+// POST /vault/unlock/start { key_ref }  → { polling_code, deep_link, ... }
+async function routeVaultUnlockStart(req, res) {
+  const session = requireDpopSession(req, res, `${ISSUER}/vault/unlock/start`);
+  if (!session) return;
+  const body = await readJsonBody(req, res);
+  if (!body) return;
+  const keyRef = String(body.key_ref || "");
+  const rec = vaultKeks.get(keyRef);
+  if (!rec) return send(res, 404, { error: "unknown_key_ref" });
+  // The same agent key that enrolled, on behalf of the same owner, must ask.
+  if (rec.jkt !== session.jkt || rec.sub !== session.sub) {
+    return send(res, 403, { error: "forbidden", error_description: "key_ref not bound to this agent" });
+  }
+  const pollingCode = b64url(randomBytes(18));
+  const requestId = b64url(randomBytes(9));
+  const expiredAt = nowSec() + 300;
+  // Auto-approve (a real SSO waits for the owner to approve in the Alien App).
+  vaultUnlocks.set(pollingCode, {
+    keyRef,
+    status: "authorized",
+    released: false,
+    jkt: session.jkt,
+    sub: session.sub,
+    expiredAt,
+  });
+  send(res, 200, {
+    polling_code: pollingCode,
+    request_id: requestId,
+    deep_link: `dev-sso://vault-approve?polling_code=${pollingCode}`,
+    expired_at: expiredAt,
+  });
+}
+
+// POST /vault/unlock/poll { polling_code }  → { status, [secret] }
+async function routeVaultUnlockPoll(req, res) {
+  const session = requireDpopSession(req, res, `${ISSUER}/vault/unlock/poll`);
+  if (!session) return;
+  const body = await readJsonBody(req, res);
+  if (!body) return;
+  const u = vaultUnlocks.get(String(body.polling_code || ""));
+  if (!u) return send(res, 200, { status: "expired" });
+  if (u.jkt !== session.jkt || u.sub !== session.sub) {
+    return send(res, 403, { error: "forbidden" });
+  }
+  if (u.expiredAt <= nowSec() || u.released) return send(res, 200, { status: "expired" });
+  if (u.status !== "authorized") return send(res, 200, { status: "pending" });
+  const rec = vaultKeks.get(u.keyRef);
+  if (!rec) return send(res, 200, { status: "expired" });
+  u.released = true; // single-use release
+  send(res, 200, { status: "authorized", secret: rec.secret });
+}
+
 // ─── Server ────────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -533,6 +673,9 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/oauth/poll" && req.method === "POST") return await routePoll(req, res);
     if (url.pathname === "/oauth/token" && req.method === "POST") return await routeToken(req, res);
     if (url.pathname === "/oauth/userinfo" && req.method === "GET") return await routeUserinfo(req, res);
+    if (url.pathname === "/vault/enroll" && req.method === "POST") return await routeVaultEnroll(req, res);
+    if (url.pathname === "/vault/unlock/start" && req.method === "POST") return await routeVaultUnlockStart(req, res);
+    if (url.pathname === "/vault/unlock/poll" && req.method === "POST") return await routeVaultUnlockPoll(req, res);
     return send(res, 404, { error: "not_found", path: url.pathname });
   } catch (err) {
     log("ERROR:", err.stack || err);

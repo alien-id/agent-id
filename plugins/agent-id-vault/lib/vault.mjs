@@ -18,16 +18,19 @@ import fs from "node:fs/promises";
 import {
   buildAgentKeySlot,
   buildMobileSlot,
+  buildOwnerApprovalSlot,
   buildPassphraseSlot,
   decryptPayload,
   encryptPayload,
   findAgentKeySlot,
   findMobileSlots,
+  findOwnerApprovalSlot,
   generateMasterKey,
   mobileSlotChallenge,
   newVaultFile,
   nextSlotId,
   unwrapSlotWithAgentKey,
+  unwrapSlotWithOwnerApproval,
   unwrapSlotWithPassphrase,
   validateVaultHeader,
   VAULT_VERSION,
@@ -91,7 +94,12 @@ export async function loadAgentPrivateKey(stateDir) {
 
 // ─── Open / unlock ──────────────────────────────────────────────────────────────
 
-export async function openVault({ stateDir, passphrase = null, privateKeyPem = null }) {
+export async function openVault({
+  stateDir,
+  passphrase = null,
+  privateKeyPem = null,
+  ownerApprovalKek = null,
+}) {
   const paths = statePaths(stateDir);
   const file = await readVaultFile(paths.vaultFile);
   if (!file) {
@@ -125,6 +133,17 @@ export async function openVault({ stateDir, passphrase = null, privateKeyPem = n
         break;
       } catch (err) {
         errors.push(`passphrase slot ${slot.id}: ${err.message}`);
+      }
+    }
+  }
+
+  if (!masterKey && ownerApprovalKek) {
+    const slot = findOwnerApprovalSlot(file.slots);
+    if (slot) {
+      try {
+        masterKey = unwrapSlotWithOwnerApproval(slot, ownerApprovalKek);
+      } catch (err) {
+        errors.push(`owner-approval slot ${slot.id}: ${err.message}`);
       }
     }
   }
@@ -182,6 +201,44 @@ export async function readMobileSlotChallenges(stateDir) {
   return findMobileSlots(file.slots || []).map(mobileSlotChallenge);
 }
 
+// Read the owner-approval unlock descriptor without unlocking — only the public
+// `keyRef` + SSO coordinates the approver needs to drive the unlock. The wrapped
+// master key and KEK are never exposed. Returns null if no owner-approval slot.
+export async function readOwnerApprovalChallenge(stateDir) {
+  const paths = statePaths(stateDir);
+  const file = await readVaultFile(paths.vaultFile);
+  if (!file) return null;
+  const slot = findOwnerApprovalSlot(file.slots || []);
+  if (!slot) return null;
+  return {
+    slotId: slot.id,
+    keyRef: slot.keyRef,
+    ssoBaseUrl: slot.ssoBaseUrl || null,
+    providerAddress: slot.providerAddress || null,
+  };
+}
+
+// Recover the master key from an owner-approval slot given the SSO-released KEK,
+// without building a vault handle. The approver (proxy CLI, or the test) POSTs
+// the result to the control plane's /approve, exactly as the phone does after
+// unsealing a mobile slot. The KEK is the caller's to zero afterwards.
+export async function recoverMasterKeyViaOwnerApproval(stateDir, kek) {
+  const paths = statePaths(stateDir);
+  const file = await readVaultFile(paths.vaultFile);
+  if (!file) {
+    const err = new Error(`Vault not found at ${paths.vaultFile}.`);
+    err.code = "VAULT_NOT_FOUND";
+    throw err;
+  }
+  const slot = findOwnerApprovalSlot(file.slots || []);
+  if (!slot) {
+    const err = new Error("Vault has no owner-approval slot");
+    err.code = "NO_OWNER_APPROVAL_SLOT";
+    throw err;
+  }
+  return unwrapSlotWithOwnerApproval(slot, kek);
+}
+
 function buildVaultHandle({ stateDir, file, masterKey, payload }) {
   let state = { file, masterKey, payload };
 
@@ -200,6 +257,7 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
         type: s.type,
         agentId: s.agentId || null,
         deviceId: s.deviceId || null,
+        keyRef: s.keyRef || null,
       }));
     },
     list() {
@@ -244,6 +302,17 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
       assertOpen();
       const id = nextSlotId(state.file.slots);
       const slot = buildMobileSlot(id, state.masterKey, devicePubKeyHex, deviceId);
+      state.file.slots.push(slot);
+      return slot;
+    },
+    addOwnerApprovalSlot(kek, { keyRef, ssoBaseUrl = null, providerAddress = null } = {}) {
+      assertOpen();
+      const id = nextSlotId(state.file.slots);
+      const slot = buildOwnerApprovalSlot(id, state.masterKey, kek, {
+        keyRef,
+        ssoBaseUrl,
+        providerAddress,
+      });
       state.file.slots.push(slot);
       return slot;
     },

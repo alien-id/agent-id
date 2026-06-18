@@ -15,6 +15,7 @@
 // local-CA spike.
 
 import fs from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 
 import {
@@ -31,14 +32,20 @@ import {
 import {
   loadAgentPrivateKey,
   openVault,
+  readOwnerApprovalChallenge,
+  recoverMasterKeyViaOwnerApproval,
   vaultFileExists,
 } from "../../agent-id-vault/lib/vault.mjs";
+import { requestUnlockSecret } from "../../agent-id-vault/lib/owner-approval.mjs";
+import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
 import {
   hasTty,
   promptSecret,
 } from "../../agent-id-vault/lib/trusted-input.mjs";
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Parse a duration string. Accepts "12h", "30m", "90s", "never" / "0", or a
 // raw millisecond integer. Returns ms (Infinity for "never").
@@ -125,6 +132,158 @@ async function clearProxyState(paths) {
   }
 }
 
+// ─── Owner-approval approver ──────────────────────────────────────────────────
+//
+// For a vault whose unlock method is an owner-approval slot, the proxy itself
+// plays the approver role the phone plays for a mobile slot: when a request
+// parks on a locked vault, the control plane lists an `unlock` request carrying
+// the owner-approval `keyRef`. We drive the SSO release (which prompts the owner
+// on their Alien app), recover the master key from the released KEK, and POST it
+// to our own control plane's /approve.
+
+function controlJson(host, port, method, p, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request(
+      {
+        host,
+        port,
+        path: p,
+        method,
+        headers: payload
+          ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+          : {},
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end(payload);
+  });
+}
+
+// Returns a { stop() } handle, or null when there's nothing to drive (no
+// owner-approval slot, or no agent key on disk).
+async function startOwnerApprovalApprover({ stateDir, controlHost, controlPort }) {
+  const challenge = await readOwnerApprovalChallenge(stateDir);
+  if (!challenge) return null;
+
+  const engine = new SignatureEngine({ baseDir: stateDir });
+  const main = await engine.ensureMainKey().catch(() => null);
+  if (!main?.privateKeyPem) return null;
+
+  const host = controlHost || "127.0.0.1";
+  const state = { stop: false, seen: new Set() };
+
+  (async function loop() {
+    while (!state.stop) {
+      try {
+        const { pending } = await controlJson(host, controlPort, "GET", "/pending");
+        for (const entry of pending || []) {
+          if (state.seen.has(entry.id)) continue;
+          if (entry.action !== "unlock" || !entry.ownerApproval) continue;
+          state.seen.add(entry.id);
+
+          const session = await engine.ensureValidSession();
+          if (!session?.accessToken) {
+            stderr(
+              "Owner-approval unlock needed, but no valid owner session. " +
+                "Run `agent-id-core auth` to (re)bind the owner.",
+            );
+            try {
+              await controlJson(host, controlPort, "POST", "/deny", {
+                id: entry.id,
+                reason: "no_owner_session",
+              });
+            } catch {
+              /* best effort */
+            }
+            continue;
+          }
+
+          // SECURITY: pin the SSO to the locally-trusted owner session, never
+          // the vault slot's ssoBaseUrl. Slot fields are cleartext in the vault
+          // file (outside the AEAD wrap), so trusting slot.ssoBaseUrl would let a
+          // tampered vault redirect the owner's access token + a valid DPoP proof
+          // to an attacker-controlled host (token exfiltration). The slot value
+          // is informational only.
+          const ssoBaseUrl = session.ssoBaseUrl || session.issuer;
+          if (!ssoBaseUrl) {
+            stderr("Owner session has no SSO URL — cannot drive owner-approval unlock.");
+            try {
+              await controlJson(host, controlPort, "POST", "/deny", {
+                id: entry.id,
+                reason: "no_sso_url",
+              });
+            } catch {
+              /* best effort */
+            }
+            continue;
+          }
+          if (
+            entry.ownerApproval.ssoBaseUrl &&
+            entry.ownerApproval.ssoBaseUrl !== ssoBaseUrl
+          ) {
+            stderr(
+              `Note: vault slot names SSO ${entry.ownerApproval.ssoBaseUrl}, but using ` +
+                `the owner session's ${ssoBaseUrl}.`,
+            );
+          }
+          let secret;
+          let mk;
+          try {
+            ({ secret } = await requestUnlockSecret({
+              ssoBaseUrl,
+              accessToken: session.accessToken,
+              agentPrivateKeyPem: main.privateKeyPem,
+              keyRef: entry.ownerApproval.keyRef,
+              onPrompt: ({ deepLink }) => {
+                stderr(
+                  deepLink
+                    ? `Approve the vault unlock in your Alien app: ${deepLink}`
+                    : "Approve the vault unlock in your Alien app.",
+                );
+              },
+            }));
+            mk = await recoverMasterKeyViaOwnerApproval(stateDir, secret);
+            await controlJson(host, controlPort, "POST", "/approve", {
+              id: entry.id,
+              masterKey: mk.toString("hex"),
+            });
+          } catch (err) {
+            stderr(`Owner-approval unlock failed: ${err.message}`);
+            try {
+              await controlJson(host, controlPort, "POST", "/deny", {
+                id: entry.id,
+                reason: "owner_approval_failed",
+              });
+            } catch {
+              /* best effort */
+            }
+          } finally {
+            if (secret) secret.fill(0);
+            if (mk) mk.fill(0);
+          }
+        }
+      } catch {
+        // control plane momentarily unavailable, or a stale id — retry
+      }
+      await sleep(250);
+    }
+  })();
+
+  return { stop: () => { state.stop = true; } };
+}
+
 // ─── Commands ───────────────────────────────────────────────────────────────────
 
 async function cmdStart(flags) {
@@ -195,12 +354,12 @@ async function cmdStart(flags) {
     grantTtlMs,
     onLock: (reason) => {
       if (controlEnabled) {
-        stderr(`Vault locked (${reason}). Next request will ask the phone to unlock.`);
+        stderr(`Vault locked (${reason}). Next request will ask for an unlock approval.`);
       } else {
         stderr(`Vault locked (${reason}). Restart the proxy to re-unlock.`);
       }
     },
-    onUnlock: () => stderr("Vault unlocked via phone approval."),
+    onUnlock: () => stderr("Vault unlocked via owner approval."),
   });
   const addr = await proxy.listen();
   const controlAddr = proxy.controlAddress;
@@ -217,10 +376,22 @@ async function cmdStart(flags) {
     stateDir,
   });
 
+  // For an owner-approval vault, the proxy drives its own unlocks against the
+  // SSO (the phone plays this role for mobile slots). No-op without the slot.
+  let approver = null;
+  if (controlAddr) {
+    approver = await startOwnerApprovalApprover({
+      stateDir,
+      controlHost: controlAddr.host,
+      controlPort: controlAddr.port,
+    });
+  }
+
   stderr(`agent-id-proxy listening on http://${addr.host}:${addr.port}`);
   stderr(`  HTTP_PROXY=http://${addr.host}:${addr.port}`);
   if (controlAddr) {
-    stderr(`Control plane: http://${controlAddr.host}:${controlAddr.port} (phone approvals)`);
+    const how = approver ? "phone or owner approvals" : "phone approvals";
+    stderr(`Control plane: http://${controlAddr.host}:${controlAddr.port} (${how})`);
   }
   stderr(`Vault: ${paths.vaultFile}${awaitMobile ? " (locked — awaiting phone unlock)" : ""}`);
   stderr(`Log:   ${paths.proxyLog}`);
@@ -250,6 +421,7 @@ async function cmdStart(flags) {
 
   const shutdown = async (signal) => {
     stderr(`Received ${signal}, shutting down…`);
+    approver?.stop();
     await proxy.close();
     vault?.lock();
     await clearProxyState(paths);
@@ -327,8 +499,11 @@ function printHelp() {
       "  otherwise restart the proxy. Use --idle-timeout never to disable.",
       "Control plane (default port 48772): the phone polls /pending and POSTs",
       "  /approve | /deny. --await-mobile starts locked so the first request prompts",
-      "  the phone to unlock (sealed-box). --require-consent prompts per (cred,host).",
-      "  Pair a device with `agent-id-vault rekey add-mobile --device-pubkey HEX`.",
+      "  for an unlock. --require-consent prompts per (cred,host).",
+      "  Unlock methods: pair a device with",
+      "    `agent-id-vault rekey add-mobile --device-pubkey HEX`, or add an SSO",
+      "    owner-approval slot with `agent-id-vault rekey add-owner-approval`",
+      "    (the proxy then drives owner approvals itself — no phone app needed).",
       "v1: HTTP only. HTTPS is CONNECT-tunneled without injection — TLS MITM is the next spike.",
     ].join("\n"),
   );

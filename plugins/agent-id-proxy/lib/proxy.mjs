@@ -41,6 +41,7 @@ import { signEvmRpcBody } from "../../agent-id-core/lib/evm.mjs";
 import {
   openVaultWithMasterKey,
   readMobileSlotChallenges,
+  readOwnerApprovalChallenge,
 } from "../../agent-id-vault/lib/vault.mjs";
 import { appendJsonl } from "../../agent-id-core/lib/state.mjs";
 
@@ -197,12 +198,20 @@ export function createProxy({
     if (!controlEnabled) throw approvalError("vault_locked", 401);
     if (!state.unlockInFlight) {
       state.unlockInFlight = (async () => {
+        // Two unlock methods can satisfy a parked request: a phone unsealing a
+        // mobile slot, or an owner approving an SSO release of an owner-approval
+        // slot. Surface whichever the vault carries; the approver POSTs the
+        // recovered master key to /approve in both cases.
         const challenges = await readMobileSlotChallenges(stateDir);
-        if (!challenges.length) throw approvalError("no_mobile_slot", 401);
+        const ownerApproval = await readOwnerApprovalChallenge(stateDir);
+        if (!challenges.length && !ownerApproval) {
+          throw approvalError("no_unlock_method", 401);
+        }
         const { id, promise } = registry.create({
           action: "unlock",
           reason: state.lockedReason || "locked",
           challenges,
+          ownerApproval,
         });
         logAccess({ event: "unlock_requested", requestId: id }).catch(() => {});
         await promise; // resolved by onApprove once the vault is open

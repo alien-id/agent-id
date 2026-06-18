@@ -233,6 +233,60 @@ export function deviceUnsealMasterKey(slot, devicePrivateKeyRaw) {
   return aeadDecrypt(kek, slot.wrap);
 }
 
+// ─── Owner-approval slot (SSO-released KEK) ──────────────────────────────────────
+//
+// Symmetric counterpart to the mobile slot: instead of sealing the master key to
+// a phone's enclave key, the master key is wrapped by a random 32-byte KEK that
+// is handed to the Alien SSO at enrollment and released only after the owner
+// approves an unlock (see lib/owner-approval.mjs for the SSO client). The slot
+// stores only the opaque `keyRef` the SSO returned — never the KEK itself, so a
+// stolen vault file is inert without an owner-approved release.
+
+const OWNER_APPROVAL_KEK_BYTES = 32;
+
+export function ownerApprovalKekBytes() {
+  return randomBytes(OWNER_APPROVAL_KEK_BYTES);
+}
+
+function assertOwnerApprovalKek(kek) {
+  if (!Buffer.isBuffer(kek) || kek.length !== OWNER_APPROVAL_KEK_BYTES) {
+    throw new Error(`owner-approval KEK must be a ${OWNER_APPROVAL_KEK_BYTES}-byte Buffer`);
+  }
+}
+
+export function buildOwnerApprovalSlot(
+  id,
+  masterKey,
+  kek,
+  { keyRef, ssoBaseUrl = null, providerAddress = null } = {},
+) {
+  if (typeof keyRef !== "string" || !keyRef) {
+    throw new Error("owner-approval slot requires a keyRef");
+  }
+  assertOwnerApprovalKek(kek);
+  const wrap = aeadEncrypt(kek, masterKey);
+  return {
+    id,
+    type: "owner-approval",
+    keyRef,
+    ssoBaseUrl: ssoBaseUrl || null,
+    providerAddress: providerAddress || null,
+    wrap,
+  };
+}
+
+export function unwrapSlotWithOwnerApproval(slot, kek) {
+  if (slot.type !== "owner-approval") {
+    throw new Error(`Slot ${slot.id} is not an owner-approval slot`);
+  }
+  assertOwnerApprovalKek(kek);
+  return aeadDecrypt(kek, slot.wrap);
+}
+
+export function findOwnerApprovalSlot(slots) {
+  return slots.find((s) => s.type === "owner-approval") || null;
+}
+
 // ─── Payload (credentials.json) ─────────────────────────────────────────────────
 
 export function encryptPayload(masterKey, plaintextJsonString) {

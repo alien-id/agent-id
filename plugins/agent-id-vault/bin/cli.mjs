@@ -17,6 +17,7 @@
 //   rekey add-passphrase        — append a passphrase slot
 //   rekey add-agent-key         — append an agent-key slot
 //   rekey add-mobile            — append a phone-approved (mobile) unlock slot
+//   rekey add-owner-approval    — append an SSO owner-approval unlock slot
 //   rekey remove-slot --id <N>  — remove a slot
 //   export --out <PATH>         — copy the encrypted vault file
 //   import --in <PATH>          — install an encrypted vault file
@@ -51,6 +52,9 @@ import {
   vaultFileExists,
 } from "../lib/vault.mjs";
 import { readLegacyVault } from "../lib/legacy.mjs";
+import { ownerApprovalKekBytes } from "../lib/format.mjs";
+import { enrollOwnerApproval } from "../lib/owner-approval.mjs";
+import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
 import {
   hasTty,
   promptNewPassphrase,
@@ -472,6 +476,40 @@ async function cmdRekey(flags) {
       await vault.save();
       stderr(`Added mobile slot ${slot.id}${deviceId ? ` for device ${deviceId}` : ""}.`);
       outputJson({ ok: true, slot: { id: slot.id, type: slot.type, deviceId } });
+    } else if (sub === "add-owner-approval") {
+      const stateDir = resolveStateDir(flags);
+      const engine = new SignatureEngine({ baseDir: stateDir });
+      const main = await engine.ensureMainKey();
+      const session = await engine.ensureValidSession();
+      if (!session?.accessToken) {
+        return outputError(
+          "No valid owner session. Run `agent-id-core auth` to bind an owner first.",
+        );
+      }
+      const ssoBaseUrl = flags["sso-url"] || session.ssoBaseUrl || session.issuer;
+      if (!ssoBaseUrl) {
+        return outputError("Could not determine SSO base URL — pass --sso-url <URL>.");
+      }
+      const providerAddress = flags["provider-address"] || session.providerAddress || null;
+
+      // The KEK lives only long enough to wrap the master key and hand a copy to
+      // the SSO; it is zeroed below so neither the vault file nor this process
+      // retains it. Recovery requires an owner-approved release from the SSO.
+      const kek = ownerApprovalKekBytes();
+      try {
+        const { keyRef } = await enrollOwnerApproval({
+          ssoBaseUrl,
+          accessToken: session.accessToken,
+          agentPrivateKeyPem: main.privateKeyPem,
+          secret: kek,
+        });
+        const slot = vault.addOwnerApprovalSlot(kek, { keyRef, ssoBaseUrl, providerAddress });
+        await vault.save();
+        stderr(`Added owner-approval slot ${slot.id} (key_ref ${keyRef}).`);
+        outputJson({ ok: true, slot: { id: slot.id, type: slot.type, keyRef } });
+      } finally {
+        kek.fill(0);
+      }
     } else if (sub === "remove-slot") {
       const id = Number(flags.id);
       if (!Number.isFinite(id)) return outputError("--id <N> required");
@@ -482,7 +520,7 @@ async function cmdRekey(flags) {
       outputJson({ ok: true, removed: id });
     } else {
       return outputError(
-        `rekey subcommand required: add-passphrase | add-agent-key | add-mobile | remove-slot`,
+        `rekey subcommand required: add-passphrase | add-agent-key | add-mobile | add-owner-approval | remove-slot`,
       );
     }
   } finally {
@@ -606,6 +644,7 @@ function printHelp() {
       "  remove --name N",
       "  rekey add-passphrase | add-agent-key | remove-slot --id N",
       "        | add-mobile --device-pubkey HEX [--device-id NAME]",
+      "        | add-owner-approval [--sso-url URL] [--provider-address ADDR]",
       "  export --out PATH",
       "  import --in PATH [--overwrite]",
       "  migrate [--default-domains H[,H…]] [--force]",
