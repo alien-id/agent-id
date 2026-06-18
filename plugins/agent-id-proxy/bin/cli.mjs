@@ -17,6 +17,7 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { createRequire } from "node:module";
 
 import {
   outputError,
@@ -44,6 +45,10 @@ import {
 } from "../../agent-id-vault/lib/trusted-input.mjs";
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
+import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
+
+// The QR renderer is a CommonJS module vendored in agent-id-core.
+const qrcode = createRequire(import.meta.url)("../../agent-id-core/bin/qrcode.cjs");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -503,6 +508,57 @@ async function cmdStop(flags) {
   }
 }
 
+// `pair` — show a QR/deep-link a phone scans to learn the control URL + token,
+// so the mobile-slot unlock flow can reach the (token-gated) control plane.
+async function cmdPair(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+  const state = await readProxyState(paths);
+  if (!state) {
+    return outputError("No proxy running (no state file). Start it first, then pair.");
+  }
+  try {
+    process.kill(state.pid, 0);
+  } catch {
+    await clearProxyState(paths);
+    return outputError("Proxy not running (cleared stale state). Start it, then pair.");
+  }
+  if (!state.controlPort || !state.controlToken) {
+    return outputError(
+      "This proxy has no control plane (started with --no-control). Pairing needs it.",
+    );
+  }
+
+  // The reachable host: an explicit override, else derive from the bound host.
+  const reachableHost =
+    flags["control-host"] || pickReachableHost(state.controlHost);
+  if (!reachableHost) {
+    return outputError(
+      `Control plane is bound to ${state.controlHost} (loopback) — a phone on another ` +
+        "device can't reach it. Restart the proxy with --control-host <lan-ip> (or " +
+        "0.0.0.0), then re-run `pair`. Pass --control-host here to override the printed host.",
+    );
+  }
+
+  const controlUrl = `http://${reachableHost}:${state.controlPort}`;
+  const payload = buildPairingPayload({ controlUrl, token: state.controlToken });
+
+  stderr("Scan with the Alien app to pair this phone for vault unlock:\n");
+  await new Promise((resolve) => {
+    qrcode.generate(payload, { small: true }, (code) => {
+      process.stderr.write(code + "\n");
+      resolve();
+    });
+  });
+  stderr(`Control URL : ${controlUrl}`);
+  stderr(`Pair token  : ${state.controlToken}`);
+  stderr("This token authorizes /register, /pending, and /approve — keep it private.");
+  if (state.controlHost === "0.0.0.0" || state.controlHost === "::") {
+    stderr("(control plane is on all interfaces; the token is the only gate.)");
+  }
+  outputJson({ ok: true, control: controlUrl, payload });
+}
+
 function printHelp() {
   stderr(
     [
@@ -514,6 +570,7 @@ function printHelp() {
       "        [--no-control] [--control-port N] [--control-host H] [--await-mobile]",
       "        [--require-consent] [--approval-timeout 2m] [--grant-ttl 1h]",
       "        [--block-private-hosts]",
+      "  pair [--control-host H]   show a QR for a phone to scan (control URL + token)",
       "  status",
       "  stop",
       "",
@@ -542,6 +599,7 @@ function printHelp() {
 
 const commands = {
   start: cmdStart,
+  pair: cmdPair,
   status: cmdStatus,
   stop: cmdStop,
 };
