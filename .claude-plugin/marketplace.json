@@ -56,6 +56,19 @@
         "oidc",
         "agent-identity"
       ]
+    },
+    {
+      "name": "agent-id-oauth",
+      "description": "Self-hosted OAuth 2.0 token broker: Authorization Code + PKCE with your own OAuth apps, tokens stored in the encrypted vault and refreshed on demand.",
+      "version": "4.0.0",
+      "source": "agent-id-oauth",
+      "category": "identity",
+      "keywords": [
+        "oauth2",
+        "pkce",
+        "token-broker",
+        "agent-identity"
+      ]
     }
   ]
 }

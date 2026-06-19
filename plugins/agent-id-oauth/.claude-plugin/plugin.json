@@ -1,0 +1,21 @@
+{
+  "name": "agent-id-oauth",
+  "version": "4.0.0",
+  "description": "Self-hosted OAuth 2.0 token broker keyed off the agent's identity. Runs the Authorization Code + PKCE flow with your own OAuth apps, stores access/refresh tokens in the encrypted vault, and refreshes them on demand — replacing a hosted auth engine for third-party providers (Google, Slack, GitHub, …).",
+  "keywords": [
+    "oauth2",
+    "pkce",
+    "token-broker",
+    "agent-identity"
+  ],
+  "dependencies": [
+    {
+      "name": "agent-id-core",
+      "version": "^4.0.0"
+    },
+    {
+      "name": "agent-id-vault",
+      "version": "^4.0.0"
+    }
+  ]
+}

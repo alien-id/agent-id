@@ -59,7 +59,7 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 
 ## Plugin Layout
 
-Alien Agent ID ships as a Claude Code plugin marketplace with four focused plugins. Each plugin has a narrow responsibility and depends on `agent-id-core` for the shared library + bootstrap surface:
+Alien Agent ID ships as a Claude Code plugin marketplace with five focused plugins. Each plugin has a narrow responsibility and depends on `agent-id-core` for the shared library + bootstrap surface:
 
 | Plugin | Skill | What it does |
 | --- | --- | --- |
@@ -67,6 +67,7 @@ Alien Agent ID ships as a Claude Code plugin marketplace with four focused plugi
 | `agent-id-git` | `/agent-id-git` | SSH-signed git commits with Agent-ID provenance trailers and v3 proof notes. `setup`, `commit`, `verify`. Verify calls into core's universal verifier and adds the SSH-signature + trailer checks on top — auditors and CI runners can verify any commit without a bound identity. |
 | `agent-id-vault` | `/agent-id-vault` | AES-256-GCM credential vault for external-service secrets (GitHub PAT, Slack token, AWS keys, …). Encryption key derived from the agent's Ed25519 private key via HKDF, so credentials are only readable on the same machine as the bound agent. `store`, `get`, `list`, `remove`. |
 | `agent-id-auth` | `/agent-id-auth` | RFC 9449 DPoP-signed calls to Alien-aware services. `header` emits the two-header pair for one request; `call` is a one-shot signed HTTP request. `discover` fetches and validates `/.well-known/alien-agent-id.json`; `capabilities` renders the manifest as actionable markdown; `support` probes for the meta-tag support signal. |
+| `agent-id-oauth` | `/agent-id-oauth` | Self-hosted OAuth 2.0 token broker for third-party providers (Google, Slack, GitHub, …). Runs the Authorization Code + PKCE flow with your own OAuth apps, stores access/refresh tokens in the vault (depends on `agent-id-vault`), refreshes on demand, and gates on missing scopes. `register`, `login`, `complete`, `token`, `list`, `logout`. |
 
 Repository layout:
 
@@ -88,13 +89,18 @@ plugins/
 │   ├── lib/vault.mjs           # AES-256-GCM + HKDF
 │   ├── bin/cli.mjs             # store, get, list, remove
 │   └── skills/agent-id-vault/SKILL.md
-└── agent-id-auth/
+├── agent-id-auth/
+│   ├── .claude-plugin/plugin.json
+│   ├── lib/manifest.mjs        # /.well-known parser + validator
+│   ├── bin/cli.mjs             # header, call, discover, capabilities, support
+│   └── skills/agent-id-auth/SKILL.md
+└── agent-id-oauth/
     ├── .claude-plugin/plugin.json
-    ├── lib/manifest.mjs        # /.well-known parser + validator
-    ├── bin/cli.mjs             # header, call, discover, capabilities, support
-    └── skills/agent-id-auth/SKILL.md
-.claude-plugin/marketplace.json # lists all four plugins
-examples/                       # demo-service.mjs, dev-sso.mjs
+    ├── lib/oauth.mjs           # provider catalog + Auth Code/PKCE + refresh
+    ├── bin/cli.mjs             # register, login, complete, token, list, logout
+    └── skills/agent-id-oauth/SKILL.md
+.claude-plugin/marketplace.json # lists all five plugins
+examples/                       # demo-service.mjs, dev-sso.mjs, arcade_bridge.py
 tests/                          # unit + integration suites
 docs/                           # AGENT-SSO.md, INTEGRATION.md
 ```
@@ -118,6 +124,7 @@ Every plugin is **zero npm dependencies** — Node.js built-ins only.
 /plugin install agent-id-git@alien-id-agent-id      # for signed commits
 /plugin install agent-id-vault@alien-id-agent-id    # for credential storage
 /plugin install agent-id-auth@alien-id-agent-id     # for DPoP service calls
+/plugin install agent-id-oauth@alien-id-agent-id    # for OAuth token brokering
 /reload-plugins
 ```
 
