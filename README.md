@@ -59,15 +59,16 @@ The agent now has an Ed25519 keypair with a signed binding proving a verified hu
 
 ## Plugin Layout
 
-Alien Agent ID ships as a Claude Code plugin marketplace with five focused plugins. Each plugin has a narrow responsibility and depends on `agent-id-core` for the shared library + bootstrap surface:
+Alien Agent ID ships as a Claude Code plugin marketplace with six focused plugins. Each plugin has a narrow responsibility and depends on `agent-id-core` for the shared library + bootstrap surface:
 
 | Plugin | Skill | What it does |
 | --- | --- | --- |
 | `agent-id-core` | `/agent-id-core` | Bootstrap (`init` / `auth` / `bind` / `bootstrap`), session lifecycle (`refresh`, `status`, `setup-owner-session`), and universal operations (`sign`, `verify`, `export-proof`). Owns the shared library that every other plugin imports: crypto primitives, the v3 bundle format + universal verifier (`verifyBundle`), `SignatureEngine`, OIDC, state I/O. |
 | `agent-id-git` | `/agent-id-git` | SSH-signed git commits with Agent-ID provenance trailers and v3 proof notes. `setup`, `commit`, `verify`. Verify calls into core's universal verifier and adds the SSH-signature + trailer checks on top — auditors and CI runners can verify any commit without a bound identity. |
-| `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slot construction: slot 0 passphrase-wrapped (scrypt), slot 1 agent-key-wrapped (HKDF) for fast unattended unlock. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `init`, `add`, `generate`, `show`, `list`, `remove`, `rekey`, `export`, `import`, `migrate`. |
+| `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slots — agent-key (HKDF), passphrase (scrypt), mobile (phone), owner-approval (Alien app). **Two one-way modes:** *user* (default; no passphrase, app/agent-key unlock) and *dev* (`--dev`; passphrase allowed) — a user-mode vault can never gain a passphrase. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `init`, `add`, `generate`, `show`, `list`, `remove`, `rekey`, `export`, `import`, `migrate`. |
 | `agent-id-proxy` | `/agent-id-proxy` | Local credential-injecting HTTP proxy. Agent calls `http://<proxy>/<credname>/<upstream-host>/<path>`; proxy materializes the credential into the request by type and forwards over real HTTPS. Signs Solana/EVM transactions in-process for wallet credentials — the agent submits unsigned transactions. System CA bundle verifies upstream — no TLS interception, no local CA. Enforces per-credential host allowlist (default-deny). `start`, `status`, `stop`. |
 | `agent-id-auth` | `/agent-id-auth` | RFC 9449 DPoP-signed calls to Alien-aware services. `header` emits the two-header pair for one request; `call` is a one-shot signed HTTP request. `discover` fetches and validates `/.well-known/alien-agent-id.json`; `capabilities` renders the manifest as actionable markdown; `support` probes for the meta-tag support signal. |
+| `agent-id-browser` | `/agent-id-browser` | Universal browser the agent drives, with the logged-in profile **sealed in the vault**. One-time headed login establishes a session; afterwards the agent drives it **headless** — fine-grained control (accessibility `snapshot` + `click`/`type`/`fill`/`select`/`press`/`navigate`/`screenshot`/`eval`) plus one-shot `read`/`fetch`. For authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace). Bundles patchright (stealth Chrome); the agent never sees a credential. `login`, `open`, `close`, actions, `read`, `fetch`, `status`. |
 
 Repository layout:
 
@@ -101,18 +102,30 @@ plugins/
 │   ├── lib/totp.mjs            # RFC 6238 TOTP generator
 │   ├── bin/cli.mjs             # start, status, stop
 │   └── skills/agent-id-proxy/SKILL.md
-└── agent-id-auth/
+├── agent-id-auth/
+│   ├── .claude-plugin/plugin.json
+│   ├── lib/manifest.mjs        # /.well-known parser + validator
+│   ├── bin/cli.mjs             # header, call, discover, capabilities, support
+│   └── skills/agent-id-auth/SKILL.md
+└── agent-id-browser/
     ├── .claude-plugin/plugin.json
-    ├── lib/manifest.mjs        # /.well-known parser + validator
-    ├── bin/cli.mjs             # header, call, discover, capabilities, support
-    └── skills/agent-id-auth/SKILL.md
-.claude-plugin/marketplace.json # lists all five plugins
+    ├── lib/launch.mjs          # hardened patchright launch (sandbox on)
+    ├── lib/profile-store.mjs   # tar + AES-256-GCM seal of the profile (DEK in vault)
+    ├── lib/session-server.mjs  # persistent session + a11y snapshot/refs + actions
+    ├── lib/unlock.mjs          # owner-approval (Alien app) unlock
+    ├── lib/session.mjs         # logout detection
+    ├── bin/cli.mjs             # login, open/close, actions, read, fetch, status
+    ├── package.json            # bundles patchright (stealth Chrome)
+    └── skills/agent-id-browser/SKILL.md
+.claude-plugin/marketplace.json # lists all six plugins
 examples/                       # demo-service.mjs, dev-sso.mjs
 tests/                          # unit + integration suites
 docs/                           # AGENT-SSO.md, INTEGRATION.md
 ```
 
-Every plugin is **zero npm dependencies** — Node.js built-ins only.
+Every plugin is **zero npm dependencies** (Node.js built-ins only) — except
+`agent-id-browser`, which bundles **patchright** (a stealth Playwright) to drive a
+real browser.
 
 ---
 
@@ -132,6 +145,7 @@ Every plugin is **zero npm dependencies** — Node.js built-ins only.
 /plugin install agent-id-vault@alien-id-agent-id    # for credential storage
 /plugin install agent-id-proxy@alien-id-agent-id    # for credential injection at runtime
 /plugin install agent-id-auth@alien-id-agent-id     # for DPoP service calls
+/plugin install agent-id-browser@alien-id-agent-id  # for driving a logged-in browser
 /reload-plugins
 ```
 

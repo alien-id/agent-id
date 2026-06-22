@@ -1,0 +1,16 @@
+{
+  "name": "agent-id-browser",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Universal browser automation with the profile sealed in the agent vault.",
+  "bin": {
+    "agent-id-browser": "./bin/cli.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "optionalDependencies": {
+    "patchright": "^1.61.0"
+  }
+}

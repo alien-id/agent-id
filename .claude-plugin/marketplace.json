@@ -68,6 +68,18 @@
         "oidc",
         "agent-identity"
       ]
+    },
+    {
+      "name": "agent-id-browser",
+      "description": "Universal browser the agent drives fine-grained (click, type, fill forms, navigate, screenshot, run JS) via an accessibility snapshot with element refs, with the logged-in profile sealed in the agent vault. One-time headed login; headless thereafter. patchright bundled (no install). For authenticated sites that block API/OAuth/cookie approaches.",
+      "version": "0.1.0",
+      "source": "agent-id-browser",
+      "category": "identity",
+      "keywords": [
+        "browser-automation",
+        "patchright",
+        "agent-identity"
+      ]
     }
   ]
 }

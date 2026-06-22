@@ -173,32 +173,40 @@ async function cmdInit(flags) {
     return;
   }
 
+  // Passphrase is the EXCEPTIONAL, opt-in dev/power-user path. The default is a
+  // USER-mode vault (no passphrase, ever) unlocked by agent-key or owner-approval.
+  // Providing a passphrase, or --dev, selects dev mode. A user-mode vault can never
+  // gain a passphrase and cannot be converted — so the agent can't enable one.
   let passphrase = await resolvePassphrase(flags, { allowPrompt: false });
-  if (!passphrase) {
-    if (!hasTty()) {
-      outputError(
-        "Passphrase required. Pass --passphrase-file <path>, --passphrase-env <VAR>, " +
-          "or run interactively to enter one.",
-      );
-      return;
-    }
+  const dev = flags.dev === true || passphrase != null;
+
+  // Dev mode on an interactive terminal with no passphrase supplied: prompt for one.
+  if (dev && passphrase == null && hasTty()) {
     passphrase = promptNewPassphrase({
-      prompt: "New vault passphrase: ",
+      prompt: "New vault passphrase (dev mode): ",
       confirm: "Confirm passphrase: ",
     });
   }
 
   const useAgentKey = flags["agent-key"] !== false;
-  const privateKeyPem = useAgentKey
-    ? await loadAgentPrivateKey(stateDir)
-    : null;
+  const privateKeyPem = useAgentKey ? await loadAgentPrivateKey(stateDir) : null;
   const agentId = privateKeyPem
     ? (await readJsonFile(statePaths(stateDir).mainKey, null))?.agentId || null
     : null;
 
-  const result = await initVault({ stateDir, passphrase, privateKeyPem, agentId });
-  stderr(`Vault initialized: ${result.path}`);
-  outputJson({ ok: true, ...result });
+  try {
+    const result = await initVault({ stateDir, passphrase, privateKeyPem, agentId, dev });
+    stderr(`Vault initialized (${result.mode} mode): ${result.path}`);
+    if (result.mode === "user") {
+      stderr(
+        "User mode: unlock via agent-key or owner-approval (Alien app). A passphrase " +
+          "can never be added, and this vault cannot be converted to dev mode.",
+      );
+    }
+    outputJson({ ok: true, ...result });
+  } catch (err) {
+    outputError(err.message);
+  }
 }
 
 async function cmdAdd(flags) {
@@ -326,6 +334,7 @@ const SEALED_FIELDS = [
   "secret",
   "refreshToken",
   "clientSecret",
+  "dek",
 ];
 
 async function cmdShow(flags) {
@@ -426,7 +435,7 @@ async function cmdGenerate(flags) {
 async function cmdList(flags) {
   const vault = await openWithFlags(flags);
   try {
-    outputJson({ ok: true, credentials: vault.list(), slots: vault.slots });
+    outputJson({ ok: true, mode: vault.mode, credentials: vault.list(), slots: vault.slots });
   } finally {
     vault.lock();
   }
@@ -651,7 +660,9 @@ function printHelp() {
       "agent-id-vault — portable encrypted credential vault",
       "",
       "Subcommands:",
-      "  init [--passphrase-file F | --passphrase-env V] [--no-agent-key]",
+      "  init [--dev [--passphrase-file F | --passphrase-env V]] [--no-agent-key]",
+      "       default = USER mode (no passphrase; agent-key slot). --dev or a passphrase",
+      "       = DEV mode (passphrase allowed). User mode is one-way (never gains a passphrase).",
       "  add --name N --type T --domains H[,H…] [type-specific value flags]",
       "      oauth2: --token-endpoint URL --client-id ID [--client-secret-env V]",
       "              --refresh-token-file F [--scope S]   (auto-refreshes access tokens)",

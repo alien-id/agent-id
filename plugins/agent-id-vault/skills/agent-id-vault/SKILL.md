@@ -12,11 +12,18 @@ allowed-tools: Bash(node *agent-id-vault/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) 
 
 Portable single-file encrypted vault at `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}/vault.enc`.
 
-The master key is held in slots, LUKS-style:
-- **slot 0**: passphrase-wrapped (Argon2id-class KDF — scrypt in v1)
-- **slot 1**: agent-key-wrapped (auto-unlock on the agent's own machine)
+The master key is held in slots, LUKS-style — agent-key (auto-unlock),
+passphrase, mobile (phone), owner-approval (Alien app).
 
-Copy the file to a second machine, type the passphrase, you're in.
+**Two modes (chosen at init, one-way):**
+- **user mode (default)** — NO passphrase, ever. Unlock by agent-key or
+  owner-approval/mobile (the Alien app). The agent **cannot** add a passphrase,
+  and a user-mode vault **cannot be converted** to dev mode (the mode is bound to
+  the master key and verified on every unlock).
+- **dev mode** (`--dev`, or providing a passphrase at init) — for developers /
+  power users: passphrase slots are allowed, plus all the user-mode methods.
+
+Passphrase is the exceptional, opt-in path — never something the agent enables.
 
 Pairs with the agent-id-proxy plugin — the proxy unlocks the vault and injects values into outbound HTTP requests. The agent itself does not retrieve plaintext during normal operation; `show` exists only for manual export.
 
@@ -27,14 +34,18 @@ Pairs with the agent-id-proxy plugin — the proxy unlocks the vault and injects
 ## Initialize the vault
 
 ```bash
-# Interactive — passphrase typed on /dev/tty, never enters the agent transcript:
+# USER mode (default, recommended): no passphrase; agent-key slot 0. Needs a main
+# key from `agent-id-core bootstrap`. Add owner-approval/mobile for app unlock.
 node CLI init
 
-# Non-interactive (for automation):
-node CLI init --passphrase-file /path/to/pass
+# DEV mode (power users): passphrase allowed. --dev prompts on /dev/tty, or:
+node CLI init --dev --passphrase-file /path/to/pass
 ```
 
-If the agent has a main key (from `agent-id-core bootstrap`), an agent-key slot is added automatically for fast unattended unlock. Pass `--no-agent-key` to skip it.
+User mode needs an agent main key (`agent-id-core bootstrap`); dev mode can use a
+passphrase and/or the agent key. `--no-agent-key` skips the agent-key slot.
+**A user-mode vault never gains a passphrase and cannot be converted — choose dev
+mode at init if you need one.**
 
 ## Add a credential
 
@@ -113,12 +124,14 @@ node CLI remove --name github-pat
 ## Rekey: add/remove slots
 
 ```bash
-node CLI rekey add-passphrase --new-passphrase-file /tmp/newpass
+node CLI rekey add-passphrase --new-passphrase-file /tmp/newpass   # DEV-mode vaults only
 node CLI rekey add-agent-key
 node CLI rekey remove-slot --id 1
 ```
 
-The CLI refuses to remove the last slot (vault would become unrecoverable).
+`rekey add-passphrase` only works on a **dev-mode** vault — on a user-mode vault it
+is refused (`PASSPHRASE_NOT_ALLOWED`), and there is no command to convert modes.
+The CLI also refuses to remove the last slot (vault would become unrecoverable).
 
 ## Portability
 

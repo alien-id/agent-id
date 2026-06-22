@@ -121,6 +121,13 @@ export function injectCredential({ headers, search, cred }) {
       // eth_sendTransaction), handled by the proxy's signing step before
       // forwarding.
       break;
+    case "browser-profile":
+      // Not an HTTP credential — the sealed browser profile is launched by the
+      // agent-id-browser plugin, never injected into a proxied request.
+      throw new RewriteError(
+        "not_injectable",
+        "browser-profile credentials are driven by agent-id-browser, not the HTTP proxy",
+      );
     default:
       throw new RewriteError("unknown_type", `Unknown credential type: ${cred.type}`);
   }

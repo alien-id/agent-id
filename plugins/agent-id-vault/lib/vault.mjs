@@ -33,6 +33,8 @@ import {
   unwrapSlotWithOwnerApproval,
   unwrapSlotWithPassphrase,
   validateVaultHeader,
+  vaultMode,
+  verifyModeTag,
   VAULT_VERSION,
 } from "./format.mjs";
 
@@ -158,6 +160,9 @@ export async function openVault({
     throw err;
   }
 
+  // The mode is bound to the master key; reject a vault whose mode was tampered.
+  verifyModeTag(file, masterKey);
+
   const payloadJson = decryptPayload(masterKey, file.payload);
   const payload = parsePayload(payloadJson);
 
@@ -182,8 +187,10 @@ export async function openVaultWithMasterKey({ stateDir, masterKey }) {
 
   let payload;
   try {
+    verifyModeTag(file, masterKey);
     payload = parsePayload(decryptPayload(masterKey, file.payload));
   } catch (err) {
+    if (err.code === "VAULT_MODE_TAMPERED") throw err;
     const e = new Error(`Master key did not open the vault payload: ${err.message}`);
     e.code = "VAULT_UNLOCK_FAILED";
     throw e;
@@ -251,6 +258,9 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     get stateDir() {
       return stateDir;
     },
+    get mode() {
+      return vaultMode(state.file);
+    },
     get slots() {
       assertOpen();
       return state.file.slots.map((s) => ({
@@ -287,6 +297,16 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     },
     addPassphraseSlot(passphrase) {
       assertOpen();
+      // User-mode vaults can NEVER gain a passphrase (the agent can't enable one,
+      // and there is no user→dev conversion). Only dev-mode vaults allow it.
+      if (vaultMode(state.file) !== "dev") {
+        const err = new Error(
+          "passphrase slots are only allowed in dev-mode vaults — a user-mode vault " +
+            "cannot enable a passphrase and cannot be converted to dev mode",
+        );
+        err.code = "PASSPHRASE_NOT_ALLOWED";
+        throw err;
+      }
       const id = nextSlotId(state.file.slots);
       const slot = buildPassphraseSlot(id, state.masterKey, passphrase);
       state.file.slots.push(slot);
@@ -351,7 +371,13 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
 
 // ─── Init ───────────────────────────────────────────────────────────────────────
 
-export async function initVault({ stateDir, passphrase, privateKeyPem = null, agentId = null }) {
+export async function initVault({
+  stateDir,
+  passphrase = null,
+  privateKeyPem = null,
+  agentId = null,
+  dev = false,
+}) {
   const paths = statePaths(stateDir);
   const existing = await readVaultFile(paths.vaultFile);
   if (existing) {
@@ -359,21 +385,40 @@ export async function initVault({ stateDir, passphrase, privateKeyPem = null, ag
     err.code = "VAULT_EXISTS";
     throw err;
   }
-  if (!passphrase) {
-    throw new Error("Passphrase required for slot 0");
-  }
+
+  // Providing a passphrase (or --dev) selects DEV mode; otherwise USER mode.
+  // Passphrase is the exceptional, opt-in dev/power-user path; the default is a
+  // user-mode vault with no passphrase that can never gain one.
+  const mode = dev || passphrase ? "dev" : "user";
   const masterKey = generateMasterKey();
-  const slots = [buildPassphraseSlot(0, masterKey, passphrase)];
-  if (privateKeyPem) {
-    slots.push(buildAgentKeySlot(1, masterKey, privateKeyPem, agentId));
+  const slots = [];
+
+  if (passphrase) {
+    slots.push(buildPassphraseSlot(0, masterKey, passphrase));
+    if (privateKeyPem) slots.push(buildAgentKeySlot(slots.length, masterKey, privateKeyPem, agentId));
+  } else {
+    // No passphrase: slot 0 must be the agent key (user mode, or dev-without-passphrase).
+    if (!privateKeyPem) {
+      const err = new Error(
+        mode === "user"
+          ? "user-mode vault needs an agent key — run `agent-id-core bootstrap` first " +
+            "(or use --dev with a passphrase for a dev vault)"
+          : "dev-mode vault created without a passphrase needs an agent key",
+      );
+      err.code = "INIT_NEEDS_KEY_OR_PASSPHRASE";
+      throw err;
+    }
+    slots.push(buildAgentKeySlot(0, masterKey, privateKeyPem, agentId));
   }
+
   const file = newVaultFile({
     masterKey,
     slots,
     payloadPlaintext: serializePayload(emptyPayload()),
+    mode,
   });
   await writeVaultFile(paths.vaultFile, file);
-  return { path: paths.vaultFile, slots: file.slots.length, version: VAULT_VERSION };
+  return { path: paths.vaultFile, slots: file.slots.length, version: VAULT_VERSION, mode };
 }
 
 // ─── Export / import (the file is already encrypted, so copy bytes) ─────────────

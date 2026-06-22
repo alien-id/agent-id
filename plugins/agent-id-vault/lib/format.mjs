@@ -29,6 +29,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createECDH,
+  createHmac,
   createPrivateKey,
   hkdfSync,
   randomBytes,
@@ -38,6 +39,40 @@ import {
 
 export const VAULT_MAGIC = "agent-id-vault";
 export const VAULT_VERSION = 2;
+
+// Vault security mode (one-way; chosen at init, never converted):
+//   - "dev"  : passphrase slots allowed (for developers / power users), PLUS the
+//              unattended (agent-key) and app (mobile / owner-approval) slots.
+//   - "user" : NO passphrase ever — only agent-key + app unlock. The agent cannot
+//              add a passphrase, and a user-mode vault cannot be converted to dev.
+// Legacy vaults (no `mode` field) are treated as "dev" for backward compatibility.
+export const VAULT_MODES = Object.freeze(["user", "dev"]);
+
+export function vaultMode(file) {
+  return file && file.mode ? file.mode : "dev";
+}
+
+// The mode is bound to the master key with an HMAC tag so it can't be flipped by
+// editing the (cleartext) header — verified on every unlock. Changing the mode
+// therefore requires the master key (i.e. an already-unlocked vault + custom
+// code), which the official CLI never does: there is no convert command and
+// addPassphraseSlot refuses in user mode.
+export function computeModeTag(masterKey, mode) {
+  return createHmac("sha256", masterKey)
+    .update(`agent-id-vault-mode:${mode}`)
+    .digest("hex");
+}
+
+export function verifyModeTag(file, masterKey) {
+  if (!file.modeTag) return; // legacy vault — nothing to verify
+  const expected = Buffer.from(computeModeTag(masterKey, vaultMode(file)), "hex");
+  const actual = Buffer.from(file.modeTag, "hex");
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    const err = new Error("vault mode tag mismatch — the vault file's mode was tampered with");
+    err.code = "VAULT_MODE_TAMPERED";
+    throw err;
+  }
+}
 
 // scrypt parameters: N=32768, r=8, p=1 → ~32 MB memory, ~300ms on a modern
 // laptop. maxmem must be set high enough; node defaults to 32 MB which is
@@ -346,10 +381,15 @@ export function decryptPayload(masterKey, payload) {
 
 // ─── Vault file shape ───────────────────────────────────────────────────────────
 
-export function newVaultFile({ masterKey, slots, payloadPlaintext = "{}" }) {
+export function newVaultFile({ masterKey, slots, payloadPlaintext = "{}", mode = "user" }) {
+  if (!VAULT_MODES.includes(mode)) {
+    throw new Error(`invalid vault mode: ${mode} (expected one of ${VAULT_MODES.join(", ")})`);
+  }
   return {
     magic: VAULT_MAGIC,
     version: VAULT_VERSION,
+    mode,
+    modeTag: computeModeTag(masterKey, mode),
     cipher: { ...DEFAULT_CIPHER },
     slots,
     payload: encryptPayload(masterKey, payloadPlaintext),
@@ -371,6 +411,9 @@ export function validateVaultHeader(file) {
   }
   if (!Array.isArray(file.slots) || file.slots.length === 0) {
     throw new Error("Vault has no slots — file is corrupt");
+  }
+  if (file.mode != null && !VAULT_MODES.includes(file.mode)) {
+    throw new Error(`Unknown vault mode: ${file.mode}`);
   }
 }
 

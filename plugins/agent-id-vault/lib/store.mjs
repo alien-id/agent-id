@@ -29,6 +29,7 @@ export const CREDENTIAL_TYPES = Object.freeze([
   "oauth2",
   "solana-keypair",
   "evm-keypair",
+  "browser-profile",
 ]);
 
 // A token endpoint must be reached over TLS — the refresh token + client secret
@@ -203,6 +204,24 @@ export function validateRecord(rec) {
       validateToAllowlist(rec);
       break;
     }
+    case "browser-profile": {
+      // Used by `agent-id-browser`, NOT the HTTP proxy. The vault holds only the
+      // data-encryption key (DEK) + the sidecar filename; the actual browser
+      // profile (cookies, tokens) is sealed at <stateDir>/browser-profiles/<file>
+      // with this DEK. `domains` is required by the schema but unused for this
+      // type (the profile is launched, not injected) — callers default to ["*"].
+      requireNonEmpty(rec, ["dek", "profileFile"]);
+      if (!/^[0-9a-fA-F]{64}$/.test(rec.dek)) {
+        throw new Error(`Credential ${rec.name}: dek must be 32 bytes of hex`);
+      }
+      if (/[\\/]/.test(rec.profileFile)) {
+        throw new Error(`Credential ${rec.name}: profileFile must be a bare filename (no path)`);
+      }
+      if (rec.headless != null && typeof rec.headless !== "boolean") {
+        throw new Error(`Credential ${rec.name}: headless must be a boolean`);
+      }
+      break;
+    }
   }
 }
 
@@ -265,6 +284,10 @@ export function listMetadata(payload) {
     // transactions and check balances without opening the record.
     ...(c.publicKey ? { publicKey: c.publicKey } : {}),
     ...(c.address ? { address: c.address } : {}),
+    // browser-profile: surface the (non-secret) account label + headless default
+    // so an agent can see which profile is which without opening the record.
+    ...(c.account ? { account: c.account } : {}),
+    ...(c.type === "browser-profile" ? { headless: c.headless !== false } : {}),
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     lastUsedAt: c.lastUsedAt || null,
@@ -289,6 +312,7 @@ const SENSITIVE_FIELDS = Object.freeze([
   "accessToken", // oauth2
   "secretSeed", // solana-keypair
   "privateKey", // evm-keypair
+  "dek", // browser-profile (data-encryption key for the sealed profile)
 ]);
 
 // Best-effort scrub of decrypted secret material when the vault locks. JS

@@ -4,6 +4,33 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`agent-id-browser` plugin — drive a real logged-in browser, profile sealed in
+  the vault.** One-time headed login establishes a session; afterwards the agent
+  drives it headless with fine-grained control (accessibility `snapshot` + element
+  refs → `click` / `type` / `fill` / `select` / `press` / `hover` / `scroll` /
+  `navigate` / `back` / `screenshot` / `eval` / `wait`), plus one-shot `read` /
+  `fetch`. The profile is tar'd + AES-256-GCM sealed with a per-profile DEK held in
+  a `browser-profile` vault credential; unsealed only while the browser runs,
+  resealed on close. Hardened patchright launch (real Chrome, renderer sandbox on).
+  Unlock honors the vault (agent-key / passphrase / owner-approval — the Alien app).
+  Bundles patchright (the only plugin with an npm dependency). For authenticated
+  sites that block API/OAuth/cookie access (e.g. Gmail/Workspace).
+- **Vault security modes (one-way).** `init` creates a **user-mode** vault by
+  default (no passphrase, ever; unlock by agent-key or owner-approval/mobile) or a
+  **dev-mode** vault (`--dev`, or providing a passphrase at init) where passphrase
+  slots are allowed. A user-mode vault can never gain a passphrase and cannot be
+  converted to dev; the mode is bound to the master key with an HMAC tag verified on
+  every unlock. _Known limitation:_ agent-key auto-unlock still works in user mode —
+  to be tightened to app-unlock-only.
+
+### Removed
+
+- The browser-cookie capture bootstrap (`examples/gmail-cookie-bootstrap.mjs` + its
+  test) — superseded by `agent-id-browser`; Chrome's app-bound encryption and
+  Google's automation-login blocks made the cookie path unshippable.
+
 ### Security
 
 - **Control plane is no longer trusted by loopback alone.** It binds to its own
@@ -109,15 +136,14 @@ All notable changes are documented here.
   `--require-consent` adds a per-`(credential, host)` prompt on first use,
   cached for `--grant-ttl`. Enrolled with `rekey add-mobile` /
   `rekey add-owner-approval`.
-- **Gmail onboarding without Google Cloud Console.**
-  `examples/gmail-cookie-bootstrap.mjs` captures the owner's existing Gmail
-  web session (Firefox `cookies.sqlite`, or Chrome over the DevTools
-  Protocol) into a `cookie-jar` credential; the agent then reads the
-  cookie-authed Atom feed (`mail.google.com/mail/u/0/feed/atom`) through the
-  proxy. `examples/gmail-login-bootstrap.mjs` is the durable alternative — a
-  one-time PKCE OAuth flow that stores a refresh token. Both hand the secret
-  to the vault via a `0600` temp file that is removed on exit (incl. Ctrl-C);
-  nothing sensitive is printed.
+- **Gmail onboarding via OAuth.** `examples/gmail-login-bootstrap.mjs` runs a
+  one-time PKCE OAuth flow that stores a refresh token as an `oauth2`
+  credential; the proxy mints short-lived access tokens on demand. The secret
+  is handed to the vault via a `0600` temp file removed on exit (incl. Ctrl-C);
+  nothing sensitive is printed. (The earlier browser-cookie capture path was
+  retired — Chrome's app-bound encryption and Google's automation-login blocks
+  made it unshippable; see the `agent-id-browser` plugin for the browser-driven
+  approach.)
 - **Clean-room demo + consumer skill** (`examples/clean-room-demo/`). A
   drop-in `alien-vault` agent skill: starts the proxy if needed, calls
   `http://<proxy>/<cred>/<host>/<path>`, and walks the phone-approved
