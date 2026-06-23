@@ -78,6 +78,25 @@ The agent never sees the token value, never manages refresh cycles, never handle
 2. **Use named credentials.** Only reference names present in the vault (e.g. `openai-key`, `github-pat`). If you need a new credential, ask the user to add it via `agent-id-vault add`.
 3. **Trust the proxy.** If the proxy returns `403 host_not_allowed`, the credential is not scoped for that domain — don't try to work around it. If you get `401 vault_locked`, the proxy needs to be restarted or unlocked.
 
+### When the proxy can't help: env-var injection
+
+The proxy only covers tools that make HTTP requests you can redirect. For CLIs
+and SDKs that authenticate from **environment variables** (e.g. the `modal`
+client via `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`, or `AWS_*`), use
+**`agent-id-vault exec`** instead — it materializes named credential fields into
+a child process's environment and runs it, with inherited stdio:
+
+```bash
+agent-id-vault exec \
+  --env MODAL_TOKEN_ID=modal-token.username \
+  --env MODAL_TOKEN_SECRET=modal-token.password \
+  -- modal run job.py
+```
+
+Same contract as the proxy: the agent references credentials by name and never
+sees the value — the secret lives only in the child's environment (never disk,
+argv, or the transcript); only the variable names and their sources are logged.
+
 ---
 
 ## Vault: portable format
