@@ -6,6 +6,17 @@ All notable changes are documented here.
 
 ### Added
 
+- **`agent-id-vault exec` — run a command with credentials injected into its
+  environment.** For CLIs/SDKs that authenticate from env vars (e.g. the `modal`
+  client via `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`), where the HTTP proxy can't
+  help. `exec --env VAR=cred.field [--env …] -- <cmd> [args…]` materializes the
+  named credential fields into the child's environment and spawns it with inherited
+  stdio (interactive commands like `modal shell` keep their TTY). The secret lives
+  only in the child's environment — never disk, argv, or this process's stdout; only
+  the variable names and their credential sources are logged. Sealed in-vault
+  keypairs (`solana-keypair`/`evm-keypair`) refuse to leave the vault. `--env` is
+  repeatable; `field` selects the record field (`basic` → `username`/`password`,
+  `bearer`/`header`/`query`/`cookie` → `value`, `totp` → `secret`, etc.).
 - **`agent-id-browser` plugin — drive a real logged-in browser, profile sealed in
   the vault.** One-time headed login establishes a session; afterwards the agent
   drives it headless with fine-grained control (accessibility `snapshot` + element

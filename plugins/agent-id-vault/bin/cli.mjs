@@ -14,6 +14,8 @@
 //   show --name <N>             — retrieve plaintext (use sparingly; prefer the proxy)
 //   list                        — metadata only, never plaintext
 //   remove --name <N>           — delete a record
+//   exec --env VAR=cred.field … -- <cmd>  — run <cmd> with credentials injected
+//                                 into its environment (secret never hits disk/argv/stdout)
 //   rekey add-passphrase        — append a passphrase slot
 //   rekey add-agent-key         — append an agent-key slot
 //   rekey add-mobile            — append a phone-approved (mobile) unlock slot
@@ -30,10 +32,12 @@
 //   (interactive trusted /dev/tty prompt as last resort)
 
 import fs from "node:fs/promises";
+import { spawn } from "node:child_process";
 
 import {
   outputError,
   outputJson,
+  parseFlags,
   resolveStateDir,
   runCli,
   stderr,
@@ -652,6 +656,124 @@ async function cmdMigrate(flags) {
   }
 }
 
+// ─── exec: run a command with vault credentials injected into its env ─────────
+//
+// Native env-injection. Materializes selected credential fields into the
+// environment of a child process, then spawns it with inherited stdio (so an
+// interactive command like `modal shell` keeps its TTY). The secret lives only
+// in the child's environment — it never touches disk, argv, or this process's
+// stdout. Only the variable names + their credential sources go to stderr.
+//
+//   agent-id-vault exec --env VAR=cred.field [--env …] [unlock flags] -- <cmd> [args…]
+//
+// Example:
+//   agent-id-vault exec \
+//     --env MODAL_TOKEN_ID=modal-token.username \
+//     --env MODAL_TOKEN_SECRET=modal-token.password \
+//     -- modal shell --gpu a10g
+//
+// `field` is the record field to read: basic → username/password; bearer /
+// header / query / cookie → value; totp → secret; oauth2 → refreshToken etc.
+// Sealed in-vault-generated keys (solana/evm) refuse to leave the vault.
+async function cmdExec() {
+  const rest = process.argv.slice(3); // drop ["exec"]; argv[2] === "exec"
+  const sepIdx = rest.indexOf("--");
+  if (sepIdx === -1) {
+    return outputError(
+      "exec needs a `--` separator before the command. " +
+        "Usage: exec --env VAR=cred.field [--env …] -- <command> [args…]",
+    );
+  }
+  const pre = rest.slice(0, sepIdx);
+  const cmdArgv = rest.slice(sepIdx + 1);
+  if (cmdArgv.length === 0) return outputError("No command given after `--`.");
+
+  // --env is repeatable (parseFlags would keep only the last); collect it by
+  // hand and leave the rest as unlock/common flags.
+  const mappings = [];
+  const flagArgs = [];
+  for (let i = 0; i < pre.length; i++) {
+    if (pre[i] === "--env") {
+      const v = pre[i + 1];
+      if (!v || v.startsWith("--")) {
+        return outputError("--env needs a VAR=cred.field argument");
+      }
+      mappings.push(v);
+      i++;
+    } else {
+      flagArgs.push(pre[i]);
+    }
+  }
+  if (mappings.length === 0) {
+    return outputError("exec needs at least one --env VAR=cred.field mapping");
+  }
+
+  const specs = [];
+  for (const m of mappings) {
+    const eq = m.indexOf("=");
+    if (eq <= 0) return outputError(`Bad --env "${m}" — expected VAR=cred.field`);
+    const varName = m.slice(0, eq);
+    const ref = m.slice(eq + 1);
+    const dot = ref.lastIndexOf(".");
+    if (dot <= 0 || dot === ref.length - 1) {
+      return outputError(
+        `Bad --env "${m}" — expected VAR=cred.field ` +
+          "(e.g. MODAL_TOKEN_ID=modal-token.username)",
+      );
+    }
+    specs.push({ varName, credName: ref.slice(0, dot), field: ref.slice(dot + 1) });
+  }
+
+  const flags = parseFlags(flagArgs);
+  const vault = await openWithFlags(flags);
+  const childEnv = { ...process.env };
+  const injected = [];
+  try {
+    for (const s of specs) {
+      const rec = vault.get(s.credName);
+      if (!rec) return outputError(`No credential named '${s.credName}'`);
+      if (rec.exportable === false && SEALED_FIELDS.includes(s.field)) {
+        return outputError(
+          `Credential '${s.credName}' is sealed (generated in-vault); field ` +
+            `'${s.field}' cannot leave the vault. Use the proxy to exercise it.`,
+        );
+      }
+      const value = rec[s.field];
+      if (typeof value !== "string" || value.length === 0) {
+        return outputError(`Credential '${s.credName}' has no usable string field '${s.field}'`);
+      }
+      childEnv[s.varName] = value;
+      injected.push(`${s.varName}=${s.credName}.${s.field}`);
+    }
+  } finally {
+    vault.lock(); // values already copied into childEnv; zero the master key
+  }
+
+  // Names + sources only — never the values.
+  stderr(`Injecting ${injected.join(", ")} → ${cmdArgv.join(" ")}`);
+
+  const child = spawn(cmdArgv[0], cmdArgv.slice(1), { stdio: "inherit", env: childEnv });
+  const forward = (sig) => {
+    try {
+      child.kill(sig);
+    } catch {
+      /* child already exited */
+    }
+  };
+  process.on("SIGINT", forward);
+  process.on("SIGTERM", forward);
+  child.on("error", (err) => {
+    process.off("SIGINT", forward);
+    process.off("SIGTERM", forward);
+    outputError(`Failed to run '${cmdArgv[0]}': ${err.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    process.off("SIGINT", forward);
+    process.off("SIGTERM", forward);
+    process.exitCode = signal ? 1 : (code ?? 0);
+  });
+}
+
 // ─── Dispatch ───────────────────────────────────────────────────────────────────
 
 function printHelp() {
@@ -673,6 +795,9 @@ function printHelp() {
       "  show --name N    (sealed/generated secrets are redacted)",
       "  list",
       "  remove --name N",
+      "  exec --env VAR=cred.field [--env …] -- <cmd> [args…]",
+      "      run <cmd> with credentials injected into its environment;",
+      "      secret never touches disk, argv, or stdout (e.g. MODAL_TOKEN_ID=modal-token.username)",
       "  rekey add-passphrase | add-agent-key | remove-slot --id N",
       "        | add-mobile --device-pubkey HEX [--device-id NAME]",
       "        | add-owner-approval [--sso-url URL] [--provider-address ADDR]",
@@ -704,6 +829,7 @@ const commands = {
   show: cmdShow,
   list: cmdList,
   remove: cmdRemove,
+  exec: cmdExec,
   rekey: makeRekeyHandler(),
   export: cmdExport,
   import: cmdImport,

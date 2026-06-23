@@ -121,6 +121,31 @@ node CLI show --name github-pat   # plaintext export; prefer the proxy for runti
 node CLI remove --name github-pat
 ```
 
+## Run a command with credentials injected into its environment
+
+For tools that authenticate from **environment variables** (CLIs, SDKs) rather
+than HTTP — where the proxy can't help — `exec` materializes selected credential
+fields into a child process's environment and runs it. The secret lives only in
+the child's env: it never touches disk, argv, or stdout. Only the variable names
+and their credential sources are logged (to stderr).
+
+```bash
+node CLI exec \
+  --env MODAL_TOKEN_ID=modal-token.username \
+  --env MODAL_TOKEN_SECRET=modal-token.password \
+  -- modal run gpu_job.py
+```
+
+- `--env VAR=cred.field` is repeatable. `field` is the record field to read:
+  `basic` → `username`/`password`; `bearer`/`header`/`query`/`cookie` → `value`;
+  `totp` → `secret`; `oauth2` → `refreshToken` etc. (`cred` may contain dots —
+  the split is on the **last** dot).
+- Everything after `--` is the command; it runs with inherited stdio, so
+  interactive commands keep their TTY (e.g. `-- modal shell --gpu a10g`).
+- Sealed in-vault-generated keys (`solana-keypair`/`evm-keypair`) refuse to leave
+  the vault — use the proxy to exercise those.
+- Unlock + `--state-dir` flags work as for any other subcommand.
+
 ## Rekey: add/remove slots
 
 ```bash
