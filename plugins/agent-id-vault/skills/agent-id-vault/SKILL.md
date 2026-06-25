@@ -1,19 +1,20 @@
 ---
 name: agent-id-vault
-description: Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key) and typed/domain-scoped credential records. Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them at request time. Can also GENERATE blockchain wallet keys (Solana ed25519, EVM secp256k1) inside the vault: the private key is sealed, only the address is printed, and transactions are signed by the proxy. Use whenever the user asks to save, fetch, or remove a service credential, create a crypto wallet for the agent, or whenever a downstream tool needs an external-service secret that must not appear in shell history, source files, or process arguments.
+description: Portable encrypted credential vault with LUKS-style slots (passkey/Touch ID, passphrase, agent-key, phone) and typed/domain-scoped credential records. Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them at request time. Can also GENERATE blockchain wallet keys (Solana ed25519, EVM secp256k1) inside the vault — the private key is sealed, only the address is printed, and transactions are signed by the proxy. Use whenever the user asks to save, fetch, or remove a service credential, create a crypto wallet for the agent, or whenever a downstream tool needs an external-service secret that must not appear in shell history, source files, or process arguments.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "5.1.0"
-allowed-tools: Bash(node *agent-id-vault/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
+  version: "7.0.0"
+allowed-tools: Bash(node *agent-id-vault/bin/cli.mjs:*) Read
 ---
 
 # Alien Agent ID — Vault
 
 Portable single-file encrypted vault at `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}/vault.enc`.
 
-The master key is held in slots, LUKS-style — agent-key (auto-unlock),
-passphrase, mobile (phone), owner-approval (Alien app).
+The master key is held in slots, LUKS-style — passkey (Touch ID / Face ID /
+security key), agent-key (auto-unlock), passphrase, mobile (phone),
+owner-approval (Alien app).
 
 **Two modes (chosen at init, one-way):**
 - **user mode (default)** — NO passphrase, ever. Unlock by agent-key or
@@ -31,21 +32,30 @@ Pairs with the agent-id-proxy plugin — the proxy unlocks the vault and injects
 
 `bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path (e.g. `node /abs/path/to/plugins/agent-id-vault/bin/cli.mjs`).
 
-## Initialize the vault
+## Initialize the vault — pick how it unlocks
+
+`init --unlock <method>` chooses the unlock. The **passkey** and **passphrase**
+methods are *hard boundaries* — the agent does **not** hold them, so it can't
+self-unlock; both default to **no agent-key slot**.
 
 ```bash
-# USER mode (default, recommended): no passphrase; agent-key slot 0. Needs a main
-# key from `agent-id-core bootstrap`. Add owner-approval/mobile for app unlock.
-node CLI init
+# Passkey (recommended): Touch ID / Face ID / security key. Opens a secure form;
+# you verify with biometrics. The agent can never unlock the vault itself.
+# (On macOS the ceremony opens in Safari — only Safari exposes the Touch ID PRF.)
+node CLI init --unlock passkey
 
-# DEV mode (power users): passphrase allowed. --dev prompts on /dev/tty, or:
-node CLI init --dev --passphrase-file /path/to/pass
+# Passphrase: typed into the secure form (dev mode).
+node CLI init --unlock passphrase
+
+# Agent-key (default if --unlock is omitted): auto, unattended — but the agent
+# CAN unlock it (convenience / low-stakes; needs `agent-id-core bootstrap`).
+node CLI init                 # == --unlock agent-key
 ```
 
-User mode needs an agent main key (`agent-id-core bootstrap`); dev mode can use a
-passphrase and/or the agent key. `--no-agent-key` skips the agent-key slot.
-**A user-mode vault never gains a passphrase and cannot be converted — choose dev
-mode at init if you need one.**
+`--agent-key` keeps an agent-key slot alongside a passkey/passphrase (convenience +
+hard method). `--no-agent-key` removes it. Add more unlock methods later with
+`rekey add-passkey` / `add-passphrase` (dev only) / `add-mobile` / `add-owner-approval`.
+A user-mode vault never gains a passphrase and cannot be converted to dev mode.
 
 ## Add a credential
 
@@ -79,13 +89,32 @@ node CLI add --name github-totp --type totp --domains '*.github.com' \
 # Full cookie jar for one origin (JSON object):
 echo '{"sid":"abc","csrf":"xyz"}' | node CLI add --name gmail \
   --type cookie-jar --domains mail.google.com
+
+# Arbitrary secret — SSH/RSA private key, PEM, service-account JSON, any blob.
+# Not host-scoped (use it via `exec --file`/`--env`, not the HTTP proxy):
+node CLI add --name deploy-key --type secret --form          # paste into the form
+node CLI add --name deploy-key --type secret --value-file ~/.ssh/id_ed25519
 ```
 
+Login/password pairs use `--type basic` (`--username` + a password input). For
+SSH/RSA keys and other key material use `--type secret`.
+
 Value-input channels — pick the one with the smallest attack surface:
-- `--<field>-file <path>` — read from file (recommended)
-- `--<field>-env <VAR>` — read from environment variable
+- `--form` — **out-of-band browser form (recommended when a human is present).** You
+  supply `--name`/`--type`/`--domains` (and any metadata like `--header-name`); a
+  one-shot `127.0.0.1` form opens for the human to type the secret, which then goes
+  straight to the vault. It never enters your stdin, transcript, or process args.
+  Multi-field types (`basic`, `oauth2`, `cookie-jar`) collect all their secrets in
+  one form. The command prints the URL to stderr and waits up to 5 min.
+- `--<field>-file <path>` — read from a file
+- `--<field>-env <VAR>` — read from an environment variable
 - stdin (piped) — `echo "secret" | node CLI add ...`
 - `--<field> <value>` — visible in process list; avoid
+
+```bash
+# The human types the secret into a browser form — the agent never sees it:
+node CLI add --name github-pat --type bearer --domains api.github.com --form
+```
 
 Never paste a secret into chat. The agent transcript persists.
 
@@ -121,25 +150,42 @@ node CLI show --name github-pat   # plaintext export; prefer the proxy for runti
 node CLI remove --name github-pat
 ```
 
-## Run a command with credentials injected into its environment
+## Run a command with credentials injected (env var or key file)
 
-For tools that authenticate from **environment variables** (CLIs, SDKs) rather
-than HTTP — where the proxy can't help — `exec` materializes selected credential
-fields into a child process's environment and runs it. The secret lives only in
-the child's env: it never touches disk, argv, or stdout. Only the variable names
-and their credential sources are logged (to stderr).
+For tools that authenticate from **environment variables** or a **key file**
+rather than HTTP — where the proxy can't help — `exec` materializes selected
+credential fields and runs the command. The agent never sees the value; only the
+variable names + their sources are logged (to stderr).
 
 ```bash
+# Into the environment (CLIs/SDKs that read env vars):
 node CLI exec \
   --env MODAL_TOKEN_ID=modal-token.username \
   --env MODAL_TOKEN_SECRET=modal-token.password \
   -- modal run gpu_job.py
+
+# Into a temp 0600 file (tools that want a key FILE — ssh, RSA PEMs):
+node CLI exec --file GIT_SSH_KEY=deploy-key.value \
+  -- sh -c 'GIT_SSH_COMMAND="ssh -i $GIT_SSH_KEY -o IdentitiesOnly=yes" git fetch'
 ```
 
-- `--env VAR=cred.field` is repeatable. `field` is the record field to read:
-  `basic` → `username`/`password`; `bearer`/`header`/`query`/`cookie` → `value`;
-  `totp` → `secret`; `oauth2` → `refreshToken` etc. (`cred` may contain dots —
-  the split is on the **last** dot).
+`--file` writes the field to a temporary `0600` file, sets `VAR` to its **path**,
+runs the command, then **shreds and removes** the file on exit. The agent gets the
+path, never the contents — ideal for the `secret` type (SSH/RSA keys, PEMs).
+
+> **`exec` is a weaker boundary than the proxy — prefer the proxy when you can.**
+> The child runs with **inherited stdio**, so if the command you run prints its
+> own environment, the secret comes straight back to your transcript. Treat the
+> value as exposed to the subprocess: only `exec` into a *trusted* tool that
+> authenticates from the env, never into something that echoes it (`env`,
+> `printenv`, `sh -c 'echo $VAR'`). The proxy, by contrast, never hands the
+> agent the value at all — reach for `exec` only for env-var-auth tools the
+> proxy genuinely can't reach.
+
+- `--env` / `--file` are repeatable and mixable. `field` is the record field to
+  read: `basic` → `username`/`password`; `bearer`/`header`/`query`/`cookie` →
+  `value`; `totp` → `secret`; `oauth2` → `refreshToken`; `secret` → `value`.
+  (`cred` may contain dots — the split is on the **last** dot.)
 - Everything after `--` is the command; it runs with inherited stdio, so
   interactive commands keep their TTY (e.g. `-- modal shell --gpu a10g`).
 - Sealed in-vault-generated keys (`solana-keypair`/`evm-keypair`) refuse to leave
@@ -149,8 +195,11 @@ node CLI exec \
 ## Rekey: add/remove slots
 
 ```bash
+node CLI rekey add-passkey [--device-label NAME]                  # Touch ID / Face ID / security key
 node CLI rekey add-passphrase --new-passphrase-file /tmp/newpass   # DEV-mode vaults only
 node CLI rekey add-agent-key
+node CLI rekey add-mobile --device-pubkey HEX [--device-id NAME]   # phone (ECDH)
+node CLI rekey add-owner-approval [--sso-url URL]                  # Alien app
 node CLI rekey remove-slot --id 1
 ```
 

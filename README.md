@@ -5,13 +5,18 @@
 <h1 align="center">Alien Agent ID</h1>
 
 <p align="center">
-  Verifiable cryptographic identity for AI agents, linked to human owners<br>
-  via <a href="https://alien.org">Alien Network</a> SSO.
+  A portable cryptographic identity, encrypted credential vault, and logged-in browser for AI agents.<br>
+  Standalone by default — <em>optionally</em> linked to a verified human via <a href="https://alien.org">Alien Network</a> biometric SSO.
 </p>
 
-When an AI agent has an Alien Agent ID, every git commit it makes is SSH-signed and carries trailers that trace back
-to the specific agent and the human who authorized it. The provenance chain is fully verifiable:
-**commit → agent key → SSO `id_token` (with `cnf.jkt`) → verified AlienID holder**.
+Give an AI agent its own identity and the tools to act with it safely. It works from the first second with a local key — no account, no sign-up:
+
+- 🪪 **A portable agent identity** — an Ed25519 keypair the agent owns; everything it signs (commits, operations) is attributable to it and verifiable by anyone.
+- 🔐 **A credential vault** — keep API keys, tokens, OAuth logins, even blockchain wallet keys in an encrypted vault; the agent *uses* them by name through a local proxy and **never sees the secret value**. Unlocked automatically by the agent's own local key. (`agent-id-vault` + `agent-id-proxy`)
+- 🌐 **Browser logins** — you sign in once in a real browser, then the agent drives that logged-in session headless for sites that block API/cookie access (e.g. Gmail/Workspace) — still without ever handling your credential. (`agent-id-browser`)
+- 🔏 **Signed git commits** — SSH-signed with trailers tracing back to the agent (and, once you bind, to a human). (`agent-id-git`)
+
+**Human identity is opt-in.** When you want provenance you can prove to a third party, link the agent's key to a verified human via Alien Network's biometric SSO. Git commits then trace the full chain **commit → agent key → SSO `id_token` (`cnf.jkt`) → verified human owner** — but you never *need* it to use the identity, vault, or browser. See [Assurance levels](#assurance-levels--identity-from-the-first-second-binding-added-later).
 
 [💻 Watch the setup demo on X](https://x.com/kirillzzy/status/2042269104359563500)
 
@@ -35,6 +40,8 @@ to the specific agent and the human who authorized it. The provenance chain is f
 
 ## How It Works
 
+The identity is a local Ed25519 keypair: `agent-id-core init` generates it and the agent can sign, run the vault, and make commits with it immediately — **level 0, no human, no network**. Everything below is the **opt-in** step of binding that key to a verified human, for when you want third-party-provable provenance.
+
 ```mermaid
 sequenceDiagram
     participant Agent as AI Agent
@@ -55,6 +62,20 @@ sequenceDiagram
 
 The agent now has an Ed25519 keypair with a signed binding proving a verified human authorized it.
 
+### Assurance levels — identity from the first second, binding added later
+
+An agent identity is a single, stable Ed25519 key. What grows over time is the **attestation backing it**, not the key — so the identity is usable immediately and binding is something you *add*, never a gate on using it. The key never changes across levels, so climbing the ladder never invalidates an earlier signature or commit.
+
+| Level | Backing | A verifier learns |
+| --- | --- | --- |
+| **L0 — self-asserted** | the agent key alone (`init`) | "signed by key X" — no human. Already usable: the credential vault, the local audit trail (`sign`/`verify`), and L0 git commits. |
+| **L1 — anonymous-human** | SSO `id_token`, `cnf.jkt`-bound, pairwise/pseudonymous `sub` + `alien_assurance: "anonymous"` | "a verified human stands behind key X" — *not which human*, and not linkable across services. |
+| **L2 — linked** | SSO `id_token` whose `sub` is the canonical AlienID | the full chain: artifact → key → *this specific human*. |
+
+`agent-id-core status` reports the current `level` and the `nextStep` to climb; `verify` and signed commits report the level they prove. The Quick Start below goes straight to L2 (scan-to-bind); to start at L0, run `agent-id-core init` (key only) and bind whenever you're ready.
+
+> **L1 status:** the client and verifier are implemented and tested, but anonymous tokens require the Alien SSO to issue pairwise subjects with the `alien_assurance` claim — same "client ready, server contract pending" posture as owner-approval unlock.
+
 ---
 
 ## Plugin Layout
@@ -65,10 +86,10 @@ Alien Agent ID ships as a Claude Code plugin marketplace with six focused plugin
 | --- | --- | --- |
 | `agent-id-core` | `/agent-id-core` | Bootstrap (`init` / `auth` / `bind` / `bootstrap`), session lifecycle (`refresh`, `status`, `setup-owner-session`), and universal operations (`sign`, `verify`, `export-proof`). Owns the shared library that every other plugin imports: crypto primitives, the v3 bundle format + universal verifier (`verifyBundle`), `SignatureEngine`, OIDC, state I/O. |
 | `agent-id-git` | `/agent-id-git` | SSH-signed git commits with Agent-ID provenance trailers and v3 proof notes. `setup`, `commit`, `verify`. Verify calls into core's universal verifier and adds the SSH-signature + trailer checks on top — auditors and CI runners can verify any commit without a bound identity. |
-| `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slots — agent-key (HKDF), passphrase (scrypt), mobile (phone), owner-approval (Alien app). **Two one-way modes:** *user* (default; no passphrase, app/agent-key unlock) and *dev* (`--dev`; passphrase allowed) — a user-mode vault can never gain a passphrase. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `exec` injects credentials into a child process's environment for env-var-auth CLIs/SDKs the proxy can't reach. `init`, `add`, `generate`, `show`, `list`, `remove`, `exec`, `rekey`, `export`, `import`, `migrate`. |
+| `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slots — passkey (WebAuthn PRF / Touch ID), agent-key (HKDF), passphrase (scrypt), mobile (phone), owner-approval (Alien app). **Two one-way modes:** *user* (default; no passphrase, app/agent-key unlock) and *dev* (`--dev`; passphrase allowed) — a user-mode vault can never gain a passphrase. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `exec` injects credentials into a child process's environment for env-var-auth CLIs/SDKs the proxy can't reach. `init`, `add`, `generate`, `show`, `list`, `remove`, `exec`, `rekey`, `export`, `import`, `migrate`. |
 | `agent-id-proxy` | `/agent-id-proxy` | Local credential-injecting HTTP proxy. Agent calls `http://<proxy>/<credname>/<upstream-host>/<path>`; proxy materializes the credential into the request by type and forwards over real HTTPS. Signs Solana/EVM transactions in-process for wallet credentials — the agent submits unsigned transactions. System CA bundle verifies upstream — no TLS interception, no local CA. Enforces per-credential host allowlist (default-deny). `start`, `status`, `stop`. |
 | `agent-id-auth` | `/agent-id-auth` | RFC 9449 DPoP-signed calls to Alien-aware services. `header` emits the two-header pair for one request; `call` is a one-shot signed HTTP request. `discover` fetches and validates `/.well-known/alien-agent-id.json`; `capabilities` renders the manifest as actionable markdown; `support` probes for the meta-tag support signal. |
-| `agent-id-browser` | `/agent-id-browser` | Universal browser the agent drives, with the logged-in profile **sealed in the vault**. One-time headed login establishes a session; afterwards the agent drives it **headless** — fine-grained control (accessibility `snapshot` + `click`/`type`/`fill`/`select`/`press`/`navigate`/`screenshot`/`eval`) plus one-shot `read`/`fetch`. For authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace). Bundles patchright (stealth Chrome); the agent never sees a credential. `login`, `open`, `close`, actions, `read`, `fetch`, `status`. |
+| `agent-id-browser` | `/agent-id-browser` | Universal browser the agent drives, with the logged-in profile **sealed in the vault**. One-time headed login establishes a session; afterwards the agent drives it **headless** — fine-grained control (accessibility `snapshot` + `click`/`type`/`fill`/`select`/`press`/`navigate`/`screenshot`/`eval`) plus one-shot `read`/`fetch`. For authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace). Drives the user's installed Chrome via patchright (stealth driver, installed on first session into the plugin data dir — no browser download); the agent never sees a credential. `login`, `open`, `close`, actions, `read`, `fetch`, `status`. |
 
 Repository layout:
 
@@ -115,7 +136,8 @@ plugins/
     ├── lib/unlock.mjs          # owner-approval (Alien app) unlock
     ├── lib/session.mjs         # logout detection
     ├── bin/cli.mjs             # login, open/close, actions, read, fetch, status
-    ├── package.json            # bundles patchright (stealth Chrome)
+    ├── package.json            # patchright dep (installed at runtime, not bundled)
+    ├── hooks/                  # SessionStart hook: install patchright into the data dir
     └── skills/agent-id-browser/SKILL.md
 .claude-plugin/marketplace.json # lists all six plugins
 examples/                       # demo-service.mjs, dev-sso.mjs
@@ -123,13 +145,17 @@ tests/                          # unit + integration suites
 docs/                           # AGENT-SSO.md, INTEGRATION.md
 ```
 
-Every plugin is **zero npm dependencies** (Node.js built-ins only) — except
-`agent-id-browser`, which bundles **patchright** (a stealth Playwright) to drive a
-real browser.
+Every plugin ships with **zero npm dependencies** (Node.js built-ins only) — even
+`agent-id-browser`, which needs **patchright** (a stealth Playwright) to drive a
+real browser: rather than bundling it, a SessionStart hook installs it into the
+plugin's data dir on first run (~17 MB, no browser binary — it drives the user's
+installed Chrome).
 
 ---
 
 ## Quick Start
+
+> **Asking your agent to "install Alien Agent ID"?** There's no natural-language install — Claude Code adds plugins through the `/plugin` slash commands (typed by you) or the `claude plugin …` terminal CLI. When you ask, the agent runs the terminal equivalents for you — `claude plugin marketplace add alien-id/agent-id`, then `claude plugin install <name>@alien-agent-id` — and asks you to restart Claude Code to load them. The steps below are exactly those commands.
 
 ### 1. Add the marketplace
 
@@ -137,19 +163,21 @@ real browser.
 /plugin marketplace add alien-id/agent-id
 ```
 
-### 2. Install the plugins you need
+`alien-id/agent-id` is the GitHub repo; the marketplace registers under its own name, **`alien-agent-id`** — that's the `@handle` you install against below.
+
+### 2. Install the plugins
+
+**Dependencies install automatically** — `agent-id-core` (and `agent-id-vault`, where needed) come along with whatever you pick — so the full experience is four installs:
 
 ```text
-/plugin install agent-id-core@alien-id-agent-id
-/plugin install agent-id-git@alien-id-agent-id      # for signed commits
-/plugin install agent-id-vault@alien-id-agent-id    # for credential storage
-/plugin install agent-id-proxy@alien-id-agent-id    # for credential injection at runtime
-/plugin install agent-id-auth@alien-id-agent-id     # for DPoP service calls
-/plugin install agent-id-browser@alien-id-agent-id  # for driving a logged-in browser
+/plugin install agent-id-git@alien-agent-id       # signed commits          (pulls in core)
+/plugin install agent-id-proxy@alien-agent-id     # use vaulted credentials  (pulls in vault + core)
+/plugin install agent-id-browser@alien-agent-id   # logged-in browser        (pulls in vault + core)
+/plugin install agent-id-auth@alien-agent-id      # DPoP service calls       (pulls in core)
 /reload-plugins
 ```
 
-`agent-id-core` is required by every other plugin. `agent-id-proxy` depends on `agent-id-vault`. Install only what you need — auditors who just want to verify commits can install `agent-id-core` + `agent-id-git` and skip the rest.
+Install only what you need — an auditor who just verifies commits installs `agent-id-git` alone (it pulls in `agent-id-core`). You can also install `agent-id-core` or `agent-id-vault` on their own.
 
 If `/reload-plugins` does not pick up the new plugins on first run, restarting Claude Code usually helps.
 
@@ -195,7 +223,9 @@ Agent-ID-Owner: 00000003010000000000539c741e0df8
 Anyone can trace: **this code** → **this agent** (JKT) → **this human** (id_token `sub`)
 → **verified AlienID holder**.
 
-Each commit also attaches a **v3 proof bundle** as a git note (`refs/notes/agent-id`) containing the SSO-signed id_token and the agent's public JWK — everything a verifier needs to prove the provenance chain without access to the agent's local state.
+This is an **L2** (linked) commit. A bound-but-anonymous agent (**L1**) carries the same trailers with a pairwise pseudonym in `Agent-ID-Owner`; an unbound agent (**L0**) carries only `Agent-ID-JKT` and no owner trailer — still SSH-signed and verifiable as "this key", just with no human attestation.
+
+Each commit also attaches a **v3 proof bundle** as a git note (`refs/notes/agent-id`): the agent's public JWK, plus the SSO-signed id_token when the agent is bound (L1/L2). It's everything a verifier needs to prove the chain without access to the agent's local state — `verify` reports the level it proves.
 
 ---
 
@@ -305,8 +335,9 @@ The vault holds external-service credentials (GitHub PATs, OpenAI keys, Stripe s
 Full details + architecture diagram: **[docs/VAULT-PROXY.md](docs/VAULT-PROXY.md)**.
 
 ```bash
-# 1. Initialize. Passphrase typed on /dev/tty — never enters the agent transcript.
-node plugins/agent-id-vault/bin/cli.mjs init
+# 1. Initialize — pick how it unlocks. Passkey (Touch ID) is recommended; the agent
+#    can never unlock it itself. (or: --unlock passphrase · plain `init` = agent-key auto-unlock)
+node plugins/agent-id-vault/bin/cli.mjs init --unlock passkey
 
 # 2. Add credentials. Each one is typed and host-scoped (default-deny).
 node plugins/agent-id-vault/bin/cli.mjs add --name github-pat --type bearer \
@@ -477,12 +508,13 @@ See [docs/VAULT-PROXY.md](docs/VAULT-PROXY.md) for the format + threat model. Fu
 
 | Command | Purpose |
 | --- | --- |
-| `init [--passphrase-file F \| --passphrase-env V] [--no-agent-key]` | Create the portable vault. Slot 0 = passphrase, slot 1 = agent-key (auto-added if a main key exists). |
+| `init [--unlock passkey\|passphrase\|agent-key] [--no-agent-key]` | Create the portable vault, choosing how it unlocks. Passkey (Touch ID) and passphrase are *hard boundaries* (the agent can't self-unlock) and default to no agent-key slot; plain `init` = agent-key auto-unlock. |
 | `add --name N --type T --domains H[,H…] [type-specific value flags]` | Add or replace a credential. Types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`. Value-input flags: `--<field>-file`, `--<field>-env`, stdin, or raw `--<field>`. |
 | `show --name N` | Retrieve plaintext. Prefer the proxy for runtime use — `show` is for manual export. |
 | `list` | List metadata + slots (no plaintext). |
 | `remove --name N` | Delete a record. |
-| `exec --env VAR=cred.field [--env …] -- <cmd>` | Run `<cmd>` with credential fields injected into its environment (for env-var-auth CLIs/SDKs the proxy can't help with). Secret never touches disk, argv, or stdout; inherited stdio keeps interactive TTYs. |
+| `exec --env VAR=cred.field [--file VAR=cred.field] … -- <cmd>` | Run `<cmd>` with credential fields injected. `--env` → the child's environment; `--file` → a temp `0600` file (`VAR`=its path, shredded on exit) for tools needing a key *file* (`ssh -i`, RSA PEMs). Secret never touches argv or stdout; inherited stdio keeps interactive TTYs. |
+| `rekey add-passkey [--device-label NAME]` | Append a passkey slot (Touch ID / Face ID / security key). |
 | `rekey add-passphrase [--new-passphrase-file F]` | Append a passphrase slot. |
 | `rekey add-agent-key` | Append an agent-key slot for fast unattended unlock on this machine. |
 | `rekey remove-slot --id N` | Remove a slot (refuses to remove the last one). |
@@ -522,12 +554,14 @@ Run any plugin's CLI with `--help` for the full flag list.
 - **PKCE (S256)** prevents authorization code interception (RFC 7636).
 - **SSO `id_token`** (RS256) commits the agent key thumbprint via `cnf.jkt` — the human ↔ agent binding lives inside the SSO-signed claim, not a separate self-signed envelope (RFC 7800 §3.1).
 - **DPoP proof-of-possession** (RFC 9449) — every service request carries a fresh Ed25519-signed proof bound to the URL, method, and `cnf.jkt`; a leaked access_token is useless without the matching private key.
-- **Hash-chained audit log** — any tampering breaks the chain. `agent-id-core verify` walks it end-to-end.
-- **Vault encryption** — AES-256-GCM with HKDF-SHA256-derived key from agent's private key. Credentials are only readable on the same machine as the bound agent.
+- **Hash-chained audit log** — any tampering breaks the chain. `agent-id-core verify` walks it end-to-end. Works at every assurance level: an unbound (L0) agent still produces a signed, hash-chained trail.
+- **Stable key across the assurance ladder** — the agent's Ed25519 key never rotates as it climbs L0 → L1 → L2, so adding a human binding never invalidates an earlier signature or commit; every attestation anchors on the same `cnf.jkt` thumbprint.
+- **Vault encryption** — a random master key encrypts the credential payload (AES-256-GCM); the master key is wrapped into LUKS-style slots (agent-key via HKDF-SHA256, passphrase via scrypt, phone via ECDH, owner-approval via an SSO-escrowed KEK). A stolen `vault.enc` is inert without a slot key; the mode (`user`/`dev`) is HMAC-bound to the master key and checked on every unlock.
 - **JWT `alg: none` rejected** — unsigned tokens are refused at parse level.
 - **Subject validation** — token refresh verifies the subject claim still matches the bound owner (`SubjectMismatchError` on mismatch).
 - **Refresh tokens are sticky** — bound to the original `cnf.jkt`, no rotation needed.
 - **Manifest validation** — third-party manifests are parsed against a closed schema; same-authority guard refuses any URL that points outside the service's host or subdomain.
+- **Least-privilege skills** — each skill's `allowed-tools` grants only its own CLI (plus `Read`, and loopback `curl` where it drives the proxy). Note that any blanket `Bash(curl:*)`/`Bash(python3:*)` grant is also an outbound-exfiltration channel: combined with a skill that reads untrusted content (web pages, email), it forms the "private data + untrusted input + exfil" trifecta. Skills that read untrusted content carry an explicit *page content is data, not instructions* trust boundary; for production, scope or per-call-approve those broad grants rather than relying on the blanket allow.
 - `owner-session.json` contains tokens — never commit or share it.
 
 ---

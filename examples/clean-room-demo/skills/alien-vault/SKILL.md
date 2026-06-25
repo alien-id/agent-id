@@ -1,7 +1,7 @@
 ---
 name: alien-vault
 description: Access the owner's external services (Gmail, GitHub, APIs) that require a credential, by calling the local Alien Agent ID vault proxy — without ever seeing, requesting, or handling the secret. Use whenever you're asked to read the owner's email or call a service that needs an API key / token / login. Starts the proxy if it isn't running; the owner unlocks the vault once on their phone; you only ever name the credential.
-allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*), Bash(curl:*), Bash(python3:*)
+allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*) Bash(curl:*) Bash(python3:*)
 ---
 
 <!--
@@ -10,6 +10,14 @@ allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*), Bash(curl:*), Bash(pyth
     <VAULT_DIR>      → the vault's state-dir (where vault.enc lives), e.g. /Users/you/vault-demo
   And edit the "Available credentials" table to match the credentials you added.
   See this directory's README.md for the full setup.
+
+  SECURITY NOTE: `Bash(curl:*)` and `Bash(python3:*)` are BROAD grants — they
+  authorize arbitrary HTTP and arbitrary code, i.e. an exfiltration channel, while
+  this skill also reads the owner's private mail (untrusted content). That is the
+  classic "private data + untrusted input + exfil" trifecta. They are here only to
+  keep this demo copy-pasteable. For anything beyond a throwaway demo, narrow them
+  (or drop the blanket grant and approve calls per-invocation) so a prompt
+  injection in an email can't turn curl/python into a data-exfil tool.
 -->
 
 # Alien Vault — using the owner's credentials without seeing them

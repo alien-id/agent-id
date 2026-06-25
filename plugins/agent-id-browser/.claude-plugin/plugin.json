@@ -1,10 +1,15 @@
 {
   "name": "agent-id-browser",
-  "version": "0.1.0",
+  "version": "7.0.0",
   "description": "Universal browser the agent drives, with the logged-in profile sealed in the agent vault. One-time headed login; headless automated reads/fetches thereafter.",
+  "author": {
+    "name": "Alien",
+    "email": "support@alien.org"
+  },
   "keywords": ["browser-automation", "patchright", "credential-vault", "agent-identity"],
+  "hooks": "./hooks/hooks.json",
   "dependencies": [
-    {"name": "agent-id-core", "version": "^4.0.0"},
-    {"name": "agent-id-vault", "version": "^5.0.0"}
+    {"name": "agent-id-core", "version": "7.0.0"},
+    {"name": "agent-id-vault", "version": "7.0.0"}
   ]
 }

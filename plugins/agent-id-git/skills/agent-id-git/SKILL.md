@@ -4,27 +4,29 @@ description: SSH-signed git commits with Alien Agent ID provenance trailers and 
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "0.0.0"
+  version: "7.0.0"
 allowed-tools: Bash(node *agent-id-git/bin/cli.mjs:*) Bash(git:*) Read
 ---
 
 # Alien Agent ID — Git
 
-SSH-signed commits whose signing key is bound, via the SSO-issued id_token (`cnf.jkt`), to a verified human owner. Each commit carries:
+SSH-signed commits whose signing key is — when the agent is bound — tied via the SSO-issued id_token (`cnf.jkt`) to a verified human owner. Each commit carries:
 
 - An SSH signature in the commit object (visible via `git log --show-signature`).
-- Two trailers in the commit message: `Agent-ID-JKT: <thumbprint>` and `Agent-ID-Owner: <sub>`.
-- A v3 proof bundle attached as a git note under `refs/notes/agent-id` containing the SSO-signed id_token and the agent's public JWK.
+- `Agent-ID-JKT: <thumbprint>` in the commit message — always; plus `Agent-ID-Owner: <sub>` when the agent is human-backed (L1/L2).
+- A v3 proof bundle attached as a git note under `refs/notes/agent-id` containing the agent's public JWK, plus the SSO-signed id_token when bound.
 
-Verification is universal: it does not require the agent's local state, only the commit and its proof note. The verifier walks `SSH sig → agent_jwk → cnf.jkt → SSO RS256 signature → verified owner sub`.
+**Binding is optional — commit works at any assurance level.** A fresh, unbound agent (L0) commits with its key alone: still SSH-signed, still independently verifiable as "this key", just with no human attestation. Bind later (`agent-id-core auth` + `bind`) and subsequent commits become human-backed (L1 anonymous / L2 linked) with no key change. Verification reports the level it proves.
+
+Verification is universal: it does not require the agent's local state, only the commit and its proof note. For a bound commit the verifier walks `SSH sig → agent_jwk → cnf.jkt → SSO RS256 signature → verified owner sub`; for an L0 commit it confirms `SSH sig → agent_jwk → JKT trailer` and reports level 0.
 
 ## Resolve the CLI
 
 `bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path (e.g. `node /abs/path/to/plugins/agent-id-git/bin/cli.mjs`) in the examples below.
 
-## Setup (one-time, after bootstrap)
+## Setup (one-time)
 
-After `agent-id-setup bootstrap` has produced a keypair and bound an owner, configure git signing:
+After `agent-id-core init` (or `bootstrap`) has produced a keypair — binding is **not** required for setup — configure git signing:
 
 ```bash
 node CLI setup
@@ -40,7 +42,7 @@ node CLI commit --message "fix: handle empty body" --push        # push commit +
 node CLI commit --message "release: 1.2.0" --push --remote upstream
 ```
 
-Output is JSON: `{ ok, commitHash, signed, jkt, proofAttached, pushed, notesPushed, ... }`.
+Output is JSON: `{ ok, commitHash, signed, level, assurance, jkt, ownerSub, proofAttached, pushed, notesPushed, ... }`. `level` is 0 (self-asserted), 1 (anonymous-human), or 2 (linked); an unbound agent commits at level 0 and emits a notice.
 
 A normal `git commit` still works but skips trailers, signing, and the proof note.
 
@@ -53,11 +55,11 @@ node CLI verify --commit <hash>        # any commit with a v3 proof note
 
 Verification runs three checks in order:
 
-1. **Universal bundle verification** (handled by `agent-id-core`): id_token SSO signature, `cnf.jkt` ↔ `jwkThumbprint(agent_jwk)`, agent_jwk validity.
-2. **Trailer binding**: `Agent-ID-JKT` and `Agent-ID-Owner` in the commit message must agree with the bundle.
+1. **Universal bundle verification** (handled by `agent-id-core`): agent_jwk validity, and — when the bundle is bound — id_token SSO signature + `cnf.jkt` ↔ `jwkThumbprint(agent_jwk)`. An L0 bundle (no id_token) is accepted as self-asserted.
+2. **Trailer binding**: `Agent-ID-JKT` must agree with the bundle; `Agent-ID-Owner`, if present, must equal the verified `sub` (a forged owner trailer on an L0 commit is rejected here).
 3. **SSH commit signature**: `git verify-commit` against the agent_jwk derived from the bundle.
 
-On success: `{ ok: true, commit, jkt, ownerSub, issuer, aud, iat, summary }`.
+On success: `{ ok: true, commit, level, assurance, jkt, ownerSub, issuer, aud, iat, summary }`. `ownerSub` is null at level 0.
 
 The verifier is **standalone** — it does not require a bound identity on the verifying machine. Auditors, CI runners, and code reviewers can run it on any repository with a v3 proof note attached.
 

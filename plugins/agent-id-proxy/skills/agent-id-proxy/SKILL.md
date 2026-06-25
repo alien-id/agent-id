@@ -4,8 +4,8 @@ description: Local credential-injecting HTTP proxy. The agent calls `http://loca
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "0.3.0"
-allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
+  version: "7.0.0"
+allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*) Bash(curl:*) Read
 ---
 
 # Alien Agent ID — Proxy
@@ -23,6 +23,12 @@ Requires `agent-id-vault init` to have produced a portable vault with at least o
 ```bash
 # Foreground (Ctrl-C to stop). Tries agent-key unlock first, falls back to /dev/tty prompt.
 node CLI start --port 48771
+
+# Once-per-session unlock via an out-of-band browser form (1Password-style): the
+# human types the vault passphrase into a localhost form; the proxy holds the key
+# for the session and re-locks when idle. Agent-key auto-unlock is bypassed, so the
+# agent cannot unlock the vault itself. (Vault must have a passphrase slot — dev mode.)
+node CLI start --unlock-form
 
 # With an explicit passphrase source:
 node CLI start --passphrase-file ~/.agent-id-pass

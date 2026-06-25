@@ -1,6 +1,6 @@
 {
   "name": "agent-id-browser",
-  "version": "0.1.0",
+  "version": "7.0.0",
   "type": "module",
   "private": true,
   "description": "Universal browser automation with the profile sealed in the agent vault.",

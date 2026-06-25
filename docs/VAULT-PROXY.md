@@ -93,9 +93,13 @@ agent-id-vault exec \
   -- modal run job.py
 ```
 
-Same contract as the proxy: the agent references credentials by name and never
-sees the value — the secret lives only in the child's environment (never disk,
-argv, or the transcript); only the variable names and their sources are logged.
+Same naming contract as the proxy — the agent references credentials by name —
+but a **weaker boundary**: `exec` does not itself write the value to disk, argv,
+or its own stdout, yet the child runs with inherited stdio, so a command that
+prints its environment hands the secret back to the transcript. Use `exec` only
+for a *trusted* env-var-auth tool, never one that echoes its env. The proxy
+(which never gives the agent the value) is the stronger path whenever the tool
+speaks HTTP.
 
 ---
 

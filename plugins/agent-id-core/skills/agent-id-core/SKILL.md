@@ -1,16 +1,26 @@
 ---
 name: agent-id-core
-description: Alien Agent ID — bootstrap and lifecycle. Establish an agent identity bound to a verified human owner via Alien Network SSO (OIDC + DPoP), check or refresh the identity's state, and sign or verify arbitrary attestation operations into the agent's local hash-chained audit trail. Use when the user asks to bootstrap an Alien Agent ID, set up the agent identity, check whether one already exists, refresh the SSO session, migrate a pre-v3 binding, or sign / verify / export-proof an arbitrary operation. Also triggers on "Alien ID", "Agent ID", "DPoP", "cnf.jkt", or "owner binding".
+description: Create and manage an AI agent's cryptographic identity — a local Ed25519 key that works immediately (sign, verify, run the vault, make commits) with no account or sign-up. Optionally bind it to a verified human via Alien Network SSO (OIDC + DPoP) when you want third-party-provable provenance; check or refresh the identity's state; sign or verify operations in the agent's local hash-chained audit trail. Use when the user asks to set up or bootstrap an agent identity, check whether one exists, add or refresh human binding, migrate a pre-v3 binding, or sign / verify / export-proof an operation. Also triggers on "Alien ID", "Agent ID", "agent identity", "DPoP", "cnf.jkt", or "owner binding".
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "0.0.0"
-allowed-tools: Bash(node *agent-id-core/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
+  version: "7.0.0"
+allowed-tools: Bash(node *agent-id-core/bin/cli.mjs:*) Read
 ---
 
 # Alien Agent ID — Core
 
-The bootstrap and lifecycle surface. Every other agent-id-* plugin assumes the state directory produced here exists and that the owner session is current.
+The bootstrap and lifecycle surface. Every other agent-id-* plugin assumes the state directory produced here exists.
+
+## Assurance levels (the onboarding ladder)
+
+An agent identity is a single, stable Ed25519 key. What grows over time is the **attestation backing it**, not the key — so the identity is usable from the very first moment and binding is something you *add*, never a precondition:
+
+- **L0 — self-asserted** (`init` only): the key alone, no human. Already usable: local audit trail (`sign`/`verify`), the credential vault, and L0 git commits ("signed by key X, no human backing").
+- **L1 — anonymous-human**: an Alien SSO `id_token` whose `cnf.jkt` binds this key and which attests a *verified human* authorized it, but with a pairwise/pseudonymous `sub` — a verifier learns "a real human stands behind this key", not *which* human.
+- **L2 — linked**: an `id_token` whose `sub` is the canonical AlienID. Full provenance: artifact → key → this specific human.
+
+The key never changes across rungs, so climbing L0→L1→L2 never invalidates an earlier signature or commit. `status` reports the current `level` and the `nextStep` to climb.
 
 State directory layout (under `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}`):
 
@@ -31,9 +41,9 @@ Check whether an identity already exists:
 node CLI status
 ```
 
-Returns `{ initialized, bound, jkt, ownerSub, providerAddress, ... }`. If `bound: true`, skip to signing operations or to the per-plugin CLIs.
+Returns `{ initialized, bound, level, assurance, nextStep, jkt, ownerSub, providerAddress, ... }`. `level` is the rung on the ladder above (0/1/2).
 
-If `bound: false`, start bootstrap **immediately** — do not ask "want me to start?" first; invoking this skill is the opt-in. The first user-facing message is the provider question (Step 1 below), not a confirmation prompt.
+When the user invoked this skill to **bootstrap / bind**, start it **immediately** — do not ask "want me to start?" first; invoking the skill is the opt-in. The first user-facing message is the provider question (Step 1 below), not a confirmation prompt. (If `level >= 1` already, skip to signing operations or the per-plugin CLIs.) Note that a level-0 agent is *already usable* for the vault, the audit trail, and L0 commits — binding adds human attestation, it is not a gate on using the identity.
 
 ## Bootstrap
 
@@ -103,6 +113,14 @@ node CLI export-proof
 ```
 
 Emits the owner session + complete audit trail as JSON on stdout. Useful for offline auditing or for transferring proof to a verifier that does not have access to the agent's state directory.
+
+## Related capabilities (same identity, other plugins)
+
+Once the identity exists, the rest of the toolkit builds on it. Surface these to the user when relevant — they don't require an owner binding (the vault and browser work at level 0):
+
+- **Credential vault** (`/agent-id-vault` + `/agent-id-proxy`) — store the user's API keys, tokens, OAuth logins, and in-vault-generated wallet keys; the agent uses them *by name* through a local proxy and never sees the secret value.
+- **Browser logins** (`/agent-id-browser`) — the user signs in once in a real browser; afterwards the agent drives that logged-in session headless (e.g. Gmail/Workspace) without handling the credential.
+- **Signed commits** (`/agent-id-git`) and **DPoP service calls** (`/agent-id-auth`).
 
 ## Common flag
 

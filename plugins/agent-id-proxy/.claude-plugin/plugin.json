@@ -1,20 +1,25 @@
 {
   "name": "agent-id-proxy",
-  "version": "0.2.0",
+  "version": "7.0.0",
   "description": "Local credential-injecting HTTP proxy. Agent calls http://<proxy>/<credname>/<upstream-host>/<path>; proxy materializes the credential by type, validates the host allowlist, and forwards over real HTTPS. Universal across services without TLS interception.",
+  "author": {
+    "name": "Alien",
+    "email": "support@alien.org"
+  },
   "keywords": [
     "credential-injection",
     "proxy",
     "agent-identity"
   ],
+  "hooks": "./hooks/hooks.json",
   "dependencies": [
     {
       "name": "agent-id-core",
-      "version": "^4.0.0"
+      "version": "7.0.0"
     },
     {
       "name": "agent-id-vault",
-      "version": "^5.0.0"
+      "version": "7.0.0"
     }
   ]
 }

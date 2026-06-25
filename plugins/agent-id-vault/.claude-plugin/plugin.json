@@ -1,7 +1,11 @@
 {
   "name": "agent-id-vault",
-  "version": "5.0.0",
+  "version": "7.0.0",
   "description": "Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key + phone/owner-approval) and typed/domain-scoped credential records.",
+  "author": {
+    "name": "Alien",
+    "email": "support@alien.org"
+  },
   "keywords": [
     "credential-vault",
     "agent-identity"
@@ -9,7 +13,7 @@
   "dependencies": [
     {
       "name": "agent-id-core",
-      "version": "^4.0.0"
+      "version": "7.0.0"
     }
   ]
 }

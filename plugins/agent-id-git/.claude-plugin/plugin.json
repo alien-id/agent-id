@@ -1,7 +1,11 @@
 {
   "name": "agent-id-git",
-  "version": "4.0.0",
+  "version": "7.0.0",
   "description": "SSH-signed git commits with Agent-ID trailers and v3 proof notes; verify provenance on any commit.",
+  "author": {
+    "name": "Alien",
+    "email": "support@alien.org"
+  },
   "keywords": [
     "git-signing",
     "provenance",
@@ -10,7 +14,7 @@
   "dependencies": [
     {
       "name": "agent-id-core",
-      "version": "^4.0.0"
+      "version": "7.0.0"
     }
   ]
 }

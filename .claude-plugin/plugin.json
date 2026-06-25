@@ -1,5 +1,5 @@
 {
   "name": "alien-agent-id",
-  "description": "Verifiable cryptographic identity for AI agents — SSH-signed git commits, owner binding via Alien Network SSO, and hash-chained audit logs",
-  "version": "3.1.1"
+  "description": "A portable cryptographic identity, encrypted credential vault, and logged-in browser for AI agents. The agent uses your credentials by name without ever seeing them, signs its git commits, and drives sites you're logged into. Works standalone; optionally link the identity to a verified human via Alien Network biometric SSO.",
+  "version": "7.0.0"
 }

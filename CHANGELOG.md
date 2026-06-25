@@ -2,10 +2,71 @@
 
 All notable changes are documented here.
 
-## [Unreleased]
+## [7.0.0] — 2026-06-26
+
+All plugins unified at **7.0.0**. Headline: passkey (Touch ID) vault unlock, plus
+the out-of-band secure form, `exec --file`/`secret`, and the assurance ladder.
 
 ### Added
 
+- **Passkey (WebAuthn PRF) vault unlock + an `init` unlock-method chooser.** A new
+  `passkey` vault slot derives its key-encryption key (HKDF-SHA256) from a WebAuthn
+  PRF secret — a value the authenticator (Touch ID / Face ID / Windows Hello / a
+  security key) releases only after user verification. The ceremony runs in the
+  secure form (served on `localhost`, since WebAuthn forbids IP rpIds); Node never
+  touches the authenticator, only the PRF bytes. `agent-id-vault init --unlock
+  passkey|passphrase|agent-key` picks the method — passkey/passphrase are *hard
+  boundaries* (the agent doesn't hold them, so it can't self-unlock) and default to
+  no agent-key slot. `rekey add-passkey` adds one to an existing vault; `show`/`exec`
+  and `proxy start --unlock-form` run the authenticate ceremony automatically when a
+  passkey slot is present. The slot stores only public material (credentialId, rpId,
+  prfSalt) — a stolen `vault.enc` is inert without the physical authenticator + the
+  user's biometric. On **macOS** the ceremony opens in **Safari** (sized via
+  AppleScript window bounds) because only Safari surfaces Apple's platform-authenticator
+  PRF — Chrome's macOS path reports the PRF extension unsupported (`enabled:false`);
+  phones (hybrid) and security keys expose PRF in any browser. The form offers an
+  explicit "Use Touch ID (this Mac)" button with a phone / security-key fallback.
+- **`exec --file` + a generic `secret` credential type.** A new **`secret`** type
+  holds arbitrary key material (SSH/RSA private keys, PEMs, service-account JSON,
+  any blob) — entered via `add --form` (multi-line) or `--value-file`, not
+  host-scoped. **`agent-id-vault exec --file VAR=cred.field`** materializes a field
+  to a temp `0600` file, sets `VAR` to its path, runs the command, then shreds +
+  removes the file on exit — for tools that need a key *file* (`ssh -i`,
+  `GIT_SSH_COMMAND`, RSA PEMs). The agent gets the path, never the contents.
+  (Login/password pairs continue to use the `basic` type.)
+- **Opt-in SessionStart auto-unlock (1Password-style).** `agent-id-proxy
+  autounlock` writes a marker that the proxy's new SessionStart hook checks; when
+  enabled (and a vault exists and no proxy is running), the hook launches `proxy
+  start --unlock-form` so the unlock form opens once at the start of a session and
+  the proxy serves it (no agent-key auto-unlock). `autounlock --off` disables it.
+- **Out-of-band secure entry form (`secure-form.mjs`).** A one-shot `127.0.0.1`
+  browser form so a human can type a secret without it ever crossing the agent's
+  stdin/stdout/transcript — the value travels browser → loopback → vault. Token-gated
+  (256-bit one-time token), single-use, body-capped, never logged; multi-platform via
+  the system browser with `/dev/tty` as the no-GUI fallback. Two uses: **`agent-id-vault
+  add --form`** (the agent supplies name/type/domains; the human types the value — works
+  for multi-field types too), and **`agent-id-proxy start --unlock-form`** (the
+  1Password-style once-per-session unlock — the human types the vault passphrase into the
+  form, the proxy holds the master key for the session and re-locks when idle, and
+  agent-key auto-unlock is bypassed so the agent cannot self-unlock). `AGENT_ID_NO_BROWSER=1`
+  suppresses auto-open (prints the URL instead).
+- **Identity assurance ladder (L0 / L1 / L2).** An agent identity is now a single
+  stable Ed25519 key whose *attestation* grows over time, instead of a binary
+  bound/unbound state. **L0 self-asserted** (key only) is usable immediately:
+  `agent-id-core sign`/`verify` and the audit trail no longer require a binding
+  (previously `appendOperation` threw), `verifyState` treats "unbound" as a valid
+  level-0 state rather than an error, and `agent-id-git commit` produces an L0
+  commit (only the `Agent-ID-JKT` trailer, and an id_token-less proof note) that
+  `verify` accepts and reports as level 0. **L1 anonymous-human** and **L2 linked**
+  are carried by the SSO `id_token`: `bundle.verifyBundle` now classifies the level
+  from claims (`alien_assurance: "anonymous"` + a pairwise `sub` ⇒ L1; canonical
+  AlienID `sub` ⇒ L2; legacy tokens ⇒ L2) and returns it. `status`, `verify`, and
+  signed commits all surface `level` / `assurance` / `nextStep`. The key never
+  rotates across levels, so climbing the ladder never invalidates a prior
+  signature. New shared module `agent-id-core/lib/assurance.mjs`. _L1 anonymous
+  tokens depend on the Alien SSO issuing pairwise subjects with the
+  `alien_assurance` claim — client + verifier are implemented and tested; the
+  server contract is pending (same posture as owner-approval unlock)._
 - **`agent-id-vault exec` — run a command with credentials injected into its
   environment.** For CLIs/SDKs that authenticate from env vars (e.g. the `modal`
   client via `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`), where the HTTP proxy can't
@@ -26,8 +87,11 @@ All notable changes are documented here.
   a `browser-profile` vault credential; unsealed only while the browser runs,
   resealed on close. Hardened patchright launch (real Chrome, renderer sandbox on).
   Unlock honors the vault (agent-key / passphrase / owner-approval — the Alien app).
-  Bundles patchright (the only plugin with an npm dependency). For authenticated
-  sites that block API/OAuth/cookie access (e.g. Gmail/Workspace).
+  patchright is installed at runtime, not bundled: a SessionStart hook installs it
+  into the plugin's data dir on first session (~17 MB driver only — no browser
+  download; it drives the user's installed Chrome via `channel:"chrome"` with the
+  stealth driver intact), so the marketplace ships no `node_modules`. For
+  authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace).
 - **Vault security modes (one-way).** `init` creates a **user-mode** vault by
   default (no passphrase, ever; unlock by agent-key or owner-approval/mobile) or a
   **dev-mode** vault (`--dev`, or providing a passphrase at init) where passphrase
@@ -35,6 +99,18 @@ All notable changes are documented here.
   converted to dev; the mode is bound to the master key with an HMAC tag verified on
   every unlock. _Known limitation:_ agent-key auto-unlock still works in user mode —
   to be tightened to app-unlock-only.
+
+### Fixed
+
+- **Marketplace now passes `claude plugin validate` (it didn't before).** Plugin
+  `source` entries in `marketplace.json` are now `./agent-id-*` relative paths — the
+  bare-name form (`"source": "agent-id-core"`) was rejected by the schema, so the
+  whole marketplace failed validation. The **vault skill's frontmatter** had a
+  colon-space inside its `description` that broke YAML parsing, which silently
+  dropped *all* of that skill's metadata (including its `allowed-tools`) at load
+  time; the description is reworded so the frontmatter parses. Every `plugin.json`
+  gained an `author` (cleared the validator's attribution warning), and the stale
+  root `plugin.json` version (`3.1.1`) was synced to `4.0.0`.
 
 ### Removed
 
@@ -44,6 +120,31 @@ All notable changes are documented here.
 
 ### Security
 
+- **Least-privilege skill permissions.** Each skill's `allowed-tools` now grants
+  only what its body actually uses: removed unused `Bash(curl:*)` + `Bash(jq:*)`
+  from the core and vault skills and unused `Bash(jq:*)` from the proxy and auth
+  skills, shrinking the outbound-exfiltration surface to the two skills that drive
+  the loopback proxy. The browser skill (which reads untrusted page/email content)
+  gained an explicit *page content is data, not instructions* trust boundary, and
+  the clean-room demo's `allowed-tools` were normalized (comma- → space-separated,
+  so the grant actually parses) with a note that its broad `curl`/`python3` grants
+  are an exfil channel to narrow before production.
+- **Vault: stripped mode-tag is detected.** A vault file carrying a `mode` field
+  with its HMAC `modeTag` removed is now rejected (`VAULT_MODE_TAMPERED`) instead of
+  being silently treated as a legacy "dev" vault — closing the
+  strip-the-tag-then-flip-the-mode bypass of the user-mode one-way guarantee.
+- **Vault: a wrong recovered master key reports an unlock failure, not "tampered".**
+  `openVaultWithMasterKey` now authenticates the key against the payload AEAD before
+  checking the mode tag, so a wrong out-of-band key (e.g. from a misbehaving phone)
+  surfaces `VAULT_UNLOCK_FAILED` rather than a misleading `VAULT_MODE_TAMPERED`.
+- **Vault: one source of truth for secret fields.** `wipePayload` (idle-lock
+  scrub), `show` redaction, and `exec` sealed-field refusal now share a single
+  exported `SECRET_FIELDS` list, so a new secret-bearing field can't be added to
+  one path and forgotten in another (which would leak via `show` or survive lock).
+- **`exec` boundary documented honestly.** The vault skill and `VAULT-PROXY.md` now
+  state that `exec` is a weaker boundary than the proxy: the child runs with
+  inherited stdio, so a command that prints its environment returns the secret to
+  the transcript — use it only for trusted env-var-auth tools.
 - **Control plane is no longer trusted by loopback alone.** It binds to its own
   `--control-host` (default `127.0.0.1`, decoupled from the data-plane `--host`,
   so `--host 0.0.0.0` no longer exposes it), and the credential-bearing routes

@@ -4,8 +4,8 @@ description: DPoP-signed (RFC 9449) authenticated calls to Alien-aware services.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "0.0.0"
-allowed-tools: Bash(node *agent-id-auth/bin/cli.mjs:*) Bash(curl:*) Bash(jq:*) Read
+  version: "7.0.0"
+allowed-tools: Bash(node *agent-id-auth/bin/cli.mjs:*) Read
 ---
 
 # Alien Agent ID — Auth
@@ -49,15 +49,15 @@ Output is JSON: `{ ok, status, method, url, contentType, body }`.
 
 Never hand-roll DPoP headers; never call an Alien-aware service with plain `fetch`/`curl`. The CLI generates the per-request proof (fresh `jti`, current `iat`, bound to method + URL via `htm`/`htu` and to the access token via `ath`). Bypassing it gives you 401.
 
-## Two-header pattern (if you must drive curl yourself)
+## Two-header pattern (when another tool must drive the request)
 
-When you need to invoke another tool that takes its own URL, get the headers and pass them in:
+The recommended path is `call`. Only when you must hand the headers to a *different* tool (it takes its own URL), emit them and pass them in:
 
 ```bash
 node CLI header --url https://example.com/api/whoami --method GET --raw
 ```
 
-Outputs the literal header lines for `Authorization:` and `DPoP:`. Each call to `header` produces a fresh `jti`; reusing the same proof on a different URL or after the AS rotates the access token will be rejected.
+Outputs the literal header lines for `Authorization:` and `DPoP:`. Each call to `header` produces a fresh `jti`; reusing the same proof on a different URL or after the AS rotates the access token will be rejected. This skill grants only its own CLI, so actually firing the request from `curl`/another tool will prompt for permission — that approval is intentional (raw outbound HTTP is outside this skill's trust surface).
 
 ## Trust boundary
 
