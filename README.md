@@ -86,7 +86,7 @@ Alien Agent ID ships as a Claude Code plugin marketplace with six focused plugin
 | --- | --- | --- |
 | `agent-id-core` | `/agent-id-core` | Bootstrap (`init` / `auth` / `bind` / `bootstrap`), session lifecycle (`refresh`, `status`, `setup-owner-session`), and universal operations (`sign`, `verify`, `export-proof`). Owns the shared library that every other plugin imports: crypto primitives, the v3 bundle format + universal verifier (`verifyBundle`), `SignatureEngine`, OIDC, state I/O. |
 | `agent-id-git` | `/agent-id-git` | SSH-signed git commits with Agent-ID provenance trailers and v3 proof notes. `setup`, `commit`, `verify`. Verify calls into core's universal verifier and adds the SSH-signature + trailer checks on top — auditors and CI runners can verify any commit without a bound identity. |
-| `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slots — passkey (WebAuthn PRF / Touch ID), agent-key (HKDF), passphrase (scrypt), mobile (phone), owner-approval (Alien app). **Two one-way modes:** *user* (default; no passphrase, app/agent-key unlock) and *dev* (`--dev`; passphrase allowed) — a user-mode vault can never gain a passphrase. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `exec` injects credentials into a child process's environment for env-var-auth CLIs/SDKs the proxy can't reach. `init`, `add`, `generate`, `show`, `list`, `remove`, `exec`, `rekey`, `export`, `import`, `migrate`. |
+| `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slots — passkey (WebAuthn PRF / Touch ID), agent-key (HKDF), passphrase (scrypt), mobile (phone), owner-approval (Alien app). **Two one-way modes:** *user* (default; no passphrase, app/agent-key unlock) and *dev* (`--dev`; passphrase allowed) — a user-mode vault can never gain a passphrase. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `exec` injects credentials into a child process's environment (or a temp `0600` key file via `--file`) for env-var-auth CLIs/SDKs the proxy can't reach. `init`, `add`, `generate`, `show`, `list`, `remove`, `exec`, `rekey`, `export`, `import`, `migrate`. |
 | `agent-id-proxy` | `/agent-id-proxy` | Local credential-injecting HTTP proxy. Agent calls `http://<proxy>/<credname>/<upstream-host>/<path>`; proxy materializes the credential into the request by type and forwards over real HTTPS. Signs Solana/EVM transactions in-process for wallet credentials — the agent submits unsigned transactions. System CA bundle verifies upstream — no TLS interception, no local CA. Enforces per-credential host allowlist (default-deny). `start`, `status`, `stop`. |
 | `agent-id-auth` | `/agent-id-auth` | RFC 9449 DPoP-signed calls to Alien-aware services. `header` emits the two-header pair for one request; `call` is a one-shot signed HTTP request. `discover` fetches and validates `/.well-known/alien-agent-id.json`; `capabilities` renders the manifest as actionable markdown; `support` probes for the meta-tag support signal. |
 | `agent-id-browser` | `/agent-id-browser` | Universal browser the agent drives, with the logged-in profile **sealed in the vault**. One-time headed login establishes a session; afterwards the agent drives it **headless** — fine-grained control (accessibility `snapshot` + `click`/`type`/`fill`/`select`/`press`/`navigate`/`screenshot`/`eval`) plus one-shot `read`/`fetch`. For authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace). Drives the user's installed Chrome via patchright (stealth driver, installed on first session into the plugin data dir — no browser download); the agent never sees a credential. `login`, `open`, `close`, actions, `read`, `fetch`, `status`. |
@@ -205,7 +205,7 @@ The plugin writes the SSH key files and prints the public key. Add it to your Gi
 
 ### Other agents
 
-Any agent with shell access can use the plugin CLIs directly. Requirements: Node.js 18+, git 2.34+, and permission to run `node plugins/agent-id-<X>/bin/cli.mjs ...` commands.
+Any agent with shell access can use the plugin CLIs directly. Requirements: Node.js 18+, git 2.34+, and permission to run `node plugins/agent-id-<X>/bin/cli.mjs ...` commands. For wiring agent-id into a non–Claude-Code harness (Hermes, a custom loop, CI), see the harness-neutral guide: **[docs/HARNESS-INTEGRATION.md](docs/HARNESS-INTEGRATION.md)** — the CLI + proxy contract, the system-prompt block to paste, and how to gate the privileged commands your harness now owns.
 
 ---
 
@@ -353,7 +353,7 @@ node plugins/agent-id-vault/bin/cli.mjs list
 node plugins/agent-id-vault/bin/cli.mjs remove --name github-pat
 ```
 
-Supported credential types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `solana-keypair`, `evm-keypair`. Value-input channels — pick the smallest attack surface: `--<field>-file`, `--<field>-env`, piped stdin, raw `--<field>` arg (visible in `ps`; avoid). **Never paste a secret into chat; transcripts persist.**
+Supported credential types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `secret` (arbitrary key material — SSH/RSA keys, PEMs, service-account JSON, used via `exec`), `solana-keypair`, `evm-keypair`. Value-input channels — pick the smallest attack surface: `--form` (out-of-band browser form), `--<field>-file`, `--<field>-env`, piped stdin, raw `--<field>` arg (visible in `ps`; avoid). **Never paste a secret into chat; transcripts persist.**
 
 ### Blockchain wallets — keys born in the vault
 
@@ -406,7 +406,8 @@ node plugins/agent-id-vault/bin/cli.mjs rekey add-agent-key        # bind B's ag
 Once a credential is in the vault, the agent uses it through `agent-id-proxy`. The agent calls a local URL that names the credential and the upstream host; the proxy materializes the credential and forwards over real HTTPS:
 
 ```bash
-# Start the proxy (default port 48771; tries agent-key unlock first, falls back to passphrase)
+# Start the proxy (default port 48771; tries agent-key unlock, else a /dev/tty prompt).
+# Or `--unlock-form` for a once-per-session human unlock (passphrase or passkey/Touch ID).
 node plugins/agent-id-proxy/bin/cli.mjs start
 
 # Agent calls a local URL — credname picks the credential, host validated by its allowlist
@@ -509,7 +510,7 @@ See [docs/VAULT-PROXY.md](docs/VAULT-PROXY.md) for the format + threat model. Fu
 | Command | Purpose |
 | --- | --- |
 | `init [--unlock passkey\|passphrase\|agent-key] [--no-agent-key]` | Create the portable vault, choosing how it unlocks. Passkey (Touch ID) and passphrase are *hard boundaries* (the agent can't self-unlock) and default to no agent-key slot; plain `init` = agent-key auto-unlock. |
-| `add --name N --type T --domains H[,H…] [type-specific value flags]` | Add or replace a credential. Types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`. Value-input flags: `--<field>-file`, `--<field>-env`, stdin, or raw `--<field>`. |
+| `add --name N --type T --domains H[,H…] [type-specific value flags]` | Add or replace a credential. Types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `secret`. Value-input flags: `--form` (out-of-band browser form), `--<field>-file`, `--<field>-env`, stdin, or raw `--<field>`. |
 | `show --name N` | Retrieve plaintext. Prefer the proxy for runtime use — `show` is for manual export. |
 | `list` | List metadata + slots (no plaintext). |
 | `remove --name N` | Delete a record. |
@@ -556,7 +557,7 @@ Run any plugin's CLI with `--help` for the full flag list.
 - **DPoP proof-of-possession** (RFC 9449) — every service request carries a fresh Ed25519-signed proof bound to the URL, method, and `cnf.jkt`; a leaked access_token is useless without the matching private key.
 - **Hash-chained audit log** — any tampering breaks the chain. `agent-id-core verify` walks it end-to-end. Works at every assurance level: an unbound (L0) agent still produces a signed, hash-chained trail.
 - **Stable key across the assurance ladder** — the agent's Ed25519 key never rotates as it climbs L0 → L1 → L2, so adding a human binding never invalidates an earlier signature or commit; every attestation anchors on the same `cnf.jkt` thumbprint.
-- **Vault encryption** — a random master key encrypts the credential payload (AES-256-GCM); the master key is wrapped into LUKS-style slots (agent-key via HKDF-SHA256, passphrase via scrypt, phone via ECDH, owner-approval via an SSO-escrowed KEK). A stolen `vault.enc` is inert without a slot key; the mode (`user`/`dev`) is HMAC-bound to the master key and checked on every unlock.
+- **Vault encryption** — a random master key encrypts the credential payload (AES-256-GCM); the master key is wrapped into LUKS-style slots (passkey via WebAuthn-PRF HKDF, agent-key via HKDF-SHA256, passphrase via scrypt, phone via ECDH, owner-approval via an SSO-escrowed KEK). A stolen `vault.enc` is inert without a slot key; the mode (`user`/`dev`) is HMAC-bound to the master key and checked on every unlock.
 - **JWT `alg: none` rejected** — unsigned tokens are refused at parse level.
 - **Subject validation** — token refresh verifies the subject claim still matches the bound owner (`SubjectMismatchError` on mismatch).
 - **Refresh tokens are sticky** — bound to the original `cnf.jkt`, no rotation needed.
