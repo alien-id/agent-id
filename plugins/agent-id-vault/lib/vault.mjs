@@ -20,18 +20,22 @@ import {
   buildMobileSlot,
   buildOwnerApprovalSlot,
   buildPassphraseSlot,
+  buildPasskeySlot,
   decryptPayload,
   encryptPayload,
   findAgentKeySlot,
   findMobileSlots,
   findOwnerApprovalSlot,
+  findPasskeySlots,
   generateMasterKey,
   mobileSlotChallenge,
   newVaultFile,
   nextSlotId,
+  passkeySlotChallenge,
   unwrapSlotWithAgentKey,
   unwrapSlotWithOwnerApproval,
   unwrapSlotWithPassphrase,
+  unwrapSlotWithPasskey,
   validateVaultHeader,
   vaultMode,
   verifyModeTag,
@@ -102,6 +106,7 @@ export async function openVault({
   passphrase = null,
   privateKeyPem = null,
   ownerApprovalKek = null,
+  passkeyPrfSecret = null,
 }) {
   const paths = statePaths(stateDir);
   const file = await readVaultFile(paths.vaultFile);
@@ -151,6 +156,17 @@ export async function openVault({
     }
   }
 
+  if (!masterKey && passkeyPrfSecret) {
+    for (const slot of findPasskeySlots(file.slots)) {
+      try {
+        masterKey = unwrapSlotWithPasskey(slot, passkeyPrfSecret);
+        break;
+      } catch (err) {
+        errors.push(`passkey slot ${slot.id}: ${err.message}`);
+      }
+    }
+  }
+
   if (!masterKey) {
     const err = new Error(
       "Could not unlock vault — passphrase wrong or no usable slot. " +
@@ -185,16 +201,19 @@ export async function openVaultWithMasterKey({ stateDir, masterKey }) {
   }
   validateVaultHeader(file);
 
+  // Decrypt the payload FIRST: its AES-GCM tag is what authenticates the key.
+  // A wrong out-of-band master key fails here and is a plain unlock failure —
+  // not "tampering". Only once the key is proven correct do we check the mode
+  // tag, where a mismatch genuinely means the cleartext mode was edited.
   let payload;
   try {
-    verifyModeTag(file, masterKey);
     payload = parsePayload(decryptPayload(masterKey, file.payload));
   } catch (err) {
-    if (err.code === "VAULT_MODE_TAMPERED") throw err;
     const e = new Error(`Master key did not open the vault payload: ${err.message}`);
     e.code = "VAULT_UNLOCK_FAILED";
     throw e;
   }
+  verifyModeTag(file, masterKey);
 
   return buildVaultHandle({ stateDir, file, masterKey, payload });
 }
@@ -207,6 +226,16 @@ export async function readMobileSlotChallenges(stateDir) {
   const file = await readVaultFile(paths.vaultFile);
   if (!file) return [];
   return findMobileSlots(file.slots || []).map(mobileSlotChallenge);
+}
+
+// Read the passkey-slot descriptors (credentialId, rpId, prfSalt) without
+// unlocking — the secure form needs them to run a WebAuthn authenticate ceremony.
+// Never exposes the wrapped key or any secret.
+export async function readPasskeyChallenges(stateDir) {
+  const paths = statePaths(stateDir);
+  const file = await readVaultFile(paths.vaultFile);
+  if (!file) return [];
+  return findPasskeySlots(file.slots || []).map(passkeySlotChallenge);
 }
 
 // Read the owner-approval unlock descriptor without unlocking — only the public
@@ -269,6 +298,8 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
         agentId: s.agentId || null,
         deviceId: s.deviceId || null,
         keyRef: s.keyRef || null,
+        credentialId: s.credentialId || null,
+        deviceLabel: s.deviceLabel || null,
       }));
     },
     list() {
@@ -326,6 +357,13 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
       state.file.slots.push(slot);
       return slot;
     },
+    addPasskeySlot(prfSecret, { credentialId, rpId, prfSalt, deviceLabel = null } = {}) {
+      assertOpen();
+      const id = nextSlotId(state.file.slots);
+      const slot = buildPasskeySlot(id, state.masterKey, prfSecret, { credentialId, rpId, prfSalt, deviceLabel });
+      state.file.slots.push(slot);
+      return slot;
+    },
     addOwnerApprovalSlot(kek, { keyRef, ssoBaseUrl = null, providerAddress = null } = {}) {
       assertOpen();
       const id = nextSlotId(state.file.slots);
@@ -376,6 +414,7 @@ export async function initVault({
   passphrase = null,
   privateKeyPem = null,
   agentId = null,
+  passkey = null, // { prfSecret: Buffer, credentialId, rpId, prfSalt, deviceLabel? }
   dev = false,
 }) {
   const paths = statePaths(stateDir);
@@ -386,29 +425,33 @@ export async function initVault({
     throw err;
   }
 
-  // Providing a passphrase (or --dev) selects DEV mode; otherwise USER mode.
-  // Passphrase is the exceptional, opt-in dev/power-user path; the default is a
-  // user-mode vault with no passphrase that can never gain one.
+  // `mode` governs whether a PASSPHRASE is allowed: providing a passphrase (or
+  // --dev) selects dev mode, otherwise user mode. Passkey + agent-key slots are
+  // allowed in either. Build a slot per provided unlock method, in order.
   const mode = dev || passphrase ? "dev" : "user";
   const masterKey = generateMasterKey();
   const slots = [];
 
-  if (passphrase) {
-    slots.push(buildPassphraseSlot(0, masterKey, passphrase));
-    if (privateKeyPem) slots.push(buildAgentKeySlot(slots.length, masterKey, privateKeyPem, agentId));
-  } else {
-    // No passphrase: slot 0 must be the agent key (user mode, or dev-without-passphrase).
-    if (!privateKeyPem) {
-      const err = new Error(
-        mode === "user"
-          ? "user-mode vault needs an agent key — run `agent-id-core bootstrap` first " +
-            "(or use --dev with a passphrase for a dev vault)"
-          : "dev-mode vault created without a passphrase needs an agent key",
-      );
-      err.code = "INIT_NEEDS_KEY_OR_PASSPHRASE";
-      throw err;
-    }
-    slots.push(buildAgentKeySlot(0, masterKey, privateKeyPem, agentId));
+  if (passphrase) slots.push(buildPassphraseSlot(slots.length, masterKey, passphrase));
+  if (passkey) {
+    slots.push(
+      buildPasskeySlot(slots.length, masterKey, passkey.prfSecret, {
+        credentialId: passkey.credentialId,
+        rpId: passkey.rpId,
+        prfSalt: passkey.prfSalt,
+        deviceLabel: passkey.deviceLabel || null,
+      }),
+    );
+  }
+  if (privateKeyPem) slots.push(buildAgentKeySlot(slots.length, masterKey, privateKeyPem, agentId));
+
+  if (slots.length === 0) {
+    const err = new Error(
+      "a vault needs at least one unlock method — a passkey (Touch ID), a passphrase (dev mode), " +
+        "or an agent key (run `agent-id-core bootstrap` first)",
+    );
+    err.code = "INIT_NEEDS_UNLOCK_METHOD";
+    throw err;
   }
 
   const file = newVaultFile({

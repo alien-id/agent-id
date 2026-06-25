@@ -32,6 +32,9 @@
 //   (interactive trusted /dev/tty prompt as last resort)
 
 import fs from "node:fs/promises";
+import { mkdtempSync, writeFileSync, chmodSync, unlinkSync, rmSync, statSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawn } from "node:child_process";
 
 import {
@@ -53,8 +56,10 @@ import {
   initVault,
   loadAgentPrivateKey,
   openVault,
+  readPasskeyChallenges,
   vaultFileExists,
 } from "../lib/vault.mjs";
+import { registerPasskey, authenticatePasskey } from "../lib/passkey.mjs";
 import { readLegacyVault } from "../lib/legacy.mjs";
 import { ownerApprovalKekBytes } from "../lib/format.mjs";
 import { enrollOwnerApproval } from "../lib/owner-approval.mjs";
@@ -65,7 +70,8 @@ import {
   promptSecret,
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
-import { CREDENTIAL_TYPES } from "../lib/store.mjs";
+import { CREDENTIAL_TYPES, SECRET_FIELDS } from "../lib/store.mjs";
+import { collectViaForm } from "../../agent-id-core/lib/secure-form.mjs";
 import { generateSolanaKeypair } from "../../agent-id-core/lib/solana.mjs";
 import { generateEvmKeypair } from "../../agent-id-core/lib/evm.mjs";
 
@@ -150,20 +156,37 @@ function parseCsvFlag(raw) {
 async function openWithFlags(flags, { allowPrompt = true } = {}) {
   const stateDir = resolveStateDir(flags);
   const useAgentKey = flags["agent-key"] !== false; // `--no-agent-key` opts out
-  const privateKeyPem = useAgentKey
-    ? await loadAgentPrivateKey(stateDir)
-    : null;
+  const privateKeyPem = useAgentKey ? await loadAgentPrivateKey(stateDir) : null;
+  const hasPassphraseFlag =
+    flags["passphrase-file"] || flags["passphrase-env"] || flags.passphrase;
 
-  // First attempt: agent-key only (no passphrase needed → faster, no prompt).
-  if (privateKeyPem && !flags["passphrase-file"] && !flags["passphrase-env"] && !flags.passphrase) {
+  // 1. Agent-key (fast, unattended) — unless a passphrase was explicitly supplied.
+  if (privateKeyPem && !hasPassphraseFlag) {
     try {
       return await openVault({ stateDir, privateKeyPem });
     } catch (err) {
       if (err.code !== "VAULT_UNLOCK_FAILED") throw err;
-      // Fall through to passphrase.
+      // fall through
     }
   }
 
+  // 2. An explicit passphrase source (file/env/arg).
+  if (hasPassphraseFlag) {
+    const passphrase = await resolvePassphrase(flags, { allowPrompt: false });
+    return openVault({ stateDir, privateKeyPem, passphrase });
+  }
+
+  // 3. A passkey slot → run the WebAuthn ceremony in the browser (preferred over a
+  //    /dev/tty prompt; a passkey vault has no passphrase to type).
+  if (allowPrompt) {
+    const challenges = await readPasskeyChallenges(stateDir);
+    if (challenges.length) {
+      const prfSecret = await authenticatePasskey(challenges[0]);
+      return openVault({ stateDir, passkeyPrfSecret: prfSecret });
+    }
+  }
+
+  // 4. Interactive passphrase prompt (a dev vault, on a TTY).
   const passphrase = await resolvePassphrase(flags, { allowPrompt });
   return openVault({ stateDir, privateKeyPem, passphrase });
 }
@@ -177,31 +200,51 @@ async function cmdInit(flags) {
     return;
   }
 
-  // Passphrase is the EXCEPTIONAL, opt-in dev/power-user path. The default is a
-  // USER-mode vault (no passphrase, ever) unlocked by agent-key or owner-approval.
-  // Providing a passphrase, or --dev, selects dev mode. A user-mode vault can never
-  // gain a passphrase and cannot be converted — so the agent can't enable one.
-  let passphrase = await resolvePassphrase(flags, { allowPrompt: false });
-  const dev = flags.dev === true || passphrase != null;
+  // Choose the unlock method. `--unlock passkey|passphrase|agent-key` is explicit;
+  // otherwise the default is agent-key (user mode). The hard-boundary methods
+  // (passkey, passphrase — the agent doesn't hold them) default to NO agent-key
+  // slot, so the agent can't silently self-unlock.
+  const method = flags.unlock ? String(flags.unlock) : null;
+  if (method && !["passkey", "passphrase", "agent-key"].includes(method)) {
+    return outputError(`--unlock must be passkey | passphrase | agent-key (got '${method}')`);
+  }
 
-  // Dev mode on an interactive terminal with no passphrase supplied: prompt for one.
-  if (dev && passphrase == null && hasTty()) {
+  let passphrase = await resolvePassphrase(flags, { allowPrompt: false });
+  const dev = flags.dev === true || passphrase != null || method === "passphrase";
+
+  // Passkey: enroll via the secure form (Touch ID / Face ID / security key).
+  let passkey = null;
+  if (method === "passkey") {
+    try {
+      passkey = await registerPasskey({ deviceLabel: flags["device-label"] || null });
+    } catch (err) {
+      return outputError(`passkey registration failed: ${err.message}`);
+    }
+  }
+
+  // Dev/passphrase path with no passphrase given: prompt on an interactive TTY.
+  if (dev && passphrase == null && method !== "passkey" && hasTty()) {
     passphrase = promptNewPassphrase({
       prompt: "New vault passphrase (dev mode): ",
       confirm: "Confirm passphrase: ",
     });
   }
 
-  const useAgentKey = flags["agent-key"] !== false;
+  // Agent-key default: on, EXCEPT when passkey/passphrase was the chosen method.
+  const agentKeyDefault = !(method === "passkey" || method === "passphrase");
+  const useAgentKey =
+    flags["agent-key"] === true || (flags["agent-key"] !== false && agentKeyDefault);
   const privateKeyPem = useAgentKey ? await loadAgentPrivateKey(stateDir) : null;
   const agentId = privateKeyPem
     ? (await readJsonFile(statePaths(stateDir).mainKey, null))?.agentId || null
     : null;
 
   try {
-    const result = await initVault({ stateDir, passphrase, privateKeyPem, agentId, dev });
-    stderr(`Vault initialized (${result.mode} mode): ${result.path}`);
-    if (result.mode === "user") {
+    const result = await initVault({ stateDir, passphrase, privateKeyPem, agentId, passkey, dev });
+    stderr(`Vault initialized (${result.mode} mode, ${result.slots} slot${result.slots > 1 ? "s" : ""}): ${result.path}`);
+    if (passkey) {
+      stderr("Unlock with your passkey (the agent can't unlock it itself). Add `rekey add-passkey` for more devices.");
+    } else if (result.mode === "user") {
       stderr(
         "User mode: unlock via agent-key or owner-approval (Alien app). A passphrase " +
           "can never be added, and this vault cannot be converted to dev mode.",
@@ -213,6 +256,30 @@ async function cmdInit(flags) {
   }
 }
 
+// Secret fields each type needs from the out-of-band form (--form). Non-secret
+// metadata (header/param/cookie name, token endpoint, client id) still comes from
+// flags; only the secret VALUE is typed by the human into the browser form.
+function formFieldsForType(type, flags) {
+  switch (type) {
+    case "bearer": return [{ name: "value", label: "Token / bearer value" }];
+    case "header": return [{ name: "value", label: `Value for header "${flags["header-name"]}"` }];
+    case "query": return [{ name: "value", label: `Value for query param "${flags["param-name"]}"` }];
+    case "cookie": return [{ name: "value", label: `Value for cookie "${flags["cookie-name"]}"` }];
+    case "basic": return [
+      { name: "username", label: "Username", secret: false },
+      { name: "password", label: "Password" },
+    ];
+    case "totp": return [{ name: "secret", label: "TOTP secret (base32)" }];
+    case "secret": return [{ name: "value", label: "Secret — SSH/RSA private key, PEM, JSON, or token", multiline: true }];
+    case "cookie-jar": return [{ name: "jar", label: "Cookie jar JSON", multiline: true }];
+    case "oauth2": return [
+      { name: "client-secret", label: "Client secret", required: false },
+      { name: "refresh-token", label: "Refresh token" },
+    ];
+    default: return null;
+  }
+}
+
 async function cmdAdd(flags) {
   const name = flags.name;
   const type = flags.type;
@@ -221,10 +288,51 @@ async function cmdAdd(flags) {
   if (!CREDENTIAL_TYPES.includes(type)) {
     return outputError(`Unknown type: ${type}. Allowed: ${CREDENTIAL_TYPES.join(", ")}`);
   }
-  const domains = parseDomains(flags);
+  let domains = parseDomains(flags);
   if (domains.length === 0) {
-    return outputError("--domains <host[,host…]> is required (default-deny)");
+    // `secret` is not host-scoped (it's used via exec/file, not the HTTP proxy),
+    // so it doesn't need a domain allowlist; everything else is default-deny.
+    if (type === "secret") domains = ["*"];
+    else return outputError("--domains <host[,host…]> is required (default-deny)");
   }
+
+  // --form: collect the secret value(s) out of band via a one-shot localhost
+  // browser form. The agent supplies the metadata; the human types the value into
+  // the form, so it never enters the agent's stdin/stdout/transcript. Validate the
+  // required metadata flags FIRST so we don't prompt and then reject.
+  let formValues = null;
+  if (flags.form) {
+    if (type === "header" && !flags["header-name"]) return outputError("--header-name is required");
+    if (type === "query" && !flags["param-name"]) return outputError("--param-name is required");
+    if (type === "cookie" && !flags["cookie-name"]) return outputError("--cookie-name is required");
+    if (type === "oauth2" && (!flags["token-endpoint"] || !flags["client-id"])) {
+      return outputError("oauth2 --form needs --token-endpoint and --client-id");
+    }
+    const specs = formFieldsForType(type, flags);
+    if (!specs) {
+      return outputError(`--form is not supported for type ${type}`);
+    }
+    try {
+      const out = await collectViaForm({
+        title: `Add credential: ${name}`,
+        description: `${type} · ${domains.join(", ")}`,
+        fields: specs,
+        label: `enter the "${name}" secret`,
+        security:
+          "Sealed with <code>AES-256-GCM</code> (key via <code>HKDF-SHA256</code>). Never shown to the agent.",
+      });
+      formValues = out.values;
+    } catch (err) {
+      return outputError(`secure form: ${err.message}`);
+    }
+  }
+
+  // Read a secret either from the form (--form) or the existing file/env/stdin/tty
+  // channels — never from argv.
+  const secret = (field) =>
+    formValues ? Promise.resolve(formValues[field] ?? "") : resolveValue(flags, field);
+  const secretFileEnv = (field) =>
+    formValues ? Promise.resolve(formValues[field] ?? "") : resolveFileEnvFlag(flags, field);
 
   const vault = await openWithFlags(flags);
   try {
@@ -234,15 +342,16 @@ async function cmdAdd(flags) {
     }
 
     switch (type) {
-      case "bearer": {
-        const value = await resolveValue(flags, "value");
-        if (!value) return outputError("Value required (--value-file / --value-env / stdin)");
+      case "bearer":
+      case "secret": {
+        const value = await secret("value");
+        if (!value) return outputError("Value required (--value-file / --value-env / stdin / --form)");
         record.value = value;
         break;
       }
       case "basic": {
-        record.username = flags.username;
-        record.password = await resolveValue(flags, "password");
+        record.username = formValues ? formValues.username : flags.username;
+        record.password = await secret("password");
         if (!record.username || !record.password) {
           return outputError("--username and password input required for basic auth");
         }
@@ -250,7 +359,7 @@ async function cmdAdd(flags) {
       }
       case "header": {
         record.headerName = flags["header-name"];
-        record.value = await resolveValue(flags, "value");
+        record.value = await secret("value");
         if (!record.headerName || !record.value) {
           return outputError("--header-name and value input required");
         }
@@ -258,7 +367,7 @@ async function cmdAdd(flags) {
       }
       case "query": {
         record.paramName = flags["param-name"];
-        record.value = await resolveValue(flags, "value");
+        record.value = await secret("value");
         if (!record.paramName || !record.value) {
           return outputError("--param-name and value input required");
         }
@@ -266,14 +375,14 @@ async function cmdAdd(flags) {
       }
       case "cookie": {
         record.cookieName = flags["cookie-name"];
-        record.value = await resolveValue(flags, "value");
+        record.value = await secret("value");
         if (!record.cookieName || !record.value) {
           return outputError("--cookie-name and value input required");
         }
         break;
       }
       case "totp": {
-        record.secret = await resolveValue(flags, "secret");
+        record.secret = await secret("secret");
         record.period = Number(flags.period || 30);
         record.digits = Number(flags.digits || 6);
         record.algorithm = flags.algorithm || "SHA1";
@@ -281,7 +390,7 @@ async function cmdAdd(flags) {
         break;
       }
       case "cookie-jar": {
-        const json = await resolveValue(flags, "jar");
+        const json = await secret("jar");
         if (!json) return outputError("Cookie jar JSON required");
         record.cookies = JSON.parse(json);
         break;
@@ -296,16 +405,15 @@ async function cmdAdd(flags) {
       case "oauth2": {
         record.tokenEndpoint = flags["token-endpoint"];
         record.clientId = flags["client-id"];
-        const clientSecret = await resolveFileEnvFlag(flags, "client-secret");
+        const clientSecret = await secretFileEnv("client-secret");
         if (clientSecret) record.clientSecret = clientSecret;
         if (flags.scope) record.scope = String(flags.scope);
-        // The refresh token is the long-lived secret — read it from file/env/
-        // stdin (resolveValue), never argv.
-        record.refreshToken = await resolveValue(flags, "refresh-token");
+        // The refresh token is the long-lived secret — from form/file/env/stdin, never argv.
+        record.refreshToken = await secret("refresh-token");
         if (!record.tokenEndpoint || !record.clientId || !record.refreshToken) {
           return outputError(
             "oauth2 needs --token-endpoint, --client-id, and a refresh token " +
-              "(--refresh-token-file / --refresh-token-env / stdin)",
+              "(--refresh-token-file / --refresh-token-env / stdin / --form)",
           );
         }
         break;
@@ -328,19 +436,6 @@ async function cmdAdd(flags) {
   }
 }
 
-// Secret-bearing fields per type, redacted by `show` for sealed (generated
-// in-vault, exportable: false) records.
-const SEALED_FIELDS = [
-  "secretSeed",
-  "privateKey",
-  "value",
-  "password",
-  "secret",
-  "refreshToken",
-  "clientSecret",
-  "dek",
-];
-
 async function cmdShow(flags) {
   const name = flags.name;
   if (!name) return outputError("--name <NAME> is required");
@@ -350,7 +445,7 @@ async function cmdShow(flags) {
     if (!rec) return outputError(`No credential named '${name}'`);
     if (rec.exportable === false) {
       const redacted = { ...rec };
-      for (const f of SEALED_FIELDS) {
+      for (const f of SECRET_FIELDS) {
         if (redacted[f] != null) redacted[f] = "[sealed — generated in-vault, not exportable]";
       }
       stderr(
@@ -490,6 +585,22 @@ async function cmdRekey(flags) {
       await vault.save();
       stderr(`Added agent-key slot ${slot.id} for agent ${agentId || "(unknown)"}.`);
       outputJson({ ok: true, slot: { id: slot.id, type: slot.type, agentId } });
+    } else if (sub === "add-passkey") {
+      let passkey;
+      try {
+        passkey = await registerPasskey({ deviceLabel: flags["device-label"] || null });
+      } catch (err) {
+        return outputError(`passkey registration failed: ${err.message}`);
+      }
+      const slot = vault.addPasskeySlot(passkey.prfSecret, {
+        credentialId: passkey.credentialId,
+        rpId: passkey.rpId,
+        prfSalt: passkey.prfSalt,
+        deviceLabel: passkey.deviceLabel,
+      });
+      await vault.save();
+      stderr(`Added passkey slot ${slot.id}${passkey.deviceLabel ? ` (${passkey.deviceLabel})` : ""}.`);
+      outputJson({ ok: true, slot: { id: slot.id, type: slot.type, credentialId: passkey.credentialId } });
     } else if (sub === "add-mobile") {
       const devicePubKey = flags["device-pubkey"];
       if (!devicePubKey) {
@@ -551,7 +662,7 @@ async function cmdRekey(flags) {
       outputJson({ ok: true, removed: id });
     } else {
       return outputError(
-        `rekey subcommand required: add-passphrase | add-agent-key | add-mobile | add-owner-approval | remove-slot`,
+        `rekey subcommand required: add-passphrase | add-passkey | add-agent-key | add-mobile | add-owner-approval | remove-slot`,
       );
     }
   } finally {
@@ -656,24 +767,26 @@ async function cmdMigrate(flags) {
   }
 }
 
-// ─── exec: run a command with vault credentials injected into its env ─────────
+// ─── exec: run a command with vault credentials injected into its env / a file ──
 //
-// Native env-injection. Materializes selected credential fields into the
-// environment of a child process, then spawns it with inherited stdio (so an
-// interactive command like `modal shell` keeps its TTY). The secret lives only
-// in the child's environment — it never touches disk, argv, or this process's
-// stdout. Only the variable names + their credential sources go to stderr.
+// Two materialization modes, both keeping the secret out of the agent's
+// stdin/stdout/argv/transcript (only the variable names + sources are logged):
 //
-//   agent-id-vault exec --env VAR=cred.field [--env …] [unlock flags] -- <cmd> [args…]
+//   --env  VAR=cred.field   inject the value into the child's environment.
+//   --file VAR=cred.field   write the value to a temp 0600 file and set VAR to its
+//                           PATH — for tools that want a key FILE (ssh -i, an RSA
+//                           PEM, a service-account JSON). The agent gets the path,
+//                           never the contents; the file is shredded + removed when
+//                           the command exits.
 //
-// Example:
-//   agent-id-vault exec \
-//     --env MODAL_TOKEN_ID=modal-token.username \
-//     --env MODAL_TOKEN_SECRET=modal-token.password \
-//     -- modal shell --gpu a10g
+//   agent-id-vault exec [--env … | --file …] [unlock flags] -- <cmd> [args…]
 //
-// `field` is the record field to read: basic → username/password; bearer /
-// header / query / cookie → value; totp → secret; oauth2 → refreshToken etc.
+// Examples:
+//   exec --env MODAL_TOKEN_ID=modal-token.username --env MODAL_TOKEN_SECRET=modal-token.password -- modal run job.py
+//   exec --file GIT_SSH_KEY=deploy-key.value -- sh -c 'GIT_SSH_COMMAND="ssh -i $GIT_SSH_KEY" git fetch'
+//
+// `field` is the record field to read (bearer/header/query/cookie → value, basic →
+// username/password, totp → secret, oauth2 → refreshToken, secret → value, …).
 // Sealed in-vault-generated keys (solana/evm) refuse to leave the vault.
 async function cmdExec() {
   const rest = process.argv.slice(3); // drop ["exec"]; argv[2] === "exec"
@@ -681,58 +794,59 @@ async function cmdExec() {
   if (sepIdx === -1) {
     return outputError(
       "exec needs a `--` separator before the command. " +
-        "Usage: exec --env VAR=cred.field [--env …] -- <command> [args…]",
+        "Usage: exec --env VAR=cred.field | --file VAR=cred.field [more] -- <command> [args…]",
     );
   }
   const pre = rest.slice(0, sepIdx);
   const cmdArgv = rest.slice(sepIdx + 1);
   if (cmdArgv.length === 0) return outputError("No command given after `--`.");
 
-  // --env is repeatable (parseFlags would keep only the last); collect it by
-  // hand and leave the rest as unlock/common flags.
+  // --env / --file are repeatable (parseFlags would keep only the last); collect
+  // them by hand and leave the rest as unlock/common flags.
   const mappings = [];
   const flagArgs = [];
   for (let i = 0; i < pre.length; i++) {
-    if (pre[i] === "--env") {
+    if (pre[i] === "--env" || pre[i] === "--file") {
       const v = pre[i + 1];
       if (!v || v.startsWith("--")) {
-        return outputError("--env needs a VAR=cred.field argument");
+        return outputError(`${pre[i]} needs a VAR=cred.field argument`);
       }
-      mappings.push(v);
+      mappings.push({ kind: pre[i] === "--file" ? "file" : "env", ref: v });
       i++;
     } else {
       flagArgs.push(pre[i]);
     }
   }
   if (mappings.length === 0) {
-    return outputError("exec needs at least one --env VAR=cred.field mapping");
+    return outputError("exec needs at least one --env or --file VAR=cred.field mapping");
   }
 
   const specs = [];
   for (const m of mappings) {
-    const eq = m.indexOf("=");
-    if (eq <= 0) return outputError(`Bad --env "${m}" — expected VAR=cred.field`);
-    const varName = m.slice(0, eq);
-    const ref = m.slice(eq + 1);
+    const eq = m.ref.indexOf("=");
+    if (eq <= 0) return outputError(`Bad --${m.kind} "${m.ref}" — expected VAR=cred.field`);
+    const varName = m.ref.slice(0, eq);
+    const ref = m.ref.slice(eq + 1);
     const dot = ref.lastIndexOf(".");
     if (dot <= 0 || dot === ref.length - 1) {
       return outputError(
-        `Bad --env "${m}" — expected VAR=cred.field ` +
-          "(e.g. MODAL_TOKEN_ID=modal-token.username)",
+        `Bad --${m.kind} "${m.ref}" — expected VAR=cred.field (e.g. GIT_SSH_KEY=deploy-key.value)`,
       );
     }
-    specs.push({ varName, credName: ref.slice(0, dot), field: ref.slice(dot + 1) });
+    specs.push({ kind: m.kind, varName, credName: ref.slice(0, dot), field: ref.slice(dot + 1) });
   }
 
   const flags = parseFlags(flagArgs);
   const vault = await openWithFlags(flags);
   const childEnv = { ...process.env };
   const injected = [];
+  let tmpDir = null;
+  const files = [];
   try {
     for (const s of specs) {
       const rec = vault.get(s.credName);
       if (!rec) return outputError(`No credential named '${s.credName}'`);
-      if (rec.exportable === false && SEALED_FIELDS.includes(s.field)) {
+      if (rec.exportable === false && SECRET_FIELDS.includes(s.field)) {
         return outputError(
           `Credential '${s.credName}' is sealed (generated in-vault); field ` +
             `'${s.field}' cannot leave the vault. Use the proxy to exercise it.`,
@@ -742,12 +856,41 @@ async function cmdExec() {
       if (typeof value !== "string" || value.length === 0) {
         return outputError(`Credential '${s.credName}' has no usable string field '${s.field}'`);
       }
-      childEnv[s.varName] = value;
-      injected.push(`${s.varName}=${s.credName}.${s.field}`);
+      if (s.kind === "file") {
+        // mkdtemp makes a 0700 dir; the file is 0600. Same-uid isn't a boundary
+        // (the agent could read the vault anyway) — this keeps the value out of
+        // the transcript/argv and bounds its on-disk lifetime to the command.
+        if (!tmpDir) tmpDir = mkdtempSync(path.join(os.tmpdir(), "agent-id-exec-"));
+        const safe = s.varName.replace(/[^A-Za-z0-9._-]/g, "_") || "secret";
+        const fp = path.join(tmpDir, safe);
+        writeFileSync(fp, value, { mode: 0o600 });
+        chmodSync(fp, 0o600); // enforce 0600 regardless of umask
+        childEnv[s.varName] = fp;
+        files.push(fp);
+        injected.push(`${s.varName}=${s.credName}.${s.field} (file)`);
+      } else {
+        childEnv[s.varName] = value;
+        injected.push(`${s.varName}=${s.credName}.${s.field}`);
+      }
     }
   } finally {
-    vault.lock(); // values already copied into childEnv; zero the master key
+    vault.lock(); // values already copied; zero the master key
   }
+
+  // Best-effort shred of any materialized files: overwrite with zeros, unlink,
+  // remove the dir. Sync so it completes inside the exit handlers.
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    for (const fp of files) {
+      try { writeFileSync(fp, Buffer.alloc(statSync(fp).size, 0)); } catch {}
+      try { unlinkSync(fp); } catch {}
+    }
+    if (tmpDir) {
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    }
+  };
 
   // Names + sources only — never the values.
   stderr(`Injecting ${injected.join(", ")} → ${cmdArgv.join(" ")}`);
@@ -762,14 +905,17 @@ async function cmdExec() {
   };
   process.on("SIGINT", forward);
   process.on("SIGTERM", forward);
+  process.on("exit", cleanup); // last-resort sync cleanup of temp files
   child.on("error", (err) => {
     process.off("SIGINT", forward);
     process.off("SIGTERM", forward);
+    cleanup();
     outputError(`Failed to run '${cmdArgv[0]}': ${err.message}`);
   });
   child.on("exit", (code, signal) => {
     process.off("SIGINT", forward);
     process.off("SIGTERM", forward);
+    cleanup();
     process.exitCode = signal ? 1 : (code ?? 0);
   });
 }
@@ -782,10 +928,14 @@ function printHelp() {
       "agent-id-vault — portable encrypted credential vault",
       "",
       "Subcommands:",
-      "  init [--dev [--passphrase-file F | --passphrase-env V]] [--no-agent-key]",
-      "       default = USER mode (no passphrase; agent-key slot). --dev or a passphrase",
-      "       = DEV mode (passphrase allowed). User mode is one-way (never gains a passphrase).",
+      "  init [--unlock passkey|passphrase|agent-key] [--dev] [--no-agent-key] [--agent-key]",
+      "       --unlock passkey     Touch ID / Face ID / security key (recommended; agent can't self-unlock)",
+      "       --unlock passphrase  typed into the secure form (dev mode)",
+      "       default (no --unlock) = USER mode, agent-key auto-unlock.",
+      "       passkey/passphrase default to NO agent-key slot; add --agent-key to keep one.",
       "  add --name N --type T --domains H[,H…] [type-specific value flags]",
+      "      --form   enter the secret in an out-of-band localhost browser form",
+      "               (agent never sees the value); else --<field>-file/-env/stdin",
       "      oauth2: --token-endpoint URL --client-id ID [--client-secret-env V]",
       "              --refresh-token-file F [--scope S]   (auto-refreshes access tokens)",
       "  generate --name N --type solana-keypair|evm-keypair --domains H[,H…] [--overwrite]",
@@ -795,10 +945,13 @@ function printHelp() {
       "  show --name N    (sealed/generated secrets are redacted)",
       "  list",
       "  remove --name N",
-      "  exec --env VAR=cred.field [--env …] -- <cmd> [args…]",
-      "      run <cmd> with credentials injected into its environment;",
-      "      secret never touches disk, argv, or stdout (e.g. MODAL_TOKEN_ID=modal-token.username)",
-      "  rekey add-passphrase | add-agent-key | remove-slot --id N",
+      "  exec [--env VAR=cred.field | --file VAR=cred.field] … -- <cmd> [args…]",
+      "      run <cmd> with credentials injected; the agent never sees the value.",
+      "      --env  → into the child's environment (MODAL_TOKEN_ID=modal-token.username)",
+      "      --file → written to a temp 0600 file, VAR=its path, shredded on exit",
+      "               (for key files: GIT_SSH_KEY=deploy-key.value)",
+      "  rekey add-passkey [--device-label NAME]   add a passkey (Touch ID) unlock",
+      "        | add-passphrase | add-agent-key | remove-slot --id N",
       "        | add-mobile --device-pubkey HEX [--device-id NAME]",
       "        | add-owner-approval [--sso-url URL] [--provider-address ADDR]",
       "  export --out PATH",

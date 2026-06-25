@@ -224,7 +224,14 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
   });
 
   it("log records evm_signed but never the private key", async () => {
-    const raw = await fs.readFile(path.join(stateDir, "proxy.log"), "utf8").catch(() => "");
+    // The access-log append is async; poll briefly so the read doesn't race the write.
+    const logPath = path.join(stateDir, "proxy.log");
+    let raw = "";
+    for (let i = 0; i < 50; i++) {
+      raw = await fs.readFile(logPath, "utf8").catch(() => "");
+      if (raw.includes("evm_signed")) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
     assert.ok(raw.includes("evm_signed"), "log records signing event");
     const rec = vault.get("evm-hot");
     assert.ok(!raw.includes(rec.privateKey), "log must NOT contain the key");

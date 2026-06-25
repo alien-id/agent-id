@@ -64,7 +64,19 @@ export function computeModeTag(masterKey, mode) {
 }
 
 export function verifyModeTag(file, masterKey) {
-  if (!file.modeTag) return; // legacy vault — nothing to verify
+  if (!file.modeTag) {
+    // A genuinely-legacy vault predates modes entirely: it has neither `mode`
+    // nor `modeTag`, and is treated as "dev". But a `mode` present WITHOUT its
+    // HMAC tag is the strip-the-tag-then-flip-the-mode attack — reject it.
+    if (file.mode != null) {
+      const err = new Error(
+        "vault has a mode field but no integrity tag — the modeTag was stripped",
+      );
+      err.code = "VAULT_MODE_TAMPERED";
+      throw err;
+    }
+    return;
+  }
   const expected = Buffer.from(computeModeTag(masterKey, vaultMode(file)), "hex");
   const actual = Buffer.from(file.modeTag, "hex");
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
@@ -367,6 +379,67 @@ export function unwrapSlotWithOwnerApproval(slot, kek) {
 
 export function findOwnerApprovalSlot(slots) {
   return slots.find((s) => s.type === "owner-approval") || null;
+}
+
+// ─── Passkey slot (WebAuthn PRF-derived KEK) ─────────────────────────────────────
+//
+// The master key is wrapped by a KEK derived from a WebAuthn PRF secret — a
+// high-entropy value the authenticator (Touch ID / Face ID / Windows Hello / a
+// security key) returns ONLY after user verification, deterministically per
+// (credential, salt). The Node side never speaks WebAuthn: the browser (the
+// secure form) runs the ceremony and hands the PRF bytes here. The slot stores
+// only the PUBLIC material needed to re-run the ceremony — credentialId, rpId,
+// prfSalt — plus the wrapped master key; never the PRF secret itself. So a stolen
+// vault file is inert without the physical authenticator + the user's biometric.
+
+const PASSKEY_HKDF_INFO = "agent-id-vault-passkey-v1";
+
+function passkeyKek(prfSecret) {
+  if (!Buffer.isBuffer(prfSecret) || prfSecret.length < 16) {
+    throw new Error("passkey PRF secret must be a Buffer of at least 16 bytes");
+  }
+  return Buffer.from(hkdfSync("sha256", prfSecret, "agent-id-vault-passkey", PASSKEY_HKDF_INFO, 32));
+}
+
+// A non-secret per-slot salt fed to the WebAuthn PRF eval, so the same passkey
+// yields the same secret at unlock as at enrollment. Stored in the slot.
+export function generatePasskeyPrfSalt() {
+  return randomBytes(SALT_BYTES).toString("hex");
+}
+
+export function buildPasskeySlot(id, masterKey, prfSecret, { credentialId, rpId, prfSalt, deviceLabel = null } = {}) {
+  if (typeof credentialId !== "string" || !credentialId) throw new Error("passkey slot requires credentialId");
+  if (typeof rpId !== "string" || !rpId) throw new Error("passkey slot requires rpId");
+  if (typeof prfSalt !== "string" || !prfSalt) throw new Error("passkey slot requires prfSalt");
+  const kek = passkeyKek(prfSecret);
+  const wrap = aeadEncrypt(kek, masterKey);
+  return { id, type: "passkey", credentialId, rpId, prfSalt, deviceLabel, wrap };
+}
+
+export function unwrapSlotWithPasskey(slot, prfSecret) {
+  if (slot.type !== "passkey") {
+    throw new Error(`Slot ${slot.id} is not a passkey slot`);
+  }
+  return aeadDecrypt(passkeyKek(prfSecret), slot.wrap);
+}
+
+export function findPasskeySlots(slots) {
+  return slots.filter((s) => s.type === "passkey");
+}
+
+// Public descriptor the secure form needs to run an unlock (authenticate)
+// ceremony — never the wrapped key or any secret.
+export function passkeySlotChallenge(slot) {
+  if (slot.type !== "passkey") {
+    throw new Error(`Slot ${slot.id} is not a passkey slot`);
+  }
+  return {
+    slotId: slot.id,
+    credentialId: slot.credentialId,
+    rpId: slot.rpId,
+    prfSalt: slot.prfSalt,
+    deviceLabel: slot.deviceLabel || null,
+  };
 }
 
 // ─── Payload (credentials.json) ─────────────────────────────────────────────────

@@ -128,6 +128,13 @@ export function injectCredential({ headers, search, cred }) {
         "not_injectable",
         "browser-profile credentials are driven by agent-id-browser, not the HTTP proxy",
       );
+    case "secret":
+      // Arbitrary key material — used via `agent-id-vault exec` (env or temp file),
+      // never injected into an HTTP request by the proxy.
+      throw new RewriteError(
+        "not_injectable",
+        "secret credentials are used via `agent-id-vault exec`, not the HTTP proxy",
+      );
     default:
       throw new RewriteError("unknown_type", `Unknown credential type: ${cred.type}`);
   }

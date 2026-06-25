@@ -35,9 +35,11 @@ import {
   loadAgentPrivateKey,
   openVault,
   readOwnerApprovalChallenge,
+  readPasskeyChallenges,
   recoverMasterKeyViaOwnerApproval,
   vaultFileExists,
 } from "../../agent-id-vault/lib/vault.mjs";
+import { authenticatePasskey } from "../../agent-id-vault/lib/passkey.mjs";
 import { requestUnlockSecret } from "../../agent-id-vault/lib/owner-approval.mjs";
 import { sealToPublicKey } from "../../agent-id-vault/lib/format.mjs";
 import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
@@ -45,6 +47,7 @@ import {
   hasTty,
   promptSecret,
 } from "../../agent-id-vault/lib/trusted-input.mjs";
+import { collectViaForm } from "../../agent-id-core/lib/secure-form.mjs";
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
 import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
@@ -86,6 +89,21 @@ async function resolvePassphrase(flags) {
     if (!val) throw new Error(`Env var ${flags["passphrase-env"]} is not set`);
     return val;
   }
+  // --unlock-form: the human types the passphrase into a one-shot localhost form
+  // (the 1Password-style once-per-session unlock). It never crosses the agent's
+  // stdin/transcript; the proxy holds the unwrapped master key for the session.
+  if (flags["unlock-form"]) {
+    const out = await collectViaForm({
+      title: "Unlock the credential vault",
+      description: "Unlocks for this session; re-locks when idle.",
+      fields: [{ name: "passphrase", label: "Vault passphrase" }],
+      label: "unlock the credential vault",
+      submitLabel: "Unlock vault",
+      security:
+        "Run through <code>scrypt</code> to unwrap the <code>AES-256-GCM</code> vault key. Never stored or shown to the agent.",
+    });
+    return out.values.passphrase;
+  }
   if (hasTty()) return promptSecret("Vault passphrase: ");
   return null;
 }
@@ -95,6 +113,20 @@ async function loadVaultForProxy(stateDir, flags) {
     throw new Error(
       `No vault at ${statePaths(stateDir).vaultFile}. Run agent-id-vault init first.`,
     );
+  }
+
+  // --unlock-form deliberately does NOT auto-unlock with the agent key — the whole
+  // point is that the agent can't self-unlock; a human must verify. Prefer a passkey
+  // (Touch ID) slot if the vault has one, else collect a passphrase via the form.
+  if (flags["unlock-form"]) {
+    const passkeys = await readPasskeyChallenges(stateDir);
+    if (passkeys.length) {
+      const prfSecret = await authenticatePasskey(passkeys[0]);
+      return openVault({ stateDir, passkeyPrfSecret: prfSecret });
+    }
+    const passphrase = await resolvePassphrase(flags);
+    if (!passphrase) throw new Error("Unlock form was cancelled or returned no passphrase");
+    return openVault({ stateDir, passphrase }); // no privateKeyPem → passphrase slot only
   }
 
   const useAgentKey = flags["agent-key"] !== false;
@@ -624,6 +656,8 @@ function printHelp() {
       "",
       "Subcommands:",
       "  start [--port N] [--host H] [--passphrase-file F | --passphrase-env V]",
+      "        [--unlock-form]   unlock once per session via an out-of-band localhost",
+      "                          browser form (no agent-key auto-unlock; needs a passphrase slot)",
       "        [--no-agent-key] [--idle-timeout 12h|30m|never]",
       "        [--no-control] [--control-port N] [--control-host H] [--control-tls|--no-control-tls]",
       "        [--await-mobile]",
@@ -632,6 +666,8 @@ function printHelp() {
       "  pair [--control-host H]   show a QR for a phone to scan (control URL + token)",
       "  status",
       "  stop",
+      "  autounlock [--off] [--idle-timeout T]   opt in/out of the SessionStart hook",
+      "        that pops the unlock form once per session (needs a passphrase/dev vault)",
       "",
       "Use with HTTP_PROXY=http://<host>:<port> set in the agent's environment.",
       "Stubs: `AgentVault <credential-name>` in headers or query parameter values.",
@@ -659,11 +695,34 @@ function printHelp() {
   );
 }
 
+// `autounlock` — opt into (or out of) the SessionStart auto-unlock hook by
+// writing/removing the marker file the hook checks. When enabled, the unlock form
+// opens once at the start of each session (needs a passphrase/dev-mode vault).
+async function cmdAutounlock(flags) {
+  const stateDir = resolveStateDir(flags);
+  await ensureDir(stateDir);
+  const marker = path.join(stateDir, "autounlock");
+  if (flags.off) {
+    await fs.unlink(marker).catch(() => {});
+    stderr("Session-start auto-unlock disabled.");
+    return outputJson({ ok: true, autounlock: false });
+  }
+  // Optional extra `start` args (e.g. --idle-timeout) persisted into the marker.
+  const extra = flags["idle-timeout"] ? `--idle-timeout ${flags["idle-timeout"]}` : "";
+  await fs.writeFile(marker, extra ? `${extra}\n` : "", { mode: 0o600 });
+  stderr(
+    "Session-start auto-unlock enabled — the unlock form will open at the start of " +
+      "each session. Needs a vault with a passphrase slot (dev mode).",
+  );
+  return outputJson({ ok: true, autounlock: true, marker, startArgs: extra || null });
+}
+
 const commands = {
   start: cmdStart,
   pair: cmdPair,
   status: cmdStatus,
   stop: cmdStop,
+  autounlock: cmdAutounlock,
 };
 
 runCli({ commands, printHelp });

@@ -5,7 +5,12 @@ import path from "node:path";
 import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { generateKeyPairSync } from "node:crypto";
 
-import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
+import {
+  initVault,
+  openVault,
+  openVaultWithMasterKey,
+} from "../plugins/agent-id-vault/lib/vault.mjs";
+import { generateMasterKey } from "../plugins/agent-id-vault/lib/format.mjs";
 import { statePaths } from "../plugins/agent-id-core/lib/state.mjs";
 
 function agentPem() {
@@ -35,10 +40,10 @@ test("user mode: no passphrase, agent-key unlock, REFUSES a passphrase slot", as
   }
 });
 
-test("user-mode init without an agent key is refused", async () => {
+test("init with no unlock method at all is refused", async () => {
   const dir = await tmp();
   try {
-    await assert.rejects(initVault({ stateDir: dir }), /needs an agent key/i);
+    await assert.rejects(initVault({ stateDir: dir }), /at least one unlock method/i);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -93,6 +98,44 @@ test("tampering the mode (user→dev in the file) is detected on unlock", async 
     await assert.rejects(
       openVault({ stateDir: dir, privateKeyPem: pem }),
       /mode tag mismatch|tampered/i,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("stripping the modeTag while flipping the mode is detected (QW-3)", async () => {
+  const dir = await tmp();
+  try {
+    const pem = agentPem();
+    await initVault({ stateDir: dir, privateKeyPem: pem });
+    const vf = statePaths(dir).vaultFile;
+    const file = JSON.parse(await readFile(vf, "utf8"));
+    // Strip the integrity tag AND flip the mode — the "legacy, skip" bypass.
+    delete file.modeTag;
+    file.mode = "dev";
+    await writeFile(vf, JSON.stringify(file, null, 2));
+    await assert.rejects(
+      openVault({ stateDir: dir, privateKeyPem: pem }),
+      /modeTag was stripped|tampered/i,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("openVaultWithMasterKey: a wrong key is an unlock failure, not 'tampered' (QW-4)", async () => {
+  const dir = await tmp();
+  try {
+    const pem = agentPem();
+    await initVault({ stateDir: dir, privateKeyPem: pem });
+    const wrongKey = generateMasterKey();
+    await assert.rejects(
+      openVaultWithMasterKey({ stateDir: dir, masterKey: wrongKey }),
+      (err) => {
+        assert.equal(err.code, "VAULT_UNLOCK_FAILED");
+        return true;
+      },
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

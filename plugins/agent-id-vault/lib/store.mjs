@@ -17,6 +17,7 @@
 //   }
 
 import { nowMs } from "../../agent-id-core/lib/crypto.mjs";
+import { isLoopbackHost } from "../../agent-id-core/lib/http.mjs";
 
 export const CREDENTIAL_TYPES = Object.freeze([
   "bearer",
@@ -30,17 +31,12 @@ export const CREDENTIAL_TYPES = Object.freeze([
   "solana-keypair",
   "evm-keypair",
   "browser-profile",
+  "secret",
 ]);
 
 // A token endpoint must be reached over TLS — the refresh token + client secret
 // travel in its request body. The only carve-out is loopback (local dev / tests),
-// where there is no network to eavesdrop.
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-
-function isLoopbackUrl(u) {
-  return LOOPBACK_HOSTS.has(u.hostname);
-}
-
+// where there is no network to eavesdrop (isLoopbackHost, shared with the OIDC stack).
 const NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 
 function requireNonEmpty(rec, fields) {
@@ -122,6 +118,13 @@ export function validateRecord(rec) {
     case "bearer":
       requireNonEmpty(rec, ["value"]);
       break;
+    case "secret":
+      // Arbitrary secret blob — an SSH/RSA private key, a PEM, a service-account
+      // JSON, or any token. NOT HTTP-injectable: it's consumed via `exec` (env)
+      // or materialized to a temp file, never by the proxy. `domains` is unused
+      // for this type (callers default it to ["*"]).
+      requireNonEmpty(rec, ["value"]);
+      break;
     case "basic":
       requireNonEmpty(rec, ["username", "password"]);
       break;
@@ -154,7 +157,7 @@ export function validateRecord(rec) {
       } catch {
         throw new Error(`Credential ${rec.name}: tokenEndpoint is not a valid URL`);
       }
-      if (endpoint.protocol !== "https:" && !isLoopbackUrl(endpoint)) {
+      if (endpoint.protocol !== "https:" && !isLoopbackHost(endpoint.hostname)) {
         throw new Error(
           `Credential ${rec.name}: tokenEndpoint must be https (or loopback) — ` +
             "it carries the refresh token and client secret",
@@ -299,9 +302,14 @@ export function touchLastUsed(payload, name) {
   if (rec) rec.lastUsedAt = nowMs();
 }
 
-// Every per-type field that holds secret material. Used to scrub the decrypted
-// payload when the vault locks.
-const SENSITIVE_FIELDS = Object.freeze([
+// Every per-type field that holds secret material — the single source of truth.
+// Used in three places that MUST agree, so they all import this one list:
+//   - wipePayload (here): scrub decrypted secrets when the vault locks
+//   - `show` (cli): redact these on sealed/non-exportable records
+//   - `exec` (cli): refuse to inject a sealed record's secret field into a child
+// Adding a new secret-bearing field/type means editing ONLY this array; forget
+// it and a secret either survives idle-lock or escapes via `show`.
+export const SECRET_FIELDS = Object.freeze([
   "value", // bearer / header / query / cookie
   "username",
   "password", // basic
@@ -324,7 +332,7 @@ export function wipePayload(payload) {
   if (!payload || !Array.isArray(payload.credentials)) return;
   for (const cred of payload.credentials) {
     if (!cred || typeof cred !== "object") continue;
-    for (const f of SENSITIVE_FIELDS) {
+    for (const f of SECRET_FIELDS) {
       const v = cred[f];
       if (Buffer.isBuffer(v)) v.fill(0);
       // Drop the vault's reference to the secret (string or nested object) so it

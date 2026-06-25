@@ -345,7 +345,14 @@ describe("solana wallet via vault + proxy (mock RPC)", () => {
   });
 
   it("log mentions the signing event + credential name but never the seed", async () => {
-    const raw = await fs.readFile(path.join(stateDir, "proxy.log"), "utf8").catch(() => "");
+    // The access-log append is async; poll briefly so the read doesn't race the write.
+    const logPath = path.join(stateDir, "proxy.log");
+    let raw = "";
+    for (let i = 0; i < 50; i++) {
+      raw = await fs.readFile(logPath, "utf8").catch(() => "");
+      if (raw.includes("solana_signed")) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
     assert.ok(raw.includes("solana_signed"), "log records the signing event");
     assert.ok(raw.includes("sol-hot"), "log mentions credential name");
     const rec = vault.get("sol-hot");
