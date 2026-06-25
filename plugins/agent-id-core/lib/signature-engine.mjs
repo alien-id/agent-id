@@ -41,6 +41,8 @@ import {
   verifyIdToken,
 } from "./oidc.mjs";
 
+import { classifyAssurance, describeAssurance } from "./assurance.mjs";
+
 import { SubjectMismatchError, errorMessage } from "./errors.mjs";
 
 // ─── Private helpers ────────────────────────────────────────────────────────────
@@ -340,10 +342,11 @@ export class SignatureEngine {
 
   async appendOperation(params) {
     this.writeQueue = this.writeQueue.then(async () => {
-      if (!this.idTokenJti) {
-        throw new Error("Owner session missing or id_token has no jti. Run `auth` and `bind` first.");
-      }
-
+      // No binding requirement: a level-0 (self-asserted) agent signs into its
+      // own audit trail with its key alone. When unbound, idTokenJti/idTokenSub
+      // are null — the envelope still carries the agent's public key and
+      // signature, which is the integrity guarantee. Binding later (L1/L2) just
+      // starts stamping a jti/sub onto subsequent entries.
       const agentId = resolveAgentId(params.ctx);
       const key = await this.ensureAgentKey(agentId);
       const delegation = agentId === "main" ? null : await this.ensureDelegation(agentId);
@@ -545,17 +548,20 @@ export async function verifyState(baseDir) {
 
   let currentJti = null;
   let ownerSub = null;
+  let idPayload = null;
   if (session?.idToken) {
     try {
-      const payload = parseJwt(session.idToken).payload;
-      currentJti = typeof payload?.jti === "string" ? payload.jti : null;
-      ownerSub = typeof payload?.sub === "string" ? payload.sub : null;
+      idPayload = parseJwt(session.idToken).payload;
+      currentJti = typeof idPayload?.jti === "string" ? idPayload.jti : null;
+      ownerSub = typeof idPayload?.sub === "string" ? idPayload.sub : null;
     } catch {
+      // A present-but-unparseable session IS a problem; absence is not (L0).
       errors.push("owner-session.json id_token is unparseable");
     }
-  } else {
-    errors.push("owner-session.json is missing");
   }
+  // An unbound agent (no owner-session) is a valid level-0 identity, not a
+  // chain-integrity failure — the audit trail is still signed by the agent key.
+  const level = classifyAssurance(idPayload);
 
   let prevHash = null;
   for (const record of auditRecords) {
@@ -573,6 +579,8 @@ export async function verifyState(baseDir) {
     ok: errors.length === 0,
     errorCount: errors.length,
     errors,
+    level,
+    assurance: describeAssurance(level),
     ownerSessionSub: ownerSub,
     operations: auditRecords.length,
     agents: Array.from(keyByAgent.keys()).sort(),

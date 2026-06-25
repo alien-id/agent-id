@@ -50,6 +50,12 @@ import {
 } from "../../agent-id-core/lib/bundle.mjs";
 
 import {
+  ASSURANCE,
+  classifyAssurance,
+  describeAssurance,
+} from "../../agent-id-core/lib/assurance.mjs";
+
+import {
   parseJwt,
   verifyIdTokenSignatureOnly,
 } from "../../agent-id-core/lib/oidc.mjs";
@@ -203,32 +209,44 @@ async function cmdCommit(flags) {
   const loaded = await requireAgentKey(stateDir);
   if (!loaded) return;
   const { key, paths } = loaded;
-  const session = await readJsonFile(paths.ownerSession, null);
-  if (!session?.idToken) {
-    outputError("No owner session. Run `agent-id-setup auth` and `agent-id-setup bind` first.");
-    return;
-  }
 
-  let idPayload;
-  try {
-    idPayload = parseJwt(session.idToken).payload;
-  } catch (err) {
-    outputError(`Could not parse id_token: ${errorMessage(err)}`);
-    return;
+  // Binding is OPTIONAL. A bound agent (L1/L2) attaches its SSO id_token and an
+  // `Agent-ID-Owner` trailer; an unbound agent (L0) commits with its key alone
+  // — still SSH-signed, still independently verifiable as "this key", just with
+  // no human attestation. This is the level-0 "use it immediately" path.
+  const session = await readJsonFile(paths.ownerSession, null);
+  let idToken = null;
+  let idPayload = null;
+  if (session?.idToken) {
+    try {
+      idPayload = parseJwt(session.idToken).payload;
+    } catch (err) {
+      outputError(`Could not parse id_token: ${errorMessage(err)}`);
+      return;
+    }
+    if (typeof idPayload?.sub !== "string" || !idPayload.sub) {
+      outputError("id_token present but missing sub claim — re-bind or remove the stale session.");
+      return;
+    }
+    idToken = session.idToken;
   }
-  if (typeof idPayload?.sub !== "string" || !idPayload.sub) {
-    outputError("id_token missing sub claim");
-    return;
-  }
+  const level = classifyAssurance(idPayload);
 
   const agentJwk = ed25519PublicKeyToJwk(key.publicKeyPem);
   const agentJkt = jwkThumbprint(agentJwk);
 
-  const trailers = [
-    `Agent-ID-JKT: ${agentJkt}`,
-    `Agent-ID-Owner: ${idPayload.sub}`,
-    `Co-Authored-By: Alien Agent <alienagentid@eti.co>`,
-  ];
+  const trailers = [`Agent-ID-JKT: ${agentJkt}`];
+  // Only a human-backed commit carries an owner trailer (the pairwise pseudonym
+  // at L1, the canonical AlienID at L2).
+  if (idPayload?.sub) trailers.push(`Agent-ID-Owner: ${idPayload.sub}`);
+  trailers.push(`Co-Authored-By: Alien Agent <alienagentid@eti.co>`);
+
+  if (level === ASSURANCE.SELF) {
+    stderr(
+      "Committing at level 0 (self-asserted: signed by the agent key, no human " +
+        "attestation). Run `agent-id-core auth` + `bind` to make later commits human-backed.",
+    );
+  }
 
   const fullMessage = `${message}\n\n${trailers.join("\n")}`;
 
@@ -254,9 +272,9 @@ async function cmdCommit(flags) {
   const commitHash = hashResult.stdout.trim();
 
   const auditRecord = await logCommitToAuditTrail(stateDir, { commitHash, message, agentJkt });
-  const proofAttached = await attachProofBundle(session.idToken, agentJwk, commitHash);
+  const proofAttached = await attachProofBundle(idToken, agentJwk, commitHash);
 
-  stderr(`Signed commit: ${commitHash.slice(0, 12)}`);
+  stderr(`Signed commit: ${commitHash.slice(0, 12)} (level ${level} — ${describeAssurance(level)})`);
 
   const { pushed, notesPushed } = flags.push
     ? await pushCommitAndNotes(flags.remote || "origin", proofAttached)
@@ -266,7 +284,10 @@ async function cmdCommit(flags) {
     ok: true,
     commitHash,
     signed: true,
+    level,
+    assurance: describeAssurance(level),
     jkt: agentJkt,
+    ownerSub: idPayload?.sub || null,
     proofAttached,
     pushed,
     notesPushed,
@@ -308,6 +329,10 @@ async function logCommitToAuditTrail(stateDir, { commitHash, message, agentJkt }
   }
 }
 
+// Attach the v3 proof bundle as a git note. `idToken` is null for an L0
+// (self-asserted) commit — the bundle then carries only agent_jwk, so a
+// verifier can still check the SSH signature against the key and confirm the
+// JKT trailer, and report level 0.
 async function attachProofBundle(idToken, agentJwk, commitHash) {
   try {
     const proofBundle = buildV3Bundle({ idToken, agentJwk });
@@ -318,7 +343,11 @@ async function attachProofBundle(idToken, agentJwk, commitHash) {
       { timeout: 10000 },
     );
     if (noteResult.code === 0) {
-      stderr("Proof bundle attached as git note (refs/notes/agent-id).");
+      stderr(
+        idToken
+          ? "Proof bundle attached as git note (refs/notes/agent-id)."
+          : "Self-asserted (L0) proof bundle attached as git note (refs/notes/agent-id).",
+      );
       return true;
     }
     stderr(`Warning: could not attach proof note: ${noteResult.stderr.trim()}`);
@@ -419,13 +448,14 @@ async function cmdVerify(flags) {
     throw err;
   }
 
-  const { jkt: computedJkt, ownerSub, agentJwk } = verified;
+  const { jkt: computedJkt, ownerSub, agentJwk, level } = verified;
 
   // Git-specific binding: trailers in the commit message must agree with
-  // the bundle's verified facts.
+  // the bundle's verified facts. At L0 there is no owner trailer and ownerSub
+  // is null; a forged Agent-ID-Owner trailer on an L0 commit still fails here.
   if (trailerOwner && trailerOwner !== ownerSub) {
     outputError(
-      `Agent-ID-Owner trailer ${trailerOwner} does not match id_token sub ${ownerSub}`,
+      `Agent-ID-Owner trailer ${trailerOwner} does not match id_token sub ${ownerSub ?? "(none — level 0)"}`,
     );
     return;
   }
@@ -468,15 +498,25 @@ async function cmdVerify(flags) {
     return;
   }
 
+  const shortJkt = `${computedJkt.slice(0, 16)}...`;
+  const summary =
+    level === ASSURANCE.SELF
+      ? `Commit ${resolvedHash.slice(0, 12)} signed by agent ${shortJkt} — level 0 (self-asserted, no human attestation)`
+      : level === ASSURANCE.ANONYMOUS
+        ? `Commit ${resolvedHash.slice(0, 12)} signed by agent ${shortJkt} — level 1 (anonymous human-backed, pseudonym ${ownerSub})`
+        : `Commit ${resolvedHash.slice(0, 12)} signed by agent ${shortJkt} — level 2, owned by ${ownerSub}`;
+
   outputJson({
     ok: true,
     commit: resolvedHash,
+    level,
+    assurance: describeAssurance(level),
     jkt: computedJkt,
     ownerSub,
     issuer: verified.issuer,
     aud: verified.aud,
     iat: verified.iat,
-    summary: `Commit ${resolvedHash.slice(0, 12)} signed by agent ${computedJkt.slice(0, 16)}... owned by ${ownerSub}`,
+    summary,
   });
 }
 

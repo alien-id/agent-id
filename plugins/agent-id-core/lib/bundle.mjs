@@ -18,6 +18,7 @@
 import { createPublicKey } from "node:crypto";
 
 import { jwkThumbprint } from "./crypto.mjs";
+import { ASSURANCE, classifyAssurance, describeAssurance } from "./assurance.mjs";
 import { errorMessage, BundleFormatError, BundleVerifyError } from "./errors.mjs";
 
 export const BUNDLE_VERSION = 3;
@@ -25,25 +26,28 @@ export const BUNDLE_VERSION = 3;
 /**
  * Build a v3 proof bundle from a signed-in agent's runtime state.
  *
- *   idToken    — the SSO-issued id_token (compact JWS, as received from /token)
+ *   idToken    — the SSO-issued id_token (compact JWS). OPTIONAL: omit it for a
+ *                self-asserted (L0) bundle that proves only the agent key, with
+ *                no human attestation.
  *   agentJwk   — the agent's Ed25519 OKP JWK (kty=OKP, crv=Ed25519, x=...)
  *
  * Returns a plain JSON-serializable object. Consumers serialize and attach
  * it to a transport (git note, exported file, future signed-tool-call
  * attestation) however they like.
  */
-export function buildV3Bundle({ idToken, agentJwk }) {
-  if (typeof idToken !== "string" || !idToken) {
-    throw new Error("buildV3Bundle: idToken is required");
-  }
+export function buildV3Bundle({ idToken = null, agentJwk }) {
   if (!agentJwk || typeof agentJwk !== "object") {
     throw new Error("buildV3Bundle: agentJwk is required");
   }
-  return {
-    version: BUNDLE_VERSION,
-    id_token: Buffer.from(idToken).toString("base64url"),
-    agent_jwk: agentJwk,
-  };
+  const bundle = { version: BUNDLE_VERSION, agent_jwk: agentJwk };
+  // A bound (L1/L2) bundle carries the SSO id_token; an L0 bundle omits it.
+  if (idToken != null) {
+    if (typeof idToken !== "string" || !idToken) {
+      throw new Error("buildV3Bundle: idToken must be a non-empty string when present");
+    }
+    bundle.id_token = Buffer.from(idToken).toString("base64url");
+  }
+  return bundle;
 }
 
 /**
@@ -70,11 +74,13 @@ export function parseBundle(raw) {
       `unsupported bundle version ${String(bundle.version)} (only v${BUNDLE_VERSION} is supported)`,
     );
   }
-  if (typeof bundle.id_token !== "string" || !bundle.id_token) {
-    throw new BundleFormatError("bundle missing id_token");
-  }
+  // agent_jwk is always required — it IS the identity. id_token is optional:
+  // present for a bound (L1/L2) bundle, absent for a self-asserted (L0) one.
   if (!bundle.agent_jwk || typeof bundle.agent_jwk !== "object") {
     throw new BundleFormatError("bundle missing agent_jwk");
+  }
+  if ("id_token" in bundle && (typeof bundle.id_token !== "string" || !bundle.id_token)) {
+    throw new BundleFormatError("bundle id_token, when present, must be a non-empty string");
   }
   return bundle;
 }
@@ -115,24 +121,58 @@ export function decodeBundleIdToken(bundle) {
  * Returns:
  *
  *   { ok: true,
+ *     level,            // assurance level: 0 self-asserted / 1 anonymous / 2 linked
+ *     assurance,        // human-readable level name
  *     jkt,              // jwkThumbprint(bundle.agent_jwk)
- *     ownerSub,         // id_token.sub — the verified human owner
- *     issuer,           // discovery-resolved issuer of the id_token
+ *     ownerSub,         // id_token.sub (pairwise pseudonym at L1) or null at L0
+ *     issuer,           // discovery-resolved issuer of the id_token (null at L0)
  *     aud,              // id_token.aud (or null)
  *     iat,              // id_token.iat (or null)
  *     agentJwk,         // pass-through for transport-specific binding
- *     idTokenPayload,   // full id_token claims, for callers that need more
+ *     idTokenPayload,   // full id_token claims (null at L0)
  *   }
  *
- * On any failure, throws BundleVerifyError with a `.code` and a message.
+ * A bundle with no id_token verifies as L0 (self-asserted) without calling
+ * verifyIdToken. On any failure, throws BundleVerifyError with a `.code`.
  */
 export async function verifyBundle(bundle, { ssoBaseUrl, verifyIdToken } = {}) {
-  if (typeof verifyIdToken !== "function") {
-    throw new TypeError("verifyBundle: verifyIdToken callback is required");
-  }
   // Accept either an already-parsed bundle or a raw JSON-shaped object.
   // parseBundle is idempotent on the latter.
   const parsed = parseBundle(bundle);
+
+  // Validate agent_jwk parses as an Ed25519 public key before thumbprinting —
+  // jwkThumbprint enforces the OKP/Ed25519 shape on its inputs, but a malformed
+  // JWK would surface a less actionable error. Needed for both L0 and L1/L2.
+  try {
+    createPublicKey({ key: parsed.agent_jwk, format: "jwk" });
+  } catch (err) {
+    throw new BundleVerifyError(
+      `agent_jwk is not a valid Ed25519 JWK: ${errorMessage(err)}`,
+      "agent-jwk-invalid",
+    );
+  }
+  const computedJkt = jwkThumbprint(parsed.agent_jwk);
+
+  // L0 (self-asserted): no id_token. The bundle proves only the agent key; the
+  // transport layer (e.g. the SSH commit signature) binds the payload to it.
+  if (!("id_token" in parsed)) {
+    return {
+      ok: true,
+      level: ASSURANCE.SELF,
+      assurance: describeAssurance(ASSURANCE.SELF),
+      jkt: computedJkt,
+      ownerSub: null,
+      issuer: null,
+      aud: null,
+      iat: null,
+      agentJwk: parsed.agent_jwk,
+      idTokenPayload: null,
+    };
+  }
+
+  if (typeof verifyIdToken !== "function") {
+    throw new TypeError("verifyBundle: verifyIdToken callback is required for a bound bundle");
+  }
   const idTokenStr = decodeBundleIdToken(parsed);
 
   let resolvedSsoBaseUrl = ssoBaseUrl || null;
@@ -180,18 +220,8 @@ export async function verifyBundle(bundle, { ssoBaseUrl, verifyIdToken } = {}) {
     );
   }
 
-  // Validate agent_jwk parses as an Ed25519 public key before thumbprinting —
-  // jwkThumbprint enforces the OKP/Ed25519 shape on its inputs, but a
-  // malformed JWK would surface a less actionable error.
-  try {
-    createPublicKey({ key: parsed.agent_jwk, format: "jwk" });
-  } catch (err) {
-    throw new BundleVerifyError(
-      `agent_jwk is not a valid Ed25519 JWK: ${errorMessage(err)}`,
-      "agent-jwk-invalid",
-    );
-  }
-  const computedJkt = jwkThumbprint(parsed.agent_jwk);
+  // agent_jwk was validated + thumbprinted up front; the bound branch only adds
+  // the cnf.jkt anchor check.
   if (computedJkt !== cnfJkt) {
     throw new BundleVerifyError(
       `agent_jwk thumbprint ${computedJkt} does not match id_token cnf.jkt ${cnfJkt}`,
@@ -199,8 +229,11 @@ export async function verifyBundle(bundle, { ssoBaseUrl, verifyIdToken } = {}) {
     );
   }
 
+  const level = classifyAssurance(idPayload);
   return {
     ok: true,
+    level,
+    assurance: describeAssurance(level),
     jkt: computedJkt,
     ownerSub: idPayload.sub,
     issuer: tokenResult.issuer,

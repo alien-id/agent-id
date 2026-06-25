@@ -19,43 +19,22 @@
 // docs/VAULT-PROXY.md and simulated by examples/dev-sso.mjs for tests.
 
 import { b64url, createDPoPProof, fromB64url } from "../../agent-id-core/lib/crypto.mjs";
+import {
+  fetchWithDPoPNonce,
+  normalizeBaseUrl,
+  readJsonResponse,
+} from "../../agent-id-core/lib/http.mjs";
 
-// RFC 6749 §10: bearer/secret material MUST ride TLS; allow plain http only
-// for loopback (development / the dev-sso fixture).
-function assertTransportSafe(base) {
-  let url;
-  try {
-    url = new URL(base);
-  } catch {
-    throw new Error(`ssoBaseUrl is not a valid URL: ${base}`);
-  }
-  if (url.protocol === "https:") return;
-  const loopback =
-    url.protocol === "http:" &&
-    (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
-  if (!loopback) {
-    throw new Error(`ssoBaseUrl must use https:// (got ${url.protocol}//${url.host})`);
-  }
-}
-
+// RFC 6749 §10: bearer/secret material MUST ride TLS; loopback http is allowed
+// for development / the dev-sso fixture. Shared with the OIDC stack.
 function normalizeBase(base) {
-  if (typeof base !== "string" || !base) throw new Error("ssoBaseUrl is required");
-  assertTransportSafe(base);
-  return base.endsWith("/") ? base.slice(0, -1) : base;
-}
-
-async function readJson(res) {
-  const text = await res.text();
-  try {
-    return { json: text ? JSON.parse(text) : {}, text };
-  } catch {
-    return { json: null, text };
-  }
+  return normalizeBaseUrl(base, "ssoBaseUrl");
 }
 
 // POST JSON to an SSO endpoint with an access-token-bound DPoP proof. Retries
 // once on an RFC 9449 §8/§9 `use_dpop_nonce` challenge with the issued nonce
-// echoed into a fresh proof.
+// echoed into a fresh proof. One-shot (no nonce cache) — these flows make a
+// handful of calls and don't benefit from sticky nonces.
 async function dpopPost({ url, accessToken, agentPrivateKeyPem, body }) {
   const buildHeaders = (nonce) => ({
     "Content-Type": "application/json",
@@ -70,32 +49,9 @@ async function dpopPost({ url, accessToken, agentPrivateKeyPem, body }) {
   });
 
   const payload = JSON.stringify(body || {});
-  let res = await fetch(url, { method: "POST", headers: buildHeaders(null), body: payload });
+  const res = await fetchWithDPoPNonce(url, { method: "POST", body: payload }, buildHeaders);
 
-  if (res.status === 400 || res.status === 401) {
-    const issuedNonce = res.headers.get("dpop-nonce");
-    if (issuedNonce) {
-      // §8 (400) puts the challenge in the JSON body; §9 (401) in WWW-Authenticate.
-      let challenged = false;
-      if (res.status === 400) {
-        try {
-          const b = await res.clone().json();
-          challenged = b && b.error === "use_dpop_nonce";
-        } catch {
-          challenged = false;
-        }
-      } else {
-        const wa = res.headers.get("www-authenticate") || "";
-        const m = wa.match(/\berror\s*=\s*(?:"([^"]*)"|([^,\s]+))/i);
-        if (m) challenged = (m[1] !== undefined ? m[1] : m[2]).toLowerCase() === "use_dpop_nonce";
-      }
-      if (challenged) {
-        res = await fetch(url, { method: "POST", headers: buildHeaders(issuedNonce), body: payload });
-      }
-    }
-  }
-
-  const { json, text } = await readJson(res);
+  const { json, text } = await readJsonResponse(res);
   if (!res.ok) {
     const details = json && typeof json === "object" ? JSON.stringify(json) : text;
     const err = new Error(`HTTP ${res.status} from ${url}: ${details || "no body"}`);

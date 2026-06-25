@@ -463,3 +463,109 @@ describe("v3 bundle emit → verify round trip", () => {
     assert.match(verify.parsed?.error || "", /Agent-ID-JKT trailer/);
   });
 });
+
+// ─── Level 0 (self-asserted): commit + verify with NO owner binding ──────────────
+
+describe("level-0 self-asserted commit → verify (no SSO)", () => {
+  let repoDir;
+  let stateDir;
+
+  beforeEach(async () => {
+    repoDir = await makeTempGitRepo();
+    stateDir = await makeStateDir();
+  });
+
+  afterEach(async () => {
+    await cleanup(repoDir);
+    await cleanup(stateDir);
+  });
+
+  // Write ONLY the agent key — no owner-session.json. This is a fresh agent
+  // straight out of `init`, before any binding.
+  async function buildUnboundAgent() {
+    const agent = generateEd25519PemPair();
+    const agentJwk = ed25519PublicKeyToJwk(agent.publicKeyPem);
+    const agentJkt = jwkThumbprint(agentJwk);
+    await ensureDir(path.join(stateDir, "keys"));
+    await writeJsonFile(path.join(stateDir, "keys", "main.json"), {
+      version: 1,
+      agentId: "main",
+      keyNonce: 0,
+      createdAt: Date.now(),
+      publicKeyPem: agent.publicKeyPem,
+      privateKeyPem: agent.privateKeyPem,
+      fingerprint: agentJkt,
+    });
+    return { agentJkt };
+  }
+
+  it("commits at level 0 (JKT trailer, no Owner) and verify accepts it as L0", async () => {
+    const { agentJkt } = await buildUnboundAgent();
+
+    const commit = await runCli(
+      ["commit", "--state-dir", stateDir, "--message", "fresh agent", "--allow-empty"],
+      { cwd: repoDir },
+    );
+    assert.equal(commit.code, 0, `commit failed: ${commit.stderr || commit.stdout}`);
+    assert.equal(commit.parsed?.ok, true);
+    assert.equal(commit.parsed?.level, 0);
+    assert.equal(commit.parsed?.assurance, "self-asserted");
+    assert.equal(commit.parsed?.ownerSub, null);
+    assert.equal(commit.parsed?.proofAttached, true);
+
+    // JKT trailer present, Owner trailer ABSENT.
+    const { stdout: commitMsg } = await exec("git", ["-C", repoDir, "log", "-1", "--format=%B"]);
+    assert.match(commitMsg, new RegExp(`^Agent-ID-JKT: ${agentJkt}$`, "m"));
+    assert.doesNotMatch(commitMsg, /^Agent-ID-Owner:/m);
+
+    // The attached bundle is the L0 shape: agent_jwk, no id_token.
+    const { stdout: noteRaw } = await exec(
+      "git", ["-C", repoDir, "notes", "--ref=agent-id", "show", "HEAD"],
+    );
+    const bundle = JSON.parse(noteRaw.trim());
+    assert.equal(bundle.version, 3);
+    assert.equal(bundle.id_token, undefined);
+    assert.equal(jwkThumbprint(bundle.agent_jwk), agentJkt);
+
+    // Verify accepts it as level 0 — no --sso-url needed.
+    const verify = await runCli(
+      ["verify", "--state-dir", stateDir, "--commit", "HEAD"],
+      { cwd: repoDir },
+    );
+    assert.equal(verify.code, 0, `verify failed: ${verify.stderr || verify.stdout}`);
+    assert.equal(verify.parsed?.ok, true);
+    assert.equal(verify.parsed?.level, 0);
+    assert.equal(verify.parsed?.assurance, "self-asserted");
+    assert.equal(verify.parsed?.ownerSub, null);
+    assert.equal(verify.parsed?.jkt, agentJkt);
+  });
+
+  it("rejects a forged Agent-ID-Owner trailer on an L0 commit", async () => {
+    const { agentJkt } = await buildUnboundAgent();
+    // A clean L0 commit, to grab a genuine L0 bundle note (agent_jwk, no token).
+    await runCli(
+      ["commit", "--state-dir", stateDir, "--message", "fresh", "--allow-empty"],
+      { cwd: repoDir },
+    );
+    const { stdout: noteRaw } = await exec(
+      "git", ["-C", repoDir, "notes", "--ref=agent-id", "show", "HEAD"],
+    );
+    // A second commit whose message forges an owner trailer (same JKT), with the
+    // genuine L0 bundle re-attached. The bundle says level 0 / ownerSub null, so
+    // the owner trailer must be rejected as inconsistent.
+    const forgedMsg = `forged\n\nAgent-ID-JKT: ${agentJkt}\nAgent-ID-Owner: 0xnot-the-owner`;
+    await exec("git", ["-C", repoDir, "commit", "--allow-empty", "--no-gpg-sign", "-m", forgedMsg]);
+    const { stdout: newHash } = await exec("git", ["-C", repoDir, "rev-parse", "HEAD"]);
+    await exec(
+      "git",
+      ["-C", repoDir, "notes", "--ref=agent-id", "add", "-f", "-m", noteRaw.trim(), newHash.trim()],
+    );
+
+    const verify = await runCli(
+      ["verify", "--state-dir", stateDir, "--commit", "HEAD"],
+      { cwd: repoDir },
+    );
+    assert.equal(verify.parsed?.ok, false);
+    assert.match(verify.parsed?.error || "", /Agent-ID-Owner trailer/);
+  });
+});

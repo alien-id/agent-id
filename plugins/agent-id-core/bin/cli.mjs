@@ -47,6 +47,12 @@ import {
 } from "../lib/signature-engine.mjs";
 
 import {
+  classifyAssurance,
+  describeAssurance,
+  nextAssuranceStep,
+} from "../lib/assurance.mjs";
+
+import {
   outputError,
   outputJson,
   resolveStateDir,
@@ -277,6 +283,9 @@ async function cmdStatus(flags) {
       ok: true,
       initialized: false,
       bound: false,
+      level: 0,
+      assurance: describeAssurance(0),
+      nextStep: "Run `agent-id-core init` (or `bootstrap`) to generate the agent key.",
       stateDir,
     });
     return;
@@ -292,14 +301,21 @@ async function cmdStatus(flags) {
     try {
       idPayload = parseJwt(session.idToken).payload;
     } catch {
-      // ignore — bound:false will reflect the bad state
+      // ignore — level will fall back to 0 to reflect the unusable session
     }
   }
+
+  // Where the agent sits on the assurance ladder: 0 self-asserted (key only),
+  // 1 anonymous-human, 2 linked-to-AlienID.
+  const level = classifyAssurance(idPayload);
 
   outputJson({
     ok: true,
     initialized: true,
-    bound: Boolean(idPayload?.sub),
+    bound: level >= 1,
+    level,
+    assurance: describeAssurance(level),
+    nextStep: nextAssuranceStep(level),
     jkt: agentJkt,
     ownerSub: idPayload?.sub || null,
     providerAddress: session?.providerAddress || null,
@@ -435,9 +451,8 @@ async function cmdBootstrap(flags) {
   stderr("Bootstrap complete. For git signing, run agent-id-git setup.");
   outputJson({
     ok: true,
-    fingerprint: bindResult.fingerprint,
-    ownerSessionSub: bindResult.ownerSessionSub,
-    bindingId: bindResult.bindingId,
+    jkt: bindResult?.jkt ?? null,
+    ownerSub: bindResult?.ownerSub ?? null,
     providerAddress,
     stateDir,
   });
@@ -500,9 +515,8 @@ async function cmdSetupOwnerSession(flags) {
   outputJson({
     ok: true,
     rebound: true,
-    fingerprint: bindResult?.fingerprint,
-    ownerSessionSub: bindResult?.ownerSessionSub,
-    bindingId: bindResult?.bindingId,
+    jkt: bindResult?.jkt ?? null,
+    ownerSub: bindResult?.ownerSub ?? null,
     providerAddress,
     stateDir,
   });

@@ -24,38 +24,18 @@ import {
 
 import { AuthRevokedError, errorMessage } from "./errors.mjs";
 
-// Validate and normalize an SSO base URL in one pass. Every public function
-// that accepts ssoBaseUrl calls this once; the returned value is safe and
-// has no trailing slash.
-function normalizeSsoBaseUrl(ssoBaseUrl) {
-  if (typeof ssoBaseUrl !== "string" || !ssoBaseUrl) {
-    throw new Error("ssoBaseUrl is required");
-  }
-  let url;
-  try {
-    url = new URL(ssoBaseUrl);
-  } catch {
-    throw new Error(`ssoBaseUrl is not a valid URL: ${ssoBaseUrl}`);
-  }
-  // RFC 6749 §10: bearer credentials and refresh tokens MUST be transmitted
-  // over TLS. Allow plain http:// only for loopback hosts (development).
-  if (url.protocol !== "https:") {
-    const loopback = url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
-    if (!loopback) {
-      throw new Error(`ssoBaseUrl must use https:// (got ${url.protocol}//${url.host})`);
-    }
-  }
-  return ssoBaseUrl.endsWith("/") ? ssoBaseUrl.slice(0, -1) : ssoBaseUrl;
-}
+import {
+  fetchWithDPoPNonce,
+  normalizeBaseUrl,
+  readJsonResponse,
+} from "./http.mjs";
 
-async function readJsonResponse(res) {
-  const text = await res.text();
-  try {
-    const json = text ? JSON.parse(text) : {};
-    return { json, text };
-  } catch {
-    return { json: null, text };
-  }
+// Validate and normalize an SSO base URL in one pass. Every public function
+// that accepts ssoBaseUrl calls this once; the returned value is safe and has
+// no trailing slash. Thin wrapper over the shared normalizer (RFC 6749 §10:
+// https only, loopback http allowed for dev).
+function normalizeSsoBaseUrl(ssoBaseUrl) {
+  return normalizeBaseUrl(ssoBaseUrl, "ssoBaseUrl");
 }
 
 async function fetchJson(url, init) {
@@ -308,7 +288,7 @@ async function tokenEndpointPost(tokenUrl, body, agentPrivateKeyPem) {
     };
   };
 
-  const res = await fetchWithDPoPNonce(
+  const res = await fetchWithNonceCache(
     tokenUrl,
     { method: "POST", body },
     buildHeaders,
@@ -386,7 +366,7 @@ export async function getUserInfo(params) {
     }),
   });
 
-  const res = await fetchWithDPoPNonce(userinfoUrl, { method: "GET" }, buildHeaders);
+  const res = await fetchWithNonceCache(userinfoUrl, { method: "GET" }, buildHeaders);
   const { json, text } = await readJsonResponse(res);
   if (!res.ok) {
     const details = json && typeof json === "object" ? JSON.stringify(json) : text;
@@ -399,74 +379,18 @@ export async function getUserInfo(params) {
 }
 
 // dpopNonceCache stores the most-recent server-issued DPoP-Nonce per URL,
-// per RFC 9449 §8.2-1: "the client MUST use the new nonce value for the
-// next request and all subsequent requests until the server supplies a new
-// nonce." Process-local in-memory; agent-id is a short-lived CLI so this
-// is a per-invocation cache that batches multi-call flows (e.g., token
-// then userinfo then refresh) without paying a 400/retry on each step.
+// per RFC 9449 §8.2-1: "the client MUST use the new nonce value for the next
+// request and all subsequent requests until the server supplies a new nonce."
+// Process-local in-memory; agent-id is a short-lived CLI so this is a
+// per-invocation cache that batches multi-call flows (e.g., token then
+// userinfo then refresh) without paying a 400/retry on each step. The
+// challenge/retry mechanics live in ./http.mjs; this module just owns the
+// cache instance so its nonces stay sticky across calls.
 const dpopNonceCache = new Map();
 
-// fetchWithDPoPNonce executes a request, pre-attaching any cached nonce
-// for `url`. Two challenge shapes are recognized per RFC 9449:
-//
-//   §8 (authorization server, e.g. /oauth/token):
-//     400 + JSON body `{"error":"use_dpop_nonce"}` + `DPoP-Nonce` header.
-//
-//   §9 (resource server, e.g. /oauth/userinfo):
-//     401 + `WWW-Authenticate: DPoP error="use_dpop_nonce"` + `DPoP-Nonce`.
-//
-// In either case the helper retries ONCE with the supplied nonce echoed in
-// a freshly built proof and updates the cache. Subsequent responses
-// bearing a DPoP-Nonce header (success or failure) refresh the cache so
-// the server's rotation policy stays sticky.
-async function fetchWithDPoPNonce(url, init, buildHeaders) {
-  const cached = dpopNonceCache.get(url);
-  let res = await fetch(url, { ...init, headers: buildHeaders(cached) });
-  rememberNonce(url, res.headers.get("dpop-nonce"));
-
-  if (res.status !== 400 && res.status !== 401) {
-    return res;
-  }
-  const issuedNonce = res.headers.get("dpop-nonce");
-  if (!issuedNonce) {
-    return res;
-  }
-
-  // Detect the challenge in the right place per status code: §8 puts it in
-  // the JSON body, §9 puts it in WWW-Authenticate.
-  let challenged = false;
-  if (res.status === 400) {
-    try {
-      const body = await res.clone().json();
-      challenged = body && body.error === "use_dpop_nonce";
-    } catch {
-      challenged = false;
-    }
-  } else {
-    const wwwAuth = res.headers.get("www-authenticate") || "";
-    // RFC 6749 §3 / RFC 7235 §2.2: WWW-Authenticate parameter values are
-    // either token or quoted-string. Match the `error` parameter
-    // structurally so that the literal string "use_dpop_nonce" appearing
-    // inside some other parameter's value (e.g. realm) does not
-    // false-positive into a spurious retry.
-    const m = wwwAuth.match(/\berror\s*=\s*(?:"([^"]*)"|([^,\s]+))/i);
-    if (m) {
-      const value = m[1] !== undefined ? m[1] : m[2];
-      challenged = value.toLowerCase() === "use_dpop_nonce";
-    }
-  }
-
-  if (challenged) {
-    res = await fetch(url, { ...init, headers: buildHeaders(issuedNonce) });
-    rememberNonce(url, res.headers.get("dpop-nonce"));
-  }
-  return res;
-}
-
-function rememberNonce(url, nonce) {
-  if (typeof nonce === "string" && nonce) {
-    dpopNonceCache.set(url, nonce);
-  }
+// Bind the module-level nonce cache so every OIDC call shares it.
+function fetchWithNonceCache(url, init, buildHeaders) {
+  return fetchWithDPoPNonce(url, init, buildHeaders, { nonceCache: dpopNonceCache });
 }
 
 export async function fetchOidcDiscovery(ssoBaseUrl) {
