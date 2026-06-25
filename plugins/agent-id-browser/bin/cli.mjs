@@ -49,6 +49,22 @@ import { looksLoggedOut } from "../lib/session.mjs";
 import { runSession, callSession } from "../lib/session-server.mjs";
 import { hasOwnerApproval, unlockViaOwnerApproval } from "../lib/unlock.mjs";
 
+// Bridge the plugin path vars into the environment. Claude Code SUBSTITUTES
+// ${CLAUDE_PLUGIN_DATA}/${CLAUDE_PLUGIN_ROOT} into skill text but only EXPORTS
+// them to hook/MCP processes — not to ordinary skill Bash commands. So the skill
+// passes them as `--plugin-data` / `--plugin-root` flags (with the path already
+// substituted in), and we copy them into process.env here so lib/launch.mjs can
+// locate the runtime-installed patchright uniformly (hook env or flag, same code).
+for (let i = 2; i < process.argv.length - 1; i++) {
+  const v = process.argv[i + 1];
+  if (typeof v !== "string" || v.includes("${")) continue; // skip unsubstituted
+  if (process.argv[i] === "--plugin-data" && !process.env.CLAUDE_PLUGIN_DATA) {
+    process.env.CLAUDE_PLUGIN_DATA = v;
+  } else if (process.argv[i] === "--plugin-root" && !process.env.CLAUDE_PLUGIN_ROOT) {
+    process.env.CLAUDE_PLUGIN_ROOT = v;
+  }
+}
+
 // ─── Vault unlock (non-interactive; surface VAULT_LOCKED rather than hang) ────────
 
 // Unlock order: agent-key (auto) → passphrase (if given) → owner-approval ("approve
@@ -575,6 +591,7 @@ runCli({
         "Unlock: agent-key (auto) | --passphrase-file F | --passphrase-env V |\n" +
         "        owner-approval (approve in the Alien app; --no-owner-approval to skip).\n" +
         "If none works, commands return VAULT_LOCKED — ask the owner to unlock, don't retry.\n" +
-        "patchright is bundled with the plugin (no install).",
+        "patchright auto-installs into the plugin data dir on first session (drives your\n" +
+        "installed Chrome via channel=chrome; pass --plugin-data <dir> when not run by a hook).",
     ),
 });
