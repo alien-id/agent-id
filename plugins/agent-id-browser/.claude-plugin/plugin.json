@@ -7,7 +7,6 @@
     "email": "support@alien.org"
   },
   "keywords": ["browser-automation", "patchright", "credential-vault", "agent-identity"],
-  "hooks": "./hooks/hooks.json",
   "dependencies": [
     {"name": "agent-id-core", "version": "7.0.0"},
     {"name": "agent-id-vault", "version": "7.0.0"}
