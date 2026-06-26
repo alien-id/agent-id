@@ -11,6 +11,7 @@
     "oidc",
     "agent-identity"
   ],
+  "hooks": "./hooks/hooks.json",
   "dependencies": [
     {
       "name": "agent-id-core",

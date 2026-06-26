@@ -59,7 +59,7 @@ import {
   readJsonFile,
   setPrivateFilePermissions,
   statePaths,
-} from "../../agent-id-core/lib/state.mjs";
+} from "@alien-id/agent-id-core/lib/state.mjs";
 import path from "node:path";
 
 const VAULT_LOCKED = Symbol("vault-locked");

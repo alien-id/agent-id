@@ -1,0 +1,24 @@
+{
+  "name": "@alien-id/agent-id-proxy",
+  "version": "7.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Local credential-injecting HTTP proxy: materializes vaulted credentials by type, validates the host allowlist, and forwards over real HTTPS.",
+  "bin": {
+    "agent-id-proxy": "./bin/cli.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "credential-injection",
+    "proxy",
+    "agent-identity"
+  ],
+  "author": "Alien Org <support@alien.org>",
+  "license": "MIT",
+  "dependencies": {
+    "@alien-id/agent-id-core": "^7.0.0",
+    "@alien-id/agent-id-vault": "^7.0.0"
+  }
+}

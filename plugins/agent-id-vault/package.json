@@ -1,0 +1,36 @@
+{
+  "name": "@alien-id/agent-id-vault",
+  "version": "7.0.0",
+  "type": "module",
+  "description": "Alien Agent ID vault: portable encrypted credential vault with LUKS-style slots and typed/domain-scoped credential records.",
+  "bin": {
+    "agent-id-vault": "./bin/cli.mjs"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "skills",
+    ".claude-plugin"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alien-id/agent-id.git",
+    "directory": "plugins/agent-id-vault"
+  },
+  "keywords": [
+    "credential-vault",
+    "agent-identity",
+    "alien-network"
+  ],
+  "author": "Alien Org <support@alien.org>",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@alien-id/agent-id-core": "^7.0.0"
+  }
+}

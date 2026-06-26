@@ -54,16 +54,20 @@ test("prefers patchright from CLAUDE_PLUGIN_DATA (the runtime hook install)", as
   }
 });
 
-test("falls back to the plugin-local install when no data dir is set", async () => {
+test("falls back to a dev/workspace install when no data dir is set", async () => {
   const savedData = process.env.CLAUDE_PLUGIN_DATA;
   const savedRoot = process.env.CLAUDE_PLUGIN_ROOT;
   try {
     delete process.env.CLAUDE_PLUGIN_DATA;
     delete process.env.CLAUDE_PLUGIN_ROOT;
 
+    // With no data dir, normal node resolution from the browser plugin finds the
+    // dev install of patchright. Under the bun workspace that copy is hoisted to
+    // the repo-root node_modules (a plugin-local copy would also satisfy the
+    // resolver); either is correct, so assert on the package, not the path.
     const entry = resolvePatchright();
-    assert.ok(entry, "dev/local patchright should resolve");
-    assert.match(entry, /agent-id-browser[/\\]node_modules[/\\]patchright/);
+    assert.ok(entry, "dev/workspace patchright should resolve");
+    assert.match(entry, /[/\\]patchright[/\\]/);
     const chromium = await loadChromium();
     assert.equal(typeof chromium.launchPersistentContext, "function", "real patchright API");
   } finally {

@@ -3,13 +3,23 @@
   "version": "7.0.0",
   "description": "Universal Agent ID - verifiable identity for AI agents linked to human owners via Alien Network SSO",
   "type": "module",
+  "packageManager": "bun@1.3.13",
+  "workspaces": [
+    "plugins/*"
+  ],
   "bin": {
     "alien-agent-id": "./plugins/agent-id-core/bin/cli.mjs"
   },
   "scripts": {
     "test": "node --test --test-force-exit tests/test-*.mjs",
     "test:integration": "bash tests/integration/full-stack.sh",
-    "test:develop-smoke": "bash tests/integration/develop-sso-smoke.sh"
+    "test:develop-smoke": "bash tests/integration/develop-sso-smoke.sh",
+    "changeset": "changeset",
+    "changeset:status": "changeset status --verbose",
+    "ci:detect": "bun scripts/detect-release.ts",
+    "ci:version": "changeset version && bun install && bun run sync-plugin-versions",
+    "ci:publish": "bun scripts/publish-topological.ts && changeset tag",
+    "sync-plugin-versions": "bun scripts/sync-plugin-versions.ts"
   },
   "files": [
     "plugins",
@@ -26,8 +36,10 @@
     "url": "https://github.com/alien-id/agent-id.git"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.0.0",
+    "bun": ">=1.3"
   },
+  "trustedDependencies": [],
   "keywords": [
     "agent-id",
     "ai-agent",
@@ -42,5 +54,9 @@
   ],
   "author": "Alien Org <support@alien.org>",
   "homepage": "https://alien.org/agent-id",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@changesets/changelog-github": "0.7.0",
+    "@changesets/cli": "2.31.0"
+  }
 }

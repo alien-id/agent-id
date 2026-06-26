@@ -38,16 +38,16 @@ import {
 } from "./control.mjs";
 import { OAuthError, refreshAccessToken } from "./oauth.mjs";
 import { blockedAddressReason, makeUpstreamLookup } from "./ssrf.mjs";
-import { signSolanaRpcBody } from "../../agent-id-core/lib/solana.mjs";
-import { signEvmRpcBody } from "../../agent-id-core/lib/evm.mjs";
+import { signSolanaRpcBody } from "@alien-id/agent-id-core/lib/solana.mjs";
+import { signEvmRpcBody } from "@alien-id/agent-id-core/lib/evm.mjs";
 import {
   openVaultWithMasterKey,
   readMobileSlotChallenges,
   readOwnerApprovalChallenge,
-} from "../../agent-id-vault/lib/vault.mjs";
-import { unsealFromPublicKey } from "../../agent-id-vault/lib/format.mjs";
+} from "@alien-id/agent-id-vault/lib/vault.mjs";
+import { unsealFromPublicKey } from "@alien-id/agent-id-vault/lib/format.mjs";
 import { fingerprintOfCertPem, generateControlCert } from "./control-tls.mjs";
-import { appendJsonl } from "../../agent-id-core/lib/state.mjs";
+import { appendJsonl } from "@alien-id/agent-id-core/lib/state.mjs";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",

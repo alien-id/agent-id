@@ -9,15 +9,17 @@
 // Records:
 //   {
 //     name: "github-pat",
-//     type: "bearer" | "basic" | "header" | "query" | "cookie" | "totp" | "cookie-jar",
+//     type: one of CREDENTIAL_TYPES below (bearer | basic | header | query |
+//           cookie | totp | cookie-jar | oauth2 | solana-keypair | evm-keypair |
+//           browser-profile | secret),
 //     domains: ["*.github.com"],
 //     description: "...",
 //     createdAt, updatedAt, lastUsedAt,
 //     ...type-specific fields
 //   }
 
-import { nowMs } from "../../agent-id-core/lib/crypto.mjs";
-import { isLoopbackHost } from "../../agent-id-core/lib/http.mjs";
+import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
+import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
 
 export const CREDENTIAL_TYPES = Object.freeze([
   "bearer",

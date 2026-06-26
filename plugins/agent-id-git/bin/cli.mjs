@@ -28,39 +28,39 @@ import {
   ed25519PemToSshPublicKey,
   ed25519PublicKeyToJwk,
   jwkThumbprint,
-} from "../../agent-id-core/lib/crypto.mjs";
+} from "@alien-id/agent-id-core/lib/crypto.mjs";
 
 import {
   ensureDir,
   readJsonFile,
   setPrivateFilePermissions,
   statePaths,
-} from "../../agent-id-core/lib/state.mjs";
+} from "@alien-id/agent-id-core/lib/state.mjs";
 
 import {
   BundleFormatError,
   BundleVerifyError,
   errorMessage,
-} from "../../agent-id-core/lib/errors.mjs";
+} from "@alien-id/agent-id-core/lib/errors.mjs";
 
 import {
   buildV3Bundle,
   parseBundle,
   verifyBundle,
-} from "../../agent-id-core/lib/bundle.mjs";
+} from "@alien-id/agent-id-core/lib/bundle.mjs";
 
 import {
   ASSURANCE,
   classifyAssurance,
   describeAssurance,
-} from "../../agent-id-core/lib/assurance.mjs";
+} from "@alien-id/agent-id-core/lib/assurance.mjs";
 
 import {
   parseJwt,
   verifyIdTokenSignatureOnly,
-} from "../../agent-id-core/lib/oidc.mjs";
+} from "@alien-id/agent-id-core/lib/oidc.mjs";
 
-import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
+import { SignatureEngine } from "@alien-id/agent-id-core/lib/signature-engine.mjs";
 
 import {
   execFile,
@@ -70,7 +70,7 @@ import {
   resolveStateDir,
   runCli,
   stderr,
-} from "../../agent-id-core/lib/cli-runtime.mjs";
+} from "@alien-id/agent-id-core/lib/cli-runtime.mjs";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 

@@ -1,0 +1,23 @@
+{
+  "name": "@alien-id/agent-id-auth",
+  "version": "7.0.0",
+  "type": "module",
+  "private": true,
+  "description": "DPoP-signed calls to Alien-aware services: discovery, capabilities, one-shot signed requests.",
+  "bin": {
+    "agent-id-auth": "./bin/cli.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "dpop",
+    "oidc",
+    "agent-identity"
+  ],
+  "author": "Alien Org <support@alien.org>",
+  "license": "MIT",
+  "dependencies": {
+    "@alien-id/agent-id-core": "^7.0.0"
+  }
+}

@@ -10,11 +10,11 @@
 
 import fs from "node:fs/promises";
 
-import { createDPoPProof } from "../../agent-id-core/lib/crypto.mjs";
+import { createDPoPProof } from "@alien-id/agent-id-core/lib/crypto.mjs";
 
-import { readJsonFile } from "../../agent-id-core/lib/state.mjs";
+import { readJsonFile } from "@alien-id/agent-id-core/lib/state.mjs";
 
-import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
+import { SignatureEngine } from "@alien-id/agent-id-core/lib/signature-engine.mjs";
 
 import {
   fetchServiceManifest,
@@ -29,7 +29,7 @@ import {
   resolveStateDir,
   runCli,
   stderr,
-} from "../../agent-id-core/lib/cli-runtime.mjs";
+} from "@alien-id/agent-id-core/lib/cli-runtime.mjs";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ async function buildDPoPHeaders(stateDir, method, url) {
 
   const session = await readJsonFile(paths.ownerSession, null);
   if (!session?.accessToken) {
-    outputError("No bound session with access_token. Run `agent-id-setup bootstrap` or `bind` first.");
+    outputError("No bound session with access_token. Run `agent-id-core bootstrap` or `bind` first.");
     return null;
   }
 

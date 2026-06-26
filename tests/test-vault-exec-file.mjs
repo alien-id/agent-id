@@ -48,7 +48,10 @@ test("exec --file writes a 0600 temp file, passes its path, shreds it after", as
     const r = spawnSync(
       "node",
       [CLI, "exec", "--file", "K=deploy-key.value", "--state-dir", dir,
-       "--", "sh", "-c", `printf '%s\\n%s\\n' "$K" "$(stat -f '%Lp' "$K" 2>/dev/null || stat -c '%a' "$K")" > "${probe}"; cat "$K" >> "${probe}"`],
+       // GNU `stat -c` first (fails cleanly on BSD with no stdout), then BSD
+       // `stat -f`. The reverse order pollutes the output on Linux: GNU treats
+       // `-f` as --file-system and prints to stdout before the `||` fires.
+       "--", "sh", "-c", `printf '%s\\n%s\\n' "$K" "$(stat -c '%a' "$K" 2>/dev/null || stat -f '%Lp' "$K")" > "${probe}"; cat "$K" >> "${probe}"`],
       { encoding: "utf8" },
     );
     assert.equal(r.status, 0, `exec failed: ${r.stderr}`);

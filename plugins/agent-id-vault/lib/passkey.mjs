@@ -5,7 +5,7 @@
 // key); this process only ever receives the PRF secret (the key-derivation input)
 // over the loopback form, never the authenticator itself.
 
-import { collectViaForm } from "../../agent-id-core/lib/secure-form.mjs";
+import { collectViaForm } from "@alien-id/agent-id-core/lib/secure-form.mjs";
 import { generatePasskeyPrfSalt } from "./format.mjs";
 
 const REG_SECURITY =

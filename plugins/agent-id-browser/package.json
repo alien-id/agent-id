@@ -1,5 +1,5 @@
 {
-  "name": "agent-id-browser",
+  "name": "@alien-id/agent-id-browser",
   "version": "7.0.0",
   "type": "module",
   "private": true,
@@ -9,6 +9,18 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "keywords": [
+    "browser-automation",
+    "patchright",
+    "credential-vault",
+    "agent-identity"
+  ],
+  "author": "Alien Org <support@alien.org>",
+  "license": "MIT",
+  "dependencies": {
+    "@alien-id/agent-id-core": "^7.0.0",
+    "@alien-id/agent-id-vault": "^7.0.0"
   },
   "optionalDependencies": {
     "patchright": "^1.61.0"
