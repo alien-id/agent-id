@@ -1,21 +1,35 @@
 #!/usr/bin/env bun
 
-// Propagate each plugin's package.json version (the source of truth changesets
-// bumps) into the two manifests the marketplace reads but changesets ignores:
+// Propagate each plugin's package.json (the source of truth changesets bumps)
+// into the two manifests the marketplace reads but changesets ignores:
 // plugins/<name>/.claude-plugin/plugin.json and .claude-plugin/marketplace.json.
-// Run by `ci:version`. Idempotent; exits non-zero on drift so CI catches it.
+// Two things flow through:
+//   1. the plugin's own `version`
+//   2. each internal dependency RANGE from package.json `dependencies`
+//      (e.g. "@alien-id/agent-id-core": "^7.1.0", maintained by changesets'
+//      updateInternalDependencies) -> plugin.json `dependencies[].version`
+// Without (2), plugin.json's cross-plugin pins are maintained by nobody and
+// drift stale (a bare "7.0.0" is an EXACT semver constraint to Claude Code, so
+// an installed 7.1.0 fails it). The planning logic lives in ./lib/sync.ts;
+// this is the I/O shell. Run by `ci:version`. Idempotent; the CI drift check
+// (`git diff --exit-code`) catches any manifest that fell behind.
 
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import {
+  type Marketplace,
+  type PluginManifest,
+  type PluginPkg,
+  planMarketplace,
+  planPluginManifest,
+} from './lib/sync';
 
 const REPO_ROOT = new URL('..', import.meta.url).pathname;
 const PLUGINS_DIR = join(REPO_ROOT, 'plugins');
 const MARKETPLACE = join(REPO_ROOT, '.claude-plugin', 'marketplace.json');
 
-type Json = Record<string, unknown>;
-
-async function readJson(path: string): Promise<Json> {
-  return JSON.parse(await readFile(path, 'utf8')) as Json;
+async function readJson<T>(path: string): Promise<T> {
+  return JSON.parse(await readFile(path, 'utf8')) as T;
 }
 
 // Write JSON with a trailing newline so the manifests round-trip cleanly through
@@ -28,67 +42,55 @@ async function main() {
   const entries = await readdir(PLUGINS_DIR, { withFileTypes: true });
   const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
 
-  // shortName (plugin.json `name`) -> version, collected from package.json.
+  // Collect every plugin's package.json + plugin.json, then build the cross-plugin
+  // name map the planner needs to resolve dependency ranges.
+  const collected: { path: string; pkg: PluginPkg; manifest: PluginManifest }[] = [];
+  const pkgNameToShort = new Map<string, string>();
   const versions = new Map<string, string>();
 
   for (const dir of dirs) {
-    const pkgPath = join(PLUGINS_DIR, dir, 'package.json');
-    const pkg = await readJson(pkgPath).catch(() => null);
-    if (!pkg || typeof pkg.version !== 'string') continue;
-    const version = pkg.version;
+    const pkg = await readJson<Record<string, unknown>>(join(PLUGINS_DIR, dir, 'package.json')).catch(
+      () => null,
+    );
+    if (!pkg || typeof pkg.version !== 'string' || typeof pkg.name !== 'string') continue;
 
-    const pluginJsonPath = join(PLUGINS_DIR, dir, '.claude-plugin', 'plugin.json');
-    const plugin = await readJson(pluginJsonPath).catch((err) => {
+    const path = join(PLUGINS_DIR, dir, '.claude-plugin', 'plugin.json');
+    const manifest = await readJson<PluginManifest>(path).catch((err) => {
       throw new Error(
-        `${pluginJsonPath} is missing or unreadable (every plugin needs a ` +
-          `.claude-plugin/plugin.json): ${err instanceof Error ? err.message : err}`,
+        `${path} is missing or unreadable (every plugin needs a .claude-plugin/plugin.json): ` +
+          `${err instanceof Error ? err.message : err}`,
       );
     });
-    const shortName = plugin.name;
-    if (typeof shortName !== 'string') {
-      throw new Error(`${pluginJsonPath} has no string "name"`);
-    }
+    if (typeof manifest.name !== 'string') throw new Error(`${path} has no string "name"`);
 
-    if (plugin.version !== version) {
-      plugin.version = version;
-      await writeJson(pluginJsonPath, plugin);
-      console.log(`plugin.json  ${shortName} -> ${version}`);
-    }
-    versions.set(shortName, version);
+    pkgNameToShort.set(pkg.name, manifest.name);
+    versions.set(manifest.name, pkg.version);
+    collected.push({
+      path,
+      pkg: {
+        shortName: manifest.name,
+        pkgName: pkg.name,
+        version: pkg.version,
+        pkgDependencies: (pkg.dependencies as Record<string, string> | undefined) ?? {},
+      },
+      manifest,
+    });
   }
 
-  const marketplace = await readJson(MARKETPLACE);
-  const plugins = marketplace.plugins;
-  if (!Array.isArray(plugins)) {
-    throw new Error(`${MARKETPLACE} has no "plugins" array`);
-  }
-
-  const marketplaceNames = new Set<string>();
-  let changed = false;
-  for (const entry of plugins as Json[]) {
-    const name = entry.name;
-    if (typeof name !== 'string') continue;
-    marketplaceNames.add(name);
-    const version = versions.get(name);
-    if (!version) {
-      throw new Error(`marketplace entry "${name}" has no matching plugin package.json`);
-    }
-    if (entry.version !== version) {
-      entry.version = version;
-      changed = true;
-      console.log(`marketplace   ${name} -> ${version}`);
+  for (const { path, pkg, manifest } of collected) {
+    const planned = planPluginManifest(pkg, manifest, pkgNameToShort);
+    if (planned.changes.length > 0) {
+      await writeJson(path, planned.manifest);
+      planned.changes.forEach((c) => console.log(c));
     }
   }
 
-  // Reverse check: every plugin must appear in the marketplace, or a plugin
-  // dropped from marketplace.json would silently pass (drift the other way).
-  for (const shortName of versions.keys()) {
-    if (!marketplaceNames.has(shortName)) {
-      throw new Error(`plugin "${shortName}" has no entry in ${MARKETPLACE}`);
-    }
+  const marketplace = await readJson<Marketplace>(MARKETPLACE);
+  const plannedMarketplace = planMarketplace(marketplace, versions);
+  if (plannedMarketplace.changes.length > 0) {
+    await writeJson(MARKETPLACE, plannedMarketplace.marketplace);
+    plannedMarketplace.changes.forEach((c) => console.log(c));
   }
-
-  if (changed) await writeJson(MARKETPLACE, marketplace);
 
   console.log('sync-plugin-versions: done');
 }
