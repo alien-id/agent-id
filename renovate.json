@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    "security:minimumReleaseAgeNpm"
+  ],
+  "minimumReleaseAge": "3 days",
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "minimumReleaseAge": "0"
+  },
+  "rangeStrategy": "pin",
+  "separateMinorPatch": true,
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["patch"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "Published libraries must keep ranges so consumers can dedupe — only devDependencies stay pinned.",
+      "matchFileNames": ["plugins/**/package.json"],
+      "matchDepTypes": ["dependencies", "peerDependencies", "optionalDependencies"],
+      "rangeStrategy": "replace"
+    },
+    {
+      "description": "Engines declare a minimum supported runtime — never pin them to an exact version.",
+      "matchDepTypes": ["engines"],
+      "rangeStrategy": "replace"
+    }
+  ]
+}

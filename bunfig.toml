@@ -1,0 +1,30 @@
+# Supply-chain hardening — see SECURITY.md
+#
+# Bun has lifecycle scripts off by default; `trustedDependencies` in
+# package.json is the opt-in allowlist. We keep it empty.
+
+[install]
+# 3-day cooldown (259200 seconds). Every 2025-2026 npm worm was detected
+# within minutes; a 3-day gate neutralizes the entire class. Bun's default
+# is already 259200 — we set it explicitly so a future default change can
+# never weaken us.
+minimumReleaseAge = 259200
+
+# Exact-version installs (no ^ or ~). Floats are how poisoned patches
+# reach consumers without code review. (Internal @alien-id/* deps keep their
+# ^ ranges so the marketplace plugins float onto compatible core/vault patches;
+# `exact` only governs newly-added third-party deps.)
+exact = true
+
+# We do NOT set frozenLockfile here — bunfig's setting overrides the
+# command-line flag, which blocks `bun add` and `bun update` entirely.
+# Instead, every CI workflow passes `--frozen-lockfile` explicitly so the
+# security guarantee holds where it matters (the build/publish path)
+# without breaking local development.
+
+# Pin the public registry explicitly — defence in depth against a hijacked
+# `npm config` or a polluted CI environment swapping the registry URL.
+registry = "https://registry.npmjs.org/"
+
+[install.scopes]
+"@alien-id" = { url = "https://registry.npmjs.org" }
