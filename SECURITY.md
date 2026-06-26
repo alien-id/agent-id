@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-[Email us](mailto:support@alien.org) with details. Do not open a public issue.
+[Email us](mailto:security@alien.org) with details. Do not open a public issue.
 
 ## What we do
 
