@@ -1,28 +1,14 @@
 #!/usr/bin/env bash
-# Materialize this plugin's npm dependencies (the shared @alien-id/agent-id-*
-# libraries, plus any optional extras) at runtime, then expose them to the
-# plugin's code.
+# Install this plugin's shared @alien-id/* deps at runtime so its imports resolve.
 #
-# This is the official Claude Code "Persistent data directory" pattern (Plugins
-# reference): a SessionStart hook runs `npm install` into CLAUDE_PLUGIN_DATA
-# (persistent across plugin updates) — the docs' exact recommendation for
-# installing language dependencies once and reusing them across sessions.
+# Official "Persistent data directory" plugin pattern: a SessionStart hook
+# `npm install`s into CLAUDE_PLUGIN_DATA (persistent). The docs pair that with
+# NODE_PATH, but NODE_PATH is CJS-only and our code is ESM (+ one CJS qrcode.cjs
+# createRequire) — so instead we symlink node_modules into the (ephemeral) plugin
+# root, one mechanism for both. The symlink is a regenerated pointer, not state;
+# real packages stay in CLAUDE_PLUGIN_DATA and a real dev node_modules is kept.
 #
-# One deliberate extension. The docs pair that install with NODE_PATH, but
-# NODE_PATH is CJS-only — Node ignores it for ESM `import`. Our plugins are ESM
-# (.mjs, bare specifiers like `@alien-id/agent-id-core/lib/crypto.mjs`) plus one
-# CJS `createRequire` (proxy's qrcode.cjs). Both resolve by walking up from the
-# importing file to a node_modules dir, and CLAUDE_PLUGIN_DATA is not on that
-# path. So instead of NODE_PATH we place a node_modules SYMLINK in the plugin
-# root — one mechanism that serves ESM and CJS uniformly.
-#
-# CLAUDE_PLUGIN_ROOT is documented as ephemeral ("do not write state here"); we
-# honor that — the symlink is a pointer, not state. No real files are written to
-# the root, it is recreated every SessionStart, and all real packages live in
-# CLAUDE_PLUGIN_DATA, so it survives plugin updates (new root -> hook re-links).
-# A pre-existing real node_modules in the root (dev checkout) is never clobbered.
-#
-# Requires @alien-id/agent-id-core (+ -vault) to be published to npm first.
+# Needs @alien-id/agent-id-core (+ -vault) published first. Idempotent; fail-soft.
 #
 # Idempotent: skips the install when package.json is unchanged and node_modules
 # is present. Fail-soft: never blocks or fails the session — on error it leaves a

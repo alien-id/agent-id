@@ -1,14 +1,9 @@
 #!/usr/bin/env bun
 
-// Propagate versions from each plugin's package.json (the single source of
-// truth that changesets bumps) into the two Claude-Code manifests that the
-// marketplace reads but changesets never touches:
-//   - plugins/<name>/.claude-plugin/plugin.json  (the plugin's own `version`)
-//   - .claude-plugin/marketplace.json            (the matching `plugins[].version`)
-//
-// Run by `ci:version` after `changeset version`. Idempotent. Exits non-zero if a
-// manifest is missing or a plugin has no marketplace entry, so drift fails CI
-// rather than shipping silently.
+// Propagate each plugin's package.json version (the source of truth changesets
+// bumps) into the two manifests the marketplace reads but changesets ignores:
+// plugins/<name>/.claude-plugin/plugin.json and .claude-plugin/marketplace.json.
+// Run by `ci:version`. Idempotent; exits non-zero on drift so CI catches it.
 
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
