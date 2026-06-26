@@ -205,7 +205,7 @@ The plugin writes the SSH key files and prints the public key. Add it to your Gi
 
 ### Other agents
 
-Any agent with shell access can use the plugin CLIs directly. Requirements: Node.js 18+, git 2.34+, and permission to run `node plugins/agent-id-<X>/bin/cli.mjs ...` commands. For wiring agent-id into a non–Claude-Code harness (Hermes, a custom loop, CI), see the harness-neutral guide: **[docs/HARNESS-INTEGRATION.md](docs/HARNESS-INTEGRATION.md)** — the CLI + proxy contract, the system-prompt block to paste, and how to gate the privileged commands your harness now owns.
+Any agent with shell access can use the plugin CLIs directly. Requirements: Node.js 18+, git 2.34+, and permission to run `node plugins/agent-id-<X>/bin/cli.mjs ...` commands. For wiring agent-id into a non–Claude-Code harness (Hermes, a custom loop, CI), load the portable umbrella skill: **[skills/agent-id/SKILL.md](skills/agent-id/SKILL.md)** — an Agent-Skills-format `SKILL.md` with the CLI + proxy contract, the system-prompt block to paste, and how to gate the privileged commands your harness now owns.
 
 ---
 
