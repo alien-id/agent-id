@@ -3,17 +3,20 @@
 // Alien Agent ID — Browser plugin CLI.
 //
 // A universal browser the agent can drive, with the logged-in profile sealed in
-// the vault. One-time HEADED login establishes a session; afterwards the agent
-// drives the browser HEADLESS by default (no window) to read/fetch any site.
+// the vault. By DEFAULT every command shares ONE session ("main") — sign into
+// Google once and every "Sign in with Google" site reuses it. `login` is ADDITIVE:
+// re-run it to add more sites to the same session. Pass --name to opt into a
+// SEPARATE, isolated session (a second account, a sandbox). After a HEADED login
+// the agent drives the browser HEADLESS by default (no window) to read/fetch.
 //
-//   login  --name N [--url START] [--account LABEL] [--headed-default]
-//          one-time: opens a real window, you sign in and close it; the profile
-//          is then sealed into the vault (browser-profile credential + DEK).
-//   read   --name N --url URL [--headed] [--max-chars K]
+//   login  [--name N] [--url START] [--account LABEL] [--fresh]
+//          opens a real window with the session loaded; sign in, close it; the
+//          session is (re)sealed. --fresh discards the existing session, starts clean.
+//   read   [--name N] --url URL [--headed] [--max-chars K]
 //          navigate (headless by default) and return the page's text + final URL.
-//   fetch  --name N --url URL [--headed] [--max-chars K]
+//   fetch  [--name N] --url URL [--headed] [--max-chars K]
 //          authenticated HTTP GET via the session (e.g. an API or Atom feed).
-//   status [--name N]   list sealed profiles; reports unlocked / sealed / account.
+//   status [--name N]   list sealed sessions; reports unlocked / sealed / account.
 //
 // Vault precondition: the vault MUST be unlocked. Unlock order: agent-key slot
 // (auto) → passphrase (--passphrase-file / --passphrase-env) → owner-approval
@@ -181,6 +184,14 @@ function waitForUserClose(ctx, timeoutMs) {
   });
 }
 
+// The default browser session is ONE shared cookie jar ("main") so logins — and
+// especially shared SSO like "Sign in with Google" — carry across sites. Pass
+// --name to opt into a separate, isolated session (a second account, a sandbox).
+const DEFAULT_PROFILE = "main";
+
+// Suggest the right login command: bare `login` for the shared default, `--name` otherwise.
+const loginHint = (name) => (name === DEFAULT_PROFILE ? "`login`" : "`login --name " + name + "`");
+
 // ─── Profile lifecycle: unseal → run → reseal → wipe ──────────────────────────────
 
 async function withProfile({ flags, name, headless, action }) {
@@ -189,12 +200,12 @@ async function withProfile({ flags, name, headless, action }) {
   try {
     const cred = vault.get(name);
     if (!cred || cred.type !== "browser-profile") {
-      const e = new Error(`no browser-profile named '${name}' — run \`login --name ${name}\` first`);
+      const e = new Error(`no browser-profile named '${name}' — run ${loginHint(name)} first`);
       e.code = "NO_PROFILE";
       throw e;
     }
     if (!(await sealedProfileExists(stateDir, cred.profileFile))) {
-      const e = new Error(`sealed profile for '${name}' is missing — re-run \`login --name ${name}\``);
+      const e = new Error(`sealed profile for '${name}' is missing — re-run ${loginHint(name)}`);
       e.code = "NO_PROFILE";
       throw e;
     }
@@ -226,11 +237,9 @@ async function withProfile({ flags, name, headless, action }) {
 // ─── Commands ─────────────────────────────────────────────────────────────────────
 
 async function cmdLogin(flags) {
-  const name = String(flags.name || "default");
+  const name = String(flags.name || DEFAULT_PROFILE);
   const stateDir = resolveStateDir(flags);
-  const file = `${name}.tar.enc`;
   const startUrl = flags.url ? String(flags.url) : "about:blank";
-  const headlessDefault = flags["headed-default"] === true ? false : true;
 
   let vault;
   try {
@@ -242,10 +251,32 @@ async function cmdLogin(flags) {
   try {
     const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-blogin-"));
     try {
+      // ADDITIVE login: resume the existing sealed session so logins ACCUMULATE in
+      // one cookie jar — sign into Google once and every "Sign in with Google" site
+      // reuses it. `--fresh` discards the existing session and starts clean.
+      const existing = vault.get(name);
+      const resuming =
+        flags.fresh !== true &&
+        existing &&
+        existing.type === "browser-profile" &&
+        (await sealedProfileExists(stateDir, existing.profileFile));
+      if (resuming) {
+        await unsealProfile({ stateDir, file: existing.profileFile, dekHex: existing.dek, destDir: work });
+      }
+      const reuse = resuming ? existing : null;
+      const file = reuse ? reuse.profileFile : `${name}.tar.enc`;
+      const dek = reuse ? reuse.dek : newDek();
+      const account = flags.account ? String(flags.account) : reuse?.account || null;
+      const headlessDefault =
+        flags["headed-default"] === true ? false : reuse ? reuse.headless !== false : true;
+
       const ctx = await launchContext({ profileDir: work, headless: false });
       stderr(
-        `A browser window opened${flags.url ? " at " + startUrl : ""}. ` +
-          "Sign in, then CLOSE the window when you're done.",
+        resuming
+          ? `A browser opened with your '${name}' session loaded${flags.url ? " at " + startUrl : ""}. ` +
+              "Sign into the new site (your existing logins are kept), then CLOSE the window."
+          : `A browser window opened${flags.url ? " at " + startUrl : ""}. ` +
+              "Sign in, then CLOSE the window when you're done.",
       );
       const page = ctx.pages()[0] || (await ctx.newPage());
       try {
@@ -260,22 +291,22 @@ async function cmdLogin(flags) {
         /* already closed by the user */
       }
 
-      const dek = newDek();
       const { bytes } = await sealProfile({ stateDir, file, dekHex: dek, sourceDir: work });
       vault.add({
+        ...(reuse || {}),
         name,
         type: "browser-profile",
         domains: ["*"],
         description: flags.description
           ? String(flags.description)
-          : "Sealed browser profile (agent-id-browser)",
+          : reuse?.description || "Sealed browser profile (agent-id-browser)",
         dek,
         profileFile: file,
         headless: headlessDefault,
         // The DEK is generated in-vault and must never be shown to the agent —
         // `vault show` redacts sealed fields (incl. dek) for exportable:false.
         exportable: false,
-        ...(flags.account ? { account: String(flags.account) } : {}),
+        ...(account ? { account } : {}),
         lastSyncedAt: Date.now(),
       });
       await vault.save();
@@ -284,9 +315,12 @@ async function cmdLogin(flags) {
         name,
         profileFile: file,
         sealedBytes: bytes,
-        account: flags.account ? String(flags.account) : null,
+        resumed: !!resuming,
+        account,
         headlessDefault,
-        message: "Profile sealed in the vault. Subsequent reads run headless by default.",
+        message: resuming
+          ? `Added to your existing '${name}' session — other logins kept.`
+          : `Session '${name}' sealed. Reuse it for every site (shared SSO like Google carries across); run \`login\` again to add more. Reads run headless by default.`,
       });
     } finally {
       await fs.rm(work, { recursive: true, force: true });
@@ -299,7 +333,7 @@ async function cmdLogin(flags) {
 }
 
 async function cmdRead(flags) {
-  const name = String(flags.name || "default");
+  const name = String(flags.name || DEFAULT_PROFILE);
   if (!flags.url) return outputError("--url is required");
   const url = String(flags.url);
   const maxChars = Number(flags["max-chars"] || 4000);
@@ -336,7 +370,7 @@ async function cmdRead(flags) {
         ok: true,
         sessionExpired: true,
         action: "re_login",
-        message: `Session looks logged out (landed on ${out.finalUrl}). Re-run \`login --name ${name}\`.`,
+        message: `Session looks logged out (landed on ${out.finalUrl}). Re-run ${loginHint(name)}.`,
         ...out,
       });
     } else {
@@ -348,7 +382,7 @@ async function cmdRead(flags) {
 }
 
 async function cmdFetch(flags) {
-  const name = String(flags.name || "default");
+  const name = String(flags.name || DEFAULT_PROFILE);
   if (!flags.url) return outputError("--url is required");
   const url = String(flags.url);
   const maxChars = Number(flags["max-chars"] || 8000);
@@ -380,7 +414,7 @@ async function cmdFetch(flags) {
         ok: true,
         sessionExpired: true,
         action: "re_login",
-        message: `Request looks logged out (status ${out.httpStatus}). Re-run \`login --name ${name}\`.`,
+        message: `Request looks logged out (status ${out.httpStatus}). Re-run ${loginHint(name)}.`,
         ...out,
       });
     } else {
@@ -435,7 +469,7 @@ async function cmdStatus(flags) {
 // ─── Interactive session: open / close / actions ─────────────────────────────────
 
 async function cmdOpen(flags) {
-  const name = String(flags.name || "default");
+  const name = String(flags.name || DEFAULT_PROFILE);
   const stateDir = resolveStateDir(flags);
   let vault;
   try {
@@ -449,12 +483,12 @@ async function cmdOpen(flags) {
   try {
     const cred = vault.get(name);
     if (!cred || cred.type !== "browser-profile") {
-      const e = new Error(`no browser-profile named '${name}' — run \`login --name ${name}\` first`);
+      const e = new Error(`no browser-profile named '${name}' — run ${loginHint(name)} first`);
       e.code = "NO_PROFILE";
       throw e;
     }
     if (!(await sealedProfileExists(stateDir, cred.profileFile))) {
-      const e = new Error(`sealed profile for '${name}' missing — re-run \`login --name ${name}\``);
+      const e = new Error(`sealed profile for '${name}' missing — re-run ${loginHint(name)}`);
       e.code = "NO_PROFILE";
       throw e;
     }
@@ -485,7 +519,7 @@ async function cmdOpen(flags) {
 
 async function cmdClose(flags) {
   const stateDir = resolveStateDir(flags);
-  const name = String(flags.name || "default");
+  const name = String(flags.name || DEFAULT_PROFILE);
   try {
     const r = await callSession(stateDir, name, "close", {});
     outputJson({ ok: true, closed: name, ...r });
@@ -523,7 +557,7 @@ async function cmdSessions(flags) {
 function actionCmd(action, map) {
   return async (flags) => {
     const stateDir = resolveStateDir(flags);
-    const name = String(flags.name || "default");
+    const name = String(flags.name || DEFAULT_PROFILE);
     try {
       const params = map ? map(flags) : {};
       const r = await callSession(stateDir, name, action, params);
@@ -567,16 +601,19 @@ runCli({
   },
   printHelp: () =>
     stderr(
-      "agent-id-browser — universal browser; logged-in profile sealed in the vault\n\n" +
-        "Setup / one-shot:\n" +
-        "  login   --name N [--url START] [--account LABEL] [--headed-default]\n" +
-        "          one-time HEADED login; seals the profile into the vault\n" +
-        "  read    --name N --url URL [--headed] [--max-chars K]\n" +
+      "agent-id-browser — universal browser; one shared logged-in session in the vault\n\n" +
+        "Sessions: every command shares ONE session ('main') by default — sign into\n" +
+        "Google once, reuse it everywhere. `login` is ADDITIVE (re-run to add sites).\n" +
+        "Use --name to open a SEPARATE isolated session; --fresh discards & restarts one.\n\n" +
+        "Setup / one-shot ([--name N] optional; defaults to the shared 'main' session):\n" +
+        "  login   [--name N] [--url START] [--account LABEL] [--fresh]\n" +
+        "          HEADED login; (re)seals the session into the vault (additive)\n" +
+        "  read    [--name N] --url URL [--headed] [--max-chars K]\n" +
         "          one-shot: navigate (headless) → page text + final URL + sessionExpired\n" +
-        "  fetch   --name N --url URL [--max-chars K]\n" +
+        "  fetch   [--name N] --url URL [--max-chars K]\n" +
         "          one-shot authenticated HTTP GET via the session (API / feed)\n" +
-        "  status  [--name N]      list sealed profiles\n\n" +
-        "Interactive session (fine-grained control):\n" +
+        "  status  [--name N]      list sealed sessions\n\n" +
+        "Interactive session (--name optional; defaults to 'main'):\n" +
         "  open    --name N [--headed]   start a persistent session (run in background)\n" +
         "  snapshot --name N             accessibility tree with element refs (eN)\n" +
         "  click   --name N --ref eN\n" +

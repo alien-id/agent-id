@@ -2,6 +2,18 @@
 
 All notable changes are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- **Browser: one shared session by default.** `agent-id-browser` commands now share a
+  single session (`main`) instead of a per-`--name` profile, so "Sign in with Google"
+  done once carries across sites (Reddit, Twitter, …) — no repeated SSO. `login` is now
+  **additive**: it loads the current session first (instead of a blank profile) so
+  re-running it *adds* a site rather than wiping prior logins. `--name <id>` opts into a
+  separate, isolated session; `login --fresh` discards and restarts. The implicit default
+  profile name changed from `default` to `main` (no existing profile was named either).
+
 ## [7.0.0] — 2026-06-26
 
 All plugins unified at **7.0.0**. Headline: passkey (Touch ID) vault unlock, plus

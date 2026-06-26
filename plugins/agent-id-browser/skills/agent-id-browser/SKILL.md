@@ -1,6 +1,6 @@
 ---
 name: agent-id-browser
-description: Drive a real, logged-in browser whose profile is sealed in the agent vault — fine-grained control (click, type, fill forms, press keys, select, hover, navigate, screenshot, run JS) via an accessibility snapshot with element refs, plus one-shot read/fetch. One-time HEADED login establishes the session; afterwards the agent drives it HEADLESS (no window). Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
+description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, press keys, select, hover, navigate, screenshot, run JS) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. A HEADED login establishes or extends the session; afterwards the agent drives it HEADLESS (no window). Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
 license: MIT
 metadata:
   author: Alien Wallet
@@ -10,10 +10,24 @@ allowed-tools: Bash(node *agent-id-browser/bin/cli.mjs:*) Read
 
 # Alien Agent ID — Browser
 
-Drives a real browser (patchright — a stealth-patched Playwright) using a profile
+Drives a real browser (patchright — a stealth-patched Playwright) using a session
 **sealed in the vault**. The human logs in **once** in a visible window; the
 session is encrypted at rest, and the agent reuses it **headless** to observe and
 act on any site. The agent never handles a secret — it only drives the browser.
+
+## Sessions — one shared by default
+
+By default **every command shares ONE session** (named `main`). That is the whole
+point: sign into Google **once** and every "Sign in with Google" site (Reddit,
+Twitter, …) reuses that login — no repeated SSO. `login` is **additive** — re-run
+it to add another site to the same session; existing logins are kept.
+
+- **Default (use this):** omit `--name` — every command uses the shared `main` session.
+- **Isolation (opt-in):** `--name <id>` is a *separate* session with its own cookie
+  jar — a second account on the same site, a throwaway, or a sandbox. It shares
+  nothing with `main`. Don't create one per site; that's what reintroduces the
+  double-login.
+- **Start over:** `login --fresh` discards the current session and logs in clean.
 
 patchright is **installed automatically** into the plugin's data dir on first
 session (a SessionStart hook; ~17 MB, no browser download — it drives your
@@ -60,18 +74,22 @@ auto-installs on first session; if a command reports `PATCHRIGHT_MISSING`, the
 install hasn't finished or you're running outside the plugin — it retries next
 session, or run `npm install` once in the plugin's data dir. Don't add browsers.)
 
-## 1) One-time login (headed — the only human step)
+## 1) Login (headed — the only human step)
 
-Opens a real window; the owner signs in and **closes it**; the profile is sealed
-into the vault as a `browser-profile` credential.
+Opens a real window **with the current session loaded**; the owner signs into a new
+site and **closes it**; the session is (re)sealed. Login is **additive** — existing
+logins are kept, so sign into Google once and reuse it across sites.
 
 ```bash
-CLI login --name gmail --url https://mail.google.com/ --account me@company.com
+CLI login --url https://mail.google.com/      # establish / extend the shared 'main' session
+CLI login --url https://www.reddit.com/       # later: adds Reddit; its Google SSO reuses the above
+# A SEPARATE, isolated session (opt-in) — e.g. a second account:
+CLI login --name work --url https://mail.google.com/ --account me@company.com
 ```
 
 It **blocks until the window is closed**, so run it in the **background** and tell
-the owner to sign in. On success: `{ ok: true, name, headlessDefault: true }`.
-Re-run `login --name gmail` to re-establish the session after a logout.
+the owner to sign in. On success: `{ ok: true, name, resumed, headlessDefault: true }`.
+Re-run `login` anytime to add a site or recover from a logout; `--fresh` starts clean.
 
 ## 2) Interactive control (the main loop)
 
@@ -79,32 +97,32 @@ Start a persistent session, then observe → act → observe. **Run `open` in th
 background** (it stays running) and wait for its `{"ready":true,...}` line:
 
 ```bash
-CLI open --name gmail            # background; add --headed to watch
+CLI open            # background; add --headed to watch
 ```
 
 **Observe** — get an accessibility snapshot; every actionable element has a `ref`:
 
 ```bash
-CLI snapshot --name gmail
+CLI snapshot
 # → { elements: [ { ref:"e5", role:"button", name:"Compose" }, … ] }
 ```
 
 **Act** — reference elements by their `ref` from the latest snapshot:
 
 ```bash
-CLI click  --name gmail --ref e5
-CLI type   --name gmail --ref e8 --text "hello@there.com" [--submit]
-CLI fill   --name gmail --fields '[{"ref":"e8","value":"a"},{"ref":"e9","value":"b"}]'
-CLI select --name gmail --ref e3 --values Option1
-CLI press  --name gmail --key Enter [--ref e8]
-CLI hover  --name gmail --ref e4
-CLI scroll --name gmail --dy 800
-CLI navigate --name gmail --url https://mail.google.com/mail/u/0/
-CLI back   --name gmail
-CLI page-text --name gmail --max-chars 4000     # visible text of the page
-CLI screenshot --name gmail --path /tmp/shot.png [--full]
-CLI eval   --name gmail --js "document.title"
-CLI wait   --name gmail --text "Inbox"          # or --ms 1500
+CLI click  --ref e5
+CLI type   --ref e8 --text "hello@there.com" [--submit]
+CLI fill   --fields '[{"ref":"e8","value":"a"},{"ref":"e9","value":"b"}]'
+CLI select --ref e3 --values Option1
+CLI press  --key Enter [--ref e8]
+CLI hover  --ref e4
+CLI scroll --dy 800
+CLI navigate --url https://mail.google.com/mail/u/0/
+CLI back
+CLI page-text --max-chars 4000     # visible text of the page
+CLI screenshot --path /tmp/shot.png [--full]
+CLI eval   --js "document.title"
+CLI wait   --text "Inbox"          # or --ms 1500
 ```
 
 **Re-snapshot after anything that changes the page** (click/navigate/submit) —
@@ -115,7 +133,7 @@ navigates, `wait` for expected text, then `snapshot` again.
 plaintext working copy:
 
 ```bash
-CLI close --name gmail
+CLI close
 CLI sessions            # list open sessions
 ```
 
@@ -124,8 +142,8 @@ CLI sessions            # list open sessions
 For a quick read without opening an interactive session:
 
 ```bash
-CLI read  --name gmail --url "https://mail.google.com/mail/u/0/"     # page text + final URL
-CLI fetch --name gmail --url "https://mail.google.com/mail/u/0/feed/atom"  # authenticated GET
+CLI read  --url "https://mail.google.com/mail/u/0/"     # page text + final URL
+CLI fetch --url "https://mail.google.com/mail/u/0/feed/atom"  # authenticated GET
 ```
 
 > Gmail tip: open `https://mail.google.com/mail/u/0/` (via `read` or `navigate`)
@@ -135,7 +153,7 @@ CLI fetch --name gmail --url "https://mail.google.com/mail/u/0/feed/atom"  # aut
 ## 4) Status
 
 ```bash
-CLI status [--name gmail]   # profiles: account, headlessDefault, sealed, lastSyncedAt
+CLI status [--name <id>]   # sessions: account, headlessDefault, sealed, lastSyncedAt
 ```
 
 If the vault is locked, `status` returns `{ ok: true, unlocked: false }` (not an error).
@@ -144,11 +162,11 @@ If the vault is locked, `status` returns `{ ok: true, unlocked: false }` (not an
 
 `read` / `fetch` (and a navigation in a session that lands on a sign-in page)
 return `"sessionExpired": true` with `"action": "re_login"`. On that signal,
-**re-run `login --name <profile>`** — do not keep retrying.
+**re-run `login`** (add `--name <id>` only if it was an isolated session) — do not keep retrying.
 
 ## Notes
 
 - **Headless by default**; `--headed` shows the window. Login is always headed.
-- The profile is unsealed to a temp working dir only while a session/read runs,
-  re-sealed (capturing rotated cookies) when it ends, and the plaintext is wiped.
+- The session is unsealed to a temp working dir only while a session/read runs,
+  re-sealed (capturing new logins + rotated cookies) when it ends, and wiped.
 - Universal — point it at any site; not Gmail-specific.
