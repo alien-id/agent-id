@@ -31,7 +31,7 @@ State directory layout (under `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}`):
 
 ## Resolve the CLI
 
-`bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path (e.g. `node /abs/path/to/plugins/agent-id-core/bin/cli.mjs`) in the examples below.
+`bin/cli.mjs` lives in this plugin's directory. In the examples below, `CLI` is `${CLAUDE_PLUGIN_ROOT}/bin/cli.mjs` — the `${CLAUDE_PLUGIN_ROOT}` path is filled in for you when the skill loads.
 
 ## At the start of a session
 

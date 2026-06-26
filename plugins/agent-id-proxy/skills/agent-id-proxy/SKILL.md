@@ -14,9 +14,11 @@ The proxy holds the unlocked vault's master key in memory, accepts HTTP requests
 
 Requires `agent-id-vault init` to have produced a portable vault with at least one credential.
 
+> **Security note:** this skill pre-approves `Bash(curl:*)` so calls to the local proxy don't prompt each time. That grant also authorizes arbitrary outbound HTTP — a potential exfiltration channel. For higher-stakes use, drop the blanket `curl` grant and approve proxy calls per-invocation.
+
 ## Resolve the CLI
 
-`bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path.
+`bin/cli.mjs` lives in this plugin's directory. In the examples below, `CLI` is `${CLAUDE_PLUGIN_ROOT}/bin/cli.mjs` — the `${CLAUDE_PLUGIN_ROOT}` path is filled in for you when the skill loads.
 
 ## Start the proxy
 

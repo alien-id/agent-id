@@ -1,6 +1,10 @@
 ---
 name: alien-vault
 description: Access the owner's external services (Gmail, GitHub, APIs) that require a credential, by calling the local Alien Agent ID vault proxy — without ever seeing, requesting, or handling the secret. Use whenever you're asked to read the owner's email or call a service that needs an API key / token / login. Starts the proxy if it isn't running; the owner unlocks the vault once on their phone; you only ever name the credential.
+license: MIT
+metadata:
+  author: Alien Wallet
+  version: "7.0.0"
 allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*) Bash(curl:*) Bash(python3:*)
 ---
 

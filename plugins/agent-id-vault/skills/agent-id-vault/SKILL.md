@@ -30,7 +30,7 @@ Pairs with the agent-id-proxy plugin — the proxy unlocks the vault and injects
 
 ## Resolve the CLI
 
-`bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path (e.g. `node /abs/path/to/plugins/agent-id-vault/bin/cli.mjs`).
+`bin/cli.mjs` lives in this plugin's directory. In the examples below, `CLI` is `${CLAUDE_PLUGIN_ROOT}/bin/cli.mjs` — the `${CLAUDE_PLUGIN_ROOT}` path is filled in for you when the skill loads.
 
 ## Initialize the vault — pick how it unlocks
 
@@ -192,38 +192,9 @@ path, never the contents — ideal for the `secret` type (SSH/RSA keys, PEMs).
   the vault — use the proxy to exercise those.
 - Unlock + `--state-dir` flags work as for any other subcommand.
 
-## Rekey: add/remove slots
+## Slot management, portability & migration
 
-```bash
-node CLI rekey add-passkey [--device-label NAME]                  # Touch ID / Face ID / security key
-node CLI rekey add-passphrase --new-passphrase-file /tmp/newpass   # DEV-mode vaults only
-node CLI rekey add-agent-key
-node CLI rekey add-mobile --device-pubkey HEX [--device-id NAME]   # phone (ECDH)
-node CLI rekey add-owner-approval [--sso-url URL]                  # Alien app
-node CLI rekey remove-slot --id 1
-```
-
-`rekey add-passphrase` only works on a **dev-mode** vault — on a user-mode vault it
-is refused (`PASSPHRASE_NOT_ALLOWED`), and there is no command to convert modes.
-The CLI also refuses to remove the last slot (vault would become unrecoverable).
-
-## Portability
-
-```bash
-node CLI export --out vault.enc        # already-encrypted; copy anywhere
-node CLI import --in vault.enc         # install on a new machine
-```
-
-After importing on machine B, run `rekey add-agent-key` to wire B's main key in for unattended unlock.
-
-## Migration from v4 (single-key-derived) vault
-
-```bash
-node CLI migrate                                # interactive passphrase prompt
-node CLI migrate --passphrase-file /tmp/pass    # automation
-```
-
-One-shot: the old `~/.agent-id/vault/` directory is renamed to `vault.bak/`. Migrated records get the placeholder allowlist `["UNCONFIGURED.invalid"]` — the proxy refuses to inject them until you attach real domains via `agent-id-vault add --name <N> --domains <H,…> --value-env <V>`.
+Less-common admin operations — adding/removing unlock slots (`rekey`), moving the vault between machines (`export`/`import`), and migrating a legacy v4 vault (`migrate`) — are documented in [reference.md](reference.md).
 
 ## Common flag
 
