@@ -50,9 +50,12 @@ assumes the layers below it have failed.
 - A read-only `detect` job decides what each push should do from ground truth
   (changeset files for the Version PR, registry state for the publish), so
   nothing reaches the publish gate without a pending release.
-- **`step-security/harden-runner`** on every job: `audit` mode on CI, `block`
-  mode on release jobs with allowlists limited to npmjs, sigstore (publish job
-  only), and github.com.
+- **`step-security/harden-runner`** on every job. `block` mode on the `detect`
+  and `publish` release jobs (publish is the only one holding `id-token`), with
+  allowlists limited to npmjs, sigstore (publish only), and github.com. `audit`
+  mode on CI and on the `version-pr` job — it holds no OIDC token, and block
+  mode severs the GitHub GraphQL call `@changesets/changelog-github` makes
+  during `changeset version` ("Premature close").
 - **GitHub Environment `npm-publish`** gates only the publish job — required
   reviewers configured in repo settings. The Version PR is created without
   environment gating so reviewers see the proposed bumps first.
