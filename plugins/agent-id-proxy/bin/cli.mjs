@@ -26,11 +26,11 @@ import {
   resolveStateDir,
   runCli,
   stderr,
-} from "../../agent-id-core/lib/cli-runtime.mjs";
+} from "@alien-id/agent-id-core/lib/cli-runtime.mjs";
 import {
   ensureDir,
   statePaths,
-} from "../../agent-id-core/lib/state.mjs";
+} from "@alien-id/agent-id-core/lib/state.mjs";
 import {
   loadAgentPrivateKey,
   openVault,
@@ -38,23 +38,23 @@ import {
   readPasskeyChallenges,
   recoverMasterKeyViaOwnerApproval,
   vaultFileExists,
-} from "../../agent-id-vault/lib/vault.mjs";
-import { authenticatePasskey } from "../../agent-id-vault/lib/passkey.mjs";
-import { requestUnlockSecret } from "../../agent-id-vault/lib/owner-approval.mjs";
-import { sealToPublicKey } from "../../agent-id-vault/lib/format.mjs";
-import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
+} from "@alien-id/agent-id-vault/lib/vault.mjs";
+import { authenticatePasskey } from "@alien-id/agent-id-vault/lib/passkey.mjs";
+import { requestUnlockSecret } from "@alien-id/agent-id-vault/lib/owner-approval.mjs";
+import { sealToPublicKey } from "@alien-id/agent-id-vault/lib/format.mjs";
+import { SignatureEngine } from "@alien-id/agent-id-core/lib/signature-engine.mjs";
 import {
   hasTty,
   promptSecret,
-} from "../../agent-id-vault/lib/trusted-input.mjs";
-import { collectViaForm } from "../../agent-id-core/lib/secure-form.mjs";
+} from "@alien-id/agent-id-vault/lib/trusted-input.mjs";
+import { collectViaForm } from "@alien-id/agent-id-core/lib/secure-form.mjs";
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
 import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
 import { normalizeFingerprint } from "../lib/control-tls.mjs";
 
 // The QR renderer is a CommonJS module vendored in agent-id-core.
-const qrcode = createRequire(import.meta.url)("../../agent-id-core/bin/qrcode.cjs");
+const qrcode = createRequire(import.meta.url)("@alien-id/agent-id-core/bin/qrcode.cjs");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

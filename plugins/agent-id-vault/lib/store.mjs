@@ -16,8 +16,8 @@
 //     ...type-specific fields
 //   }
 
-import { nowMs } from "../../agent-id-core/lib/crypto.mjs";
-import { isLoopbackHost } from "../../agent-id-core/lib/http.mjs";
+import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
+import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
 
 export const CREDENTIAL_TYPES = Object.freeze([
   "bearer",

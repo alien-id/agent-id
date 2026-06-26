@@ -18,12 +18,12 @@
 // This is the CLIENT half. The matching SSO endpoints are documented in
 // docs/VAULT-PROXY.md and simulated by examples/dev-sso.mjs for tests.
 
-import { b64url, createDPoPProof, fromB64url } from "../../agent-id-core/lib/crypto.mjs";
+import { b64url, createDPoPProof, fromB64url } from "@alien-id/agent-id-core/lib/crypto.mjs";
 import {
   fetchWithDPoPNonce,
   normalizeBaseUrl,
   readJsonResponse,
-} from "../../agent-id-core/lib/http.mjs";
+} from "@alien-id/agent-id-core/lib/http.mjs";
 
 // RFC 6749 §10: bearer/secret material MUST ride TLS; loopback http is allowed
 // for development / the dev-sso fixture. Shared with the OIDC stack.

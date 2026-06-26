@@ -20,7 +20,7 @@
 // agent decides the location; the proxy decides the format.
 
 import { generateTotp } from "./totp.mjs";
-import { hostMatchesAllowlist } from "../../agent-id-vault/lib/store.mjs";
+import { hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 
 // Match `AgentVault <name>` where name is the credential identifier syntax.
 const STUB_RE = /AgentVault\s+([a-zA-Z0-9._-]{1,64})/g;

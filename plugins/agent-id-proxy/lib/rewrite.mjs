@@ -16,7 +16,7 @@
 // leaf certs.
 
 import { generateTotp } from "./totp.mjs";
-import { hostMatchesAllowlist } from "../../agent-id-vault/lib/store.mjs";
+import { hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 
 const CREDNAME_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 const HOST_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9.-]{0,253}[a-zA-Z0-9])?(?::\d{1,5})?$/;

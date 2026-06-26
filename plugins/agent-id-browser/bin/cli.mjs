@@ -35,8 +35,8 @@ import {
   resolveStateDir,
   runCli,
   stderr,
-} from "../../agent-id-core/lib/cli-runtime.mjs";
-import { openVault, loadAgentPrivateKey } from "../../agent-id-vault/lib/vault.mjs";
+} from "@alien-id/agent-id-core/lib/cli-runtime.mjs";
+import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
 
 import {
   newDek,

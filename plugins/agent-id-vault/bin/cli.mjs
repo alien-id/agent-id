@@ -44,11 +44,11 @@ import {
   resolveStateDir,
   runCli,
   stderr,
-} from "../../agent-id-core/lib/cli-runtime.mjs";
+} from "@alien-id/agent-id-core/lib/cli-runtime.mjs";
 import {
   readJsonFile,
   statePaths,
-} from "../../agent-id-core/lib/state.mjs";
+} from "@alien-id/agent-id-core/lib/state.mjs";
 
 import {
   exportVault,
@@ -63,7 +63,7 @@ import { registerPasskey, authenticatePasskey } from "../lib/passkey.mjs";
 import { readLegacyVault } from "../lib/legacy.mjs";
 import { ownerApprovalKekBytes } from "../lib/format.mjs";
 import { enrollOwnerApproval } from "../lib/owner-approval.mjs";
-import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
+import { SignatureEngine } from "@alien-id/agent-id-core/lib/signature-engine.mjs";
 import {
   hasTty,
   promptNewPassphrase,
@@ -71,9 +71,9 @@ import {
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
 import { CREDENTIAL_TYPES, SECRET_FIELDS } from "../lib/store.mjs";
-import { collectViaForm } from "../../agent-id-core/lib/secure-form.mjs";
-import { generateSolanaKeypair } from "../../agent-id-core/lib/solana.mjs";
-import { generateEvmKeypair } from "../../agent-id-core/lib/evm.mjs";
+import { collectViaForm } from "@alien-id/agent-id-core/lib/secure-form.mjs";
+import { generateSolanaKeypair } from "@alien-id/agent-id-core/lib/solana.mjs";
+import { generateEvmKeypair } from "@alien-id/agent-id-core/lib/evm.mjs";
 
 // ─── Input helpers ──────────────────────────────────────────────────────────────
 

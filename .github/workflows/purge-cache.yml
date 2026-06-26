@@ -1,0 +1,27 @@
+name: Purge Actions cache
+
+on:
+  schedule:
+    - cron: "0 4 1 * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  purge:
+    name: Purge all Actions caches
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      # Defence against a poisoned cache being reused across runs.
+      - name: Delete all caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh cache delete --all --repo "$GITHUB_REPOSITORY"

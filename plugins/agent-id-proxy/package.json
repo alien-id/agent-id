@@ -1,19 +1,18 @@
 {
-  "name": "@alien-id/agent-id-browser",
+  "name": "@alien-id/agent-id-proxy",
   "version": "7.0.0",
   "type": "module",
   "private": true,
-  "description": "Universal browser automation with the profile sealed in the agent vault.",
+  "description": "Local credential-injecting HTTP proxy: materializes vaulted credentials by type, validates the host allowlist, and forwards over real HTTPS.",
   "bin": {
-    "agent-id-browser": "./bin/cli.mjs"
+    "agent-id-proxy": "./bin/cli.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "keywords": [
-    "browser-automation",
-    "patchright",
-    "credential-vault",
+    "credential-injection",
+    "proxy",
     "agent-identity"
   ],
   "author": "Alien Org <support@alien.org>",
@@ -21,8 +20,5 @@
   "dependencies": {
     "@alien-id/agent-id-core": "^7.0.0",
     "@alien-id/agent-id-vault": "^7.0.0"
-  },
-  "optionalDependencies": {
-    "patchright": "^1.61.0"
   }
 }

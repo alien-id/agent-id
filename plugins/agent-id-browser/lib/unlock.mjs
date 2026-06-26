@@ -12,13 +12,13 @@
 // (Mobile-slot unlock is intentionally NOT here: the phone POSTs the sealed
 // master key to a control plane, which only the long-running proxy exposes.)
 
-import { SignatureEngine } from "../../agent-id-core/lib/signature-engine.mjs";
-import { requestUnlockSecret } from "../../agent-id-vault/lib/owner-approval.mjs";
+import { SignatureEngine } from "@alien-id/agent-id-core/lib/signature-engine.mjs";
+import { requestUnlockSecret } from "@alien-id/agent-id-vault/lib/owner-approval.mjs";
 import {
   readOwnerApprovalChallenge,
   recoverMasterKeyViaOwnerApproval,
   openVaultWithMasterKey,
-} from "../../agent-id-vault/lib/vault.mjs";
+} from "@alien-id/agent-id-vault/lib/vault.mjs";
 
 // Cheap check (no unlock): does the vault have an owner-approval slot?
 export async function hasOwnerApproval(stateDir) {
