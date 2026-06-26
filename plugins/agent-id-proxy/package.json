@@ -18,7 +18,7 @@
   "author": "Alien Org <support@alien.org>",
   "license": "MIT",
   "dependencies": {
-    "@alien-id/agent-id-core": "^7.0.0",
-    "@alien-id/agent-id-vault": "^7.0.0"
+    "@alien-id/agent-id-core": "^7.1.0",
+    "@alien-id/agent-id-vault": "^7.1.0"
   }
 }
