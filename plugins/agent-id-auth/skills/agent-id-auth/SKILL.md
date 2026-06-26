@@ -21,7 +21,7 @@ Requires that `agent-id-setup bootstrap` has produced a keypair and bound an own
 
 ## Resolve the CLI
 
-`bin/cli.mjs` lives in this plugin's directory. Substitute `CLI` with the absolute path (e.g. `node /abs/path/to/plugins/agent-id-auth/bin/cli.mjs`) in the examples below.
+`bin/cli.mjs` lives in this plugin's directory. In the examples below, `CLI` is `${CLAUDE_PLUGIN_ROOT}/bin/cli.mjs` — the `${CLAUDE_PLUGIN_ROOT}` path is filled in for you when the skill loads.
 
 ## When the user gives you a URL on an Alien-aware service
 
