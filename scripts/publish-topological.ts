@@ -112,6 +112,9 @@ async function main() {
       ],
       cwd,
     );
+    // In a dry run the publish is skipped but the pack is real; remove the
+    // tarball so `--dry-run` leaves the working tree clean.
+    if (DRY_RUN) cleanTarballs(cwd);
     summary.push(`published ${pkg.name}@${pkg.version} → ${tag}`);
   }
 

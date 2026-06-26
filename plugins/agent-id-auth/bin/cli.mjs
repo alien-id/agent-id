@@ -51,7 +51,7 @@ async function buildDPoPHeaders(stateDir, method, url) {
 
   const session = await readJsonFile(paths.ownerSession, null);
   if (!session?.accessToken) {
-    outputError("No bound session with access_token. Run `agent-id-setup bootstrap` or `bind` first.");
+    outputError("No bound session with access_token. Run `agent-id-core bootstrap` or `bind` first.");
     return null;
   }
 

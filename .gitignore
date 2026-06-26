@@ -6,3 +6,5 @@ skills-lock.json
 .idea
 .DS_Store
 node_modules/
+# npm pack artifacts (publish-topological.ts packs into plugins/*/)
+*.tgz

@@ -17,7 +17,7 @@ Per-request DPoP signing for HTTP calls to Alien-aware services. Each request ca
 
 Servers verify the proof's `cnf.jkt` against the agent's key, so a captured token cannot be replayed by a different client. The CLI generates the per-request proof; raw `curl`/`fetch` will get 401.
 
-Requires that `agent-id-setup bootstrap` has produced a keypair and bound an owner under `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}`.
+Requires that `agent-id-core bootstrap` has produced a keypair and bound an owner under `${AGENT_ID_STATE_DIR:-$HOME/.agent-id}`.
 
 ## Resolve the CLI
 

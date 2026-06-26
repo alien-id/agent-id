@@ -43,7 +43,12 @@ async function main() {
     const version = pkg.version;
 
     const pluginJsonPath = join(PLUGINS_DIR, dir, '.claude-plugin', 'plugin.json');
-    const plugin = await readJson(pluginJsonPath);
+    const plugin = await readJson(pluginJsonPath).catch((err) => {
+      throw new Error(
+        `${pluginJsonPath} is missing or unreadable (every plugin needs a ` +
+          `.claude-plugin/plugin.json): ${err instanceof Error ? err.message : err}`,
+      );
+    });
     const shortName = plugin.name;
     if (typeof shortName !== 'string') {
       throw new Error(`${pluginJsonPath} has no string "name"`);
@@ -63,10 +68,12 @@ async function main() {
     throw new Error(`${MARKETPLACE} has no "plugins" array`);
   }
 
+  const marketplaceNames = new Set<string>();
   let changed = false;
   for (const entry of plugins as Json[]) {
     const name = entry.name;
     if (typeof name !== 'string') continue;
+    marketplaceNames.add(name);
     const version = versions.get(name);
     if (!version) {
       throw new Error(`marketplace entry "${name}" has no matching plugin package.json`);
@@ -75,6 +82,14 @@ async function main() {
       entry.version = version;
       changed = true;
       console.log(`marketplace   ${name} -> ${version}`);
+    }
+  }
+
+  // Reverse check: every plugin must appear in the marketplace, or a plugin
+  // dropped from marketplace.json would silently pass (drift the other way).
+  for (const shortName of versions.keys()) {
+    if (!marketplaceNames.has(shortName)) {
+      throw new Error(`plugin "${shortName}" has no entry in ${MARKETPLACE}`);
     }
   }
 

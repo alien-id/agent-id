@@ -73,9 +73,14 @@ bump too (`updateInternalDependents: always`).
 | `@alien-id/agent-id-core` | `@alien-id/agent-id-vault` |
 | `@alien-id/agent-id-vault` | (nothing published) |
 
-The four `ignore`d plugins are never bumped by changesets. Their internal
-`^7.x` range floats onto the latest published core/vault, so a core/vault patch
-reaches them at install time without a version bump.
+The four `ignore`d plugins keep their own `version` (changesets never bumps
+it), but `changeset version` **does rewrite their dependency range** — e.g. a
+core minor turns `"@alien-id/agent-id-core": "^7.0.0"` into `"^7.1.0"` in each
+plugin's `package.json`. So a Version PR carries package.json diffs for the
+ignored plugins too. That is intended: the runtime `install-deps.sh` hook copies
+the plugin's `package.json`, so the bumped range is what the marketplace install
+pulls. (The `dependencies[].version` field in each `plugin.json` is separate
+display metadata that `sync-plugin-versions` does not touch.)
 
 ## Version propagation
 
