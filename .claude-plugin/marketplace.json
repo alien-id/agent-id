@@ -6,15 +6,12 @@
     "name": "Alien",
     "email": "support@alien.org"
   },
-  "metadata": {
-    "pluginRoot": "./plugins"
-  },
   "plugins": [
     {
       "name": "agent-id-core",
       "description": "Shared library for Alien Agent ID: crypto primitives, v3 bundle format, universal verifier, SignatureEngine, OIDC, state I/O. Required by every other agent-id-* plugin.",
       "version": "7.0.0",
-      "source": "./agent-id-core",
+      "source": "./plugins/agent-id-core",
       "category": "identity",
       "keywords": [
         "agent-identity",
@@ -26,7 +23,7 @@
       "name": "agent-id-git",
       "description": "SSH-signed git commits with Agent-ID trailers and v3 proof notes; verify provenance on any commit.",
       "version": "7.0.0",
-      "source": "./agent-id-git",
+      "source": "./plugins/agent-id-git",
       "category": "identity",
       "keywords": [
         "git-signing",
@@ -38,7 +35,7 @@
       "name": "agent-id-vault",
       "description": "Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key + phone/owner-approval) and typed/domain-scoped credential records.",
       "version": "7.0.0",
-      "source": "./agent-id-vault",
+      "source": "./plugins/agent-id-vault",
       "category": "identity",
       "keywords": [
         "credential-vault",
@@ -49,7 +46,7 @@
       "name": "agent-id-proxy",
       "description": "Local credential-injecting HTTP proxy. Agent calls http://<proxy>/<credname>/<upstream-host>/<path>; proxy materializes the credential by type, validates the host allowlist, and forwards over real HTTPS. Universal across services without TLS interception.",
       "version": "7.0.0",
-      "source": "./agent-id-proxy",
+      "source": "./plugins/agent-id-proxy",
       "category": "identity",
       "keywords": [
         "credential-injection",
@@ -61,7 +58,7 @@
       "name": "agent-id-auth",
       "description": "DPoP-signed calls to Alien-aware services: discovery, capabilities, one-shot signed requests.",
       "version": "7.0.0",
-      "source": "./agent-id-auth",
+      "source": "./plugins/agent-id-auth",
       "category": "identity",
       "keywords": [
         "dpop",
@@ -73,7 +70,7 @@
       "name": "agent-id-browser",
       "description": "Universal browser the agent drives fine-grained (click, type, fill forms, navigate, screenshot, run JS) via an accessibility snapshot with element refs, with the logged-in profile sealed in the agent vault. One-time headed login; headless thereafter. Drives the user's installed Chrome via patchright (installed at runtime into the plugin data dir on first session; no browser download). For authenticated sites that block API/OAuth/cookie approaches.",
       "version": "7.0.0",
-      "source": "./agent-id-browser",
+      "source": "./plugins/agent-id-browser",
       "category": "identity",
       "keywords": [
         "browser-automation",
