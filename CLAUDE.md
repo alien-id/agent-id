@@ -43,6 +43,16 @@ never relative sibling paths. Resolution:
   resolve. This is why core/vault must be published before the other plugins can
   install.
 
+  This is the official Claude Code **"Persistent data directory"** pattern
+  (Plugins reference): a `SessionStart` hook that `npm install`s into
+  `$CLAUDE_PLUGIN_DATA`. The docs pair it with `NODE_PATH`, but `NODE_PATH` is
+  CJS-only and our plugins are ESM (plus one CJS `createRequire` for
+  `qrcode.cjs`), so we substitute a regenerated `node_modules` **symlink** — one
+  mechanism that resolves both. `$CLAUDE_PLUGIN_ROOT` is treated as ephemeral as
+  the docs require: the symlink is a pointer (not persistent state), recreated
+  each session, with all real packages in `$CLAUDE_PLUGIN_DATA`, so it survives
+  plugin updates and never clobbers a real dev `node_modules`.
+
 Internal deps pin `^semver` (e.g. `^7.0.0`), **not** `workspace:*` — the
 marketplace installer uses `npm`, which can't resolve the `workspace:` protocol.
 

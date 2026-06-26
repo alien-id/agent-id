@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 # Materialize this plugin's npm dependencies (the shared @alien-id/agent-id-*
 # libraries, plus any optional extras) at runtime, then expose them to the
-# plugin's ESM code.
+# plugin's code.
 #
-# Why this exists: the marketplace installs each plugin into its own isolated,
-# versioned cache dir with NO sibling plugins and NO node_modules. The plugin's
-# .mjs files import shared code as bare specifiers (`@alien-id/agent-id-core/...`),
-# which Node resolves by walking up from the importing file looking for a
-# node_modules directory. So we:
-#   1. npm install the deps into CLAUDE_PLUGIN_DATA (persistent across sessions),
-#   2. symlink CLAUDE_PLUGIN_ROOT/node_modules -> CLAUDE_PLUGIN_DATA/node_modules.
-# CLAUDE_PLUGIN_ROOT is ephemeral (recreated each session), so only the symlink
-# lives there and the hook recreates it every SessionStart; the real packages
-# persist in CLAUDE_PLUGIN_DATA.
+# This is the official Claude Code "Persistent data directory" pattern (Plugins
+# reference): a SessionStart hook runs `npm install` into CLAUDE_PLUGIN_DATA
+# (persistent across plugin updates) — the docs' exact recommendation for
+# installing language dependencies once and reusing them across sessions.
+#
+# One deliberate extension. The docs pair that install with NODE_PATH, but
+# NODE_PATH is CJS-only — Node ignores it for ESM `import`. Our plugins are ESM
+# (.mjs, bare specifiers like `@alien-id/agent-id-core/lib/crypto.mjs`) plus one
+# CJS `createRequire` (proxy's qrcode.cjs). Both resolve by walking up from the
+# importing file to a node_modules dir, and CLAUDE_PLUGIN_DATA is not on that
+# path. So instead of NODE_PATH we place a node_modules SYMLINK in the plugin
+# root — one mechanism that serves ESM and CJS uniformly.
+#
+# CLAUDE_PLUGIN_ROOT is documented as ephemeral ("do not write state here"); we
+# honor that — the symlink is a pointer, not state. No real files are written to
+# the root, it is recreated every SessionStart, and all real packages live in
+# CLAUDE_PLUGIN_DATA, so it survives plugin updates (new root -> hook re-links).
+# A pre-existing real node_modules in the root (dev checkout) is never clobbered.
 #
 # Requires @alien-id/agent-id-core (+ -vault) to be published to npm first.
 #
