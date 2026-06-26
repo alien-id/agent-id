@@ -4,7 +4,7 @@ description: Local credential-injecting HTTP proxy. The agent calls `http://loca
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "7.0.0"
+  version: "7.1.0"
 allowed-tools: Bash(node *agent-id-proxy/bin/cli.mjs:*) Bash(curl:*) Read
 ---
 

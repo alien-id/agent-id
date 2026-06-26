@@ -4,7 +4,7 @@ description: SSH-signed git commits with Alien Agent ID provenance trailers and 
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "7.0.0"
+  version: "7.1.0"
 allowed-tools: Bash(node *agent-id-git/bin/cli.mjs:*) Bash(git:*) Read
 ---
 

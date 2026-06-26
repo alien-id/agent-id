@@ -4,7 +4,7 @@ description: Drive a real, logged-in browser whose session is sealed in the agen
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "7.0.0"
+  version: "7.1.0"
 allowed-tools: Bash(node *agent-id-browser/bin/cli.mjs:*) Read
 ---
 

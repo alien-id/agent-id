@@ -1,6 +1,6 @@
 {
   "name": "agent-id-auth",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "description": "DPoP-signed calls to Alien-aware services: service manifest discovery, capability rendering, one-shot signed requests.",
   "author": {
     "name": "Alien",

@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-auth",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "type": "module",
   "private": true,
   "description": "DPoP-signed calls to Alien-aware services: discovery, capabilities, one-shot signed requests.",

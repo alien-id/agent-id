@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-git",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "type": "module",
   "private": true,
   "description": "SSH-signed git commits with Agent-ID trailers and v3 proof notes; verify provenance on any commit.",

@@ -4,7 +4,7 @@ description: DPoP-signed (RFC 9449) authenticated calls to Alien-aware services.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "7.0.0"
+  version: "7.1.0"
 allowed-tools: Bash(node *agent-id-auth/bin/cli.mjs:*) Read
 ---
 

@@ -2,7 +2,10 @@
 
 All notable changes are documented here.
 
-## [Unreleased]
+## [7.1.0] — 2026-06-26
+
+All plugins unified at **7.1.0**. Shared libs now ship as `@alien-id/*` npm packages
+(core, vault) released via changesets; the four marketplace plugins bump in step.
 
 ### Changed
 
