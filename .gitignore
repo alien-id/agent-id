@@ -1,6 +1,7 @@
 .agent-id/
 .agents
-.claude
+.claude/*
+!.claude/skills/
 skills-lock.json
 *.html
 .idea
