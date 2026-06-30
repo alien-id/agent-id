@@ -204,6 +204,17 @@ function specNeeds(spec) {
  */
 export function resolveSecurePrompt({ env = process.env, extraProviders = [], need = {} } = {}) {
   const browser = new BrowserFormProvider({ env });
+  // Explicit operator override: AGENT_ID_SECURE_PROMPT=browser|tty|hosted (or the
+  // name of an extraProvider, e.g. "mobile") forces that backend regardless of the
+  // usual availability ordering. An unknown name falls through to normal resolution.
+  const forced = env.AGENT_ID_SECURE_PROMPT;
+  if (forced) {
+    const extra = extraProviders.find((p) => p && p.name === forced);
+    if (extra) return extra;
+    if (forced === "browser") return browser;
+    if (forced === "tty") return new TtyProvider();
+    if (forced === "hosted") return new HostedHarnessProvider({ env });
+  }
   const chain = [new HostedHarnessProvider({ env }), ...extraProviders, browser, new TtyProvider()];
   for (const p of chain) {
     if (!p.isAvailable || !p.isAvailable()) continue;

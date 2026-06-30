@@ -85,6 +85,23 @@ test("TtyProvider is single-line only (multiline:false)", () => {
   assert.equal(new TtyProvider().capabilities().multiline, false);
 });
 
+test("resolver: AGENT_ID_SECURE_PROMPT forces a backend (overriding availability + order)", () => {
+  // Forces tty even though a browser is available…
+  assert.equal(resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "tty" } }).name, "tty");
+  // …and forces browser even when AGENT_ID_NO_BROWSER would normally disable it.
+  assert.equal(
+    resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "browser", AGENT_ID_NO_BROWSER: "1" } }).name,
+    "browser",
+  );
+  // Can also pin a named extraProvider.
+  assert.equal(
+    resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "mobile" }, extraProviders: [stub("mobile")] }).name,
+    "mobile",
+  );
+  // An unknown name falls through to normal resolution.
+  assert.equal(resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "nope" } }).name, "browser");
+});
+
 test("hosted: selected for a valid unix socket; collect() round-trips values; URLs refused", async () => {
   const { sock, server } = await startHostedSocket((body, res) => {
     // Echo a value keyed by the requested field name, proving the spec arrived.

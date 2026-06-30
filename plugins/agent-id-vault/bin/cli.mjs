@@ -71,7 +71,8 @@ import {
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
 import { CREDENTIAL_TYPES, SECRET_FIELDS } from "../lib/store.mjs";
-import { collectViaForm } from "@alien-id/agent-id-core/lib/secure-form.mjs";
+import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
+import { normalizeTotpInput } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { generateSolanaKeypair } from "@alien-id/agent-id-core/lib/solana.mjs";
 import { generateEvmKeypair } from "@alien-id/agent-id-core/lib/evm.mjs";
 
@@ -276,6 +277,15 @@ function formFieldsForType(type, flags) {
       { name: "client-secret", label: "Client secret", required: false },
       { name: "refresh-token", label: "Refresh token" },
     ];
+    case "login": return [
+      { name: "username", label: "Username / email", secret: false },
+      { name: "password", label: "Password" },
+      // Only ask for the 2FA seed up front when the policy is `totp`; otherwise
+      // it's added later (when available) via `set-totp`.
+      ...(flags.otp === "totp"
+        ? [{ name: "totpSecret", label: "TOTP secret (base32) or otpauth:// URI" }]
+        : []),
+    ];
     default: return null;
   }
 }
@@ -293,7 +303,19 @@ async function cmdAdd(flags) {
     // `secret` is not host-scoped (it's used via exec/file, not the HTTP proxy),
     // so it doesn't need a domain allowlist; everything else is default-deny.
     if (type === "secret") domains = ["*"];
-    else return outputError("--domains <host[,host…]> is required (default-deny)");
+    else if (type === "login") {
+      // `login` is browser-driven, not proxy-injected — domains is advisory. Default
+      // to the loginUrl host when given, else "*".
+      let host = null;
+      if (flags["login-url"]) {
+        try {
+          host = new URL(String(flags["login-url"])).hostname;
+        } catch {
+          /* invalid URL caught later by validateRecord */
+        }
+      }
+      domains = host ? [host] : ["*"];
+    } else return outputError("--domains <host[,host…]> is required (default-deny)");
   }
 
   // --form: collect the secret value(s) out of band via a one-shot localhost
@@ -313,7 +335,9 @@ async function cmdAdd(flags) {
       return outputError(`--form is not supported for type ${type}`);
     }
     try {
-      const out = await collectViaForm({
+      // collectSecret routes through the secure-prompt resolver (browser form →
+      // /dev/tty → hosted harness), so this works where no GUI browser is present.
+      const out = await collectSecret({
         title: `Add credential: ${name}`,
         description: `${type} · ${domains.join(", ")}`,
         fields: specs,
@@ -418,6 +442,41 @@ async function cmdAdd(flags) {
         }
         break;
       }
+      case "login": {
+        record.username = formValues ? formValues.username : flags.username;
+        record.password = await secret("password");
+        if (!record.username || !record.password) {
+          return outputError("--username and password input required for login");
+        }
+        const otp = flags.otp ? String(flags.otp) : "none";
+        record.otp = otp;
+        if (otp === "totp") {
+          // Seed from the form, or --totp-secret-file/-env. Accepts a raw base32
+          // secret or a full otpauth:// URI; parsed + validated in-vault.
+          const seedInput = formValues
+            ? formValues.totpSecret
+            : await secretFileEnv("totp-secret");
+          if (!seedInput) {
+            return outputError(
+              "otp totp needs a TOTP seed (--form, --totp-secret-file/-env) — " +
+                "or add it later with `set-totp`",
+            );
+          }
+          let parsed;
+          try {
+            parsed = normalizeTotpInput(seedInput);
+          } catch (err) {
+            return outputError(`TOTP seed: ${err.message}`);
+          }
+          record.totpSecret = parsed.secret;
+          if (parsed.period) record.period = parsed.period;
+          if (parsed.digits) record.digits = parsed.digits;
+          if (parsed.algorithm) record.algorithm = parsed.algorithm;
+        }
+        if (flags["login-url"]) record.loginUrl = String(flags["login-url"]);
+        if (flags.profile) record.profile = String(flags.profile);
+        break;
+      }
     }
 
     const stored = vault.add(record);
@@ -431,6 +490,66 @@ async function cmdAdd(flags) {
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt,
     });
+  } finally {
+    vault.lock();
+  }
+}
+
+// set-totp: securely attach (or update) a 2FA seed on an existing `login` or
+// `totp` credential — for the common case where the seed only becomes available
+// AFTER the login was first stored (the user enables 2FA later). The seed is
+// entered out-of-band via the secure prompt (so it never enters the agent's
+// transcript) and may be a raw base32 secret OR a full otpauth:// URI.
+async function cmdSetTotp(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+
+  let seedInput;
+  if (flags.form) {
+    try {
+      const out = await collectSecret({
+        title: `Set TOTP seed: ${name}`,
+        description: "Paste the base32 secret, or the full otpauth:// URI from the QR code",
+        fields: [{ name: "seed", label: "TOTP secret (base32) or otpauth:// URI" }],
+        label: `enter the TOTP seed for "${name}"`,
+        security: "Sealed with <code>AES-256-GCM</code>. Never shown to the agent.",
+      });
+      seedInput = out.values.seed;
+    } catch (err) {
+      return outputError(`secure form: ${err.message}`);
+    }
+  } else {
+    seedInput = await resolveValue(flags, "seed"); // --seed-file / --seed-env / stdin / tty
+  }
+  if (!seedInput) {
+    return outputError("TOTP seed required (--form, --seed-file, --seed-env, or stdin)");
+  }
+  let parsed;
+  try {
+    parsed = normalizeTotpInput(seedInput);
+  } catch (err) {
+    return outputError(`TOTP seed: ${err.message}`);
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type === "login") {
+      rec.otp = "totp";
+      rec.totpSecret = parsed.secret;
+    } else if (rec.type === "totp") {
+      rec.secret = parsed.secret;
+    } else {
+      return outputError(`set-totp works on 'login' or 'totp' credentials, not '${rec.type}'`);
+    }
+    if (parsed.period) rec.period = parsed.period;
+    if (parsed.digits) rec.digits = parsed.digits;
+    if (parsed.algorithm) rec.algorithm = parsed.algorithm;
+    vault.add(rec); // re-validates + upserts (createdAt preserved)
+    await vault.save();
+    stderr(`Set TOTP seed on '${name}' (${rec.type}).`);
+    outputJson({ ok: true, name, type: rec.type, ...(rec.type === "login" ? { otp: "totp" } : {}) });
   } finally {
     vault.lock();
   }
@@ -934,10 +1053,16 @@ function printHelp() {
       "       default (no --unlock) = USER mode, agent-key auto-unlock.",
       "       passkey/passphrase default to NO agent-key slot; add --agent-key to keep one.",
       "  add --name N --type T --domains H[,H…] [type-specific value flags]",
-      "      --form   enter the secret in an out-of-band localhost browser form",
-      "               (agent never sees the value); else --<field>-file/-env/stdin",
+      "      --form   enter the secret out-of-band via the secure prompt (browser",
+      "               form → /dev/tty → hosted harness); else --<field>-file/-env/stdin",
       "      oauth2: --token-endpoint URL --client-id ID [--client-secret-env V]",
       "              --refresh-token-file F [--scope S]   (auto-refreshes access tokens)",
+      "      login:  --login-url URL [--otp none|totp|interactive] [--profile NAME]",
+      "              --form captures username/password (+ TOTP seed when --otp totp);",
+      "              driven by `agent-id-browser auto-login`, not the HTTP proxy",
+      "  set-totp --name N [--form]   attach/update a 2FA seed on a login|totp cred",
+      "              accepts a base32 secret or an otpauth:// URI (use when 2FA is",
+      "              enabled after the login was stored); else --seed-file/-env/stdin",
       "  generate --name N --type solana-keypair|evm-keypair --domains H[,H…] [--overwrite]",
       "      creates the keypair inside the vault; prints ONLY the public address",
       "      evm:    [--chain-id-allowlist 1,137] [--to-allowlist 0x..,0x..]",
@@ -978,6 +1103,7 @@ function makeRekeyHandler() {
 const commands = {
   init: cmdInit,
   add: cmdAdd,
+  "set-totp": cmdSetTotp,
   generate: cmdGenerate,
   show: cmdShow,
   list: cmdList,
