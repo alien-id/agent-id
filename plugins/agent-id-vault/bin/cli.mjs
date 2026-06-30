@@ -474,7 +474,17 @@ async function cmdAdd(flags) {
           if (parsed.algorithm) record.algorithm = parsed.algorithm;
         }
         if (flags["login-url"]) record.loginUrl = String(flags["login-url"]);
-        if (flags.profile) record.profile = String(flags.profile);
+        if (flags.profile) {
+          // The sealed browser-profile is a separate record sharing this name
+          // namespace — it must not collide with the login credential's own name.
+          if (String(flags.profile) === name) {
+            return outputError(
+              `--profile '${flags.profile}' must differ from the login name '${name}' ` +
+                "(the login and its sealed browser-profile are separate vault records)",
+            );
+          }
+          record.profile = String(flags.profile);
+        }
         break;
       }
     }

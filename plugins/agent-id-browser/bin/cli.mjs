@@ -367,6 +367,14 @@ async function cmdAutoLogin(flags) {
     }
 
     const profileName = String(flags.name || cred.profile || DEFAULT_PROFILE);
+    // A login and its sealed browser-profile are two records in ONE name
+    // namespace — sealing into the login's own name would overwrite it.
+    if (profileName === credName) {
+      return outputError(
+        `target profile '${profileName}' must differ from the login credential '${credName}' ` +
+          "(they share the vault namespace) — pass --name <other> or set the cred's `profile`",
+      );
+    }
     const existing = vault.get(profileName);
     const reuse = existing && existing.type === "browser-profile" ? existing : null;
     const file = reuse ? reuse.profileFile : `${profileName}.tar.enc`;
