@@ -24,6 +24,7 @@ import crypto from "node:crypto";
 import { launchContext } from "./launch.mjs";
 import { sealProfile } from "./profile-store.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
+import { SECRET_FIELDS, hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { resolveOtp } from "./auto-login.mjs";
 
 function sessionsDir(stateDir) {
@@ -90,6 +91,40 @@ async function openVaultAgentKey(stateDir) {
   return openVault({ stateDir, privateKeyPem: pk });
 }
 
+// The hostname of a page URL ("" for about:blank / unparseable). Exported for tests.
+export function hostOfUrl(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+// Authorize typing a credential into the current page. Two checks the rest of the
+// codebase already enforces elsewhere, applied here before any value reaches the DOM:
+//   - SEAL: an in-vault-generated secret (exportable:false) must never leave the
+//     vault — mirrors cmdShow (redacts) and cmdExec (refuses). Only applied when a
+//     specific secret `field` is being read (fill-secret), not for a derived OTP code.
+//   - AUDIENCE: the page host must be on the credential's `domains` allowlist —
+//     mirrors the proxy's hostMatchesAllowlist — so a secret can't be driven to an
+//     attacker-chosen origin (about:blank / a foreign host is denied).
+// Pure (no page object) so it unit-tests without a browser. Throws on violation.
+export function assertFillAllowed(rec, host, field = null) {
+  if (!rec) throw new Error("no such credential");
+  if (field && rec.exportable === false && SECRET_FIELDS.includes(field)) {
+    throw new Error(
+      `"${field}" is sealed (generated in-vault) and cannot be typed into a page — use the proxy`,
+    );
+  }
+  if (!hostMatchesAllowlist(host, rec.domains)) {
+    throw new Error(
+      `refusing to type this credential on "${host || "(no host)"}" — not on its domain ` +
+        `allowlist (${(rec.domains || []).join(", ") || "none"}). Add the host to the ` +
+        "credential's domains (wildcards like *.example.com are allowed).",
+    );
+  }
+}
+
 async function dispatch(page, msg) {
   const p = msg.params || {};
   switch (msg.action) {
@@ -130,6 +165,9 @@ async function dispatch(page, msg) {
       try {
         const rec = vault.get(credName);
         if (!rec) throw new Error(`no credential "${credName}"`);
+        // Refuse a sealed field, and refuse a page whose host isn't on the
+        // credential's allowlist — BEFORE reading the value into memory.
+        assertFillAllowed(rec, hostOfUrl(page.url()), field);
         const value = rec[field];
         if (typeof value !== "string" || !value) {
           throw new Error(`"${credName}.${field}" is not a usable string field`);
@@ -156,6 +194,8 @@ async function dispatch(page, msg) {
       try {
         const rec = vault.get(credName);
         if (!rec) throw new Error(`no credential "${credName}"`);
+        // Audience binding: a live OTP code must not be typed into a foreign origin.
+        assertFillAllowed(rec, hostOfUrl(page.url()));
         const otpCred =
           rec.type === "totp"
             ? { name: credName, otp: "totp", totpSecret: rec.secret, period: rec.period, digits: rec.digits, algorithm: rec.algorithm }
