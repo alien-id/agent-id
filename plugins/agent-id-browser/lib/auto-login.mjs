@@ -140,11 +140,76 @@ async function detectPageState(page) {
 async function typeOtp(page, code) {
   const sel =
     'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i], ' +
-    'input[name*="code" i], input[id*="code" i], input[inputmode="numeric"]';
+    'input[name*="code" i], input[id*="code" i], input[name*="verif" i], input[id*="verif" i], ' +
+    'input[inputmode="numeric"]';
   const loc = page.locator(sel).first();
   await loc.fill(code);
-  await loc.press("Enter").catch(() => {});
+  // ADFS / Entra submit via a button; generic forms submit on Enter.
+  if (await page.locator("#submitButton").count()) {
+    await page.locator("#submitButton").click().catch(() => {});
+  } else if (await page.locator("#idSubmit_SAOTCC_Continue").count()) {
+    await page.locator("#idSubmit_SAOTCC_Continue").click().catch(() => {});
+  } else {
+    await loc.press("Enter").catch(() => {});
+  }
 }
+
+// ── Microsoft ADFS / Entra (Azure AD) driver ──────────────────────────────────
+// ADFS and Entra forms use stable element IDs across every deployment/theme, so
+// one driver serves any service fronted by them (the heuristic can't, because the
+// real password field is hidden behind a "Next" step and a JS-driven submit span).
+
+async function detectMicrosoftFlow(page) {
+  return page
+    .evaluate(() => {
+      if (document.getElementById("userNameInput") && document.getElementById("submitButton")) {
+        return "adfs";
+      }
+      if (document.querySelector('input[name="loginfmt"]')) return "entra";
+      return null;
+    })
+    .catch(() => null);
+}
+
+async function clickIfPresent(page, selector) {
+  const loc = page.locator(selector).first();
+  if (await loc.count()) {
+    await loc.click({ timeout: 8000 }).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+async function fillWhenVisible(page, selector, value, timeout = 15000) {
+  await page.waitForSelector(selector, { state: "visible", timeout }).catch(() => {});
+  await page.fill(selector, value);
+}
+
+// Drive a Microsoft ADFS or Entra forms login: username → (Next) → password →
+// Sign in. The 2FA step, if any, is then handled by the generic OTP loop in
+// autoLogin (stored seed or the secure prompt). Verified against ADFS; Entra is
+// best-effort by the same well-known selectors.
+export async function microsoftLogin(page, cred, log = () => {}) {
+  const flow = await detectMicrosoftFlow(page);
+  if (flow === "entra") {
+    log("Detected Microsoft Entra (Azure AD) login");
+    await fillWhenVisible(page, 'input[name="loginfmt"]', cred.username);
+    await clickIfPresent(page, "#idSIButton9"); // Next
+    await fillWhenVisible(page, 'input[name="passwd"]', cred.password);
+    await clickIfPresent(page, "#idSIButton9"); // Sign in
+    return;
+  }
+  log("Detected Microsoft ADFS login");
+  await fillWhenVisible(page, "#userNameInput", cred.username);
+  // Paginated ADFS: a "Next" button reveals the password page.
+  if (await page.locator("#nextButton").count()) await clickIfPresent(page, "#nextButton");
+  await fillWhenVisible(page, "#passwordInput", cred.password);
+  const kmsi = page.locator("#kmsiInput"); // "keep me signed in", if offered
+  if (await kmsi.count()) await kmsi.check().catch(() => {});
+  await clickIfPresent(page, "#submitButton");
+}
+
+export { detectMicrosoftFlow };
 
 // Heuristic fallback: fill a username/email field and the password field, submit.
 // Handles a simple two-step flow (username page → password page).
@@ -193,6 +258,9 @@ export async function autoLogin({
 
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
     await runRecipe(page, cred.recipe, { username: cred.username, password: cred.password, getOtp });
+  } else if (await detectMicrosoftFlow(page)) {
+    // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
+    await microsoftLogin(page, cred, log);
   } else {
     await heuristicLogin(page, cred);
   }

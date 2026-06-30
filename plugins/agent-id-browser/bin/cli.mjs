@@ -666,13 +666,13 @@ async function cmdSessions(flags) {
 
 // Thin client for an action against a running session. `map` turns flags into
 // the action's params. The server's JSON reply is passed straight through.
-function actionCmd(action, map) {
+function actionCmd(action, map, timeoutMs) {
   return async (flags) => {
     const stateDir = resolveStateDir(flags);
     const name = String(flags.name || DEFAULT_PROFILE);
     try {
       const params = map ? map(flags) : {};
-      const r = await callSession(stateDir, name, action, params);
+      const r = await callSession(stateDir, name, action, params, timeoutMs);
       outputJson(r);
       if (r && r.ok === false) process.exitCode = 1;
     } catch (err) {
@@ -704,6 +704,10 @@ runCli({
     click: actionCmd("click", (f) => ({ ref: f.ref })),
     type: actionCmd("type", (f) => ({ ref: f.ref, text: f.text ?? "", submit: f.submit === true })),
     fill: actionCmd("fill", (f) => ({ fields: JSON.parse(f.fields || "[]") })),
+    // Secret injection by reference: the agent picks the element (ref) from a
+    // snapshot; the vault supplies the value, which never returns to the agent.
+    "fill-secret": actionCmd("fill-secret", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit === true })),
+    "fill-otp": actionCmd("fill-otp", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit !== false }), 360000),
     select: actionCmd("select", (f) => ({ ref: f.ref, values: csv(f.values) })),
     press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
     hover: actionCmd("hover", (f) => ({ ref: f.ref })),
@@ -736,6 +740,10 @@ runCli({
         "  click   --name N --ref eN\n" +
         "  type    --name N --ref eN --text T [--submit]\n" +
         "  fill    --name N --fields '[{\"ref\":\"e1\",\"value\":\"..\"}]'\n" +
+        "  fill-secret --name N --ref eN --cred NAME.field [--submit]\n" +
+        "          inject a vaulted secret into the ref'd field (agent never sees the value)\n" +
+        "  fill-otp    --name N --ref eN --cred NAME\n" +
+        "          type the current 2FA code (stored seed, or asked via the secure prompt)\n" +
         "  select  --name N --ref eN --values a,b      press --name N --key Enter [--ref eN]\n" +
         "  hover   --name N --ref eN                   scroll --name N [--dy 600]\n" +
         "  navigate --name N --url URL                 back --name N\n" +

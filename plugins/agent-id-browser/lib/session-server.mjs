@@ -23,6 +23,8 @@ import crypto from "node:crypto";
 
 import { launchContext } from "./launch.mjs";
 import { sealProfile } from "./profile-store.mjs";
+import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
+import { resolveOtp } from "./auto-login.mjs";
 
 function sessionsDir(stateDir) {
   return path.join(stateDir, "browser-sessions");
@@ -39,6 +41,11 @@ function snapshotInPage() {
     "[role=radio]", "[role=tab]", "[role=menuitem]", "[role=option]",
     "[contenteditable=true]", "summary", "[tabindex]:not([tabindex='-1'])",
   ].join(",");
+  // Clear refs from a previous snapshot first: forms that swap in place (e.g.
+  // multi-step IdP logins) leave stale data-aibref attributes, so a reused ref
+  // like "e2" could match BOTH an old hidden element and a new one — and an action
+  // would target the wrong (often invisible) element.
+  for (const old of document.querySelectorAll("[data-aibref]")) old.removeAttribute("data-aibref");
   const out = [];
   let i = 0;
   const seen = new Set();
@@ -74,6 +81,15 @@ function snapshotInPage() {
 const sel = (ref) => `[data-aibref="${String(ref).replace(/["\\]/g, "")}"]`;
 const ACTION_TIMEOUT = 15000;
 
+// Unlock the vault non-interactively (agent-key slot) inside the session process,
+// so a secret can be injected straight into the page without the controlling agent
+// ever seeing the value.
+async function openVaultAgentKey(stateDir) {
+  const pk = await loadAgentPrivateKey(stateDir);
+  if (!pk) throw new Error("vault: no agent key available to unlock");
+  return openVault({ stateDir, privateKeyPem: pk });
+}
+
 async function dispatch(page, msg) {
   const p = msg.params || {};
   switch (msg.action) {
@@ -101,6 +117,61 @@ async function dispatch(page, msg) {
       const fields = Array.isArray(p.fields) ? p.fields : [];
       for (const f of fields) await page.fill(sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
       return { filled: fields.map((f) => f.ref) };
+    }
+    case "fill-secret": {
+      // Inject a vaulted secret into the element the agent identified. The agent
+      // supplies { ref, cred: "name.field" } — never the value; nothing about the
+      // value is returned or logged.
+      const dot = String(p.cred || "").lastIndexOf(".");
+      if (dot <= 0) throw new Error(`fill-secret needs cred "name.field" (got "${p.cred}")`);
+      const credName = String(p.cred).slice(0, dot);
+      const field = String(p.cred).slice(dot + 1);
+      const vault = await openVaultAgentKey(msg._stateDir);
+      try {
+        const rec = vault.get(credName);
+        if (!rec) throw new Error(`no credential "${credName}"`);
+        const value = rec[field];
+        if (typeof value !== "string" || !value) {
+          throw new Error(`"${credName}.${field}" is not a usable string field`);
+        }
+        // CRITICAL: patchright's fill/press errors echo the value being typed, so
+        // never let the raw error escape — it would leak the secret to the agent.
+        try {
+          await page.fill(sel(p.ref), value, { timeout: ACTION_TIMEOUT });
+          if (p.submit) await page.press(sel(p.ref), "Enter");
+        } catch {
+          throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+        }
+      } finally {
+        vault.lock();
+      }
+      return { filled: p.ref, cred: p.cred };
+    }
+    case "fill-otp": {
+      // Resolve the current 2FA code for a login/totp cred — generated from a
+      // stored seed, or asked via the secure prompt — and type it.
+      const credName = String(p.cred || "");
+      const vault = await openVaultAgentKey(msg._stateDir);
+      let code;
+      try {
+        const rec = vault.get(credName);
+        if (!rec) throw new Error(`no credential "${credName}"`);
+        const otpCred =
+          rec.type === "totp"
+            ? { name: credName, otp: "totp", totpSecret: rec.secret, period: rec.period, digits: rec.digits, algorithm: rec.algorithm }
+            : rec;
+        code = await resolveOtp(otpCred, {});
+      } finally {
+        vault.lock();
+      }
+      // Same leak guard as fill-secret: never surface the value-bearing error.
+      try {
+        await page.fill(sel(p.ref), code, { timeout: ACTION_TIMEOUT });
+        if (p.submit !== false) await page.press(sel(p.ref), "Enter");
+      } catch {
+        throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+      }
+      return { filled: p.ref, otp: true };
     }
     case "select":
       await page.selectOption(sel(p.ref), p.values, { timeout: ACTION_TIMEOUT });
@@ -201,7 +272,7 @@ export async function runSession({ stateDir, name, headless, dekHex, profileFile
 }
 
 // Client: send one action to a running session, return its JSON reply.
-export async function callSession(stateDir, name, action, params = {}) {
+export async function callSession(stateDir, name, action, params = {}, timeoutMs = 35000) {
   let info = null;
   for (let attempt = 0; attempt < 10 && !info; attempt++) {
     try {
@@ -218,7 +289,7 @@ export async function callSession(stateDir, name, action, params = {}) {
   return await new Promise((resolve, reject) => {
     const sock = net.connect(info.port, "127.0.0.1");
     let buf = "";
-    const to = setTimeout(() => { sock.destroy(); reject(new Error("session timed out")); }, 35000);
+    const to = setTimeout(() => { sock.destroy(); reject(new Error("session timed out")); }, timeoutMs);
     sock.on("connect", () => sock.write(JSON.stringify({ token: info.token, action, params }) + "\n"));
     sock.on("data", (d) => {
       buf += d.toString("utf8");
