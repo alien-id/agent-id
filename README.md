@@ -13,7 +13,7 @@ Give an AI agent its own identity and the tools to act with it safely. It works 
 
 - 🪪 **A portable agent identity** — an Ed25519 keypair the agent owns; everything it signs (commits, operations) is attributable to it and verifiable by anyone.
 - 🔐 **A credential vault** — keep API keys, tokens, OAuth logins, even blockchain wallet keys in an encrypted vault; the agent *uses* them by name through a local proxy and **never sees the secret value**. Unlocked automatically by the agent's own local key. (`agent-id-vault` + `agent-id-proxy`)
-- 🌐 **Browser logins** — you sign in once in a real browser, then the agent drives that logged-in session headless for sites that block API/cookie access (e.g. Gmail/Workspace) — still without ever handling your credential. (`agent-id-browser`)
+- 🌐 **Browser logins** — sign in once in a real browser when a desktop head is available, **or** let the agent log in *headless* from a stored `login` credential, answering any 2FA over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI). Either way the agent then drives the logged-in session headless for sites that block API/cookie access (e.g. Gmail/Workspace) — still without ever handling your credential. (`agent-id-browser`)
 - 🔏 **Signed git commits** — SSH-signed with trailers tracing back to the agent (and, once you bind, to a human). (`agent-id-git`)
 
 **Human identity is opt-in.** When you want provenance you can prove to a third party, link the agent's key to a verified human via Alien Network's biometric SSO. Git commits then trace the full chain **commit → agent key → SSO `id_token` (`cnf.jkt`) → verified human owner** — but you never *need* it to use the identity, vault, or browser. See [Assurance levels](#assurance-levels--identity-from-the-first-second-binding-added-later).
@@ -89,7 +89,7 @@ Alien Agent ID ships as a Claude Code plugin marketplace with six focused plugin
 | `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slots — passkey (WebAuthn PRF / Touch ID), agent-key (HKDF), passphrase (scrypt), mobile (phone), owner-approval (Alien app). **Two one-way modes:** *user* (default; no passphrase, app/agent-key unlock) and *dev* (`--dev`; passphrase allowed) — a user-mode vault can never gain a passphrase. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `exec` injects credentials into a child process's environment (or a temp `0600` key file via `--file`) for env-var-auth CLIs/SDKs the proxy can't reach. `init`, `add`, `generate`, `show`, `list`, `remove`, `exec`, `rekey`, `export`, `import`, `migrate`. |
 | `agent-id-proxy` | `/agent-id-proxy` | Local credential-injecting HTTP proxy. Agent calls `http://<proxy>/<credname>/<upstream-host>/<path>`; proxy materializes the credential into the request by type and forwards over real HTTPS. Signs Solana/EVM transactions in-process for wallet credentials — the agent submits unsigned transactions. System CA bundle verifies upstream — no TLS interception, no local CA. Enforces per-credential host allowlist (default-deny). `start`, `status`, `stop`. |
 | `agent-id-auth` | `/agent-id-auth` | RFC 9449 DPoP-signed calls to Alien-aware services. `header` emits the two-header pair for one request; `call` is a one-shot signed HTTP request. `discover` fetches and validates `/.well-known/alien-agent-id.json`; `capabilities` renders the manifest as actionable markdown; `support` probes for the meta-tag support signal. |
-| `agent-id-browser` | `/agent-id-browser` | Universal browser the agent drives, with the logged-in profile **sealed in the vault**. One-time headed login establishes a session; afterwards the agent drives it **headless** — fine-grained control (accessibility `snapshot` + `click`/`type`/`fill`/`select`/`press`/`navigate`/`screenshot`/`eval`) plus one-shot `read`/`fetch`. For authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace). Drives the user's installed Chrome via patchright (stealth driver, installed on first session into the plugin data dir — no browser download); the agent never sees a credential. `login`, `open`, `close`, actions, `read`, `fetch`, `status`. |
+| `agent-id-browser` | `/agent-id-browser` | Universal browser the agent drives, with the logged-in profile **sealed in the vault**. Establish a session two ways: a **headed** Chrome login when a desktop browser is available, or an **agent-driven headless** login from a stored `login` credential (`auto-login`, or `snapshot` + `fill-secret`/`fill-otp`) where the password and any 2FA are entered over the abstracted secure-entry channel — never seen by the agent. Afterwards it drives the session **headless** — fine-grained control (accessibility `snapshot` + `click`/`type`/`fill`/`fill-secret`/`fill-otp`/`select`/`press`/`navigate`/`screenshot`/`eval`) plus one-shot `read`/`fetch`. Secret-typing is gated by the credential's domain allowlist (no foreign-origin exfiltration) and refuses sealed in-vault keys. Drives the user's installed Chrome via patchright (stealth driver, installed on first session into the plugin data dir — no browser download). `login`, `auto-login`, `open`, `close`, actions, `read`, `fetch`, `status`. |
 
 Repository layout:
 
@@ -97,8 +97,9 @@ Repository layout:
 plugins/
 ├── agent-id-core/
 │   ├── .claude-plugin/plugin.json
-│   ├── lib/                    # crypto, bundle, state, errors, oidc,
-│   │                           # signature-engine, cli-runtime
+│   ├── lib/                    # crypto, bundle, state, errors, oidc, signature-engine,
+│   │                           # cli-runtime, secure-prompt (pluggable secure entry),
+│   │                           # trusted-input (/dev/tty), totp
 │   ├── bin/cli.mjs             # 10 subcommands
 │   ├── bin/qrcode.cjs          # zero-dep terminal QR renderer
 │   └── skills/agent-id-core/SKILL.md
@@ -111,7 +112,7 @@ plugins/
 │   ├── lib/format.mjs          # Portable vault format + slot crypto
 │   ├── lib/store.mjs           # Typed credential schema + record CRUD
 │   ├── lib/vault.mjs           # Facade: open, init, export, import
-│   ├── lib/trusted-input.mjs   # /dev/tty channel for passphrases
+│   ├── lib/trusted-input.mjs   # re-export shim → core (back-compat)
 │   ├── lib/legacy.mjs          # v4 migration helpers
 │   ├── bin/cli.mjs             # init, add, show, list, remove, rekey,
 │   │                           # export, import, migrate
@@ -120,7 +121,7 @@ plugins/
 │   ├── lib/proxy.mjs           # Server + URL-rewrite + stub injection
 │   ├── lib/rewrite.mjs         # URL-rewrite path: parse + materialize
 │   ├── lib/stub.mjs            # Legacy stub-injection helpers
-│   ├── lib/totp.mjs            # RFC 6238 TOTP generator
+│   ├── lib/totp.mjs            # re-export shim → core (back-compat)
 │   ├── bin/cli.mjs             # start, status, stop
 │   └── skills/agent-id-proxy/SKILL.md
 ├── agent-id-auth/
@@ -133,9 +134,12 @@ plugins/
     ├── lib/launch.mjs          # hardened patchright launch (sandbox on)
     ├── lib/profile-store.mjs   # tar + AES-256-GCM seal of the profile (DEK in vault)
     ├── lib/session-server.mjs  # persistent session + a11y snapshot/refs + actions
+    │                           # (incl. fill-secret/fill-otp: vault → page, seal+domain gated)
+    ├── lib/auto-login.mjs      # headless login driver (ADFS/Entra + heuristic + recipe; OTP)
+    ├── lib/login-detect.mjs    # 3-way login-outcome classifier (otp-required/failed/logged-in)
     ├── lib/unlock.mjs          # owner-approval (Alien app) unlock
     ├── lib/session.mjs         # logout detection
-    ├── bin/cli.mjs             # login, open/close, actions, read, fetch, status
+    ├── bin/cli.mjs             # login, auto-login, open/close, actions, read, fetch, status
     ├── package.json            # patchright dep (installed at runtime, not bundled)
     ├── hooks/                  # SessionStart hook: install patchright into the data dir
     └── skills/agent-id-browser/SKILL.md
@@ -353,7 +357,7 @@ node plugins/agent-id-vault/bin/cli.mjs list
 node plugins/agent-id-vault/bin/cli.mjs remove --name github-pat
 ```
 
-Supported credential types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `secret` (arbitrary key material — SSH/RSA keys, PEMs, service-account JSON, used via `exec`), `solana-keypair`, `evm-keypair`. Value-input channels — pick the smallest attack surface: `--form` (out-of-band browser form), `--<field>-file`, `--<field>-env`, piped stdin, raw `--<field>` arg (visible in `ps`; avoid). **Never paste a secret into chat; transcripts persist.**
+Supported credential types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `secret` (arbitrary key material — SSH/RSA keys, PEMs, service-account JSON, used via `exec`), `solana-keypair`, `evm-keypair`, and `login` (a direct service login — username + password + a 2FA policy — driven by `agent-id-browser auto-login`; attach a TOTP seed later with `set-totp`). Value-input channels — pick the smallest attack surface: `--form` (out-of-band, via the pluggable **secure-entry channel**: browser form → `/dev/tty` → hosted-harness form, set by `AGENT_ID_SECURE_PROMPT`), `--<field>-file`, `--<field>-env`, piped stdin, raw `--<field>` arg (visible in `ps`; avoid). **Never paste a secret into chat; transcripts persist.**
 
 ### Blockchain wallets — keys born in the vault
 
@@ -510,7 +514,8 @@ See [docs/VAULT-PROXY.md](docs/VAULT-PROXY.md) for the format + threat model. Fu
 | Command | Purpose |
 | --- | --- |
 | `init [--unlock passkey\|passphrase\|agent-key] [--no-agent-key]` | Create the portable vault, choosing how it unlocks. Passkey (Touch ID) and passphrase are *hard boundaries* (the agent can't self-unlock) and default to no agent-key slot; plain `init` = agent-key auto-unlock. |
-| `add --name N --type T --domains H[,H…] [type-specific value flags]` | Add or replace a credential. Types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `secret`. Value-input flags: `--form` (out-of-band browser form), `--<field>-file`, `--<field>-env`, stdin, or raw `--<field>`. |
+| `add --name N --type T --domains H[,H…] [type-specific value flags]` | Add or replace a credential. Types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `secret`, `login` (`--login-url`, `--otp none\|totp\|interactive`, `--profile`). Value-input flags: `--form` (out-of-band, via the secure-entry channel), `--<field>-file`, `--<field>-env`, stdin, or raw `--<field>`. |
+| `set-totp --name N [--form]` | Attach/update a 2FA seed on a `login` or `totp` credential (raw base32 or an `otpauth://` URI), entered out-of-band — for when 2FA is enabled after the login was stored. |
 | `show --name N` | Retrieve plaintext. Prefer the proxy for runtime use — `show` is for manual export. |
 | `list` | List metadata + slots (no plaintext). |
 | `remove --name N` | Delete a record. |
