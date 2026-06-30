@@ -48,6 +48,7 @@ import {
   sealedProfileExists,
 } from "../lib/profile-store.mjs";
 import { launchContext } from "../lib/launch.mjs";
+import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
 import { runSession, callSession } from "../lib/session-server.mjs";
 import { hasOwnerApproval, unlockViaOwnerApproval } from "../lib/unlock.mjs";
@@ -332,6 +333,109 @@ async function cmdLogin(flags) {
   }
 }
 
+// auto-login: drive the sealed browser through a service login using a stored
+// `login` credential, answering 2FA from a stored seed or via the secure prompt,
+// then seal the resulting session into a browser-profile so read/fetch/open reuse
+// it. For places where a full desktop browser isn't on hand (the browser can run
+// headless/remote; the human only touches the abstracted secure-prompt surface).
+async function cmdAutoLogin(flags) {
+  const credName = flags.cred ? String(flags.cred) : null;
+  if (!credName) {
+    return outputError("--cred <LOGIN_CRED> is required (the name of a `login` credential)");
+  }
+  const stateDir = resolveStateDir(flags);
+
+  let vault;
+  try {
+    vault = await openVaultUnlocked(flags);
+  } catch (err) {
+    return handleErr(err);
+  }
+
+  try {
+    const cred = vault.get(credName);
+    if (!cred || cred.type !== "login") {
+      const e = new Error(
+        `no 'login' credential named '${credName}' — add one with ` +
+          "`agent-id-vault add --type login --login-url … --form`",
+      );
+      e.code = "NO_PROFILE";
+      throw e;
+    }
+    if (!cred.loginUrl) {
+      return outputError(`login '${credName}' has no loginUrl — set one so auto-login knows where to start`);
+    }
+
+    const profileName = String(flags.name || cred.profile || DEFAULT_PROFILE);
+    const existing = vault.get(profileName);
+    const reuse = existing && existing.type === "browser-profile" ? existing : null;
+    const file = reuse ? reuse.profileFile : `${profileName}.tar.enc`;
+    const dek = reuse ? reuse.dek : newDek();
+    const headless = resolveHeadless(flags) ?? true;
+
+    const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-autologin-"));
+    try {
+      const ctx = await launchContext({ profileDir: work, headless });
+      let result;
+      try {
+        const page = ctx.pages()[0] || (await ctx.newPage());
+        result = await autoLogin({ page, cred, env: process.env, log: (m) => stderr(m) });
+      } finally {
+        // Close so the context flushes cookies/storage to the work dir before sealing.
+        await ctx.close().catch(() => {});
+      }
+
+      if (!result || !result.ok) {
+        outputJson({
+          ok: false,
+          error: "AUTO_LOGIN_FAILED",
+          outcome: result ? result.outcome : "unknown",
+          finalUrl: result ? result.finalUrl : null,
+          message:
+            `Auto-login for '${credName}' did not complete (${result ? result.outcome : "unknown"}). ` +
+            "Verify the credentials / loginUrl, add a `recipe` to the credential, or bootstrap " +
+            `once with headed \`login --name ${profileName}\`.`,
+        });
+        process.exitCode = 1;
+        return;
+      }
+
+      // Seal the authenticated session (same upsert/seal path as `login`).
+      const { bytes } = await sealProfile({ stateDir, file, dekHex: dek, sourceDir: work });
+      vault.add({
+        ...(reuse || {}),
+        name: profileName,
+        type: "browser-profile",
+        domains: ["*"],
+        description: reuse?.description || `Auto-login session for '${credName}' (agent-id-browser)`,
+        dek,
+        profileFile: file,
+        headless: reuse ? reuse.headless !== false : true,
+        exportable: false,
+        ...(reuse?.account || cred.username ? { account: reuse?.account || cred.username } : {}),
+        lastSyncedAt: Date.now(),
+      });
+      vault.touchLastUsed(credName);
+      await vault.save();
+      outputJson({
+        ok: true,
+        cred: credName,
+        profile: profileName,
+        outcome: result.outcome,
+        finalUrl: result.finalUrl,
+        sealedBytes: bytes,
+        message: `Logged in and sealed session '${profileName}'. Reuse it: \`read --name ${profileName} --url …\`.`,
+      });
+    } finally {
+      await fs.rm(work, { recursive: true, force: true });
+    }
+  } catch (err) {
+    handleErr(err);
+  } finally {
+    vault.lock();
+  }
+}
+
 async function cmdRead(flags) {
   const name = String(flags.name || DEFAULT_PROFILE);
   if (!flags.url) return outputError("--url is required");
@@ -578,6 +682,7 @@ const csv = (v) => (v == null ? undefined : String(v).split(",").map((s) => s.tr
 runCli({
   commands: {
     login: cmdLogin,
+    "auto-login": cmdAutoLogin,
     read: cmdRead,
     fetch: cmdFetch,
     status: cmdStatus,
@@ -608,6 +713,10 @@ runCli({
         "Setup / one-shot ([--name N] optional; defaults to the shared 'main' session):\n" +
         "  login   [--name N] [--url START] [--account LABEL] [--fresh]\n" +
         "          HEADED login; (re)seals the session into the vault (additive)\n" +
+        "  auto-login --cred LOGIN [--name N] [--headed]\n" +
+        "          drive a service login from a vault `login` credential (username/\n" +
+        "          password + 2FA via stored seed or the secure prompt); seals the\n" +
+        "          session into profile N (default the cred's `profile`, else 'main')\n" +
         "  read    [--name N] --url URL [--headed] [--max-chars K]\n" +
         "          one-shot: navigate (headless) → page text + final URL + sessionExpired\n" +
         "  fetch   [--name N] --url URL [--max-chars K]\n" +
