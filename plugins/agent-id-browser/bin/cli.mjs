@@ -48,6 +48,7 @@ import {
   sealedProfileExists,
 } from "../lib/profile-store.mjs";
 import { launchContext } from "../lib/launch.mjs";
+import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
 import { runSession, callSession } from "../lib/session-server.mjs";
 import { hasOwnerApproval, unlockViaOwnerApproval } from "../lib/unlock.mjs";
@@ -332,6 +333,117 @@ async function cmdLogin(flags) {
   }
 }
 
+// auto-login: drive the sealed browser through a service login using a stored
+// `login` credential, answering 2FA from a stored seed or via the secure prompt,
+// then seal the resulting session into a browser-profile so read/fetch/open reuse
+// it. For places where a full desktop browser isn't on hand (the browser can run
+// headless/remote; the human only touches the abstracted secure-prompt surface).
+async function cmdAutoLogin(flags) {
+  const credName = flags.cred ? String(flags.cred) : null;
+  if (!credName) {
+    return outputError("--cred <LOGIN_CRED> is required (the name of a `login` credential)");
+  }
+  const stateDir = resolveStateDir(flags);
+
+  let vault;
+  try {
+    vault = await openVaultUnlocked(flags);
+  } catch (err) {
+    return handleErr(err);
+  }
+
+  try {
+    const cred = vault.get(credName);
+    if (!cred || cred.type !== "login") {
+      const e = new Error(
+        `no 'login' credential named '${credName}' — add one with ` +
+          "`agent-id-vault add --type login --login-url … --form`",
+      );
+      e.code = "NO_PROFILE";
+      throw e;
+    }
+    if (!cred.loginUrl) {
+      return outputError(`login '${credName}' has no loginUrl — set one so auto-login knows where to start`);
+    }
+
+    const profileName = String(flags.name || cred.profile || DEFAULT_PROFILE);
+    // A login and its sealed browser-profile are two records in ONE name
+    // namespace — sealing into the login's own name would overwrite it.
+    if (profileName === credName) {
+      return outputError(
+        `target profile '${profileName}' must differ from the login credential '${credName}' ` +
+          "(they share the vault namespace) — pass --name <other> or set the cred's `profile`",
+      );
+    }
+    const existing = vault.get(profileName);
+    const reuse = existing && existing.type === "browser-profile" ? existing : null;
+    const file = reuse ? reuse.profileFile : `${profileName}.tar.enc`;
+    const dek = reuse ? reuse.dek : newDek();
+    const headless = resolveHeadless(flags) ?? true;
+
+    const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-autologin-"));
+    try {
+      const ctx = await launchContext({ profileDir: work, headless });
+      let result;
+      try {
+        const page = ctx.pages()[0] || (await ctx.newPage());
+        result = await autoLogin({ page, cred, env: process.env, log: (m) => stderr(m) });
+      } finally {
+        // Close so the context flushes cookies/storage to the work dir before sealing.
+        await ctx.close().catch(() => {});
+      }
+
+      if (!result || !result.ok) {
+        outputJson({
+          ok: false,
+          error: "AUTO_LOGIN_FAILED",
+          outcome: result ? result.outcome : "unknown",
+          finalUrl: result ? result.finalUrl : null,
+          message:
+            `Auto-login for '${credName}' did not complete (${result ? result.outcome : "unknown"}). ` +
+            "Verify the credentials / loginUrl, add a `recipe` to the credential, or bootstrap " +
+            `once with headed \`login --name ${profileName}\`.`,
+        });
+        process.exitCode = 1;
+        return;
+      }
+
+      // Seal the authenticated session (same upsert/seal path as `login`).
+      const { bytes } = await sealProfile({ stateDir, file, dekHex: dek, sourceDir: work });
+      vault.add({
+        ...(reuse || {}),
+        name: profileName,
+        type: "browser-profile",
+        domains: ["*"],
+        description: reuse?.description || `Auto-login session for '${credName}' (agent-id-browser)`,
+        dek,
+        profileFile: file,
+        headless: reuse ? reuse.headless !== false : true,
+        exportable: false,
+        ...(reuse?.account || cred.username ? { account: reuse?.account || cred.username } : {}),
+        lastSyncedAt: Date.now(),
+      });
+      vault.touchLastUsed(credName);
+      await vault.save();
+      outputJson({
+        ok: true,
+        cred: credName,
+        profile: profileName,
+        outcome: result.outcome,
+        finalUrl: result.finalUrl,
+        sealedBytes: bytes,
+        message: `Logged in and sealed session '${profileName}'. Reuse it: \`read --name ${profileName} --url …\`.`,
+      });
+    } finally {
+      await fs.rm(work, { recursive: true, force: true });
+    }
+  } catch (err) {
+    handleErr(err);
+  } finally {
+    vault.lock();
+  }
+}
+
 async function cmdRead(flags) {
   const name = String(flags.name || DEFAULT_PROFILE);
   if (!flags.url) return outputError("--url is required");
@@ -554,13 +666,13 @@ async function cmdSessions(flags) {
 
 // Thin client for an action against a running session. `map` turns flags into
 // the action's params. The server's JSON reply is passed straight through.
-function actionCmd(action, map) {
+function actionCmd(action, map, timeoutMs) {
   return async (flags) => {
     const stateDir = resolveStateDir(flags);
     const name = String(flags.name || DEFAULT_PROFILE);
     try {
       const params = map ? map(flags) : {};
-      const r = await callSession(stateDir, name, action, params);
+      const r = await callSession(stateDir, name, action, params, timeoutMs);
       outputJson(r);
       if (r && r.ok === false) process.exitCode = 1;
     } catch (err) {
@@ -578,6 +690,7 @@ const csv = (v) => (v == null ? undefined : String(v).split(",").map((s) => s.tr
 runCli({
   commands: {
     login: cmdLogin,
+    "auto-login": cmdAutoLogin,
     read: cmdRead,
     fetch: cmdFetch,
     status: cmdStatus,
@@ -591,6 +704,10 @@ runCli({
     click: actionCmd("click", (f) => ({ ref: f.ref })),
     type: actionCmd("type", (f) => ({ ref: f.ref, text: f.text ?? "", submit: f.submit === true })),
     fill: actionCmd("fill", (f) => ({ fields: JSON.parse(f.fields || "[]") })),
+    // Secret injection by reference: the agent picks the element (ref) from a
+    // snapshot; the vault supplies the value, which never returns to the agent.
+    "fill-secret": actionCmd("fill-secret", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit === true })),
+    "fill-otp": actionCmd("fill-otp", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit !== false }), 360000),
     select: actionCmd("select", (f) => ({ ref: f.ref, values: csv(f.values) })),
     press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
     hover: actionCmd("hover", (f) => ({ ref: f.ref })),
@@ -608,6 +725,10 @@ runCli({
         "Setup / one-shot ([--name N] optional; defaults to the shared 'main' session):\n" +
         "  login   [--name N] [--url START] [--account LABEL] [--fresh]\n" +
         "          HEADED login; (re)seals the session into the vault (additive)\n" +
+        "  auto-login --cred LOGIN [--name N] [--headed]\n" +
+        "          drive a service login from a vault `login` credential (username/\n" +
+        "          password + 2FA via stored seed or the secure prompt); seals the\n" +
+        "          session into profile N (default the cred's `profile`, else 'main')\n" +
         "  read    [--name N] --url URL [--headed] [--max-chars K]\n" +
         "          one-shot: navigate (headless) → page text + final URL + sessionExpired\n" +
         "  fetch   [--name N] --url URL [--max-chars K]\n" +
@@ -619,6 +740,10 @@ runCli({
         "  click   --name N --ref eN\n" +
         "  type    --name N --ref eN --text T [--submit]\n" +
         "  fill    --name N --fields '[{\"ref\":\"e1\",\"value\":\"..\"}]'\n" +
+        "  fill-secret --name N --ref eN --cred NAME.field [--submit]\n" +
+        "          inject a vaulted secret into the ref'd field (agent never sees the value)\n" +
+        "  fill-otp    --name N --ref eN --cred NAME\n" +
+        "          type the current 2FA code (stored seed, or asked via the secure prompt)\n" +
         "  select  --name N --ref eN --values a,b      press --name N --key Enter [--ref eN]\n" +
         "  hover   --name N --ref eN                   scroll --name N [--dy 600]\n" +
         "  navigate --name N --url URL                 back --name N\n" +

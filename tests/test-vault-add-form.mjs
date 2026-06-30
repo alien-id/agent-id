@@ -62,7 +62,9 @@ test("add --form stores the value typed in the form; the value never hits stdout
     const child = spawn(
       "node",
       [CLI, "add", "--name", "gh", "--type", "bearer", "--domains", "api.github.com", "--form", "--state-dir", dir],
-      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1" } },
+      // Pin the browser backend (the resolver would otherwise pick /dev/tty when a
+      // terminal is present); AGENT_ID_NO_BROWSER makes it print the URL, not open one.
+      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1", AGENT_ID_SECURE_PROMPT: "browser" } },
     );
     let stdout = "";
     let stderr = "";

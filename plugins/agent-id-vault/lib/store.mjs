@@ -11,7 +11,7 @@
 //     name: "github-pat",
 //     type: one of CREDENTIAL_TYPES below (bearer | basic | header | query |
 //           cookie | totp | cookie-jar | oauth2 | solana-keypair | evm-keypair |
-//           browser-profile | secret),
+//           browser-profile | secret | login),
 //     domains: ["*.github.com"],
 //     description: "...",
 //     createdAt, updatedAt, lastUsedAt,
@@ -34,7 +34,11 @@ export const CREDENTIAL_TYPES = Object.freeze([
   "evm-keypair",
   "browser-profile",
   "secret",
+  "login",
 ]);
+
+// Allowed `otp` policies on a `login` credential.
+export const LOGIN_OTP_MODES = Object.freeze(["none", "totp", "interactive"]);
 
 // A token endpoint must be reached over TLS — the refresh token + client secret
 // travel in its request body. The only carve-out is loopback (local dev / tests),
@@ -227,6 +231,41 @@ export function validateRecord(rec) {
       }
       break;
     }
+    case "login": {
+      // A direct service login the sealed browser (agent-id-browser) drives — NOT
+      // proxy-injected (`domains` is advisory for this type, like browser-profile /
+      // secret). `otp` chooses how a 2FA step is answered: `none` (no 2FA), `totp`
+      // (generate from a stored seed; requires `totpSecret`), or `interactive`
+      // (ask the human for the current code over the secure-prompt channel).
+      requireNonEmpty(rec, ["username", "password"]);
+      const otp = rec.otp == null ? "none" : rec.otp;
+      if (!LOGIN_OTP_MODES.includes(otp)) {
+        throw new Error(
+          `Credential ${rec.name}: otp must be one of ${LOGIN_OTP_MODES.join(", ")}`,
+        );
+      }
+      if (otp === "totp") requireNonEmpty(rec, ["totpSecret"]);
+      if (rec.loginUrl != null) {
+        try {
+          new URL(rec.loginUrl);
+        } catch {
+          throw new Error(`Credential ${rec.name}: loginUrl is not a valid URL`);
+        }
+      }
+      if (rec.profile != null && (typeof rec.profile !== "string" || rec.profile.length === 0)) {
+        throw new Error(`Credential ${rec.name}: profile must be a non-empty string`);
+      }
+      if (rec.recipe != null && !Array.isArray(rec.recipe)) {
+        throw new Error(`Credential ${rec.name}: recipe must be an array of steps`);
+      }
+      if (
+        rec.selectors != null &&
+        (typeof rec.selectors !== "object" || Array.isArray(rec.selectors))
+      ) {
+        throw new Error(`Credential ${rec.name}: selectors must be an object`);
+      }
+      break;
+    }
   }
 }
 
@@ -323,6 +362,7 @@ export const SECRET_FIELDS = Object.freeze([
   "secretSeed", // solana-keypair
   "privateKey", // evm-keypair
   "dek", // browser-profile (data-encryption key for the sealed profile)
+  "totpSecret", // login (the stored 2FA seed; username + password already listed above)
 ]);
 
 // Best-effort scrub of decrypted secret material when the vault locks. JS

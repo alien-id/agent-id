@@ -1,6 +1,6 @@
 ---
 name: agent-id-browser
-description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, press keys, select, hover, navigate, screenshot, run JS) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. A HEADED login establishes or extends the session; afterwards the agent drives it HEADLESS (no window). Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
+description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, press keys, select, hover, navigate, screenshot, run JS) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. Two ways to log in: a HEADED Chrome login when a desktop browser is available, OR an agent-driven HEADLESS login from a stored `login` credential (auto-login, or snapshot + fill-secret/fill-otp) where the password and any 2FA code are entered over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI) — never via chat, never seen by the agent. Afterwards the agent drives the session HEADLESS. Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
 license: MIT
 metadata:
   author: Alien Wallet
@@ -74,7 +74,16 @@ auto-installs on first session; if a command reports `PATCHRIGHT_MISSING`, the
 install hasn't finished or you're running outside the plugin — it retries next
 session, or run `npm install` once in the plugin's data dir. Don't add browsers.)
 
-## 1) Login (headed — the only human step)
+## 1) Login — headed Chrome, or agent-driven headless
+
+Two ways to establish (or refresh) a logged-in session. **If a desktop head is
+available, it's fine to log in with Chrome (A).** When it isn't — or when you're
+explicitly asked to, or as a fallback — use the agent-driven path (B), where the
+password and any 2FA code are entered through an abstracted **secure-entry channel**
+(the loopback **browser form**, the **mobile app**, a **hosted-harness** form, or
+the **CLI**/`/dev/tty`) — never in chat, never seen by the agent.
+
+### A. Headed login (a desktop browser is available)
 
 Opens a real window **with the current session loaded**; the owner signs into a new
 site and **closes it**; the session is (re)sealed. Login is **additive** — existing
@@ -90,6 +99,34 @@ CLI login --name work --url https://mail.google.com/ --account me@company.com
 It **blocks until the window is closed**, so run it in the **background** and tell
 the owner to sign in. On success: `{ ok: true, name, resumed, headlessDefault: true }`.
 Re-run `login` anytime to add a site or recover from a logout; `--fresh` starts clean.
+
+### B. Agent-driven login (headless — no desktop browser, or on request / as fallback)
+
+Store the login **once** in the vault (username + password, and a 2FA policy), then
+the agent logs in headless — it reads the form and injects the secrets **from the
+vault**, so the agent never sees them:
+
+```bash
+# one-time: capture username + password (+ a TOTP seed if --otp totp) via the secure prompt
+node …/agent-id-vault/bin/cli.mjs add --type login --name acme \
+  --login-url https://app.acme.com/login --otp interactive --profile acme --form
+
+CLI auto-login --cred acme --name acme        # headless; seals the session just like `login`
+```
+
+`auto-login` fills the form (it auto-detects Microsoft ADFS/Entra; otherwise a
+heuristic or a per-cred `recipe`) and answers a 2FA step over the secure-entry
+channel — a stored TOTP seed if present, otherwise the **current** code is requested
+via whatever surface is registered (browser / mobile / hosted / CLI). For custom or
+multi-step forms, drive it yourself with `snapshot` + `fill-secret` / `fill-otp`
+(§2) — the general, selector-free path the agent reasons through.
+
+**Domain allowlist (security):** a `login` credential is only typed into hosts on
+its `domains` list (default-deny, the same control the proxy enforces); a foreign
+origin is **refused**, and a sealed in-vault-generated secret can never be typed
+into a page. SSO redirects credential entry to the identity provider, so set
+`domains` to cover it — a wildcard works: `--domains '*.acme.com'` allows
+`idp.acme.com`. The refusal error names the blocked host.
 
 ## 2) Interactive control (the main loop)
 
@@ -113,6 +150,8 @@ CLI snapshot
 CLI click  --ref e5
 CLI type   --ref e8 --text "hello@there.com" [--submit]
 CLI fill   --fields '[{"ref":"e8","value":"a"},{"ref":"e9","value":"b"}]'
+CLI fill-secret --ref e8 --cred acme.password [--submit]   # inject a vaulted secret by ref
+CLI fill-otp    --ref e9 --cred acme                       # type the current 2FA code
 CLI select --ref e3 --values Option1
 CLI press  --key Enter [--ref e8]
 CLI hover  --ref e4
@@ -166,7 +205,18 @@ return `"sessionExpired": true` with `"action": "re_login"`. On that signal,
 
 ## Notes
 
-- **Headless by default**; `--headed` shows the window. Login is always headed.
+- **Headless by default**; `--headed` shows the window. The headed `login` (§1A)
+  is the only step that opens a window; `auto-login` and the `fill-secret` /
+  `fill-otp` path (§1B) run headless.
+- **`fill-secret` / `fill-otp` keep the secret from the agent**: the agent supplies
+  only the element `ref` and the credential name; the value is read from the vault
+  and typed in the session process, never returned or logged. They **refuse** a
+  sealed (in-vault-generated) secret and any page host not on the credential's
+  `domains` allowlist.
+- **Secure-entry channel is pluggable.** When a code/secret must be entered live
+  (e.g. `--otp interactive`), it's collected over the first available surface:
+  hosted-harness form → mobile app → loopback browser form → CLI (`/dev/tty`).
+  `AGENT_ID_SECURE_PROMPT=browser|tty|hosted` pins a backend.
 - The session is unsealed to a temp working dir only while a session/read runs,
   re-sealed (capturing new logins + rotated cookies) when it ends, and wiped.
 - Universal — point it at any site; not Gmail-specific.

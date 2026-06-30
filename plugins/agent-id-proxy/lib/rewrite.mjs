@@ -135,6 +135,13 @@ export function injectCredential({ headers, search, cred }) {
         "not_injectable",
         "secret credentials are used via `agent-id-vault exec`, not the HTTP proxy",
       );
+    case "login":
+      // A direct service login driven by `agent-id-browser auto-login` (it fills a
+      // form + handles 2FA), never injected into a proxied HTTP request.
+      throw new RewriteError(
+        "not_injectable",
+        "login credentials are driven by `agent-id-browser auto-login`, not the HTTP proxy",
+      );
     default:
       throw new RewriteError("unknown_type", `Unknown credential type: ${cred.type}`);
   }
