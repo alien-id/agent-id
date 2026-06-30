@@ -10,7 +10,7 @@
     {
       "name": "agent-id-core",
       "description": "Shared library for Alien Agent ID: crypto primitives, v3 bundle format, universal verifier, SignatureEngine, OIDC, state I/O. Required by every other agent-id-* plugin.",
-      "version": "7.1.1",
+      "version": "7.2.0",
       "source": "./plugins/agent-id-core",
       "category": "identity",
       "keywords": [
@@ -34,7 +34,7 @@
     {
       "name": "agent-id-vault",
       "description": "Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key + phone/owner-approval) and typed/domain-scoped credential records.",
-      "version": "7.1.1",
+      "version": "7.2.0",
       "source": "./plugins/agent-id-vault",
       "category": "identity",
       "keywords": [
