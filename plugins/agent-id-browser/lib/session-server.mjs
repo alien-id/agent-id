@@ -31,6 +31,12 @@ import {
   assertActionAllowed,
   contextOptionsForAccess,
 } from "./access-guard.mjs";
+import {
+  humanClick,
+  humanHover,
+  humanScroll,
+  humanType,
+} from "./human-input.mjs";
 
 function sessionsDir(stateDir) {
   return path.join(stateDir, "browser-sessions");
@@ -151,15 +157,19 @@ async function dispatch(page, msg, policy = null) {
     case "text":
       return { text: String(await page.evaluate(() => (document.body ? document.body.innerText : ""))).slice(0, Number(p.maxChars || 6000)) };
     case "click":
-      await page.click(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await humanClick(page, sel(p.ref), { timeout: ACTION_TIMEOUT });
       return { clicked: p.ref };
     case "type":
-      await page.fill(sel(p.ref), String(p.text ?? ""), { timeout: ACTION_TIMEOUT });
-      if (p.submit) await page.press(sel(p.ref), "Enter");
+      await humanType(page, sel(p.ref), String(p.text ?? ""), {
+        timeout: ACTION_TIMEOUT,
+        submit: !!p.submit,
+      });
       return { typed: p.ref, submit: !!p.submit };
     case "fill": {
       const fields = Array.isArray(p.fields) ? p.fields : [];
-      for (const f of fields) await page.fill(sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
+      for (const f of fields) {
+        await humanType(page, sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
+      }
       return { filled: fields.map((f) => f.ref) };
     }
     case "fill-secret": {
@@ -181,11 +191,10 @@ async function dispatch(page, msg, policy = null) {
         if (typeof value !== "string" || !value) {
           throw new Error(`"${credName}.${field}" is not a usable string field`);
         }
-        // CRITICAL: patchright's fill/press errors echo the value being typed, so
+        // CRITICAL: a fill/keyboard error can echo the value being typed, so
         // never let the raw error escape — it would leak the secret to the agent.
         try {
-          await page.fill(sel(p.ref), value, { timeout: ACTION_TIMEOUT });
-          if (p.submit) await page.press(sel(p.ref), "Enter");
+          await humanType(page, sel(p.ref), value, { timeout: ACTION_TIMEOUT, submit: !!p.submit });
         } catch {
           throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
         }
@@ -215,8 +224,10 @@ async function dispatch(page, msg, policy = null) {
       }
       // Same leak guard as fill-secret: never surface the value-bearing error.
       try {
-        await page.fill(sel(p.ref), code, { timeout: ACTION_TIMEOUT });
-        if (p.submit !== false) await page.press(sel(p.ref), "Enter");
+        await humanType(page, sel(p.ref), code, {
+          timeout: ACTION_TIMEOUT,
+          submit: p.submit !== false,
+        });
       } catch {
         throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
       }
@@ -226,14 +237,14 @@ async function dispatch(page, msg, policy = null) {
       await page.selectOption(sel(p.ref), p.values, { timeout: ACTION_TIMEOUT });
       return { selected: p.ref };
     case "hover":
-      await page.hover(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await humanHover(page, sel(p.ref), { timeout: ACTION_TIMEOUT });
       return { hovered: p.ref };
     case "press":
       if (p.ref) await page.press(sel(p.ref), String(p.key));
       else await page.keyboard.press(String(p.key));
       return { pressed: p.key };
     case "scroll":
-      await page.mouse.wheel(Number(p.dx || 0), Number(p.dy || 600));
+      await humanScroll(page, Number(p.dx || 0), Number(p.dy || 600));
       return { scrolled: true };
     case "screenshot": {
       const out = p.path ? String(p.path) : path.join(sessionsDir(msg._stateDir), `shot-${Date.now()}.png`);
