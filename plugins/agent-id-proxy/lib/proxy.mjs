@@ -45,6 +45,7 @@ import {
   readMobileSlotChallenges,
   readOwnerApprovalChallenge,
 } from "@alien-id/agent-id-vault/lib/vault.mjs";
+import { effectiveAccess, evaluateAccess } from "@alien-id/agent-id-vault/lib/access.mjs";
 import { unsealFromPublicKey } from "@alien-id/agent-id-vault/lib/format.mjs";
 import { fingerprintOfCertPem, generateControlCert } from "./control-tls.mjs";
 import { appendJsonl } from "@alien-id/agent-id-core/lib/state.mjs";
@@ -76,6 +77,11 @@ function stripHopByHop(headers) {
 // bounding memory.
 const WALLET_MAX_BODY_BYTES = 1024 * 1024;
 
+// Non-read requests on an access-restricted ("ro") credential buffer the body
+// so POST-tunneled reads (GraphQL query / JMAP get / JSON-RPC calls) can be
+// classified before the write-block applies. Same bound as wallet bodies.
+const ACCESS_MAX_BODY_BYTES = 1024 * 1024;
+
 function readRequestBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -103,6 +109,12 @@ function structuredError(res, status, body) {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(payload),
     "X-AgentVault-Proxy-Error": body.error || "unknown",
+    // These errors are returned BEFORE the request body is consumed (bad host,
+    // access denied, locked, …). On a keep-alive connection Node would parse
+    // the unread body as a pipelined request and reject it with a spurious 400,
+    // masking our status. Closing the connection discards the leftover body so
+    // the client sees this response cleanly.
+    Connection: "close",
   });
   res.end(payload);
 }
@@ -653,6 +665,55 @@ export function createProxy({
     // First use of this (credential, host) pair? Ask for human consent.
     await requireGrant(cred.name, parsed.host);
 
+    // ── Access-level gate ────────────────────────────────────────────────────
+    // A restricted credential (access:"ro" and/or accessRules) is checked
+    // against method + host + pathname first; when only the body can decide
+    // (a POST that might be a tunneled read), buffer it and re-evaluate.
+    const bareHost = parsed.host.includes(":")
+      ? parsed.host.slice(0, parsed.host.indexOf(":"))
+      : parsed.host;
+    const reqPathname = parsed.restAndQuery.split("?")[0];
+    let accessBody = null; // set when the gate had to consume the request stream
+    let decision = evaluateAccess(cred, {
+      method: req.method,
+      host: bareHost,
+      path: reqPathname,
+    });
+    if (!decision.allowed && decision.needsBody) {
+      accessBody = await readRequestBody(req, ACCESS_MAX_BODY_BYTES);
+      decision = evaluateAccess(cred, {
+        method: req.method,
+        host: bareHost,
+        path: reqPathname,
+        body: accessBody.toString("utf8"),
+      });
+    }
+    if (!decision.allowed) {
+      // Drain any unconsumed request body (a write's payload) so the HTTP
+      // framing stays clean before we send the denial on this connection.
+      if (accessBody == null) req.resume();
+      logAccess({
+        event: "access_denied",
+        credential: cred.name,
+        host: parsed.host,
+        method: req.method,
+        path: reqPathname,
+        access: effectiveAccess(cred),
+        reason: decision.reason,
+      });
+      return structuredError(res, 403, {
+        error: "access_denied",
+        message:
+          `credential '${cred.name}' has access level '${effectiveAccess(cred)}' — ` +
+          `${req.method} ${reqPathname} on ${parsed.host} is not permitted (${decision.reason}). ` +
+          "Only the owner can raise it: `agent-id-vault set-access` (human-confirmed).",
+        credential: cred.name,
+        host: parsed.host,
+        access: effectiveAccess(cred),
+        reason: decision.reason,
+      });
+    }
+
     // oauth2 credentials refresh an access token here, then inject as a bearer.
     // Refresh failures throw an error carrying an HTTP status (mapped by the
     // top-level handler), so they short-circuit before we touch the upstream.
@@ -669,7 +730,7 @@ export function createProxy({
     // signature / tx hash that lands on chain anyway.
     let bodyOverride = null;
     if (cred.type === "solana-keypair" || cred.type === "evm-keypair") {
-      const raw = await readRequestBody(req, WALLET_MAX_BODY_BYTES);
+      const raw = accessBody ?? (await readRequestBody(req, WALLET_MAX_BODY_BYTES));
       if (raw.length > 0) {
         let result;
         let event;
@@ -700,6 +761,9 @@ export function createProxy({
       } else {
         bodyOverride = raw; // bodyless request (e.g. GET) — stream already consumed
       }
+    } else if (accessBody != null) {
+      // The access gate consumed the stream; forward what it buffered.
+      bodyOverride = accessBody;
     }
 
     // Build upstream URL (default https; credential may opt into http).
@@ -767,6 +831,42 @@ export function createProxy({
       credentialsUsed = credentialsUsed.concat(headerRewrite.used);
     } catch (err) {
       return handleStubError(res, err);
+    }
+
+    // Access-level gate (method/host/path only — legacy stub mode does not
+    // classify bodies, so a non-read method on an "ro" credential is denied
+    // unless an accessRule explicitly allows it; use URL-rewrite mode for
+    // POST-tunneled reads).
+    for (const u of credentialsUsed) {
+      const rec = lookup(u.name);
+      if (!rec) continue; // already resolved by the rewrite step
+      const decision = evaluateAccess(rec, {
+        method: req.method,
+        host: parsed.hostname,
+        path: parsed.pathname,
+        body: null,
+      });
+      if (!decision.allowed) {
+        logAccess({
+          event: "access_denied",
+          credential: u.name,
+          host: parsed.hostname,
+          method: req.method,
+          path: parsed.pathname,
+          access: effectiveAccess(rec),
+          reason: decision.reason,
+        });
+        return structuredError(res, 403, {
+          error: "access_denied",
+          message:
+            `credential '${u.name}' has access level '${effectiveAccess(rec)}' — ` +
+            `${req.method} ${parsed.pathname} on ${parsed.hostname} is not permitted (${decision.reason}).`,
+          credential: u.name,
+          host: parsed.hostname,
+          access: effectiveAccess(rec),
+          reason: decision.reason,
+        });
+      }
     }
 
     if (state.vault) {

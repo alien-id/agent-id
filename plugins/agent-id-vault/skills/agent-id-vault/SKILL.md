@@ -1,6 +1,6 @@
 ---
 name: agent-id-vault
-description: Portable encrypted credential vault with LUKS-style slots (passkey/Touch ID, passphrase, agent-key, phone) and typed/domain-scoped credential records. Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them at request time. Can also GENERATE blockchain wallet keys (Solana ed25519, EVM secp256k1) inside the vault — the private key is sealed, only the address is printed, and transactions are signed by the proxy. Use whenever the user asks to save, fetch, or remove a service credential, create a crypto wallet for the agent, or whenever a downstream tool needs an external-service secret that must not appear in shell history, source files, or process arguments.
+description: Portable encrypted credential vault with LUKS-style slots (passkey/Touch ID, passphrase, agent-key, phone) and typed/domain-scoped credential records. Credentials can carry an ACCESS LEVEL (--access ro) so the agent can read a service but never write to it — enforced by the proxy and the sealed browser, widened only with the owner's out-of-band confirmation (set-access). Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them at request time. Can also GENERATE blockchain wallet keys (Solana ed25519, EVM secp256k1) inside the vault — the private key is sealed, only the address is printed, and transactions are signed by the proxy. Use whenever the user asks to save, fetch, or remove a service credential, create a crypto wallet for the agent, or whenever a downstream tool needs an external-service secret that must not appear in shell history, source files, or process arguments.
 license: MIT
 metadata:
   author: Alien Wallet
@@ -117,6 +117,78 @@ node CLI add --name github-pat --type bearer --domains api.github.com --form
 ```
 
 Never paste a secret into chat. The agent transcript persists.
+
+## Access levels — grant "read", not "everything"
+
+Any credential can carry `--access ro` (default is `rw`, unrestricted). A
+read-only credential can be **used** but not used to **change** anything:
+
+- **The proxy** allows read-shaped requests only: `GET`/`HEAD`/`OPTIONS`, plus
+  POST-tunneled reads it can classify (GraphQL `query`, JMAP `*/get`/`*/query`,
+  JSON-RPC calls that don't submit transactions). Everything else → structured
+  `403 access_denied`.
+- **The sealed browser** (agent-id-browser) enforces the same classification on
+  every request a `--access ro` session makes, at the network layer.
+- **Plaintext egress is sealed**: `show` redacts and `exec` refuses a ro
+  credential's secret fields — otherwise the enforcement would be theater.
+
+```bash
+# "The agent may READ my mailbox, never send/delete":
+node CLI add --name fastmail --type bearer --access ro \
+  --domains api.fastmail.com --form
+
+# Fine-grained overrides (first match wins), e.g. allow one search POST:
+node CLI set-access --name fastmail \
+  --rules '[{"effect":"allow","methods":["POST"],"path":"/search"}]'
+```
+
+**Changing the level later** (`set-access`) is asymmetric by design:
+
+```bash
+node CLI set-access --name fastmail --access ro   # tighten: applies at once
+node CLI set-access --name fastmail --access rw   # WIDEN: the owner must
+                                                  # confirm via the secure form
+```
+
+Widening (ro→rw, adding an `allow` rule, dropping a `deny` rule) opens the
+secure prompt and asks the **owner** to type the credential name — the agent
+cannot approve it itself, and `add`/`generate` refuse to overwrite a record
+with a wider level. When a human types the secret via `--form`, the form shows
+the access level being granted.
+
+Any credential the proxy restricts (level `ro`, or `rw` with rules) is also
+sealed against `show`/`exec` — its plaintext can't be extracted to sidestep the
+gate.
+
+### Where `ro` works — the operation must be legible in the request
+
+Read/write can only be told apart when the request reveals the operation. It
+**fails safe**: when it can't tell, it denies (never silently allows a write).
+
+| API shape | Under `ro` |
+| --- | --- |
+| REST with real verbs (Gmail API, Stripe, GitHub REST) | reads pass, writes blocked — **best case** |
+| GraphQL with the **query text inline** in the body | `query` passes, `mutation`/`subscription` blocked |
+| JMAP (Fastmail) | `*/get`,`*/query` pass; `*/set` blocked |
+| JSON-RPC with recognized read methods | reads pass; unknown methods blocked |
+| GraphQL **persisted queries** (hash only, no query text — Reddit/X web) | over-blocks: reads AND writes denied |
+| Opaque binary RPC (gRPC-web, Connect, Twirp) | over-blocks: denied |
+
+Two things `ro` deliberately does **not** cover: a server that mutates on a
+`GET` (per HTTP safe-method convention `GET`/`HEAD`/`OPTIONS` are reads —
+constrain such an endpoint with an explicit `deny` rule), and raw IMAP/SMTP
+(no HTTP method to gate — use an API or a web session).
+
+For an over-blocked endpoint you have two levers: a scoped `allow` rule for a
+read path (but if reads and writes share one URL, e.g. a single `/graphql`, that
+also reopens writes there); or, for a token API, prefer a **server-side
+read-only scope** at onboarding (e.g. Gmail `gmail.readonly`) — the only
+enforcement even a client-side bug can't defeat.
+
+> The policy is enforced by the proxy / browser-session processes. With an
+> agent-key vault the agent could in principle open the vault directly, so for
+> a hard guarantee init the vault with `--unlock passkey` (no agent-key slot)
+> and let only the proxy hold it unlocked.
 
 ## Generate a wallet keypair (the key never leaves the vault)
 

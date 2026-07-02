@@ -92,7 +92,12 @@ function launchOptions(headless) {
 
 // Launch a persistent context on the given (already-unsealed) profile dir.
 // headless defaults to true; pass false for the one-time headed login.
-export async function launchContext({ profileDir, headless = true }) {
+// `contextOptions` merges extra Playwright context options (e.g. the access
+// guard's serviceWorkers:"block" for read-only profiles).
+export async function launchContext({ profileDir, headless = true, contextOptions = {} }) {
   const chromium = await loadChromium();
-  return chromium.launchPersistentContext(profileDir, launchOptions(headless));
+  return chromium.launchPersistentContext(profileDir, {
+    ...launchOptions(headless),
+    ...contextOptions,
+  });
 }

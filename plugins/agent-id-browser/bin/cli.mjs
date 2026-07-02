@@ -52,6 +52,17 @@ import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
 import { runSession, callSession } from "../lib/session-server.mjs";
 import { hasOwnerApproval, unlockViaOwnerApproval } from "../lib/unlock.mjs";
+import {
+  ACCESS_LEVELS,
+  effectiveAccess,
+  isAccessRelaxation,
+  strictestAccess,
+} from "@alien-id/agent-id-vault/lib/access.mjs";
+import {
+  applyAccessGuard,
+  contextOptionsForAccess,
+  guardDecision,
+} from "../lib/access-guard.mjs";
 
 // Bridge the plugin path vars into the environment. Claude Code SUBSTITUTES
 // ${CLAUDE_PLUGIN_DATA}/${CLAUDE_PLUGIN_ROOT} into skill text but only EXPORTS
@@ -215,7 +226,13 @@ async function withProfile({ flags, name, headless, action }) {
     try {
       await unsealProfile({ stateDir, file: cred.profileFile, dekHex: cred.dek, destDir: work });
       const useHeadless = headless != null ? headless : cred.headless !== false;
-      const ctx = await launchContext({ profileDir: work, headless: useHeadless });
+      const ctx = await launchContext({
+        profileDir: work,
+        headless: useHeadless,
+        contextOptions: contextOptionsForAccess(cred),
+      });
+      // Read-only profile → network gate on everything this context does.
+      await applyAccessGuard(ctx, cred, { log: (m) => stderr(m) });
       let result;
       try {
         result = await action(ctx, cred);
@@ -241,6 +258,10 @@ async function cmdLogin(flags) {
   const name = String(flags.name || DEFAULT_PROFILE);
   const stateDir = resolveStateDir(flags);
   const startUrl = flags.url ? String(flags.url) : "about:blank";
+  const access = flags.access != null ? String(flags.access) : null;
+  if (access && !ACCESS_LEVELS.includes(access)) {
+    return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
+  }
 
   let vault;
   try {
@@ -265,6 +286,14 @@ async function cmdLogin(flags) {
         await unsealProfile({ stateDir, file: existing.profileFile, dekHex: existing.dek, destDir: work });
       }
       const reuse = resuming ? existing : null;
+      // A login can create a restricted session or tighten one — never widen
+      // one. Widening is the owner's call: `agent-id-vault set-access`.
+      if (reuse && access && isAccessRelaxation(reuse, { ...reuse, access })) {
+        return outputError(
+          `session '${name}' has access level '${effectiveAccess(reuse)}' — a re-login cannot ` +
+            `widen it to '${access}'. The owner can: agent-id-vault set-access --name ${name} --access ${access}`,
+        );
+      }
       const file = reuse ? reuse.profileFile : `${name}.tar.enc`;
       const dek = reuse ? reuse.dek : newDek();
       const account = flags.account ? String(flags.account) : reuse?.account || null;
@@ -307,6 +336,9 @@ async function cmdLogin(flags) {
         // The DEK is generated in-vault and must never be shown to the agent —
         // `vault show` redacts sealed fields (incl. dek) for exportable:false.
         exportable: false,
+        // Tighten (or set on a fresh profile); the reuse spread already carries
+        // an existing restriction forward, and widening was refused above.
+        ...(access ? { access } : {}),
         ...(account ? { account } : {}),
         lastSyncedAt: Date.now(),
       });
@@ -318,6 +350,7 @@ async function cmdLogin(flags) {
         sealedBytes: bytes,
         resumed: !!resuming,
         account,
+        access: access || (reuse ? effectiveAccess(reuse) : "rw"),
         headlessDefault,
         message: resuming
           ? `Added to your existing '${name}' session — other logins kept.`
@@ -342,6 +375,10 @@ async function cmdAutoLogin(flags) {
   const credName = flags.cred ? String(flags.cred) : null;
   if (!credName) {
     return outputError("--cred <LOGIN_CRED> is required (the name of a `login` credential)");
+  }
+  const requestedAccess = flags.access != null ? String(flags.access) : null;
+  if (requestedAccess && !ACCESS_LEVELS.includes(requestedAccess)) {
+    return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
   }
   const stateDir = resolveStateDir(flags);
 
@@ -377,6 +414,29 @@ async function cmdAutoLogin(flags) {
     }
     const existing = vault.get(profileName);
     const reuse = existing && existing.type === "browser-profile" ? existing : null;
+
+    // The session's access level is the STRICTEST of: the login credential's
+    // (a read-only credential can only mint read-only sessions), the existing
+    // profile's (a re-login never widens), and the requested flag. An explicit
+    // request the ceiling forbids is an error, not a silent clamp.
+    const ceiling = effectiveAccess(cred);
+    if (requestedAccess === "rw" && ceiling === "ro") {
+      return outputError(
+        `login credential '${credName}' is read-only — sessions minted from it cannot be 'rw'. ` +
+          `The owner can widen it: agent-id-vault set-access --name ${credName} --access rw`,
+      );
+    }
+    if (reuse && requestedAccess && isAccessRelaxation(reuse, { ...reuse, access: requestedAccess })) {
+      return outputError(
+        `session '${profileName}' has access level '${effectiveAccess(reuse)}' — auto-login cannot ` +
+          `widen it. The owner can: agent-id-vault set-access --name ${profileName} --access ${requestedAccess}`,
+      );
+    }
+    const sessionAccess = strictestAccess(
+      strictestAccess(requestedAccess || "rw", ceiling),
+      reuse ? effectiveAccess(reuse) : "rw",
+    );
+
     const file = reuse ? reuse.profileFile : `${profileName}.tar.enc`;
     const dek = reuse ? reuse.dek : newDek();
     const headless = resolveHeadless(flags) ?? true;
@@ -420,6 +480,10 @@ async function cmdAutoLogin(flags) {
         profileFile: file,
         headless: reuse ? reuse.headless !== false : true,
         exportable: false,
+        ...(sessionAccess !== "rw" ? { access: sessionAccess } : {}),
+        // A fresh profile inherits the login credential's rules; an existing
+        // profile keeps its own (carried by the reuse spread).
+        ...(!reuse && Array.isArray(cred.accessRules) ? { accessRules: cred.accessRules } : {}),
         ...(reuse?.account || cred.username ? { account: reuse?.account || cred.username } : {}),
         lastSyncedAt: Date.now(),
       });
@@ -431,6 +495,7 @@ async function cmdAutoLogin(flags) {
         profile: profileName,
         outcome: result.outcome,
         finalUrl: result.finalUrl,
+        access: sessionAccess,
         sealedBytes: bytes,
         message: `Logged in and sealed session '${profileName}'. Reuse it: \`read --name ${profileName} --url …\`.`,
       });
@@ -504,7 +569,14 @@ async function cmdFetch(flags) {
       flags,
       name,
       headless: resolveHeadless(flags),
-      action: async (ctx) => {
+      action: async (ctx, cred) => {
+        // ctx.request bypasses route interception — check the policy directly.
+        const decision = guardDecision(cred, { method: "GET", url, postData: null });
+        if (!decision.allowed) {
+          throw new Error(
+            `access level '${effectiveAccess(cred)}' blocks GET ${url} (${decision.reason})`,
+          );
+        }
         const resp = await ctx.request.get(url, { timeout: 30000 });
         const httpStatus = resp.status();
         let body = "";
@@ -565,6 +637,7 @@ async function cmdStatus(flags) {
       profiles.push({
         name: m.name,
         account: m.account || null,
+        access: effectiveAccess(cred),
         headlessDefault: m.headless !== false,
         sealed: await sealedProfileExists(stateDir, cred.profileFile),
         lastSyncedAt: cred.lastSyncedAt || null,
@@ -592,6 +665,7 @@ async function cmdOpen(flags) {
   let dekHex;
   let profileFile;
   let headlessDefault;
+  let policy = null;
   try {
     const cred = vault.get(name);
     if (!cred || cred.type !== "browser-profile") {
@@ -607,6 +681,12 @@ async function cmdOpen(flags) {
     dekHex = cred.dek;
     profileFile = cred.profileFile;
     headlessDefault = cred.headless !== false;
+    if (cred.access != null || cred.accessRules != null) {
+      policy = {
+        ...(cred.access != null ? { access: cred.access } : {}),
+        ...(cred.accessRules != null ? { accessRules: cred.accessRules } : {}),
+      };
+    }
   } catch (err) {
     vault.lock();
     return handleErr(err);
@@ -619,10 +699,11 @@ async function cmdOpen(flags) {
     await fs.rm(workDir, { recursive: true, force: true });
     await unsealProfile({ stateDir, file: profileFile, dekHex, destDir: workDir });
     stderr(
-      `Session '${name}' starting (${headless ? "headless" : "headed"}). Keep this process ` +
+      `Session '${name}' starting (${headless ? "headless" : "headed"}` +
+        `${policy && effectiveAccess(policy) === "ro" ? ", READ-ONLY" : ""}). Keep this process ` +
         `running (background it); issue actions, then \`close --name ${name}\`.`,
     );
-    await runSession({ stateDir, name, headless, dekHex, profileFile, workDir }); // blocks until close
+    await runSession({ stateDir, name, headless, dekHex, profileFile, workDir, policy }); // blocks until close
   } catch (err) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     handleErr(err);
@@ -723,12 +804,19 @@ runCli({
         "Google once, reuse it everywhere. `login` is ADDITIVE (re-run to add sites).\n" +
         "Use --name to open a SEPARATE isolated session; --fresh discards & restarts one.\n\n" +
         "Setup / one-shot ([--name N] optional; defaults to the shared 'main' session):\n" +
-        "  login   [--name N] [--url START] [--account LABEL] [--fresh]\n" +
+        "  login   [--name N] [--url START] [--account LABEL] [--fresh] [--access ro|rw]\n" +
         "          HEADED login; (re)seals the session into the vault (additive)\n" +
-        "  auto-login --cred LOGIN [--name N] [--headed]\n" +
+        "  auto-login --cred LOGIN [--name N] [--headed] [--access ro|rw]\n" +
         "          drive a service login from a vault `login` credential (username/\n" +
         "          password + 2FA via stored seed or the secure prompt); seals the\n" +
         "          session into profile N (default the cred's `profile`, else 'main')\n" +
+        "          --access ro seals a READ-ONLY session: every request the page\n" +
+        "          makes is classified in the session process; writes are blocked\n" +
+        "          at the wire (GET/HEAD/OPTIONS + GraphQL-query/JMAP-get/JSON-RPC\n" +
+        "          reads pass), WebSockets/service-workers are disabled, and\n" +
+        "          eval/fill-secret/fill-otp are refused. A ro login credential\n" +
+        "          only mints ro sessions; re-logins can tighten but never widen\n" +
+        "          (the owner widens via `agent-id-vault set-access`).\n" +
         "  read    [--name N] --url URL [--headed] [--max-chars K]\n" +
         "          one-shot: navigate (headless) → page text + final URL + sessionExpired\n" +
         "  fetch   [--name N] --url URL [--max-chars K]\n" +

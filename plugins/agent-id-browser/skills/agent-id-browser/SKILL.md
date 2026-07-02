@@ -1,6 +1,6 @@
 ---
 name: agent-id-browser
-description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, press keys, select, hover, navigate, screenshot, run JS) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. Two ways to log in: a HEADED Chrome login when a desktop browser is available, OR an agent-driven HEADLESS login from a stored `login` credential (auto-login, or snapshot + fill-secret/fill-otp) where the password and any 2FA code are entered over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI) — never via chat, never seen by the agent. Afterwards the agent drives the session HEADLESS. Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
+description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, press keys, select, hover, navigate, screenshot, run JS) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. Two ways to log in: a HEADED Chrome login when a desktop browser is available, OR an agent-driven HEADLESS login from a stored `login` credential (auto-login, or snapshot + fill-secret/fill-otp) where the password and any 2FA code are entered over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI) — never via chat, never seen by the agent. Afterwards the agent drives the session HEADLESS. Sessions can be sealed READ-ONLY (--access ro): the session process blocks write requests at the network layer, so the agent can read mail/feeds/messages but never send, post, or delete. Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
 license: MIT
 metadata:
   author: Alien Wallet
@@ -127,6 +127,46 @@ origin is **refused**, and a sealed in-vault-generated secret can never be typed
 into a page. SSO redirects credential entry to the identity provider, so set
 `domains` to cover it — a wildcard works: `--domains '*.acme.com'` allows
 `idp.acme.com`. The refusal error names the blocked host.
+
+## Read-only sessions (access levels)
+
+A session can be sealed **read-only**: the owner grants "the agent may read my
+mail / feed / messages, never act on them". Pass `--access ro` at login time:
+
+```bash
+CLI login --name gmail-ro --url https://mail.google.com/ --access ro   # headed
+CLI auto-login --cred acme --name acme-ro --access ro                  # headless
+```
+
+Enforcement lives in the **session process**, not in the client: every request
+the page makes is classified — `GET`/`HEAD`/`OPTIONS` and POST-tunneled reads
+(GraphQL `query`, JMAP `*/get`, JSON-RPC reads) pass; **writes are aborted at
+the wire**, so clicking "Send" fails harmlessly. WebSockets and service
+workers are disabled (they would bypass inspection), and `eval`,
+`fill-secret`, `fill-otp` are refused. Everything observational — `navigate`,
+`snapshot`, `click`, `type` (e.g. a search box), `page-text`, `screenshot`,
+`read`, `fetch` — works normally.
+
+Rules of the level:
+- A `login` credential with `access: "ro"` only ever mints ro sessions.
+- Re-`login`/`auto-login` can tighten a session's level, **never widen** it.
+- Widening is the owner's act: `agent-id-vault set-access --name <session> --access rw`
+  (confirmed by the owner on the secure form — don't retry, ask them).
+- `status` shows each session's `access`.
+
+If an action or page request fails with an access/read-only error, that's the
+granted level working — report it to the user instead of looking for another
+route to the same write.
+
+**Two practical notes for `ro` sessions:**
+- Since the gate default-denies any POST it can't prove is a read, a site that
+  loads content via **persisted-query GraphQL** (a hash, not the query text —
+  e.g. Reddit, X) has its reads collateral-blocked too. The server-rendered
+  page (the initial `GET`) reads fine; dynamically-loaded content may not
+  populate. That's the fail-safe tradeoff, not a bug.
+- Bot-hostile sites (Reddit especially) serve a challenge page to a **headless**
+  browser regardless of access level. That's the site, not the vault — drive
+  such a site with `open --headed`, not the one-shot headless `read`.
 
 ## 2) Interactive control (the main loop)
 

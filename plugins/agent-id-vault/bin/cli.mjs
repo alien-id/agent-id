@@ -70,7 +70,13 @@ import {
   promptSecret,
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
-import { CREDENTIAL_TYPES, SECRET_FIELDS } from "../lib/store.mjs";
+import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../lib/store.mjs";
+import {
+  ACCESS_LEVELS,
+  effectiveAccess,
+  isAccessRelaxation,
+  isAccessRestricted,
+} from "../lib/access.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { normalizeTotpInput } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { generateSolanaKeypair } from "@alien-id/agent-id-core/lib/solana.mjs";
@@ -298,6 +304,10 @@ async function cmdAdd(flags) {
   if (!CREDENTIAL_TYPES.includes(type)) {
     return outputError(`Unknown type: ${type}. Allowed: ${CREDENTIAL_TYPES.join(", ")}`);
   }
+  const access = flags.access != null ? String(flags.access) : null;
+  if (access && !ACCESS_LEVELS.includes(access)) {
+    return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
+  }
   let domains = parseDomains(flags);
   if (domains.length === 0) {
     // `secret` is not host-scoped (it's used via exec/file, not the HTTP proxy),
@@ -339,7 +349,9 @@ async function cmdAdd(flags) {
       // /dev/tty → hosted harness), so this works where no GUI browser is present.
       const out = await collectSecret({
         title: `Add credential: ${name}`,
-        description: `${type} · ${domains.join(", ")}`,
+        // Show the access level so the human sees the grant they are making
+        // while typing the secret ("ro" = the agent can read, never write).
+        description: `${type} · ${domains.join(", ")}${access === "ro" ? " · access: READ-ONLY" : ""}`,
         fields: specs,
         label: `enter the "${name}" secret`,
         security:
@@ -363,6 +375,22 @@ async function cmdAdd(flags) {
     const record = { name, type, domains, description: flags.description || null };
     if (flags["upstream-scheme"] != null) {
       record.upstreamScheme = String(flags["upstream-scheme"]);
+    }
+    if (access) record.access = access;
+
+    // Upserting must never silently widen access: preserve the stored policy
+    // when no --access flag is given, and refuse a widening flag — only
+    // `set-access` (owner-confirmed) may relax.
+    const existing = vault.get(name);
+    if (existing) {
+      if (!access && existing.access != null) record.access = existing.access;
+      if (existing.accessRules != null) record.accessRules = existing.accessRules;
+      if (isAccessRelaxation(existing, record)) {
+        return outputError(
+          `Credential '${name}' has access level '${effectiveAccess(existing)}' — re-adding it ` +
+            `with '${access}' would widen what the agent may do. Use \`set-access\` (owner-confirmed).`,
+        );
+      }
     }
 
     switch (type) {
@@ -491,12 +519,16 @@ async function cmdAdd(flags) {
 
     const stored = vault.add(record);
     await vault.save();
-    stderr(`Added credential '${name}' (${type}) for ${domains.join(", ")}.`);
+    stderr(
+      `Added credential '${name}' (${type}) for ${domains.join(", ")}` +
+        `${stored.access ? ` — access: ${stored.access}` : ""}.`,
+    );
     outputJson({
       ok: true,
       name: stored.name,
       type: stored.type,
       domains: stored.domains,
+      access: effectiveAccess(stored),
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt,
     });
@@ -572,14 +604,23 @@ async function cmdShow(flags) {
   try {
     const rec = vault.get(name);
     if (!rec) return outputError(`No credential named '${name}'`);
-    if (rec.exportable === false) {
+    // Two sealing reasons: in-vault-generated secrets never export, and an
+    // access-restricted ("ro") credential's plaintext must not reach the agent
+    // — otherwise the proxy/browser read-only enforcement would be theater.
+    const sealedWhy =
+      rec.exportable === false
+        ? "generated in-vault, not exportable"
+        : isAccessRestricted(rec)
+          ? `access-restricted (${describeAccess(rec)}) — enforced via the proxy/browser only`
+          : null;
+    if (sealedWhy) {
       const redacted = { ...rec };
       for (const f of SECRET_FIELDS) {
-        if (redacted[f] != null) redacted[f] = "[sealed — generated in-vault, not exportable]";
+        if (redacted[f] != null) redacted[f] = `[sealed — ${sealedWhy}]`;
       }
       stderr(
-        `Credential '${name}' was generated inside the vault; its secret is sealed ` +
-          "and cannot be exported. Use the proxy to exercise it.",
+        `Credential '${name}' is sealed (${sealedWhy}). ` +
+          "Use the proxy or the sealed browser to exercise it.",
       );
       outputJson({ ok: true, credential: redacted, sealed: true });
       return;
@@ -608,6 +649,11 @@ async function cmdGenerate(flags) {
     );
   }
 
+  const access = flags.access != null ? String(flags.access) : null;
+  if (access && !ACCESS_LEVELS.includes(access)) {
+    return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
+  }
+
   const vault = await openWithFlags(flags);
   try {
     if (vault.has(name) && !flags.overwrite) {
@@ -620,6 +666,19 @@ async function cmdGenerate(flags) {
       description: flags.description || null,
       exportable: false,
     };
+    if (access) record.access = access;
+    // Overwriting must not silently widen access (same rule as `add`).
+    const existing = vault.get(name);
+    if (existing) {
+      if (!access && existing.access != null) record.access = existing.access;
+      if (existing.accessRules != null) record.accessRules = existing.accessRules;
+      if (isAccessRelaxation(existing, record)) {
+        return outputError(
+          `Credential '${name}' has access level '${effectiveAccess(existing)}' — ` +
+            "overwriting cannot widen it. Use `set-access` (owner-confirmed).",
+        );
+      }
+    }
     let address;
     if (type === "solana-keypair") {
       const { publicKey, secretSeedHex } = generateSolanaKeypair();
@@ -654,6 +713,104 @@ async function cmdGenerate(flags) {
       domains: stored.domains,
       exportable: false,
       createdAt: stored.createdAt,
+    });
+  } finally {
+    vault.lock();
+  }
+}
+
+// ─── set-access: change a credential's access level / rules ────────────────────
+//
+// TIGHTENING (rw→ro, adding deny rules, dropping allow rules) applies
+// immediately — an agent may always give capabilities up. RELAXING (ro→rw,
+// adding allow rules, dropping deny rules) asks the OWNER to confirm
+// out-of-band via the secure prompt (they type the credential name), so an
+// agent cannot self-upgrade what its credentials permit.
+
+function describeAccess(rec) {
+  const rules = Array.isArray(rec.accessRules) ? ` + ${rec.accessRules.length} rule(s)` : "";
+  return `${effectiveAccess(rec)}${rules}`;
+}
+
+async function cmdSetAccess(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const wantLevel = flags.access != null ? String(flags.access) : null;
+  if (wantLevel && !ACCESS_LEVELS.includes(wantLevel)) {
+    return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
+  }
+  let wantRules; // undefined = leave untouched; null = clear; array = replace
+  if (flags["clear-rules"] === true) {
+    wantRules = null;
+  } else if (flags.rules != null) {
+    try {
+      wantRules = JSON.parse(String(flags.rules));
+    } catch (err) {
+      return outputError(`--rules must be a JSON array: ${err.message}`);
+    }
+  }
+  if (wantLevel == null && wantRules === undefined) {
+    return outputError(
+      "Nothing to change — pass --access ro|rw and/or --rules '<JSON array>' / --clear-rules",
+    );
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+
+    const after = { ...rec };
+    if (wantLevel != null) after.access = wantLevel;
+    if (wantRules !== undefined) {
+      if (wantRules == null) delete after.accessRules;
+      else after.accessRules = wantRules;
+    }
+    try {
+      validateRecord(after); // fail fast, before any owner ceremony
+    } catch (err) {
+      return outputError(err.message);
+    }
+
+    if (isAccessRelaxation(rec, after)) {
+      stderr(
+        `Widening access on '${name}' (${describeAccess(rec)} → ${describeAccess(after)}) ` +
+          "needs the owner's out-of-band confirmation…",
+      );
+      let values;
+      try {
+        ({ values } = await collectSecret({
+          title: `Allow MORE access: ${name}`,
+          description:
+            `The agent asks to widen what '${name}' may do: ` +
+            `${describeAccess(rec)} → ${describeAccess(after)}. ` +
+            "Approve only if YOU intend this.",
+          fields: [
+            {
+              name: "confirm",
+              label: `Type the credential name (${name}) to approve`,
+              secret: false,
+            },
+          ],
+          label: `approve wider access for "${name}"`,
+          security: "Typed by you, out of the agent's sight. Mismatch = no change.",
+        }));
+      } catch (err) {
+        return outputError(`owner confirmation: ${err.message}`);
+      }
+      if (String(values.confirm || "").trim() !== name) {
+        return outputError("owner confirmation did not match the credential name — access unchanged");
+      }
+    }
+
+    vault.add(after);
+    await vault.save();
+    stderr(`Access on '${name}' is now: ${describeAccess(after)}.`);
+    outputJson({
+      ok: true,
+      name,
+      access: effectiveAccess(after),
+      accessRules: after.accessRules ?? null,
     });
   } finally {
     vault.lock();
@@ -981,6 +1138,17 @@ async function cmdExec() {
             `'${s.field}' cannot leave the vault. Use the proxy to exercise it.`,
         );
       }
+      // An access-restricted credential (ro, OR rw with deny rules) handed raw
+      // to a child process would bypass the proxy/browser gate — refuse, same
+      // as sealed. Rule-only restrictions count: the rules are enforced at the
+      // proxy, so leaking the plaintext would make them theater.
+      if (isAccessRestricted(rec) && SECRET_FIELDS.includes(s.field)) {
+        return outputError(
+          `Credential '${s.credName}' is access-restricted (${describeAccess(rec)}); field ` +
+            `'${s.field}' cannot be exported to a child process (that would bypass enforcement). ` +
+            "Use the proxy/browser, or ask the owner to run `set-access --access rw` (and clear rules).",
+        );
+      }
       const value = rec[s.field];
       if (typeof value !== "string" || value.length === 0) {
         return outputError(`Credential '${s.credName}' has no usable string field '${s.field}'`);
@@ -1062,9 +1230,13 @@ function printHelp() {
       "       --unlock passphrase  typed into the secure form (dev mode)",
       "       default (no --unlock) = USER mode, agent-key auto-unlock.",
       "       passkey/passphrase default to NO agent-key slot; add --agent-key to keep one.",
-      "  add --name N --type T --domains H[,H…] [type-specific value flags]",
+      "  add --name N --type T --domains H[,H…] [--access ro|rw] [type-specific value flags]",
       "      --form   enter the secret out-of-band via the secure prompt (browser",
       "               form → /dev/tty → hosted harness); else --<field>-file/-env/stdin",
+      "      --access ro   read-only: the proxy/browser allow only read-shaped",
+      "               requests (GET/HEAD/OPTIONS + POST-tunneled reads: GraphQL",
+      "               query, JMAP get/query, JSON-RPC non-submitting); show/exec",
+      "               refuse the plaintext. Default rw (unrestricted).",
       "      oauth2: --token-endpoint URL --client-id ID [--client-secret-env V]",
       "              --refresh-token-file F [--scope S]   (auto-refreshes access tokens)",
       "      login:  --login-url URL [--otp none|totp|interactive] [--profile NAME]",
@@ -1073,6 +1245,11 @@ function printHelp() {
       "  set-totp --name N [--form]   attach/update a 2FA seed on a login|totp cred",
       "              accepts a base32 secret or an otpauth:// URI (use when 2FA is",
       "              enabled after the login was stored); else --seed-file/-env/stdin",
+      "  set-access --name N [--access ro|rw] [--rules '<JSON>' | --clear-rules]",
+      "              change a credential's access level. Tightening applies at",
+      "              once; WIDENING requires the owner to confirm via the secure",
+      "              prompt (the agent cannot self-upgrade). Rules: JSON array of",
+      '              {"effect":"allow|deny","methods":[..],"hosts":[..],"path":"/glob*"}',
       "  generate --name N --type solana-keypair|evm-keypair --domains H[,H…] [--overwrite]",
       "      creates the keypair inside the vault; prints ONLY the public address",
       "      evm:    [--chain-id-allowlist 1,137] [--to-allowlist 0x..,0x..]",
@@ -1114,6 +1291,7 @@ const commands = {
   init: cmdInit,
   add: cmdAdd,
   "set-totp": cmdSetTotp,
+  "set-access": cmdSetAccess,
   generate: cmdGenerate,
   show: cmdShow,
   list: cmdList,
