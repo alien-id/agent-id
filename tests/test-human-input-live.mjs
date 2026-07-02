@@ -114,3 +114,27 @@ test(
     }
   },
 );
+
+test(
+  "human input types into an element inside an iframe via root: frame",
+  { skip: patchrightAvailable ? false : "patchright/Chrome not installed" },
+  async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "human-frame-"));
+    let ctx;
+    try {
+      ctx = await launchContext({ profileDir: dir, headless: true });
+      const page = ctx.pages()[0] || (await ctx.newPage());
+      await page.setContent(`<iframe id="f" srcdoc="<input id='inp'>"></iframe>`);
+      const frame = page.frames().find((f) => f !== page.mainFrame());
+      assert.ok(frame, "the child frame exists");
+      // The session server resolves an iframe ref to its Frame and passes it as
+      // `root`; humanType must locate/clear/type through the frame while the
+      // mouse/keyboard stay page-global.
+      await humanType(page, "#inp", "framed", { root: frame });
+      assert.equal(await frame.locator("#inp").inputValue(), "framed");
+    } finally {
+      if (ctx) await ctx.close().catch(() => {});
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  },
+);

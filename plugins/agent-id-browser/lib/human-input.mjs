@@ -99,9 +99,12 @@ export async function humanMove(page, x, y, { rng = Math.random } = {}) {
   lastPos.set(page, { x, y });
 }
 
-// Resolve a selector to a first visible element, scrolled into view.
-async function locate(page, selector, timeout) {
-  const el = page.locator(selector).first();
+// Resolve a selector to a first visible element, scrolled into view. `root` is
+// a Page OR a Frame — an element inside an iframe is located via its frame,
+// while the mouse/keyboard (below) stay page-global (they address viewport
+// coordinates and the focused element, which frames share).
+async function locate(root, selector, timeout) {
+  const el = root.locator(selector).first();
   await el.waitFor({ state: "visible", timeout });
   await el.scrollIntoViewIfNeeded({ timeout }).catch(() => {});
   return el;
@@ -114,9 +117,11 @@ async function locate(page, selector, timeout) {
 // retries under overlays / sticky headers). Doing the click by raw page.mouse at
 // a coordinate would skip those checks and silently miss when anything covers
 // the point — so we keep the human motion but not the fragile raw click.
-export async function humanClick(page, selector, { rng = Math.random, timeout = 15000 } = {}) {
-  if (!humanInputEnabled()) return void (await page.click(selector, { timeout }));
-  const el = await locate(page, selector, timeout);
+export async function humanClick(page, selector, { rng = Math.random, timeout = 15000, root = page } = {}) {
+  if (!humanInputEnabled()) return void (await root.click(selector, { timeout }));
+  const el = await locate(root, selector, timeout);
+  // boundingBox is relative to the main-frame viewport even for iframe elements,
+  // so page.mouse can travel to it.
   const box = await el.boundingBox().catch(() => null);
   if (box) {
     const { x, y } = pointInBox(box, rng);
@@ -134,22 +139,22 @@ export async function humanType(
   page,
   selector,
   text,
-  { rng = Math.random, timeout = 15000, submit = false } = {},
+  { rng = Math.random, timeout = 15000, submit = false, root = page } = {},
 ) {
   const value = String(text ?? "");
   if (!humanInputEnabled()) {
-    await page.fill(selector, value, { timeout });
-    if (submit) await page.press(selector, "Enter");
+    await root.fill(selector, value, { timeout });
+    if (submit) await root.press(selector, "Enter");
     return;
   }
-  await humanClick(page, selector, { rng, timeout });
+  await humanClick(page, selector, { rng, timeout, root });
   // Deterministic replace (parity with fill): clear the field first — fill("")
   // is actionability-checked and always empties, so the subsequent keystrokes
   // never append to stale content, and an empty `value` clears correctly. NOT
   // swallowed: if the field can't be cleared we must fail rather than type into
   // (and corrupt) leftover content — the secret paths wrap this in a value-free
   // catch, so a throw never leaks the value.
-  await page.locator(selector).first().fill("", { timeout });
+  await root.locator(selector).first().fill("", { timeout });
   const delays = keystrokeDelays(value.length, { rng });
   for (let i = 0; i < value.length; i++) {
     await page.keyboard.type(value[i]);
@@ -161,9 +166,9 @@ export async function humanType(
   }
 }
 
-export async function humanHover(page, selector, { rng = Math.random, timeout = 15000 } = {}) {
-  if (!humanInputEnabled()) return void (await page.hover(selector, { timeout }));
-  const el = await locate(page, selector, timeout);
+export async function humanHover(page, selector, { rng = Math.random, timeout = 15000, root = page } = {}) {
+  if (!humanInputEnabled()) return void (await root.hover(selector, { timeout }));
+  const el = await locate(root, selector, timeout);
   const box = await el.boundingBox();
   if (!box) return void (await el.hover({ timeout }));
   const { x, y } = pointInBox(box, rng);

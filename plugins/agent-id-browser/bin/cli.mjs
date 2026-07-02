@@ -783,6 +783,11 @@ runCli({
     back: actionCmd("back"),
     "page-text": actionCmd("text", (f) => ({ maxChars: f["max-chars"] })),
     click: actionCmd("click", (f) => ({ ref: f.ref })),
+    dblclick: actionCmd("dblclick", (f) => ({ ref: f.ref })),
+    check: actionCmd("check", (f) => ({ ref: f.ref })),
+    uncheck: actionCmd("uncheck", (f) => ({ ref: f.ref })),
+    drag: actionCmd("drag", (f) => ({ ref: f.ref, to: f.to })),
+    upload: actionCmd("upload", (f) => ({ ref: f.ref, files: csv(f.files) })),
     type: actionCmd("type", (f) => ({ ref: f.ref, text: f.text ?? "", submit: f.submit === true })),
     fill: actionCmd("fill", (f) => ({ fields: JSON.parse(f.fields || "[]") })),
     // Secret injection by reference: the agent picks the element (ref) from a
@@ -795,7 +800,18 @@ runCli({
     scroll: actionCmd("scroll", (f) => ({ dx: f.dx, dy: f.dy })),
     screenshot: actionCmd("screenshot", (f) => ({ path: f.path, fullPage: f.full === true || f.fullPage === true })),
     eval: actionCmd("eval", (f) => ({ expression: f.js ?? f.expression })),
-    wait: actionCmd("wait", (f) => ({ text: f.text, ms: f.ms })),
+    wait: actionCmd("wait", (f) => ({ text: f.text, ms: f.ms, url: f.url, load: f.load })),
+    get: actionCmd("get", (f) => ({ ref: f.ref, what: f.what, attr: f.attr, maxChars: f["max-chars"] })),
+    is: actionCmd("is", (f) => ({ ref: f.ref, what: f.what })),
+    tabs: actionCmd("tabs"),
+    "tab-new": actionCmd("tab-new", (f) => ({ url: f.url }), 45000),
+    "tab-switch": actionCmd("tab-switch", (f) => ({ index: f.index })),
+    "tab-close": actionCmd("tab-close", (f) => ({ index: f.index })),
+    dialog: actionCmd("dialog", (f) => ({ mode: f.mode, text: f.text })),
+    downloads: actionCmd("downloads", (f) => ({ max: f.max })),
+    console: actionCmd("console", (f) => ({ level: f.level, max: f.max })),
+    cookies: actionCmd("cookies", (f) => ({ url: f.url })),
+    batch: actionCmd("batch", (f) => ({ actions: JSON.parse(f.actions || "[]") }), 320000),
   },
   printHelp: () =>
     stderr(
@@ -824,18 +840,33 @@ runCli({
         "  status  [--name N]      list sealed sessions\n\n" +
         "Interactive session (--name optional; defaults to 'main'):\n" +
         "  open    --name N [--headed]   start a persistent session (run in background)\n" +
-        "  snapshot --name N             accessibility tree with element refs (eN)\n" +
-        "  click   --name N --ref eN\n" +
+        "  snapshot --name N             accessibility tree with element refs; iframe\n" +
+        "          elements get frame-prefixed refs (f1e3); reports open tabs when >1\n" +
+        "  click   --name N --ref eN                   dblclick --name N --ref eN\n" +
+        "  check   --name N --ref eN                   uncheck  --name N --ref eN\n" +
         "  type    --name N --ref eN --text T [--submit]\n" +
         "  fill    --name N --fields '[{\"ref\":\"e1\",\"value\":\"..\"}]'\n" +
         "  fill-secret --name N --ref eN --cred NAME.field [--submit]\n" +
         "          inject a vaulted secret into the ref'd field (agent never sees the value)\n" +
         "  fill-otp    --name N --ref eN --cred NAME\n" +
         "          type the current 2FA code (stored seed, or asked via the secure prompt)\n" +
+        "  upload  --name N --ref eN --files /a.pdf[,/b.png]   attach files (file input\n" +
+        "          or picker button); refused on read-only sessions\n" +
+        "  drag    --name N --ref eN --to eM           same-frame drag & drop\n" +
         "  select  --name N --ref eN --values a,b      press --name N --key Enter [--ref eN]\n" +
         "  hover   --name N --ref eN                   scroll --name N [--dy 600]\n" +
         "  navigate --name N --url URL                 back --name N\n" +
-        "  page-text --name N [--max-chars K]          wait --name N [--text T | --ms N]\n" +
+        "  page-text --name N [--max-chars K]\n" +
+        "  wait    --name N [--text T | --url SUBSTR | --load networkidle | --ms N]\n" +
+        "  get     --name N [--ref eN] --what text|html|value|attr|url|title [--attr A]\n" +
+        "  is      --name N --ref eN --what visible|enabled|checked|editable\n" +
+        "  tabs    list open tabs        tab-new [--url U] | tab-switch --index I | tab-close\n" +
+        "  dialog  [--mode accept|dismiss [--text T]]   JS-dialog policy + last dialog seen\n" +
+        "  downloads               files saved by the page (path + status)\n" +
+        "  console [--level error|warn] [--max K]       page console + JS errors (best-\n" +
+        "          effort: the stealth driver suppresses most console events)\n" +
+        "  cookies [--url U]       cookie metadata (names/domains — values stay sealed)\n" +
+        "  batch   --actions '[{\"action\":\"click\",\"params\":{\"ref\":\"e1\"}},…]'  (stops on error)\n" +
         "  screenshot --name N [--path P] [--full]     eval --name N --js 'EXPR'\n" +
         "  sessions                list open sessions   close --name N\n\n" +
         "Unlock: agent-key (auto) | --passphrase-file F | --passphrase-env V |\n" +

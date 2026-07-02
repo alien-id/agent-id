@@ -12,8 +12,9 @@
 //     click on "Send" fails at the wire even though clicking is allowed;
 //   - service workers are blocked (they would bypass route interception);
 //   - WebSockets are disabled via an init script (frames can't be inspected);
-//   - the un-auditable/secret-bearing actions (`eval`, `fill-secret`,
-//     `fill-otp`) are refused at the action layer (assertActionAllowed).
+//   - the un-auditable/secret-bearing/exfiltrating actions (`eval`,
+//     `fill-secret`, `fill-otp`, `upload`) are refused at the action layer
+//     (assertActionAllowed).
 //
 // The DOM stays fully interactive (navigate/click/type/scroll) — typing a
 // search query is a read — because the wire, not the widget, is the boundary.
@@ -26,7 +27,9 @@ import {
 
 // Actions refused on a read-only session. Everything observational or
 // DOM-interactive stays available; mutations die at the network gate.
-const RO_DENIED_ACTIONS = Object.freeze(["eval", "fill-secret", "fill-otp"]);
+// `upload` is denied too: feeding the owner's local files into a page is a
+// write in spirit (and page JS could exfiltrate the content over allowed GETs).
+const RO_DENIED_ACTIONS = Object.freeze(["eval", "fill-secret", "fill-otp", "upload"]);
 
 // Pure — unit-tests without a browser. Throws on a denied action.
 export function assertActionAllowed(rec, action) {
