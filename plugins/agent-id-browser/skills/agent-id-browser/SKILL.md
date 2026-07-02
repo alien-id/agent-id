@@ -158,15 +158,12 @@ If an action or page request fails with an access/read-only error, that's the
 granted level working — report it to the user instead of looking for another
 route to the same write.
 
-**Two practical notes for `ro` sessions:**
-- Since the gate default-denies any POST it can't prove is a read, a site that
-  loads content via **persisted-query GraphQL** (a hash, not the query text —
-  e.g. Reddit, X) has its reads collateral-blocked too. The server-rendered
-  page (the initial `GET`) reads fine; dynamically-loaded content may not
-  populate. That's the fail-safe tradeoff, not a bug.
-- Bot-hostile sites (Reddit especially) serve a challenge page to a **headless**
-  browser regardless of access level. That's the site, not the vault — drive
-  such a site with `open --headed`, not the one-shot headless `read`.
+**A practical note for `ro` sessions:** since the gate default-denies any POST
+it can't prove is a read, a site that loads content via **persisted-query
+GraphQL** (a hash, not the query text — e.g. Reddit, X) has its reads
+collateral-blocked too. The server-rendered page (the initial `GET`) reads
+fine; dynamically-loaded content may not populate. That's the fail-safe
+tradeoff, not a bug.
 
 ## 2) Interactive control (the main loop)
 
