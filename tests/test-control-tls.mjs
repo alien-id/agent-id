@@ -13,7 +13,7 @@ import https from "node:https";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createECDH } from "node:crypto";
+import { createECDH, X509Certificate } from "node:crypto";
 
 import {
   generateControlCert,
@@ -39,6 +39,28 @@ describe("self-signed cert generation", () => {
 
   it("two certs have different fingerprints", () => {
     assert.notEqual(generateControlCert().fingerprint, generateControlCert().fingerprint);
+  });
+
+  // Regression: a serial that DER-encodes with a redundant leading zero byte
+  // (leading 0x00 followed by a high-bit-clear byte) is illegal padding and made
+  // strict parsers throw "asn1 …::illegal padding" — the ~1/512 flake in the TLS
+  // tests below. The INTEGER encoder now emits minimal DER, so every serial edge
+  // case must parse via the strict X509Certificate constructor.
+  it("encodes every serial edge case as valid DER (no illegal padding)", () => {
+    const serials = {
+      "leading zero + high-bit-clear (the flake)": Buffer.from([0x00, 0x45, 0x9a, 0xbc]),
+      "leading zero + high-bit-set (0x00 required)": Buffer.from([0x00, 0x80, 0x11, 0x22]),
+      "two leading zeros": Buffer.from([0x00, 0x00, 0x33, 0x44]),
+      "top bit set, no leading zero": Buffer.from([0xff, 0x11, 0x22]),
+      "ordinary": Buffer.from([0x45, 0x11, 0x22]),
+      "all zero": Buffer.from([0x00, 0x00]),
+    };
+    for (const [label, serial] of Object.entries(serials)) {
+      const { certPem, fingerprint } = generateControlCert({ serial });
+      // Throws on illegal padding — the exact failure we're regressing against.
+      assert.doesNotThrow(() => new X509Certificate(certPem), `strict parse: ${label}`);
+      assert.equal(fingerprintOfCertPem(certPem), fingerprint, `fingerprint stable: ${label}`);
+    }
   });
 });
 
