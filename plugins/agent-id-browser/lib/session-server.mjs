@@ -37,6 +37,12 @@ import {
   assertActionAllowed,
   contextOptionsForAccess,
 } from "./access-guard.mjs";
+import {
+  humanClick,
+  humanHover,
+  humanScroll,
+  humanType,
+} from "./human-input.mjs";
 
 function sessionsDir(stateDir) {
   return path.join(stateDir, "browser-sessions");
@@ -291,7 +297,7 @@ async function dispatch(state, msg, policy = null) {
     case "text":
       return { text: String(await page.evaluate(() => (document.body ? document.body.innerText : ""))).slice(0, Number(p.maxChars || 6000)) };
     case "click":
-      await frameForRef(state, p.ref).click(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await humanClick(page, sel(p.ref), { timeout: ACTION_TIMEOUT, root: frameForRef(state, p.ref) });
       return { clicked: p.ref };
     case "dblclick":
       await frameForRef(state, p.ref).dblclick(sel(p.ref), { timeout: ACTION_TIMEOUT });
@@ -302,15 +308,21 @@ async function dispatch(state, msg, policy = null) {
     case "uncheck":
       await frameForRef(state, p.ref).uncheck(sel(p.ref), { timeout: ACTION_TIMEOUT });
       return { unchecked: p.ref };
-    case "type": {
-      const t = frameForRef(state, p.ref);
-      await t.fill(sel(p.ref), String(p.text ?? ""), { timeout: ACTION_TIMEOUT });
-      if (p.submit) await t.press(sel(p.ref), "Enter");
+    case "type":
+      await humanType(page, sel(p.ref), String(p.text ?? ""), {
+        timeout: ACTION_TIMEOUT,
+        submit: !!p.submit,
+        root: frameForRef(state, p.ref),
+      });
       return { typed: p.ref, submit: !!p.submit };
-    }
     case "fill": {
       const fields = Array.isArray(p.fields) ? p.fields : [];
-      for (const f of fields) await frameForRef(state, f.ref).fill(sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
+      for (const f of fields) {
+        await humanType(page, sel(f.ref), String(f.value ?? ""), {
+          timeout: ACTION_TIMEOUT,
+          root: frameForRef(state, f.ref),
+        });
+      }
       return { filled: fields.map((f) => f.ref) };
     }
     case "fill-secret": {
@@ -336,11 +348,14 @@ async function dispatch(state, msg, policy = null) {
         if (typeof value !== "string" || !value) {
           throw new Error(`"${credName}.${field}" is not a usable string field`);
         }
-        // CRITICAL: patchright's fill/press errors echo the value being typed, so
+        // CRITICAL: a fill/keyboard error can echo the value being typed, so
         // never let the raw error escape — it would leak the secret to the agent.
         try {
-          await target.fill(sel(p.ref), value, { timeout: ACTION_TIMEOUT });
-          if (p.submit) await target.press(sel(p.ref), "Enter");
+          await humanType(page, sel(p.ref), value, {
+            timeout: ACTION_TIMEOUT,
+            submit: !!p.submit,
+            root: target,
+          });
         } catch {
           throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
         }
@@ -373,8 +388,11 @@ async function dispatch(state, msg, policy = null) {
       }
       // Same leak guard as fill-secret: never surface the value-bearing error.
       try {
-        await target.fill(sel(p.ref), code, { timeout: ACTION_TIMEOUT });
-        if (p.submit !== false) await target.press(sel(p.ref), "Enter");
+        await humanType(page, sel(p.ref), code, {
+          timeout: ACTION_TIMEOUT,
+          submit: p.submit !== false,
+          root: target,
+        });
       } catch {
         throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
       }
@@ -384,7 +402,7 @@ async function dispatch(state, msg, policy = null) {
       await frameForRef(state, p.ref).selectOption(sel(p.ref), p.values, { timeout: ACTION_TIMEOUT });
       return { selected: p.ref };
     case "hover":
-      await frameForRef(state, p.ref).hover(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await humanHover(page, sel(p.ref), { timeout: ACTION_TIMEOUT, root: frameForRef(state, p.ref) });
       return { hovered: p.ref };
     case "press":
       if (p.ref) await frameForRef(state, p.ref).press(sel(p.ref), String(p.key));
@@ -430,7 +448,7 @@ async function dispatch(state, msg, policy = null) {
       return { dragged: p.ref, to: p.to };
     }
     case "scroll":
-      await page.mouse.wheel(Number(p.dx || 0), Number(p.dy || 600));
+      await humanScroll(page, Number(p.dx || 0), Number(p.dy || 600));
       return { scrolled: true };
     case "screenshot": {
       const out = p.path ? String(p.path) : path.join(sessionsDir(msg._stateDir), `shot-${Date.now()}.png`);

@@ -158,15 +158,12 @@ If an action or page request fails with an access/read-only error, that's the
 granted level working — report it to the user instead of looking for another
 route to the same write.
 
-**Two practical notes for `ro` sessions:**
-- Since the gate default-denies any POST it can't prove is a read, a site that
-  loads content via **persisted-query GraphQL** (a hash, not the query text —
-  e.g. Reddit, X) has its reads collateral-blocked too. The server-rendered
-  page (the initial `GET`) reads fine; dynamically-loaded content may not
-  populate. That's the fail-safe tradeoff, not a bug.
-- Bot-hostile sites (Reddit especially) serve a challenge page to a **headless**
-  browser regardless of access level. That's the site, not the vault — drive
-  such a site with `open --headed`, not the one-shot headless `read`.
+**A practical note for `ro` sessions:** since the gate default-denies any POST
+it can't prove is a read, a site that loads content via **persisted-query
+GraphQL** (a hash, not the query text — e.g. Reddit, X) has its reads
+collateral-blocked too. The server-rendered page (the initial `GET`) reads
+fine; dynamically-loaded content may not populate. That's the fail-safe
+tradeoff, not a bug.
 
 ## 2) Interactive control (the main loop)
 
@@ -290,4 +287,11 @@ return `"sessionExpired": true` with `"action": "re_login"`. On that signal,
   `AGENT_ID_SECURE_PROMPT=browser|tty|hosted` pins a backend.
 - The session is unsealed to a temp working dir only while a session/read runs,
   re-sealed (capturing new logins + rotated cookies) when it ends, and wiped.
+- **Human-like input.** `click`/`type`/`fill`/`hover`/`scroll` (and auto-login's
+  form filling) drive the page with real cursor travel and key-by-key typing
+  rather than instantaneous synthetic events — because you're a real Chrome on
+  the user's real IP, behaviour is the only residual bot signal, and robotic
+  motion against a pristine fingerprint is itself the tell. It costs a little
+  time per action; set `AGENT_ID_HUMAN_INPUT=0` to fall back to fast direct
+  input when a site isn't bot-hostile and speed matters.
 - Universal — point it at any site; not Gmail-specific.

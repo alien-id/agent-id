@@ -93,14 +93,65 @@ function launchOptions(headless) {
   };
 }
 
+// ── Headless User-Agent normalization ─────────────────────────────────────────
+//
+// Chrome tags the User-Agent with "HeadlessChrome" in headless mode. patchright
+// (by design — upstream issue Kaliiiiiiiiii-Vinyzu/patchright-python#46, closed
+// "not planned") does NOT strip it, even though it already normalizes the
+// Sec-CH-UA client-hint header to "Google Chrome". That leaves the UA string as
+// the ONE request signal that differs between headed and headless, and the lone
+// "Headless" token is a well-known bot-detection trigger (it flips Google,
+// Reddit, etc. into a challenge). We normalize it so a headless session is
+// byte-identical to a headed one on the wire and in JS.
+//
+// We do NOT invent a UA (patchright rightly warns a mismatched UA is itself a
+// tell). We read the browser's OWN headless UA and strip only the "Headless"
+// token, then apply it via Playwright's `userAgent` option — which overrides at
+// the CDP layer, so `navigator.userAgent` still reports [native code] (not a
+// detectable JS patch) and Sec-CH-UA / userAgentData stay consistent. Verified:
+// after this, every request header and JS surface matches a headed Chrome.
+//
+// The value is resolved once per process by a minimal throwaway launch (~0.5s,
+// no profile, no navigation) and memoized. Only headless launches pay it;
+// headed launches already report a clean UA. On any probe failure we fall back
+// to the unmodified UA rather than break the launch.
+let headlessUserAgentPromise = null;
+async function resolveHeadlessUserAgent() {
+  if (!headlessUserAgentPromise) {
+    headlessUserAgentPromise = (async () => {
+      const chromium = await loadChromium();
+      const browser = await chromium.launch({
+        channel: "chrome",
+        headless: true,
+        ignoreDefaultArgs: ["--no-sandbox"],
+        args: ["--test-type"],
+      });
+      try {
+        const page = await browser.newPage();
+        const ua = await page.evaluate(() => navigator.userAgent);
+        // Strip the token: "HeadlessChrome/149…" → "Chrome/149…". No-op if the
+        // build already reports a clean UA (nothing to normalize).
+        return /Headless/i.test(ua) ? ua.replace(/Headless/gi, "") : null;
+      } finally {
+        await browser.close();
+      }
+    })().catch(() => null);
+  }
+  return headlessUserAgentPromise;
+}
+
 // Launch a persistent context on the given (already-unsealed) profile dir.
 // headless defaults to true; pass false for the one-time headed login.
 // `contextOptions` merges extra Playwright context options (e.g. the access
 // guard's serviceWorkers:"block" for read-only profiles).
 export async function launchContext({ profileDir, headless = true, contextOptions = {} }) {
   const chromium = await loadChromium();
-  return chromium.launchPersistentContext(profileDir, {
-    ...launchOptions(headless),
-    ...contextOptions,
-  });
+  const opts = { ...launchOptions(headless), ...contextOptions };
+  // Headless only: normalize the "HeadlessChrome" UA to match a headed browser.
+  // A caller-supplied userAgent (contextOptions) wins.
+  if (headless && opts.userAgent == null) {
+    const ua = await resolveHeadlessUserAgent();
+    if (ua) opts.userAgent = ua;
+  }
+  return chromium.launchPersistentContext(profileDir, opts);
 }
