@@ -33,9 +33,19 @@ function tlv(tag, content) {
 }
 const SEQ = (...parts) => tlv(0x30, Buffer.concat(parts));
 const SET = (...parts) => tlv(0x31, Buffer.concat(parts));
+// DER INTEGER for a non-negative value, in MINIMAL form. Two rules that both
+// bite a 16-byte random serial:
+//   - strip redundant leading 0x00 bytes (a leading zero whose successor has the
+//     high bit clear is illegal padding — strict parsers throw
+//     "asn1 …::illegal padding"); happens ~1/512 random serials, which was the
+//     source of the flaky control-plane TLS test.
+//   - keep exactly one leading 0x00 when the top byte's high bit is set, so the
+//     value stays positive (X.509 serials must be positive).
 function INTEGER(buf) {
-  let b = buf;
-  if (b.length === 0) b = Buffer.from([0]);
+  let start = 0;
+  while (start < buf.length && buf[start] === 0x00) start++;
+  let b = buf.subarray(start);
+  if (b.length === 0) b = Buffer.from([0]); // the value is zero
   else if (b[0] & 0x80) b = Buffer.concat([Buffer.from([0]), b]); // keep positive
   return tlv(0x02, b);
 }
@@ -83,7 +93,14 @@ export function fingerprintOfCertPem(certPem) {
 // Generate a fresh self-signed P-256 cert. Returns { certPem, keyPem, fingerprint }
 // where fingerprint is the lowercase hex SHA-256 of the cert DER (what the phone
 // pins, and what tls.getPeerCertificate().fingerprint256 yields once normalized).
-export function generateControlCert({ cn = "alien-agent-id-control", days = 3650, now = new Date() } = {}) {
+export function generateControlCert({
+  cn = "alien-agent-id-control",
+  days = 3650,
+  now = new Date(),
+  // Serial bytes — injectable so tests can pin the leading-zero / high-bit edge
+  // cases the random default only hits ~1/512 of the time.
+  serial: serialBytes = randomBytes(16),
+} = {}) {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const spki = publicKey.export({ type: "spki", format: "der" }); // complete SubjectPublicKeyInfo
 
@@ -94,7 +111,7 @@ export function generateControlCert({ cn = "alien-agent-id-control", days = 3650
     UTCTIME(utcTime(new Date(now.getTime() + days * 86_400_000))),
   );
   const version = ctx(0, INTEGER(Buffer.from([2]))); // [0] EXPLICIT v3
-  const serial = INTEGER(randomBytes(16));
+  const serial = INTEGER(serialBytes);
   const basicConstraints = SEQ(OID(OID_BASIC_CONSTRAINTS), BOOL(true), OCTETSTRING(SEQ())); // cA=FALSE (default)
   const extensions = ctx(3, SEQ(basicConstraints)); // [3] EXPLICIT Extensions
 
