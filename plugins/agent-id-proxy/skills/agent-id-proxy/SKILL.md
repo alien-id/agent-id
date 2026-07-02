@@ -106,6 +106,13 @@ Don't retry a `403 access_denied` — the level is the owner's decision. Ask the
 owner to widen it (`agent-id-vault set-access`, human-confirmed). Denials are
 logged as `access_denied` events.
 
+Classification needs the operation to be visible in the request. A POST whose
+body doesn't reveal a read — a **persisted-query** GraphQL (hash only, no query
+text), opaque binary RPC (gRPC-web/Connect), or an unknown JSON-RPC method —
+fails safe: it's denied, not allowed. So `ro` works cleanly on REST-with-verbs,
+inline GraphQL, JMAP, and known JSON-RPC, and over-blocks (reads too) on
+hash-only endpoints. See the vault skill's "Where `ro` works" table.
+
 ## Wallet credentials — transaction signing in the proxy
 
 `solana-keypair` / `evm-keypair` credentials (created with

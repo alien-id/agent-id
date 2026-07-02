@@ -158,10 +158,32 @@ the access level being granted.
 
 Any credential the proxy restricts (level `ro`, or `rw` with rules) is also
 sealed against `show`/`exec` — its plaintext can't be extracted to sidestep the
-gate. Two things `ro` deliberately does **not** cover: a server that mutates on
-a `GET` (per HTTP safe-method convention `GET`/`HEAD`/`OPTIONS` are treated as
-reads — constrain such an endpoint with an explicit `deny` rule), and raw
-IMAP/SMTP (no HTTP method to gate — use an API or a web session).
+gate.
+
+### Where `ro` works — the operation must be legible in the request
+
+Read/write can only be told apart when the request reveals the operation. It
+**fails safe**: when it can't tell, it denies (never silently allows a write).
+
+| API shape | Under `ro` |
+| --- | --- |
+| REST with real verbs (Gmail API, Stripe, GitHub REST) | reads pass, writes blocked — **best case** |
+| GraphQL with the **query text inline** in the body | `query` passes, `mutation`/`subscription` blocked |
+| JMAP (Fastmail) | `*/get`,`*/query` pass; `*/set` blocked |
+| JSON-RPC with recognized read methods | reads pass; unknown methods blocked |
+| GraphQL **persisted queries** (hash only, no query text — Reddit/X web) | over-blocks: reads AND writes denied |
+| Opaque binary RPC (gRPC-web, Connect, Twirp) | over-blocks: denied |
+
+Two things `ro` deliberately does **not** cover: a server that mutates on a
+`GET` (per HTTP safe-method convention `GET`/`HEAD`/`OPTIONS` are reads —
+constrain such an endpoint with an explicit `deny` rule), and raw IMAP/SMTP
+(no HTTP method to gate — use an API or a web session).
+
+For an over-blocked endpoint you have two levers: a scoped `allow` rule for a
+read path (but if reads and writes share one URL, e.g. a single `/graphql`, that
+also reopens writes there); or, for a token API, prefer a **server-side
+read-only scope** at onboarding (e.g. Gmail `gmail.readonly`) — the only
+enforcement even a client-side bug can't defeat.
 
 > The policy is enforced by the proxy / browser-session processes. With an
 > agent-key vault the agent could in principle open the vault directly, so for
