@@ -89,6 +89,23 @@ The credential is materialized into the request based on its type:
 
 Upstream scheme defaults to **HTTPS**. Set `upstreamScheme: "http"` on the credential to opt into plain HTTP (legacy/internal services). The proxy rewrites the `Host` header and strips `Origin` / `Referer` before forwarding.
 
+## Access levels (read-only credentials)
+
+A credential added with `--access ro` (see the vault skill) is enforced here on
+every request: `GET`/`HEAD`/`OPTIONS` pass; a `POST`/`PUT`/`PATCH`/`DELETE` is
+allowed only if the credential's `accessRules` allow it or the body classifies
+as a tunneled read (GraphQL `query`, JMAP `*/get`/`*/query`, JSON-RPC calls
+that don't submit transactions — so `getBalance` works on a ro wallet but
+`sendTransaction` doesn't). Anything else:
+
+```json
+{ "ok": false, "error": "access_denied", "credential": "mail-ro", "access": "ro", "reason": "write_blocked" }
+```
+
+Don't retry a `403 access_denied` — the level is the owner's decision. Ask the
+owner to widen it (`agent-id-vault set-access`, human-confirmed). Denials are
+logged as `access_denied` events.
+
 ## Wallet credentials — transaction signing in the proxy
 
 `solana-keypair` / `evm-keypair` credentials (created with
@@ -170,6 +187,7 @@ node CLI start --idle-timeout never     # disable (unattended agents)
 { "ok": false, "error": "credential_not_found", "credential": "github-pat" }
 { "ok": false, "error": "host_not_allowed", "credential": "github-pat", "host": "evil.example.com", "allowed": ["*.github.com"] }
 { "ok": false, "error": "vault_locked", "reason": "idle_timeout" }
+{ "ok": false, "error": "access_denied", "credential": "mail-ro", "access": "ro", "reason": "write_blocked" }
 { "ok": false, "error": "bad_request", "message": "..." }
 ```
 
@@ -182,8 +200,11 @@ node CLI status
 node CLI stop
 ```
 
-## v1 limitations
+## Limitations
 
 - **HTTPS only at the upstream leg** in URL-rewrite mode. The agent-to-proxy leg is plain HTTP loopback by design.
-- **No consent prompt.** Host allowlist is the only authorization gate in v1.
-- **No in-process re-unlock.** Restart the proxy to re-unlock after idle lock.
+- Authorization gates: per-credential **host allowlist**, **access level**
+  (`ro`/`rw` + rules), and — when started with `--require-consent` — a
+  per-(credential, host) human consent grant.
+- Stub-injection mode (legacy) enforces access levels by method/host/path only
+  — POST-tunneled reads are not classified there; use URL-rewrite mode.

@@ -20,6 +20,11 @@
 
 import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
 import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
+import { hostMatchesAllowlist, validateAccessFields } from "./access.mjs";
+
+// Domain matching lives in access.mjs (access rules share the syntax); kept
+// exported here for the proxy/browser consumers that import it from store.
+export { hostMatchesAllowlist };
 
 export const CREDENTIAL_TYPES = Object.freeze([
   "bearer",
@@ -120,6 +125,9 @@ export function validateRecord(rec) {
       `Credential ${rec.name}: upstreamScheme must be one of ${UPSTREAM_SCHEMES.join(", ")}`,
     );
   }
+  // Optional per-credential access level + rules (enforced by the proxy and
+  // the browser session server; see access.mjs).
+  validateAccessFields(rec);
   switch (rec.type) {
     case "bearer":
       requireNonEmpty(rec, ["value"]);
@@ -324,6 +332,10 @@ export function listMetadata(payload) {
     type: c.type,
     domains: c.domains,
     description: c.description || null,
+    // Access level is metadata, not a secret — agents need to see it to know
+    // which operations a credential permits (and how to ask for more).
+    ...(c.access ? { access: c.access } : {}),
+    ...(Array.isArray(c.accessRules) ? { accessRules: c.accessRules } : {}),
     // The wallet address is public by design — agents need it to build
     // transactions and check balances without opening the record.
     ...(c.publicKey ? { publicKey: c.publicKey } : {}),
@@ -389,23 +401,3 @@ export function wipePayload(payload) {
   payload.credentials.length = 0;
 }
 
-// ─── Domain allowlist matching ──────────────────────────────────────────────────
-
-// Supports literal hostnames and a single leading "*." wildcard.
-// `*.github.com` matches `github.com`, `api.github.com`, `x.y.github.com`.
-export function hostMatchesAllowlist(host, allowlist) {
-  if (!host || !Array.isArray(allowlist)) return false;
-  const hostLower = host.toLowerCase();
-  for (const entry of allowlist) {
-    const e = entry.toLowerCase();
-    if (e.startsWith("*.")) {
-      const suffix = e.slice(1); // ".github.com"
-      const bare = e.slice(2); // "github.com"
-      if (hostLower === bare) return true;
-      if (hostLower.endsWith(suffix)) return true;
-    } else if (hostLower === e) {
-      return true;
-    }
-  }
-  return false;
-}

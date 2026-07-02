@@ -26,6 +26,11 @@ import { sealProfile } from "./profile-store.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
 import { SECRET_FIELDS, hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { resolveOtp } from "./auto-login.mjs";
+import {
+  applyAccessGuard,
+  assertActionAllowed,
+  contextOptionsForAccess,
+} from "./access-guard.mjs";
 
 function sessionsDir(stateDir) {
   return path.join(stateDir, "browser-sessions");
@@ -125,8 +130,12 @@ export function assertFillAllowed(rec, host, field = null) {
   }
 }
 
-async function dispatch(page, msg) {
+async function dispatch(page, msg, policy = null) {
   const p = msg.params || {};
+  // Read-only sessions refuse the un-auditable/secret-bearing actions here;
+  // everything else stays available because the network gate (applyAccessGuard)
+  // is what actually stops mutations from reaching the service.
+  if (policy) assertActionAllowed(policy, msg.action);
   switch (msg.action) {
     case "info":
       return { url: page.url(), title: await page.title().catch(() => "") };
@@ -243,8 +252,27 @@ async function dispatch(page, msg) {
 }
 
 // Launch the session and serve actions until `close` (or a signal). Blocks.
-export async function runSession({ stateDir, name, headless, dekHex, profileFile, workDir }) {
-  const ctx = await launchContext({ profileDir: workDir, headless });
+// `policy` is the profile record's access policy ({access, accessRules}) —
+// enforced HERE, in the process holding the live cookies, not in the client.
+export async function runSession({
+  stateDir,
+  name,
+  headless,
+  dekHex,
+  profileFile,
+  workDir,
+  policy = null,
+}) {
+  const ctx = await launchContext({
+    profileDir: workDir,
+    headless,
+    contextOptions: policy ? contextOptionsForAccess(policy) : {},
+  });
+  if (policy) {
+    await applyAccessGuard(ctx, policy, {
+      log: (m) => process.stderr.write(`${m}\n`),
+    });
+  }
   const page = ctx.pages()[0] || (await ctx.newPage());
 
   // Single, idempotent shutdown: close the browser, RESEAL the refreshed profile,
@@ -281,7 +309,7 @@ export async function runSession({ stateDir, name, headless, dekHex, profileFile
       }
       msg._stateDir = stateDir;
       try {
-        const result = await dispatch(page, msg);
+        const result = await dispatch(page, msg, policy);
         sock.end(JSON.stringify({ ok: true, ...result }) + "\n");
       } catch (err) {
         sock.end(JSON.stringify({ ok: false, error: err.message || String(err) }) + "\n");
