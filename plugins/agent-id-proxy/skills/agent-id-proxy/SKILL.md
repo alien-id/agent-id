@@ -94,9 +94,10 @@ Upstream scheme defaults to **HTTPS**. Set `upstreamScheme: "http"` on the crede
 A credential added with `--access ro` (see the vault skill) is enforced here on
 every request: `GET`/`HEAD`/`OPTIONS` pass; a `POST`/`PUT`/`PATCH`/`DELETE` is
 allowed only if the credential's `accessRules` allow it or the body classifies
-as a tunneled read (GraphQL `query`, JMAP `*/get`/`*/query`, JSON-RPC calls
-that don't submit transactions — so `getBalance` works on a ro wallet but
-`sendTransaction` doesn't). Anything else:
+as a tunneled read (an inline GraphQL `query`, a JMAP `*/get`/`*/query`, or a
+JSON-RPC method on the recognized-read allowlist such as `eth_call`/`getBalance`).
+It is default-deny: a submitting method like `sendTransaction`, and any
+unrecognized method, are blocked. Anything else:
 
 ```json
 { "ok": false, "error": "access_denied", "credential": "mail-ro", "access": "ro", "reason": "write_blocked" }
