@@ -156,6 +156,13 @@ cannot approve it itself, and `add`/`generate` refuse to overwrite a record
 with a wider level. When a human types the secret via `--form`, the form shows
 the access level being granted.
 
+Any credential the proxy restricts (level `ro`, or `rw` with rules) is also
+sealed against `show`/`exec` — its plaintext can't be extracted to sidestep the
+gate. Two things `ro` deliberately does **not** cover: a server that mutates on
+a `GET` (per HTTP safe-method convention `GET`/`HEAD`/`OPTIONS` are treated as
+reads — constrain such an endpoint with an explicit `deny` rule), and raw
+IMAP/SMTP (no HTTP method to gate — use an API or a web session).
+
 > The policy is enforced by the proxy / browser-session processes. With an
 > agent-key vault the agent could in principle open the vault directly, so for
 > a hard guarantee init the vault with `--unlock passkey` (no agent-key slot)

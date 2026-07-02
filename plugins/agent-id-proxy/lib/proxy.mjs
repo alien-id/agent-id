@@ -109,6 +109,12 @@ function structuredError(res, status, body) {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(payload),
     "X-AgentVault-Proxy-Error": body.error || "unknown",
+    // These errors are returned BEFORE the request body is consumed (bad host,
+    // access denied, locked, …). On a keep-alive connection Node would parse
+    // the unread body as a pipelined request and reject it with a spurious 400,
+    // masking our status. Closing the connection discards the leftover body so
+    // the client sees this response cleanly.
+    Connection: "close",
   });
   res.end(payload);
 }
@@ -683,6 +689,9 @@ export function createProxy({
       });
     }
     if (!decision.allowed) {
+      // Drain any unconsumed request body (a write's payload) so the HTTP
+      // framing stays clean before we send the denial on this connection.
+      if (accessBody == null) req.resume();
       logAccess({
         event: "access_denied",
         credential: cred.name,

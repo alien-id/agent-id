@@ -14,6 +14,7 @@ import {
   effectiveAccess,
   evaluateAccess,
   isAccessRelaxation,
+  isAccessRestricted,
   pathMatchesGlob,
   strictestAccess,
 } from "../plugins/agent-id-vault/lib/access.mjs";
@@ -75,6 +76,18 @@ describe("evaluateAccess", () => {
     }
   });
 
+  it("a read-shaped body does NOT promote PUT/PATCH/DELETE (only POST tunnels reads)", () => {
+    const ro = { ...base, access: "ro" };
+    const readBody = '{"query":"{ __typename }"}';
+    for (const m of ["DELETE", "PUT", "PATCH"]) {
+      const d = evaluateAccess(ro, req({ method: m, body: readBody }));
+      assert.equal(d.allowed, false, `${m} with read-shaped body must stay blocked`);
+      assert.equal(d.needsBody, undefined, `${m} must not even ask for the body`);
+    }
+    // POST with the same read body is the only one that passes.
+    assert.equal(evaluateAccess(ro, req({ method: "POST", body: readBody })).allowed, true);
+  });
+
   it("asks for the body once, when only the body can decide", () => {
     const ro = { ...base, access: "ro" };
     const first = evaluateAccess(ro, req({ method: "POST" }));
@@ -127,6 +140,24 @@ describe("body classification (POST-tunneled reads)", () => {
     assert.equal(classifyBodyRead('[{"query":"query{a}"},{"query":"{b}"}]'), "read");
   });
 
+  it("GraphQL: a multi-operation doc with a mutation is a write even if it leads with query", () => {
+    // operationName could select the mutation — leading keyword is not enough.
+    assert.equal(
+      classifyBodyRead(
+        JSON.stringify({
+          query: "query GetMe { me { id } }\nmutation DoBad { sendMail }",
+          operationName: "DoBad",
+        }),
+      ),
+      "write",
+    );
+    // a `#`-comment must not hide a real mutation, nor fake a leading query
+    assert.equal(classifyBodyRead('{"query":"# query\\nmutation { x }"}'), "write");
+    assert.equal(classifyBodyRead('{"query":"query Foo { a }"}'), "read");
+    // leading comment before a genuine query stays a read
+    assert.equal(classifyBodyRead('{"query":"# hi\\nquery { a }"}'), "read");
+  });
+
   it("JMAP: get/query read, set writes", () => {
     assert.equal(
       classifyBodyRead(
@@ -140,15 +171,30 @@ describe("body classification (POST-tunneled reads)", () => {
     );
   });
 
-  it("JSON-RPC: balance reads, sends write", () => {
+  it("JSON-RPC: recognized reads pass, sends write", () => {
     assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"eth_getBalance"}'), "read");
+    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"eth_call"}'), "read");
     assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"getBalance"}'), "read");
+    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"simulateTransaction"}'), "read");
     assert.equal(
       classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction"}'),
       "write",
     );
     assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"sendTransaction"}'), "write");
     assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"requestAirdrop"}'), "write");
+  });
+
+  it("JSON-RPC is default-DENY: unrecognized methods are unknown (blocked), not read", () => {
+    // Writes on non-EVM/Solana RPC services that the old denylist let through as
+    // reads — now unknown (→ blocked). `wallet_sendCalls` is explicitly a write.
+    for (const method of ["deleteUser", "sendtoaddress", "starknet_addInvokeTransaction", "admin_addPeer"]) {
+      assert.equal(
+        classifyBodyRead(`{"jsonrpc":"2.0","id":1,"method":"${method}"}`),
+        "unknown",
+        `${method} must not classify as a read`,
+      );
+    }
+    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"wallet_sendCalls"}'), "write");
   });
 
   it("unknown shapes stay unknown (blocked under ro)", () => {
@@ -207,6 +253,29 @@ describe("relaxation detection", () => {
       ),
       false,
     );
+  });
+
+  it("REORDERING an allow ahead of a deny is a relaxation (first-match-wins)", () => {
+    const allow = { effect: "allow", methods: ["POST"], path: "/x" };
+    const deny = { effect: "deny", methods: ["POST"], path: "/x" };
+    // Same set, different order: [deny, allow] denies /x; [allow, deny] allows it.
+    assert.equal(
+      isAccessRelaxation(
+        { access: "ro", accessRules: [deny, allow] },
+        { access: "ro", accessRules: [allow, deny] },
+      ),
+      true,
+    );
+  });
+});
+
+describe("isAccessRestricted", () => {
+  it("true for ro and for any accessRules, false for plain rw", () => {
+    assert.equal(isAccessRestricted({ access: "ro" }), true);
+    assert.equal(isAccessRestricted({ access: "rw", accessRules: [{ effect: "deny" }] }), true);
+    assert.equal(isAccessRestricted({ accessRules: [{ effect: "deny" }] }), true);
+    assert.equal(isAccessRestricted({ access: "rw" }), false);
+    assert.equal(isAccessRestricted({}), false);
   });
 });
 

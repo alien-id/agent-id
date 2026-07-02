@@ -18,7 +18,11 @@
 // The DOM stays fully interactive (navigate/click/type/scroll) — typing a
 // search query is a read — because the wire, not the widget, is the boundary.
 
-import { effectiveAccess, evaluateAccess } from "@alien-id/agent-id-vault/lib/access.mjs";
+import {
+  effectiveAccess,
+  evaluateAccess,
+  isAccessRestricted,
+} from "@alien-id/agent-id-vault/lib/access.mjs";
 
 // Actions refused on a read-only session. Everything observational or
 // DOM-interactive stays available; mutations die at the network gate.
@@ -36,9 +40,11 @@ export function assertActionAllowed(rec, action) {
 }
 
 // Extra context options for a restricted profile: service workers would
-// answer fetches without touching our route handler, so block them.
+// answer fetches without touching our route handler, so block them for ANY
+// active guard (ro OR rule-restricted) — a deny rule is otherwise bypassable
+// via a service-worker-replayed fetch.
 export function contextOptionsForAccess(rec) {
-  return effectiveAccess(rec) === "ro" ? { serviceWorkers: "block" } : {};
+  return isAccessRestricted(rec) ? { serviceWorkers: "block" } : {};
 }
 
 // Decide one request. Exported for tests (no browser needed).
@@ -65,24 +71,24 @@ export function guardDecision(rec, { method, url, postData }) {
 // Install the network gate on a (patchright) BrowserContext. No-op unless the
 // record is read-only or carries rules. Returns true when a guard is active.
 export async function applyAccessGuard(ctx, rec, { log = () => {} } = {}) {
-  const restricted = effectiveAccess(rec) === "ro" || Array.isArray(rec.accessRules);
+  const restricted = isAccessRestricted(rec);
   if (!restricted) return false;
 
-  if (effectiveAccess(rec) === "ro") {
-    // WebSocket frames bypass route interception — deny the channel up front;
-    // sites degrade to HTTP polling, which the gate does inspect.
-    await ctx.addInitScript(() => {
-      try {
-        Object.defineProperty(window, "WebSocket", {
-          value: undefined,
-          writable: false,
-          configurable: false,
-        });
-      } catch {
-        /* already locked down */
-      }
-    });
-  }
+  // WebSocket frames bypass route interception — deny the channel up front for
+  // ANY active guard (ro OR rule-restricted); sites degrade to HTTP polling,
+  // which the route gate does inspect. Gating this on `ro` alone would leave a
+  // deny-rule profile writable over a WebSocket.
+  await ctx.addInitScript(() => {
+    try {
+      Object.defineProperty(window, "WebSocket", {
+        value: undefined,
+        writable: false,
+        configurable: false,
+      });
+    } catch {
+      /* already locked down */
+    }
+  });
 
   await ctx.route("**/*", async (route) => {
     const request = route.request();

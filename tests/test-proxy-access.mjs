@@ -41,7 +41,10 @@ function startUpstream() {
   });
 }
 
-// URL-rewrite mode request: /<credname>/<host:port>/<path>
+// URL-rewrite mode request: /<credname>/<host:port>/<path>. A body is sent with
+// an explicit Content-Length (as real JSON clients do) rather than chunked —
+// Node's own http client mis-reports the status when the server closes the
+// connection mid-chunked-upload, which is a client quirk, not proxy behavior.
 function rewriteRequest({ proxyPort, credname, upstream, pathq, method = "GET", body = null }) {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -50,7 +53,13 @@ function rewriteRequest({ proxyPort, credname, upstream, pathq, method = "GET", 
         port: proxyPort,
         method,
         path: `/${credname}/${upstream.host}:${upstream.port}${pathq}`,
-        headers: body != null ? { "Content-Type": "application/json" } : {},
+        headers:
+          body != null
+            ? {
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(body),
+              }
+            : {},
       },
       (res) => {
         const chunks = [];
@@ -176,6 +185,21 @@ describe("proxy access-level enforcement", () => {
     });
     assert.equal(r.status, 200);
     assert.ok(upstreamSeen.value.body.includes("inbox"), "body forwarded intact");
+  });
+
+  it("ro: a DELETE with a read-shaped body is still blocked (only POST tunnels reads)", async () => {
+    upstreamSeen.value = null;
+    const r = await rewriteRequest({
+      proxyPort,
+      credname: "mail-ro",
+      upstream,
+      pathq: "/v1/messages/42",
+      method: "DELETE",
+      body: JSON.stringify({ query: "{ __typename }" }),
+    });
+    assert.equal(r.status, 403);
+    assert.equal(JSON.parse(r.body).error, "access_denied");
+    assert.equal(upstreamSeen.value, null, "the DELETE must never reach upstream");
   });
 
   it("ro: a GraphQL mutation POST is blocked", async () => {

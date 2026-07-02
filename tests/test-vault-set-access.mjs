@@ -118,7 +118,7 @@ test("access-level lifecycle via the CLI", async (t) => {
         "exec", "--env", "T=mail.value", "--state-dir", dir, "--", "node", "-e", "0",
       ]);
       assert.notEqual(r.code, 0);
-      assert.match(r.stderr + r.stdout, /access level 'ro'/);
+      assert.match(r.stderr + r.stdout, /access-restricted/);
     });
 
     await t.test("add cannot widen an existing ro credential", async () => {
@@ -177,6 +177,40 @@ test("access-level lifecycle via the CLI", async (t) => {
       assert.equal(rec.accessRules.length, 1);
       assert.equal(rec.accessRules[0].effect, "allow");
     });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a rw credential with deny accessRules is sealed too (show redacts, exec refuses)", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "rwrules-"));
+  try {
+    await makeVault(dir);
+    // rw level, but a deny rule — the proxy enforces the rule, so the plaintext
+    // must not leak or the rule is theater.
+    const add = await run(
+      ["add", "--name", "svc", "--type", "bearer", "--domains", "api.svc.com",
+       "--value-env", "TOK", "--state-dir", dir],
+      { TOK: "rw_rules_secret" },
+    );
+    assert.equal(add.code, 0, add.stderr);
+    // Attach a deny rule (tightening → no ceremony).
+    const setr = await run([
+      "set-access", "--name", "svc",
+      "--rules", '[{"effect":"deny","methods":["POST","PUT","PATCH","DELETE"]}]',
+      "--state-dir", dir,
+    ]);
+    assert.equal(setr.code, 0, setr.stderr);
+
+    const show = await run(["show", "--name", "svc", "--state-dir", dir]);
+    assert.ok(!show.stdout.includes("rw_rules_secret"), "show leaked a rule-restricted secret");
+    assert.equal(JSON.parse(show.stdout).sealed, true);
+
+    const exec = await run([
+      "exec", "--env", "T=svc.value", "--state-dir", dir, "--", "node", "-e", "0",
+    ]);
+    assert.notEqual(exec.code, 0);
+    assert.match(exec.stderr + exec.stdout, /access-restricted/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

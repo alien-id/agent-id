@@ -71,7 +71,12 @@ import {
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
 import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../lib/store.mjs";
-import { ACCESS_LEVELS, effectiveAccess, isAccessRelaxation } from "../lib/access.mjs";
+import {
+  ACCESS_LEVELS,
+  effectiveAccess,
+  isAccessRelaxation,
+  isAccessRestricted,
+} from "../lib/access.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { normalizeTotpInput } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { generateSolanaKeypair } from "@alien-id/agent-id-core/lib/solana.mjs";
@@ -605,8 +610,8 @@ async function cmdShow(flags) {
     const sealedWhy =
       rec.exportable === false
         ? "generated in-vault, not exportable"
-        : effectiveAccess(rec) === "ro"
-          ? "access level 'ro' — enforced via the proxy/browser only"
+        : isAccessRestricted(rec)
+          ? `access-restricted (${describeAccess(rec)}) — enforced via the proxy/browser only`
           : null;
     if (sealedWhy) {
       const redacted = { ...rec };
@@ -1133,13 +1138,15 @@ async function cmdExec() {
             `'${s.field}' cannot leave the vault. Use the proxy to exercise it.`,
         );
       }
-      // An access-restricted credential handed raw to a child process would
-      // bypass the proxy/browser read-only gate — refuse, same as sealed.
-      if (effectiveAccess(rec) === "ro" && SECRET_FIELDS.includes(s.field)) {
+      // An access-restricted credential (ro, OR rw with deny rules) handed raw
+      // to a child process would bypass the proxy/browser gate — refuse, same
+      // as sealed. Rule-only restrictions count: the rules are enforced at the
+      // proxy, so leaking the plaintext would make them theater.
+      if (isAccessRestricted(rec) && SECRET_FIELDS.includes(s.field)) {
         return outputError(
-          `Credential '${s.credName}' has access level 'ro'; field '${s.field}' cannot be ` +
-            "exported to a child process (that would bypass read-only enforcement). " +
-            "Use the proxy/browser, or ask the owner to run `set-access --access rw`.",
+          `Credential '${s.credName}' is access-restricted (${describeAccess(rec)}); field ` +
+            `'${s.field}' cannot be exported to a child process (that would bypass enforcement). ` +
+            "Use the proxy/browser, or ask the owner to run `set-access --access rw` (and clear rules).",
         );
       }
       const value = rec[s.field];

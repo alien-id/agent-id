@@ -12,3 +12,11 @@ immediately, widening requires the owner's out-of-band confirmation via the
 secure prompt, and `add`/`generate` refuse to widen an existing record.
 Enforcement happens in agent-id-proxy (structured `403 access_denied`) and
 agent-id-browser (network-layer route gate for sealed sessions).
+
+Hardening: body classification runs only for POST (a read-shaped body can't
+promote a DELETE/PUT/PATCH); JSON-RPC is default-deny (unrecognized methods are
+not treated as reads); rule reordering counts as a relaxation (owner ceremony);
+rule-restricted `rw` credentials are sealed and their browser sessions block
+WebSockets/service-workers too; multi-operation GraphQL documents are writes if
+they contain any mutation/subscription. The proxy closes the connection on
+early denials so an unconsumed request body can't corrupt the response status.

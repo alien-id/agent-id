@@ -64,6 +64,14 @@ export function effectiveAccess(rec) {
   return rec && rec.access != null ? rec.access : "rw";
 }
 
+// Is this credential restricted in ANY way (level or rules)? A rule-only
+// restriction (access:"rw" + a deny rule) still means the proxy/browser gate
+// the credential, so its plaintext must be sealed and the browser's
+// route-bypass channels closed — otherwise the rule is theater.
+export function isAccessRestricted(rec) {
+  return effectiveAccess(rec) === "ro" || Array.isArray(rec && rec.accessRules);
+}
+
 // ─── Validation (called from store.mjs validateRecord) ────────────────────────
 
 export function validateAccessFields(rec) {
@@ -136,15 +144,45 @@ function ruleMatches(rule, { method, host, path }) {
 
 const JMAP_READ_METHOD_RE = /\/(get|query|queryChanges|changes|echo|parse)$/;
 
-// JSON-RPC calls that submit/sign state changes (EVM + Solana vocabularies).
+// JSON-RPC is default-DENY: a method is a read ONLY if it matches a known
+// read-shaped vocabulary; anything unrecognized is "unknown" → blocked under
+// ro (matching the GraphQL/JMAP classifiers). This inverts an earlier
+// denylist that treated every non-EVM/Solana-write method as a read, so a
+// generic `deleteUser` / Bitcoin `sendtoaddress` / `wallet_sendCalls` no
+// longer slips through as a read.
+const JSONRPC_READ_RE =
+  /^(eth_(get\w+|call|blockNumber|chainId|gasPrice|estimateGas|feeHistory|maxPriorityFeePerGas|accounts|syncing|protocolVersion)|net_\w+|web3_\w+|get[A-Z]\w*|simulate\w+|isBlockhashValid|getHealth)$/;
+// Explicit writes (kept for clarity / defense in depth; unknown is already denied).
 const JSONRPC_WRITE_RE =
-  /^(eth_send|eth_sign|personal_|sendTransaction$|signTransaction$|signAllTransactions$|requestAirdrop$)/;
+  /^(eth_send|eth_sign|personal_|wallet_send|sendTransaction$|sendRawTransaction$|signTransaction$|signAllTransactions$|requestAirdrop$)/;
+
+// GraphQL operation-definition keyword at the start of a line (after stripping
+// leading commas/whitespace). Used to detect ANY mutation/subscription in a
+// multi-operation document — a request can name a later operation via
+// `operationName`, so the leading keyword alone is not trustworthy.
+const GQL_OP_RE = /(^|[\s,{}])(query|mutation|subscription)\b/g;
 
 function classifyGraphql(doc) {
-  // { query: "query { … }" } or "{ … }" (shorthand query). Mutations and
-  // subscriptions are writes. Operation type is the first keyword.
-  const q = String(doc.query).trimStart();
-  return /^(query\b|\{)/.test(q) ? "read" : "write";
+  // { query: "query { … }" } or "{ … }" (shorthand query). A document is a read
+  // ONLY if it contains no mutation/subscription operation anywhere — otherwise
+  // `operationName` could select a write even when the text starts with `query`.
+  // Strip line comments first (a `#`-comment could otherwise hide a keyword or
+  // fake a leading one). Shorthand `{ … }` with no keyword is an anonymous query.
+  const raw = String(doc.query || "");
+  const stripped = raw.replace(/#[^\n\r]*/g, "");
+  let sawWrite = false;
+  let sawQuery = false;
+  let m;
+  GQL_OP_RE.lastIndex = 0;
+  while ((m = GQL_OP_RE.exec(stripped)) !== null) {
+    if (m[2] === "query") sawQuery = true;
+    else sawWrite = true;
+  }
+  if (sawWrite) return "write";
+  if (sawQuery) return "read";
+  // No operation keyword at all: a bare `{ … }` shorthand query is a read;
+  // anything else (empty / unparseable) is unknown → blocked under ro.
+  return /^\s*\{/.test(stripped) ? "read" : "unknown";
 }
 
 function classifyOne(obj) {
@@ -158,7 +196,9 @@ function classifyOne(obj) {
     return allRead ? "read" : "write";
   }
   if (typeof obj.method === "string" && (obj.jsonrpc != null || obj.id !== undefined)) {
-    return JSONRPC_WRITE_RE.test(obj.method) ? "write" : "read";
+    if (JSONRPC_WRITE_RE.test(obj.method)) return "write";
+    if (JSONRPC_READ_RE.test(obj.method)) return "read";
+    return "unknown"; // default-deny: unrecognized RPC method is not a proven read
   }
   return "unknown";
 }
@@ -195,9 +235,16 @@ export function classifyBodyRead(body) {
  *
  * `path` is the pathname only (no query string). `body` is the UTF-8 request
  * body, or undefined when the caller has not buffered it. When the decision
- * would require the body to classify (a non-read method under "ro" with no
- * matching rule), the result carries `needsBody: true` and `allowed: false`;
- * the caller may buffer the body and re-evaluate.
+ * would require the body to classify (a POST that might be a tunneled read
+ * under "ro" with no matching rule), the result carries `needsBody: true` and
+ * `allowed: false`; the caller may buffer the body and re-evaluate.
+ *
+ * NOTE on `ro`: GET/HEAD/OPTIONS are treated as reads per the HTTP safe-method
+ * contract (RFC 9110 §9.2.1) — `ro` does NOT defend against a server that
+ * mutates on GET (unsubscribe/`?action=delete` links); constrain those with an
+ * explicit deny accessRule if needed. Body classification runs ONLY for POST —
+ * the sole method the read-through-POST protocols (GraphQL/JMAP/JSON-RPC) use —
+ * so a read-shaped body can never promote a PUT/PATCH/DELETE to allowed.
  */
 export function evaluateAccess(rec, { method, host, path, body }) {
   const m = String(method || "GET").toUpperCase();
@@ -216,6 +263,10 @@ export function evaluateAccess(rec, { method, host, path, body }) {
   if (effectiveAccess(rec) === "rw") return { allowed: true, reason: "level_rw" };
 
   if (READ_METHODS.includes(m)) return { allowed: true, reason: "read_method" };
+
+  // Every non-read method other than POST is a write under "ro" — its body is
+  // never consulted, so a read-shaped payload can't unlock a DELETE/PUT/PATCH.
+  if (m !== "POST") return { allowed: false, reason: "write_blocked" };
 
   if (body === undefined) {
     return { allowed: false, reason: "write_blocked", needsBody: true };
@@ -243,10 +294,21 @@ function ruleSet(rec, effect) {
   );
 }
 
+// Ordered, effect-qualified key list — position matters because evaluateAccess
+// is first-match-wins.
+function orderedRuleKeys(rec) {
+  return (Array.isArray(rec.accessRules) ? rec.accessRules : []).map((r) =>
+    JSON.stringify({ effect: r.effect, methods: r.methods, hosts: r.hosts, path: r.path }),
+  );
+}
+
 /**
  * Does `after` grant anything `before` did not? True when the level widens
- * (ro→rw), an allow rule appears that wasn't there, or a deny rule disappears.
- * Tightening (rw→ro, adding deny rules, dropping allow rules) is false.
+ * (ro→rw), an allow rule appears that wasn't there, a deny rule disappears, OR
+ * the relative order of rules common to both changes — because evaluateAccess
+ * is first-match-wins, moving an allow ahead of an overlapping deny widens
+ * access even when the rule SET is unchanged. Pure tightening (rw→ro, adding
+ * deny rules, dropping allow rules, no reorder) is false.
  */
 export function isAccessRelaxation(before, after) {
   if (ACCESS_RANK[effectiveAccess(after)] > ACCESS_RANK[effectiveAccess(before)]) return true;
@@ -257,6 +319,17 @@ export function isAccessRelaxation(before, after) {
   const afterDeny = ruleSet(after, "deny");
   for (const r of ruleSet(before, "deny")) {
     if (!afterDeny.has(r)) return true;
+  }
+  // Order sensitivity: compare the relative order of rules present in both. A
+  // swap (allow moved before a deny it previously lost to) flips precedence.
+  const beforeKeys = orderedRuleKeys(before);
+  const afterKeys = orderedRuleKeys(after);
+  const beforeSet = new Set(beforeKeys);
+  const afterSet = new Set(afterKeys);
+  const bCommon = beforeKeys.filter((k) => afterSet.has(k));
+  const aCommon = afterKeys.filter((k) => beforeSet.has(k));
+  for (let i = 0; i < bCommon.length; i++) {
+    if (bCommon[i] !== aCommon[i]) return true;
   }
   return false;
 }
