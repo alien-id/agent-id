@@ -169,6 +169,8 @@ describe("body classification (POST-tunneled reads)", () => {
       classifyBodyRead('{"methodCalls":[["Email/get",{},"0"],["EmailSubmission/set",{},"1"]]}'),
       "write",
     );
+    // an empty batch is a no-op → unknown (blocked under ro), not vacuously read
+    assert.equal(classifyBodyRead('{"methodCalls":[]}'), "unknown");
   });
 
   it("JSON-RPC: recognized reads pass, sends write", () => {
@@ -255,7 +257,7 @@ describe("relaxation detection", () => {
     );
   });
 
-  it("REORDERING an allow ahead of a deny is a relaxation (first-match-wins)", () => {
+  it("REORDERING an allow ahead of an overlapping deny is a relaxation (first-match-wins)", () => {
     const allow = { effect: "allow", methods: ["POST"], path: "/x" };
     const deny = { effect: "deny", methods: ["POST"], path: "/x" };
     // Same set, different order: [deny, allow] denies /x; [allow, deny] allows it.
@@ -265,6 +267,45 @@ describe("relaxation detection", () => {
         { access: "ro", accessRules: [allow, deny] },
       ),
       true,
+    );
+  });
+
+  it("harmless reorders and tightenings do NOT require the ceremony", () => {
+    const allow = { effect: "allow", methods: ["POST"], path: "/x" };
+    const deny = { effect: "deny", methods: ["POST"], path: "/x" };
+    const denyGet = { effect: "deny", methods: ["GET"], path: "/y" };
+    const allowOpt = { effect: "allow", methods: ["OPTIONS"], path: "/z" };
+    // moving a deny AHEAD of an allow is a tightening → not a relaxation
+    assert.equal(
+      isAccessRelaxation(
+        { access: "ro", accessRules: [allow, deny] },
+        { access: "ro", accessRules: [deny, allow] },
+      ),
+      false,
+    );
+    // reordering two denies among themselves → neutral
+    assert.equal(
+      isAccessRelaxation(
+        { access: "ro", accessRules: [deny, denyGet] },
+        { access: "ro", accessRules: [denyGet, deny] },
+      ),
+      false,
+    );
+    // reordering two allows among themselves → neutral
+    assert.equal(
+      isAccessRelaxation(
+        { access: "ro", accessRules: [allow, allowOpt] },
+        { access: "ro", accessRules: [allowOpt, allow] },
+      ),
+      false,
+    );
+    // an allow moving ahead of a NON-overlapping deny (different method) → neutral
+    assert.equal(
+      isAccessRelaxation(
+        { access: "ro", accessRules: [denyGet, allow] },
+        { access: "ro", accessRules: [allow, denyGet] },
+      ),
+      false,
     );
   });
 });

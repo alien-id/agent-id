@@ -189,7 +189,9 @@ function classifyOne(obj) {
   if (!obj || typeof obj !== "object") return "unknown";
   if (typeof obj.query === "string") return classifyGraphql(obj);
   if (Array.isArray(obj.methodCalls)) {
-    // JMAP request: every invocation must be a read method.
+    // JMAP request: every invocation must be a read method. An empty batch is a
+    // no-op — classify as unknown (blocked under ro) rather than vacuously read.
+    if (obj.methodCalls.length === 0) return "unknown";
     const allRead = obj.methodCalls.every(
       (c) => Array.isArray(c) && typeof c[0] === "string" && JMAP_READ_METHOD_RE.test(c[0]),
     );
@@ -294,21 +296,40 @@ function ruleSet(rec, effect) {
   );
 }
 
-// Ordered, effect-qualified key list — position matters because evaluateAccess
-// is first-match-wins.
-function orderedRuleKeys(rec) {
-  return (Array.isArray(rec.accessRules) ? rec.accessRules : []).map((r) =>
-    JSON.stringify({ effect: r.effect, methods: r.methods, hosts: r.hosts, path: r.path }),
+// Effect-qualified key for a rule (position handled separately). Two rules with
+// the same {effect, methods, hosts, path} are interchangeable.
+function ruleKey(r) {
+  return JSON.stringify({ effect: r.effect, methods: r.methods, hosts: r.hosts, path: r.path });
+}
+
+// Do two rules overlap — i.e. could some request match BOTH? If so, their
+// relative order decides the outcome (first-match-wins). Conservative: a null
+// dimension means "matches anything" on that axis, so it overlaps unless the
+// other side is a disjoint concrete set.
+function rulesOverlap(a, b) {
+  const dimOverlap = (x, y, eq) => {
+    if (x == null || y == null) return true; // one is unconstrained on this axis
+    return x.some((xi) => y.some((yi) => eq(xi, yi)));
+  };
+  const methodsOk = dimOverlap(
+    a.methods && a.methods.map((m) => m.toUpperCase()),
+    b.methods && b.methods.map((m) => m.toUpperCase()),
+    (x, y) => x === y,
   );
+  if (!methodsOk) return false;
+  // hosts / path can't be proven disjoint cheaply (wildcards/globs), so treat
+  // any host/path pairing as potentially overlapping — the safe direction.
+  return true;
 }
 
 /**
  * Does `after` grant anything `before` did not? True when the level widens
  * (ro→rw), an allow rule appears that wasn't there, a deny rule disappears, OR
- * the relative order of rules common to both changes — because evaluateAccess
- * is first-match-wins, moving an allow ahead of an overlapping deny widens
- * access even when the rule SET is unchanged. Pure tightening (rw→ro, adding
- * deny rules, dropping allow rules, no reorder) is false.
+ * a reorder moves an allow ahead of an overlapping deny it previously lost to
+ * (first-match-wins, so that widens). Pure tightening (rw→ro, adding deny
+ * rules, dropping allow rules) and order-neutral reorders (deny↔deny,
+ * allow↔allow, or a deny moved EARLIER) are false — tightening applies without
+ * the owner ceremony.
  */
 export function isAccessRelaxation(before, after) {
   if (ACCESS_RANK[effectiveAccess(after)] > ACCESS_RANK[effectiveAccess(before)]) return true;
@@ -320,16 +341,27 @@ export function isAccessRelaxation(before, after) {
   for (const r of ruleSet(before, "deny")) {
     if (!afterDeny.has(r)) return true;
   }
-  // Order sensitivity: compare the relative order of rules present in both. A
-  // swap (allow moved before a deny it previously lost to) flips precedence.
-  const beforeKeys = orderedRuleKeys(before);
-  const afterKeys = orderedRuleKeys(after);
-  const beforeSet = new Set(beforeKeys);
-  const afterSet = new Set(afterKeys);
-  const bCommon = beforeKeys.filter((k) => afterSet.has(k));
-  const aCommon = afterKeys.filter((k) => beforeSet.has(k));
-  for (let i = 0; i < bCommon.length; i++) {
-    if (bCommon[i] !== aCommon[i]) return true;
+  // Precedence reorder: among rules common to both, a widening happens only if
+  // some allow rule A was AFTER an overlapping deny rule D in `before` but is
+  // now BEFORE it in `after` (A can now win where D used to). Reordering rules
+  // of the same effect, or moving a deny earlier, never widens.
+  const beforeRules = Array.isArray(before.accessRules) ? before.accessRules : [];
+  const afterRules = Array.isArray(after.accessRules) ? after.accessRules : [];
+  const afterKeys = new Set(afterRules.map(ruleKey));
+  const beforeKeys = new Set(beforeRules.map(ruleKey));
+  const common = (rules, otherKeys) =>
+    rules.map((r, i) => ({ r, i, key: ruleKey(r) })).filter((x) => otherKeys.has(x.key));
+  const bCommon = common(beforeRules, afterKeys);
+  const aPos = new Map(common(afterRules, beforeKeys).map((x) => [x.key, x.i]));
+  for (const allow of bCommon) {
+    if (allow.r.effect !== "allow") continue;
+    for (const deny of bCommon) {
+      if (deny.r.effect !== "deny") continue;
+      if (!rulesOverlap(allow.r, deny.r)) continue;
+      const denyBeforeAllow_before = deny.i < allow.i;
+      const allowBeforeDeny_after = aPos.get(allow.key) < aPos.get(deny.key);
+      if (denyBeforeAllow_before && allowBeforeDeny_after) return true;
+    }
   }
   return false;
 }

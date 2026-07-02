@@ -74,11 +74,32 @@ export async function applyAccessGuard(ctx, rec, { log = () => {} } = {}) {
   const restricted = isAccessRestricted(rec);
   if (!restricted) return false;
 
-  // WebSocket frames bypass route interception — deny the channel up front for
-  // ANY active guard (ro OR rule-restricted); sites degrade to HTTP polling,
-  // which the route gate does inspect. Gating this on `ro` alone would leave a
-  // deny-rule profile writable over a WebSocket.
+  // WebSocket frames bypass HTTP route interception, so a restricted session
+  // must deny the channel or a page could drive a write over it. Block it at
+  // the NETWORK layer (routeWebSocket, CDP-level) — evasion-proof, unlike a JS
+  // shadow of window.WebSocket which a Web/Shared Worker (self.WebSocket) or a
+  // fresh realm can recover. Feature-detected for older patchright; the
+  // main-world override stays as defense-in-depth / fallback. Sites degrade to
+  // HTTP polling, which the route gate does inspect.
+  if (typeof ctx.routeWebSocket === "function") {
+    try {
+      await ctx.routeWebSocket("**/*", (ws) => {
+        // Neither connectToServer() nor onMessage handlers are attached, so the
+        // upstream socket is never opened; close the client side immediately.
+        try {
+          ws.close();
+        } catch {
+          /* route already resolved */
+        }
+      });
+    } catch {
+      /* routeWebSocket unavailable/removed — the init-script fallback covers it */
+    }
+  }
   await ctx.addInitScript(() => {
+    // Defense in depth (covers any engine/version where routeWebSocket is
+    // absent). Shadow the constructor in the main world AND, best-effort, in
+    // Workers via a patched Worker that prepends the same shadow.
     try {
       Object.defineProperty(window, "WebSocket", {
         value: undefined,
