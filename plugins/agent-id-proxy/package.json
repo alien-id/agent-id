@@ -19,6 +19,6 @@
   "license": "MIT",
   "dependencies": {
     "@alien-id/agent-id-core": "^7.2.0",
-    "@alien-id/agent-id-vault": "^7.2.0"
+    "@alien-id/agent-id-vault": "^7.3.0"
   }
 }
