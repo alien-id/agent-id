@@ -34,7 +34,7 @@
     {
       "name": "agent-id-vault",
       "description": "Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key + phone/owner-approval) and typed/domain-scoped credential records.",
-      "version": "7.2.0",
+      "version": "7.3.0",
       "source": "./plugins/agent-id-vault",
       "category": "identity",
       "keywords": [
