@@ -26,6 +26,19 @@
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { classifyLogin } from "./login-detect.mjs";
+import { humanClick, humanDriver, humanType } from "./human-input.mjs";
+
+// Type a secret (password / OTP) with human cadence, guarding against a
+// keyboard/fill error that could echo the value — auto-login errors propagate to
+// the agent, so the raw error must never carry the secret. Mirrors the
+// session-server fill-secret guard.
+async function typeSecret(page, selector, value, opts = {}) {
+  try {
+    await humanType(page, selector, value, opts);
+  } catch {
+    throw new Error(`could not type into "${selector}" — element not visible/editable`);
+  }
+}
 
 const PLACEHOLDER_FIELDS = ["url", "value", "text", "selector", "key"];
 
@@ -58,32 +71,56 @@ export function stepNeedsOtp(step) {
  * the first time a step needs it (so a recipe whose login fails before the OTP
  * step never prompts). Actions: navigate, fill, type, click, press, wait.
  */
-export async function runRecipe(page, steps, { username, password, getOtp }) {
+// `driver` maps the action vocabulary to page interactions; it defaults to the
+// human-input driver (curved motion, key-by-key typing) and is injectable so the
+// mapping/{otp}-lazy-resolution logic unit-tests without a browser.
+export async function runRecipe(
+  page,
+  steps,
+  { username, password, getOtp, driver = humanDriver },
+) {
   let otp;
   const sub = async (s) => {
     if (typeof s !== "string") return s;
     if (s.includes("{otp}") && otp === undefined) otp = await getOtp();
     return applyVars(s, { username, password, otp });
   };
+  // A step whose template injects the password/otp must never surface the raw
+  // value in an error (the recipe path is otherwise unguarded, unlike the
+  // heuristic/Microsoft fills). Run it under a value-free catch.
+  const carriesSecret = (tpl) =>
+    typeof tpl === "string" && (tpl.includes("{password}") || tpl.includes("{otp}"));
+  const guarded = async (tpl, run) => {
+    if (!carriesSecret(tpl)) return run();
+    try {
+      return await run();
+    } catch {
+      throw new Error(`recipe step '${tpl}' failed while entering a secret value`);
+    }
+  };
   for (const step of steps) {
     switch (step.action) {
       case "navigate":
-        await page.goto(await sub(step.url), { waitUntil: "domcontentloaded", timeout: 30000 });
+        await driver.navigate(page, await sub(step.url));
         break;
       case "fill":
-        await page.fill(await sub(step.selector), await sub(step.value));
+        await guarded(step.value, async () =>
+          driver.fill(page, await sub(step.selector), await sub(step.value)),
+        );
         break;
       case "type": // alias of fill (kept for parity with the session vocabulary)
-        await page.fill(await sub(step.selector), await sub(step.text));
+        await guarded(step.text, async () =>
+          driver.type(page, await sub(step.selector), await sub(step.text)),
+        );
         break;
       case "click":
-        await page.click(await sub(step.selector));
+        await driver.click(page, await sub(step.selector));
         break;
       case "press":
-        await page.press(await sub(step.selector), step.key || "Enter");
+        await driver.press(page, await sub(step.selector), step.key || "Enter");
         break;
       case "wait":
-        await page.waitForTimeout(Number(step.ms) || 1000);
+        await driver.wait(page, Number(step.ms) || 1000);
         break;
       default:
         throw new Error(`unknown recipe action: ${step.action}`);
@@ -142,15 +179,16 @@ async function typeOtp(page, code) {
     'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i], ' +
     'input[name*="code" i], input[id*="code" i], input[name*="verif" i], input[id*="verif" i], ' +
     'input[inputmode="numeric"]';
-  const loc = page.locator(sel).first();
-  await loc.fill(code);
+  // The OTP code is low-sensitivity (single-use, seconds-lived) but still typed
+  // with human cadence and the value-free error guard, for consistency.
+  await typeSecret(page, sel, code);
   // ADFS / Entra submit via a button; generic forms submit on Enter.
   if (await page.locator("#submitButton").count()) {
-    await page.locator("#submitButton").click().catch(() => {});
+    await humanClick(page, "#submitButton").catch(() => {});
   } else if (await page.locator("#idSubmit_SAOTCC_Continue").count()) {
-    await page.locator("#idSubmit_SAOTCC_Continue").click().catch(() => {});
+    await humanClick(page, "#idSubmit_SAOTCC_Continue").catch(() => {});
   } else {
-    await loc.press("Enter").catch(() => {});
+    await page.locator(sel).first().press("Enter").catch(() => {});
   }
 }
 
@@ -174,15 +212,18 @@ async function detectMicrosoftFlow(page) {
 async function clickIfPresent(page, selector) {
   const loc = page.locator(selector).first();
   if (await loc.count()) {
-    await loc.click({ timeout: 8000 }).catch(() => {});
+    await humanClick(page, selector, { timeout: 8000 }).catch(() => {});
     return true;
   }
   return false;
 }
 
-async function fillWhenVisible(page, selector, value, timeout = 15000) {
+// Fill a field with human cadence once it's visible. `secret:true` routes through
+// the value-free error guard (for passwords).
+async function fillWhenVisible(page, selector, value, { timeout = 15000, secret = false } = {}) {
   await page.waitForSelector(selector, { state: "visible", timeout }).catch(() => {});
-  await page.fill(selector, value);
+  if (secret) await typeSecret(page, selector, value, { timeout });
+  else await humanType(page, selector, value, { timeout });
 }
 
 // Drive a Microsoft ADFS or Entra forms login: username → (Next) → password →
@@ -195,7 +236,7 @@ export async function microsoftLogin(page, cred, log = () => {}) {
     log("Detected Microsoft Entra (Azure AD) login");
     await fillWhenVisible(page, 'input[name="loginfmt"]', cred.username);
     await clickIfPresent(page, "#idSIButton9"); // Next
-    await fillWhenVisible(page, 'input[name="passwd"]', cred.password);
+    await fillWhenVisible(page, 'input[name="passwd"]', cred.password, { secret: true });
     await clickIfPresent(page, "#idSIButton9"); // Sign in
     return;
   }
@@ -203,7 +244,7 @@ export async function microsoftLogin(page, cred, log = () => {}) {
   await fillWhenVisible(page, "#userNameInput", cred.username);
   // Paginated ADFS: a "Next" button reveals the password page.
   if (await page.locator("#nextButton").count()) await clickIfPresent(page, "#nextButton");
-  await fillWhenVisible(page, "#passwordInput", cred.password);
+  await fillWhenVisible(page, "#passwordInput", cred.password, { secret: true });
   const kmsi = page.locator("#kmsiInput"); // "keep me signed in", if offered
   if (await kmsi.count()) await kmsi.check().catch(() => {});
   await clickIfPresent(page, "#submitButton");
@@ -219,11 +260,12 @@ async function heuristicLogin(page, { username, password }) {
     'input[id*="user" i], input[id*="email" i], input[autocomplete="username"], input[type="text"]';
   const pwSel = 'input[type="password"]';
 
-  const fillFirst = async (sel, value) => {
+  const fillFirst = async (sel, value, secret = false) => {
     const loc = page.locator(sel).first();
     if ((await loc.count()) === 0) return false;
     if (!(await loc.isVisible().catch(() => false))) return false;
-    await loc.fill(value);
+    if (secret) await typeSecret(page, sel, value);
+    else await humanType(page, sel, value);
     return true;
   };
 
@@ -233,7 +275,7 @@ async function heuristicLogin(page, { username, password }) {
     await page.keyboard.press("Enter").catch(() => {});
     await page.waitForTimeout(1500);
   }
-  const filledPw = await fillFirst(pwSel, password);
+  const filledPw = await fillFirst(pwSel, password, true);
   if (filledPw) await page.locator(pwSel).first().press("Enter").catch(() => {});
 }
 

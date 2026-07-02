@@ -23,15 +23,21 @@ test("stepNeedsOtp detects {otp} in a placeholder field", () => {
   assert.equal(stepNeedsOtp({ action: "fill", selector: "#pw", value: "{password}" }), false);
 });
 
-test("runRecipe maps steps to page calls, substitutes vars, resolves {otp} once and lazily", async () => {
-  const calls = [];
-  const page = {
-    goto: async (url) => calls.push(["goto", url]),
-    fill: async (sel, val) => calls.push(["fill", sel, val]),
-    click: async (sel) => calls.push(["click", sel]),
-    press: async (sel, key) => calls.push(["press", sel, key]),
-    waitForTimeout: async (ms) => calls.push(["wait", ms]),
+// A recording driver stands in for the human-input driver so the recipe
+// mapping / var-substitution / lazy-OTP logic is tested without a browser.
+function recordingDriver(calls) {
+  return {
+    navigate: async (_p, url) => calls.push(["goto", url]),
+    fill: async (_p, sel, val) => calls.push(["fill", sel, val]),
+    type: async (_p, sel, val) => calls.push(["type", sel, val]),
+    click: async (_p, sel) => calls.push(["click", sel]),
+    press: async (_p, sel, key) => calls.push(["press", sel, key]),
+    wait: async (_p, ms) => calls.push(["wait", ms]),
   };
+}
+
+test("runRecipe maps steps to driver calls, substitutes vars, resolves {otp} once and lazily", async () => {
+  const calls = [];
   let otpCalls = 0;
   const getOtp = async () => {
     otpCalls++;
@@ -45,7 +51,12 @@ test("runRecipe maps steps to page calls, substitutes vars, resolves {otp} once 
     { action: "fill", selector: "#otp", value: "{otp}" },
     { action: "press", selector: "#otp", key: "Enter" },
   ];
-  await runRecipe(page, steps, { username: "alice", password: "s3cret", getOtp });
+  await runRecipe({}, steps, {
+    username: "alice",
+    password: "s3cret",
+    getOtp,
+    driver: recordingDriver(calls),
+  });
   assert.deepEqual(calls, [
     ["goto", "https://x/login"],
     ["fill", "#user", "alice"],
@@ -58,26 +69,26 @@ test("runRecipe maps steps to page calls, substitutes vars, resolves {otp} once 
 });
 
 test("runRecipe does not resolve OTP when no step needs it", async () => {
-  const noop = async () => {};
-  const page = { goto: noop, fill: noop, click: noop, press: noop, waitForTimeout: noop };
   let otpCalls = 0;
-  await runRecipe(page, [{ action: "fill", selector: "#u", value: "{username}" }], {
+  await runRecipe({}, [{ action: "fill", selector: "#u", value: "{username}" }], {
     username: "u",
     password: "p",
     getOtp: async () => {
       otpCalls++;
       return "x";
     },
+    driver: recordingDriver([]),
   });
   assert.equal(otpCalls, 0);
 });
 
 test("runRecipe rejects an unknown action", async () => {
   await assert.rejects(
-    runRecipe({ goto: async () => {} }, [{ action: "frobnicate" }], {
+    runRecipe({}, [{ action: "frobnicate" }], {
       username: "u",
       password: "p",
       getOtp: async () => "",
+      driver: recordingDriver([]),
     }),
     /unknown recipe action/,
   );

@@ -256,4 +256,11 @@ return `"sessionExpired": true` with `"action": "re_login"`. On that signal,
   `AGENT_ID_SECURE_PROMPT=browser|tty|hosted` pins a backend.
 - The session is unsealed to a temp working dir only while a session/read runs,
   re-sealed (capturing new logins + rotated cookies) when it ends, and wiped.
+- **Human-like input.** `click`/`type`/`fill`/`hover`/`scroll` (and auto-login's
+  form filling) drive the page with real cursor travel and key-by-key typing
+  rather than instantaneous synthetic events — because you're a real Chrome on
+  the user's real IP, behaviour is the only residual bot signal, and robotic
+  motion against a pristine fingerprint is itself the tell. It costs a little
+  time per action; set `AGENT_ID_HUMAN_INPUT=0` to fall back to fast direct
+  input when a site isn't bot-hostile and speed matters.
 - Universal — point it at any site; not Gmail-specific.
