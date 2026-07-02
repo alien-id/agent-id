@@ -122,26 +122,43 @@ capabilities: [
   field (the known jti gap — trail entries must not depend on
   `owner-session.json` cache integrity).
 
-### Attested enforcement (TEE track)
+### Attested enforcement (Frame track)
 
 The `access.mjs` header already states the honest limit: the policy is only as
-strong as the enforcement point + unlock boundary. Two tracks, in order:
+strong as the enforcement point + unlock boundary. We have the **Frame
+platform** in deployment (AMD SEV-SNP confidential VMs, `enclave-sdk`) with
+4-layer attestation — AMD hardware → auditor approval → **on-chain instance
+registration** → client verification — and an on-chain enclave key registry +
+JWKS. The plan is Frame-first, local hardware keys second:
 
-1. **Local hardware keys** — agent key (and where possible the vault master
-   key path) behind Secure Enclave / TPM so a compromised user-space process
-   can sign per-use but never exfiltrate the key. The phone enclave slot is
-   the proven pattern; this brings it host-side.
-2. **Attested remote enforcement point** — the proxy + policy engine runnable
-   inside our TEE infrastructure: vault unlocked *inside* the enclave via the
-   owner-approval escrow, attestation document (enclave measurement + policy
-   hash + vault mode) exposed on `/status` and embedded in each audit entry,
-   so a verifier can check "policy hash X was in force inside genuine enclave
-   Y when this decision was made". This upgrades the audit trail from
-   "signed by the agent key" to "signed by a runtime a third party can trust".
+1. **Enclave vault slot** — new slot type in `format.mjs`, symmetric with the
+   existing `mobile` slot: KEK via ECDH against a Frame instance's *attested*
+   key. The client verifies the attestation report against the on-chain
+   auditor-approved measurement (client verification code exists:
+   `enclave-sdk/api/verify.go` `VerifyKeysAndAttestation`) **before** sealing.
+   The single-file vault is its own provisioning mechanism — sealing a slot
+   to an enclave key is all a remote proxy needs.
+2. **Frame-hosted proxy** — run proxy + policy engine as a Frame service.
+   `enclave-sdk` is Go-only (mkosi Ubuntu disk images, no Node runtime), so:
+   *near term*, add Node.js to the image package list and run the existing
+   `.mjs` code unchanged behind the SDK's service server; *long term*, port
+   the enforcement hot path (rewrite + `access.mjs` + audit signing) to Go as
+   a first-class service type (pattern: `enclaved-sg`). Vault unlock inside
+   the Frame via the enclave slot + owner approval; idle-lock semantics
+   unchanged.
+3. **Attestation in the audit trail** — each decision entry carries the Frame
+   measurement + policy hash; a verifier walks entry → enclave signing key →
+   attestation report → on-chain auditor-approved measurement. Upgrades the
+   trail from "signed by the agent key" to "signed inside a runtime anyone
+   can verify". Attestation stays a transport-level artifact beside the v3
+   bundle (no bundle format change).
+4. **Local hardware keys** — Secure Enclave/TPM for the agent key on dev
+   machines. Still wanted, no longer the primary track.
 
-Open (decide before M6): first TEE target; key-release policy for unlock
-inside the enclave; whether the attestation rides the v3 bundle (new claim) or
-stays a transport-level artifact next to it.
+Pre-M6 fixes in the SDK (blockers for honest attestation claims): launch
+measurement verification is commented out (`enclave-sdk/api/verify.go` ~89
+"not implemented"); sealed-artifact validation TODO in
+`alien-host/internal/service/managers/download/manager.go`.
 
 ## Milestones / TODO
 
@@ -157,8 +174,10 @@ stays a transport-level artifact next to it.
       distinct awaiting-approval surface on the session socket.
 - [ ] **M5 — audit append**: decisions into the hash-chained trail + the
       `idTokenJti` persistence fix.
-- [ ] **M6 — attested enforcement**: local hardware-key track first; remote
-      attested proxy behind a design doc.
+- [ ] **M6 — attested enforcement**: enclave vault slot (`format.mjs`) +
+      Frame-hosted proxy (Node-in-image first, Go port later) +
+      attestation-bearing audit entries. Prereq: the two enclave-sdk
+      verification fixes noted above.
 - [ ] **M7 — playbooks**: named task recipes = capability bundle + one-tap
       phone consent (builds on M2; the unit owners actually think in).
 - [ ] Docs: new section in `docs/VAULT-PROXY.md`; vault + proxy + browser
@@ -195,6 +214,44 @@ stays a transport-level artifact next to it.
 - **Metadata to the phone**: prompts carry method/host/path/capability only —
   never bodies, headers, or credential material. Same rule as today's consent
   prompts; keep it that way when adding the classified-operation context.
+
+## Alien infrastructure leverage (context for this stream and the next)
+
+What exists across the org's repos that this work should plug into rather than
+rebuild (see `~/devel/alien/repos/{documentation,enclave-sdk,enclaved-sg,sso,backend-app,alien-fleet,vault-approver-ios}`):
+
+- **On-chain Agent ID (AAID)** — whitepaper §3 specifies agent accounts with
+  capability masks, reputation tiers, revoked/suspended status, creator
+  links, and ≤4-tier delegation with cascading revocation. Registering the
+  bundle's JKT into an AAID account gives us **revocation** (our known gap:
+  today a compromised key is permanent until re-bootstrap) and multi-hop
+  delegation, verifiable from the chain without trusting the SSO.
+  Implementation status on chain needs scoping with the network team
+  (Session Generator exposes provider/session creation today; agent accounts
+  don't appear implemented).
+- **Assurance rides Phase B/C scopes** — `alien_assurance` / L1 should NOT be
+  a bespoke claim: the SSO roadmap's scope machinery
+  (`alien:identity:basic`, enclave-JWT-embedded claims for high-sensitivity
+  scopes) is the vehicle. Sessions are cryptographically unlinkable across
+  providers by construction — that IS the pairwise property L1 was waiting
+  for; only the assurance claim is missing.
+- **Push channel for the ask loop** — backend-app has APNs registration
+  (`/v1/apns/register`, `/v2/apns/register`) and vault-approver-ios's
+  components (DeviceKey, VaultCrypto sealed-box — byte-compatible with our
+  format, BiometricAuth) are ready pending a transport swap from the
+  localhost ControlClient to the push channel. M1 ships against the local
+  control plane (works today); the push transport is the production path
+  once the approver merges into the main app.
+- **Per-human nullifiers** — alien-fleet already derives
+  `SHA256(domain, iss, sub)` nullifiers from our DPoP tokens (one faucet
+  trial per verified owner). The same primitive lets any RP rate-limit **per
+  verified human** without linkability — the technical core of the
+  delegated-presence story for the open web, and a natural companion claim
+  to present alongside capability approvals.
+- **External dependency to track**: DPoP is live on SSO staging/develop but
+  the **production cutover is pending** (status doc 2026-05-08; detectable
+  via `/.well-known/openid-configuration` → `dpop_algs`). Most of the above
+  assumes it.
 
 ## Carried over from the previous stream
 
