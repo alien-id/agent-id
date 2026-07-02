@@ -60,3 +60,67 @@ test("a bare 'code' field name (postal_code / promo code) does NOT trigger OTP",
     "logged-in",
   );
 });
+
+// Regression: the exact false positive that sealed an UNauthenticated Reddit
+// session — verbatim text captured from Reddit's real wall. It has no password
+// field, no OTP affordance, and no credential-error copy (note: NO "try again"),
+// so the OLD classifier returned "logged-in". It MUST now be "blocked".
+test("blocked: Reddit's real network-security wall is NOT mistaken for logged-in", () => {
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      bodyText:
+        "You've been blocked by network security. If you think you've been blocked by mistake, file a ticket below and we'll look into it.",
+    }),
+    "blocked",
+  );
+});
+
+test("blocked: takes precedence over a vanished password field (logged-in) and over errors", () => {
+  // No password field (would be "logged-in") + block copy → "blocked".
+  assert.equal(classifyLogin({ hasPasswordField: false, bodyText: "unusual traffic detected" }), "blocked");
+  // Block copy alongside a stray error phrase → still "blocked" (a wall, not a bad password).
+  assert.equal(
+    classifyLogin({ hasPasswordField: true, bodyText: "Verify you are human. try again" }),
+    "blocked",
+  );
+});
+
+test("blocked: an explicit blocked flag forces the outcome", () => {
+  assert.equal(classifyLogin({ hasPasswordField: false, blocked: true, bodyText: "" }), "blocked");
+});
+
+test("blocked: a captcha / verification challenge is caught", () => {
+  assert.equal(
+    classifyLogin({ hasPasswordField: false, bodyText: "Are you a robot? Complete the challenge to continue." }),
+    "blocked",
+  );
+});
+
+test("NOT blocked: ordinary app copy that merely contains benign words stays logged-in", () => {
+  assert.equal(
+    classifyLogin({ hasPasswordField: false, bodyText: "Traffic report: your commute is clear today" }),
+    "logged-in",
+  );
+});
+
+test("NOT blocked: a legit page's Cloudflare footer does NOT trip the wall detector", () => {
+  // The precision reason bare "cloudflare" was excluded from BLOCK_RE.
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      bodyText: "Welcome back!  •  Performance & security by Cloudflare",
+    }),
+    "logged-in",
+  );
+});
+
+test("blocked: Google's real 'unusual traffic from your network' wall is caught", () => {
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      bodyText: "Our systems have detected unusual traffic from your computer network.",
+    }),
+    "blocked",
+  );
+});

@@ -9,7 +9,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { applyVars, stepNeedsOtp, runRecipe, resolveOtp } from "../plugins/agent-id-browser/lib/auto-login.mjs";
+import {
+  applyVars,
+  stepNeedsOtp,
+  runRecipe,
+  resolveOtp,
+  isLoginishPath,
+  stillOnLoginPage,
+  originOf,
+  isDeepLoginUrl,
+} from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { generateTotp } from "../plugins/agent-id-core/lib/totp.mjs";
 
 test("applyVars substitutes username/password/otp; passes non-strings through", () => {
@@ -103,4 +112,55 @@ test("resolveOtp generates a code from a stored TOTP seed (RFC vector)", async (
 
 test("resolveOtp throws when otp=totp but no seed is stored", async () => {
   await assert.rejects(resolveOtp({ name: "x", otp: "totp" }, {}), /totpSecret/);
+});
+
+// ── Positive-confirmation helpers (the "logged-in" false-positive guard) ──────────
+
+test("isLoginishPath matches whole login/auth segments, not substrings", () => {
+  for (const p of ["/login", "/login/", "/account/signin", "/oauth2/authorize", "/auth/callback", "/challenge"]) {
+    assert.equal(isLoginishPath(p), true, `login-ish: ${p}`);
+  }
+  // "authors" must NOT match "auth"; app paths are not login-ish.
+  for (const p of ["/", "/feed", "/authors/jane", "/r/test", "/user/me", "/settings"]) {
+    assert.equal(isLoginishPath(p), false, `app path: ${p}`);
+  }
+});
+
+test("stillOnLoginPage: true only when stuck on the same-host login page", () => {
+  const loginUrl = "https://www.reddit.com/login";
+  // The exact Reddit failure: form gone but still on /login with a js_challenge.
+  assert.equal(
+    stillOnLoginPage("https://www.reddit.com/login/?solution=abc&js_challenge=1", loginUrl),
+    true,
+  );
+  // Real success leaves the login page (redirect to the feed) → confirmed.
+  assert.equal(stillOnLoginPage("https://www.reddit.com/", loginUrl), false);
+  assert.equal(stillOnLoginPage("https://www.reddit.com/r/programming/", loginUrl), false);
+  // Left the auth host entirely → progressed.
+  assert.equal(stillOnLoginPage("https://app.example.com/dashboard", loginUrl), false);
+  // Garbage URLs don't wedge the caller into a false "stuck".
+  assert.equal(stillOnLoginPage("not a url", loginUrl), false);
+});
+
+test("stillOnLoginPage: a modal login on the homepage isn't falsely flagged as stuck", () => {
+  // loginUrl is the app homepage (login via modal, URL unchanged). After login we
+  // are on "/" — NOT a login-ish path — so "logged-in" is confirmed, not rejected.
+  assert.equal(stillOnLoginPage("https://app.example.com/", "https://app.example.com/"), false);
+});
+
+// ── Warmup helpers (the cold-deep-link block fix) ─────────────────────────────────
+
+test("originOf returns scheme+host, null on garbage", () => {
+  assert.equal(originOf("https://www.reddit.com/login/?x=1"), "https://www.reddit.com");
+  assert.equal(originOf("http://host:8080/a/b"), "http://host:8080");
+  assert.equal(originOf("not a url"), null);
+});
+
+test("isDeepLoginUrl: true for a real path, false for the bare origin root", () => {
+  assert.equal(isDeepLoginUrl("https://www.reddit.com/login/"), true);
+  assert.equal(isDeepLoginUrl("https://accounts.example.com/auth/signin"), true);
+  // Bare root → nothing to warm up first.
+  assert.equal(isDeepLoginUrl("https://www.reddit.com/"), false);
+  assert.equal(isDeepLoginUrl("https://www.reddit.com"), false);
+  assert.equal(isDeepLoginUrl("garbage"), false);
 });

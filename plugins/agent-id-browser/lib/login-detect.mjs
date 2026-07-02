@@ -4,13 +4,22 @@
 // states. `looksLoggedOut` (session.mjs) is too coarse here: right after the
 // password step you are usually STILL on the auth host — entering a 2FA code —
 // which it would read as "logged out" for both "OTP required" and "wrong
-// password". This is a focused 3-way classifier over a snapshot of the page:
+// password". This is a focused classifier over a snapshot of the page:
 //
+//   "blocked"      — a bot-block / human-verification interstitial (a network
+//                    -security wall, CAPTCHA, "unusual traffic"). The form is
+//                    gone but we are NOT in — must not be mistaken for success.
 //   "otp-required" — a second-factor affordance is present (a one-time-code input,
 //                    an OTP-ish field name, or body copy describing 2FA)
 //   "failed"       — a credential error is shown and there is no OTP affordance
 //   "logged-in"    — no password field remains and nothing looks gated
 //   "unknown"      — indeterminate (page may not have advanced yet; caller waits)
+//
+// The "blocked" state is checked FIRST and exists because of a real false
+// positive: a "blocked by network security" wall has no password field, no OTP
+// affordance, and no credential-error copy, so it was classified "logged-in" —
+// and the caller sealed an UNauthenticated session (no auth cookie) while
+// reporting success. A block wall never clears by waiting, so the caller stops.
 //
 // Pure + dependency-free so it unit-tests without a browser. The browser side
 // (auto-login.mjs) gathers the snapshot via page.evaluate and calls this.
@@ -29,6 +38,17 @@ const OTP_BODY_RE =
 // Body / inline text that signals the credentials were rejected.
 const ERROR_RE =
   /(incorrect|invalid|wrong password|that password|couldn.?t (?:sign|log) ?you in|try again|doesn.?t match|not recognized|too many attempts|account.*lock)/i;
+
+// Bot-block / human-verification interstitial copy. DISTINCT from ERROR_RE: these
+// describe an anti-automation wall (network-security block, CAPTCHA, rate limit),
+// not a bad password, and no retyping or waiting clears them. Every phrase is
+// high-precision — near-exclusive to a block/challenge page — because a false
+// match aborts an otherwise-successful login. Deliberately NOT here: a bare
+// "cloudflare" (legit footers say "secured by Cloudflare") — the CF challenge is
+// caught by "checking your browser" / "verify you are human" instead. Matching
+// login path SEGMENTS is done separately in auto-login.mjs.
+const BLOCK_RE =
+  /(blocked by network security|you.?ve been blocked|access to this page (?:has been |is )?denied|verify (?:you are|you.?re) (?:a )?human|are you a (?:human|robot)|checking your browser before|unusual (?:traffic|activity) (?:from|detected|on)|automated (?:queries|traffic|requests)|too many requests|suspicious (?:traffic|network) activity)/i;
 
 /**
  * Classify a login attempt's current page state.
@@ -49,15 +69,22 @@ export function classifyLogin({
   otpFieldNames = [],
   bodyText = "",
   errorText = null,
+  blocked = false,
 } = {}) {
+  const isBlocked =
+    blocked === true || BLOCK_RE.test(bodyText) || BLOCK_RE.test(String(errorText || ""));
   const otpAffordance =
     hasOtpField ||
     (Array.isArray(otpFieldNames) && otpFieldNames.some((n) => OTP_FIELD_RE.test(String(n || "")))) ||
     OTP_BODY_RE.test(bodyText);
   const hasError = ERROR_RE.test(String(errorText || "")) || ERROR_RE.test(bodyText);
 
+  // A bot-block / human-verification wall: the form is gone but we are NOT in.
+  // Checked FIRST — otherwise the missing password field reads as success and an
+  // unauthenticated session gets sealed (the bug this outcome was added for).
+  if (isBlocked) return "blocked";
   // An OTP affordance is the strongest signal the password step succeeded and a
-  // second factor is now being requested — check it first.
+  // second factor is now being requested — check it next.
   if (otpAffordance) return "otp-required";
   // No second factor, but a credential error → the password was rejected.
   if (hasError) return "failed";
@@ -67,4 +94,4 @@ export function classifyLogin({
   return "unknown";
 }
 
-export { OTP_FIELD_RE, OTP_BODY_RE, ERROR_RE };
+export { OTP_FIELD_RE, OTP_BODY_RE, ERROR_RE, BLOCK_RE };

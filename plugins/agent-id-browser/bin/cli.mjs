@@ -454,15 +454,26 @@ async function cmdAutoLogin(flags) {
       }
 
       if (!result || !result.ok) {
+        const outcome = result ? result.outcome : "unknown";
+        // A bot-block wall (e.g. Reddit's "blocked by network security") can't be
+        // cleared by an automated credential submission — the login handshake is
+        // exactly where anti-automation bites. A human driving a headed login
+        // clears it and the session seals with the SAME access level.
+        const message =
+          outcome === "blocked"
+            ? `Auto-login for '${credName}' was blocked by an anti-automation wall (bot ` +
+              "challenge / network-security block). This hits the login handshake specifically; " +
+              `sign in yourself once with headed \`login --name ${profileName}` +
+              `${requestedAccess ? ` --access ${requestedAccess}` : ""}\` — it seals the same session.`
+            : `Auto-login for '${credName}' did not complete (${outcome}). ` +
+              "Verify the credentials / loginUrl, add a `recipe` to the credential, or bootstrap " +
+              `once with headed \`login --name ${profileName}\`.`;
         outputJson({
           ok: false,
           error: "AUTO_LOGIN_FAILED",
-          outcome: result ? result.outcome : "unknown",
+          outcome,
           finalUrl: result ? result.finalUrl : null,
-          message:
-            `Auto-login for '${credName}' did not complete (${result ? result.outcome : "unknown"}). ` +
-            "Verify the credentials / loginUrl, add a `recipe` to the credential, or bootstrap " +
-            `once with headed \`login --name ${profileName}\`.`,
+          message,
         });
         process.exitCode = 1;
         return;

@@ -50,6 +50,63 @@ function hostOf(url) {
   }
 }
 
+// Scheme+host origin of a URL (e.g. "https://www.reddit.com"), or null.
+export function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+// Is the login URL a DEEP link (a real path like /login) rather than the bare
+// origin root? A warmup navigation only helps for deep links — if the login URL
+// is already the root there is nothing to warm up first.
+export function isDeepLoginUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.pathname !== "/" && u.pathname !== "";
+  } catch {
+    return false;
+  }
+}
+
+// A URL path segment that names a login / auth / challenge step. Matched against
+// whole segments (so "/authors/x" is NOT login-ish, but "/login/" and
+// "/oauth2/authorize" are) to keep the "still on the login page" check precise.
+const LOGIN_SEGMENT_RE = /^(log[-_]?in|sign[-_]?in|signin|auth|authorize|sso|oauth2?|challenge|checkpoint|verify)$/i;
+
+export function isLoginishPath(pathname) {
+  return String(pathname || "")
+    .split("/")
+    .some((seg) => LOGIN_SEGMENT_RE.test(seg));
+}
+
+// Are we still sitting on the login/auth host+path after the form cleared? A real
+// login LEAVES the login page (redirect to the app/feed). If the password field
+// merely vanished while we're still on a login-ish path — an SPA re-render, or a
+// redirect into a bot-challenge wall like Reddit's /login?...js_challenge — that
+// is NOT a completed login, and sealing it yields a session with no auth cookie.
+// This is the positive-confirmation backstop for "logged-in" (paired with the
+// "blocked" classifier, which catches walls that carry visible block copy).
+export function stillOnLoginPage(currentUrl, loginUrl) {
+  let cur, login;
+  try {
+    cur = new URL(currentUrl);
+  } catch {
+    return false;
+  }
+  try {
+    login = new URL(loginUrl);
+  } catch {
+    return false;
+  }
+  // Left the auth host entirely → definitely progressed.
+  if (cur.hostname !== login.hostname) return false;
+  // Same host: only "stuck" if we're on a login-ish path.
+  return isLoginishPath(cur.pathname);
+}
+
 // Substitute {username}/{password}/{otp} in a string. Pure.
 export function applyVars(str, vars = {}) {
   if (typeof str !== "string") return str;
@@ -295,6 +352,26 @@ export async function autoLogin({
   if (!cred.loginUrl) throw new Error(`login '${cred.name}': loginUrl is required for auto-login`);
   const getOtp = () => resolveOtp(cred, { env, log });
 
+  // Warm up before a deep login link. Some sites (e.g. Reddit) wall a COLD
+  // deep-link straight to /login with a "blocked by network security" bot block,
+  // but let it through once the ORIGIN has loaded and the anti-bot's clearance
+  // cookie is set — which is how a human arrives (homepage → click "Log in"), not
+  // by cold deep-link. General + best-effort: one harmless extra navigation for
+  // sites without such a wall, skipped when the login URL is already the origin
+  // root or when the credential opts out with `warmup: false`. The clearance
+  // applies on the NEXT navigation, so we deliberately don't inspect this page —
+  // the origin itself may still show the block while the cookie is being set.
+  const origin = originOf(cred.loginUrl);
+  if (origin && isDeepLoginUrl(cred.loginUrl) && cred.warmup !== false) {
+    log("auto-login: warming up via the site origin before the login page");
+    try {
+      await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(Math.max(settleMs * 2, 4000));
+    } catch {
+      /* warmup is best-effort — proceed to the login URL regardless */
+    }
+  }
+
   await page.goto(cred.loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForTimeout(settleMs);
 
@@ -311,9 +388,20 @@ export async function autoLogin({
   for (let round = 0; round < maxRounds; round++) {
     const outcome = classifyLogin(await detectPageState(page));
     log(`auto-login: ${outcome}`);
-    if (outcome === "logged-in") return { ok: true, outcome, finalUrl: page.url() };
-    if (outcome === "failed") return { ok: false, outcome, finalUrl: page.url() };
-    if (outcome === "otp-required") {
+    // A bot-block / human-verification wall never clears by waiting — stop and
+    // report it (the caller advises a headed login, which a human can clear).
+    if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url() };
+    if (outcome === "logged-in") {
+      // Positive confirmation: the form is gone AND we've left the login page.
+      // Without this, a vanished password field on a block/challenge or SPA
+      // re-render sealed an unauthenticated session while reporting success.
+      if (!stillOnLoginPage(page.url(), cred.loginUrl)) {
+        return { ok: true, outcome, finalUrl: page.url() };
+      }
+      log("auto-login: form cleared but still on the login page — awaiting redirect");
+    } else if (outcome === "failed") {
+      return { ok: false, outcome, finalUrl: page.url() };
+    } else if (outcome === "otp-required") {
       if (cred.otp === "none") {
         return { ok: false, outcome: "otp-unexpected", finalUrl: page.url() };
       }
@@ -321,7 +409,7 @@ export async function autoLogin({
       await page.waitForTimeout(settleMs);
       continue;
     }
-    await page.waitForTimeout(settleMs); // unknown — let the page settle, re-check
+    await page.waitForTimeout(settleMs); // unknown / unconfirmed — settle, re-check
   }
   return { ok: false, outcome: "timeout", finalUrl: page.url() };
 }
