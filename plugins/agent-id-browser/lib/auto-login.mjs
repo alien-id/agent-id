@@ -85,16 +85,33 @@ export async function runRecipe(
     if (s.includes("{otp}") && otp === undefined) otp = await getOtp();
     return applyVars(s, { username, password, otp });
   };
+  // A step whose template injects the password/otp must never surface the raw
+  // value in an error (the recipe path is otherwise unguarded, unlike the
+  // heuristic/Microsoft fills). Run it under a value-free catch.
+  const carriesSecret = (tpl) =>
+    typeof tpl === "string" && (tpl.includes("{password}") || tpl.includes("{otp}"));
+  const guarded = async (tpl, run) => {
+    if (!carriesSecret(tpl)) return run();
+    try {
+      return await run();
+    } catch {
+      throw new Error(`recipe step '${tpl}' failed while entering a secret value`);
+    }
+  };
   for (const step of steps) {
     switch (step.action) {
       case "navigate":
         await driver.navigate(page, await sub(step.url));
         break;
       case "fill":
-        await driver.fill(page, await sub(step.selector), await sub(step.value));
+        await guarded(step.value, async () =>
+          driver.fill(page, await sub(step.selector), await sub(step.value)),
+        );
         break;
       case "type": // alias of fill (kept for parity with the session vocabulary)
-        await driver.type(page, await sub(step.selector), await sub(step.text));
+        await guarded(step.text, async () =>
+          driver.type(page, await sub(step.selector), await sub(step.text)),
+        );
         break;
       case "click":
         await driver.click(page, await sub(step.selector));

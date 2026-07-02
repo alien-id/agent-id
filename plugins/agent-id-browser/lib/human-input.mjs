@@ -107,19 +107,23 @@ async function locate(page, selector, timeout) {
   return el;
 }
 
-// Move to an element and click it with a natural press dwell. Falls back to a
-// plain click if the element has no box (e.g. zero-size wrapper).
+// Click an element with a human cursor approach. The curved humanMove supplies
+// the behavioural signal (real mousemove trail + arrival dwell); the actual
+// click goes through the actionability-checked locator.click(), which auto-waits
+// for the element to be visible/stable and to actually receive the event (it
+// retries under overlays / sticky headers). Doing the click by raw page.mouse at
+// a coordinate would skip those checks and silently miss when anything covers
+// the point — so we keep the human motion but not the fragile raw click.
 export async function humanClick(page, selector, { rng = Math.random, timeout = 15000 } = {}) {
   if (!humanInputEnabled()) return void (await page.click(selector, { timeout }));
   const el = await locate(page, selector, timeout);
-  const box = await el.boundingBox();
-  if (!box) return void (await el.click({ timeout }));
-  const { x, y } = pointInBox(box, rng);
-  await humanMove(page, x, y, { rng });
-  await wait(page, 30 + rng() * 90);
-  await page.mouse.down();
-  await wait(page, 20 + rng() * 60);
-  await page.mouse.up();
+  const box = await el.boundingBox().catch(() => null);
+  if (box) {
+    const { x, y } = pointInBox(box, rng);
+    await humanMove(page, x, y, { rng });
+    await wait(page, 30 + rng() * 90); // arrival dwell before the press
+  }
+  await el.click({ timeout });
 }
 
 // Focus an element (by clicking it) and type text key-by-key with human cadence.
@@ -139,10 +143,13 @@ export async function humanType(
     return;
   }
   await humanClick(page, selector, { rng, timeout });
-  // Replace existing content (parity with fill()): select it so the first
-  // keystroke overwrites rather than appends. Best-effort — an empty or
-  // non-selectable field just types normally.
-  await page.locator(selector).first().selectText({ timeout }).catch(() => {});
+  // Deterministic replace (parity with fill): clear the field first — fill("")
+  // is actionability-checked and always empties, so the subsequent keystrokes
+  // never append to stale content, and an empty `value` clears correctly. NOT
+  // swallowed: if the field can't be cleared we must fail rather than type into
+  // (and corrupt) leftover content — the secret paths wrap this in a value-free
+  // catch, so a throw never leaks the value.
+  await page.locator(selector).first().fill("", { timeout });
   const delays = keystrokeDelays(value.length, { rng });
   for (let i = 0; i < value.length; i++) {
     await page.keyboard.type(value[i]);

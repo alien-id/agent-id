@@ -58,9 +58,23 @@ test(
         mousemoves: window.__ev.mousemoves,
         keys: window.__ev.keys.slice(),
       }));
-      assert.equal(afterType.value, "hello", "the field received the typed text");
+      assert.equal(afterType.value, "hello", "the field received the typed text (replaced, not appended)");
       assert.ok(afterType.mousemoves > 0, "the cursor moved before focusing (no teleport)");
-      assert.deepEqual(afterType.keys, ["h", "e", "l", "l", "o"], "each character produced a keydown");
+      // Each character produced its own keydown (the leading Delete is the
+      // clear-before-type step; filter to the single-character keys).
+      assert.deepEqual(
+        afterType.keys.filter((k) => k.length === 1),
+        ["h", "e", "l", "l", "o"],
+        "each character produced a keydown",
+      );
+
+      // Empty value must CLEAR the field (parity with fill), not leave it.
+      await humanType(page, "#inp", "");
+      assert.equal(
+        await page.evaluate(() => document.getElementById("inp").value),
+        "",
+        "typing an empty string clears the field",
+      );
 
       // Click the button: cursor should travel further before the click lands.
       await humanClick(page, "#btn");
