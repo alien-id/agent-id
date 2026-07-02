@@ -10,7 +10,13 @@
 // interactive element with a `data-aibref="eN"` attribute and returns a flat
 // accessibility list [{ref, role, name, …}]. Actions then target an element by
 // its ref (resolved to the `[data-aibref="eN"]` selector). Refs are valid until
-// the next snapshot / navigation.
+// the next snapshot / navigation. Elements inside iframes get frame-prefixed
+// refs ("f1e3"); the snapshot's frame→prefix map lives in the session state and
+// every ref-based action resolves through it.
+//
+// The session tracks ALL tabs (ctx "page" events): actions run on the CURRENT
+// tab, `tabs`/`tab-switch` move between them, and per-page listeners feed the
+// console ring buffer, the downloads ledger, and the JS-dialog policy.
 //
 // Protocol: line-delimited JSON over a 127.0.0.1 TCP socket, gated by a random
 // per-session token. Session coordinates live in
@@ -39,8 +45,12 @@ export function sessionFilePath(stateDir, name) {
   return path.join(sessionsDir(stateDir), `${name}.json`);
 }
 
-// Runs in the page. Tags visible interactive elements and returns a flat list.
-function snapshotInPage() {
+// Runs in the page (once per frame). Tags visible interactive elements and
+// returns a flat list. `prefix` namespaces refs per frame: "" for the main
+// frame ("e1", "e2", …), "f1" for the first iframe ("f1e1", …) — so a ref is
+// self-describing about which frame it lives in.
+function snapshotInPage(prefix) {
+  const pre = prefix || "";
   const SEL = [
     "a[href]", "button", "input:not([type=hidden])", "textarea", "select",
     "[role=button]", "[role=link]", "[role=textbox]", "[role=checkbox]",
@@ -63,7 +73,7 @@ function snapshotInPage() {
     if (r.width === 0 || r.height === 0 || st.visibility === "hidden" || st.display === "none") {
       continue;
     }
-    const ref = "e" + ++i;
+    const ref = pre + "e" + ++i;
     el.setAttribute("data-aibref", ref);
     const name = (
       el.getAttribute("aria-label") ||
@@ -86,6 +96,104 @@ function snapshotInPage() {
 
 const sel = (ref) => `[data-aibref="${String(ref).replace(/["\\]/g, "")}"]`;
 const ACTION_TIMEOUT = 15000;
+const MAX_FRAMES = 12; // iframes snapshotted per page (ad-heavy pages have dozens)
+const CONSOLE_CAP = 300; // ring-buffer size for captured console/pageerror entries
+
+// "f1e3" → "f1"; plain main-frame refs ("e3") → null. Exported for tests.
+export function frameRefId(ref) {
+  const m = /^(f\d+)e\d+$/.exec(String(ref ?? ""));
+  return m ? m[1] : null;
+}
+
+// A download's suggested filename, made safe to join under the sessions dir
+// (no separators / traversal, bounded length). Exported for tests.
+export function safeFilename(name) {
+  const cleaned = String(name || "").replace(/[^\w.-]+/g, "_").replace(/^\.+/, "");
+  return (cleaned || "file").slice(0, 80);
+}
+
+// Resolve the Frame (or current Page, which proxies its main frame) a ref
+// points into. Child-frame refs are only valid until the next snapshot —
+// same contract as the refs themselves.
+function frameForRef(state, ref) {
+  const id = frameRefId(ref);
+  if (!id) return state.current;
+  const frame = state.frames.get(id);
+  if (!frame || frame.isDetached()) {
+    throw new Error(`frame for ref '${ref}' is gone — re-snapshot and retry`);
+  }
+  return frame;
+}
+
+// `get --what value|attr value` must not read back a password field: the vault
+// may have just typed a secret there via fill-secret, and returning it would
+// hand the agent the very value the vault exists to withhold.
+async function refusePasswordRead(target, selector) {
+  const isPassword = await target
+    .$eval(selector, (el) => el.tagName === "INPUT" && el.type === "password")
+    .catch(() => false);
+  if (isPassword) {
+    throw new Error("refusing to read a password field's value");
+  }
+}
+
+function pushConsole(state, entry) {
+  state.console.push({ ...entry, at: Date.now() });
+  if (state.console.length > CONSOLE_CAP) {
+    state.console.splice(0, state.console.length - CONSOLE_CAP);
+  }
+}
+
+// Per-page listeners: console + pageerror feed the ring buffer, downloads are
+// saved under the sessions dir and ledgered, JS dialogs are answered per the
+// session's armed policy (default: dismiss — Playwright would otherwise
+// auto-dismiss silently), and closing the current tab falls back to another.
+function attachPage(state, page) {
+  page.on("console", (msg) => pushConsole(state, { type: msg.type(), text: String(msg.text()).slice(0, 500) }));
+  page.on("pageerror", (err) => pushConsole(state, { type: "error", text: String(err && err.message ? err.message : err).slice(0, 500) }));
+  page.on("dialog", (d) => {
+    state.lastDialog = {
+      type: d.type(),
+      message: String(d.message()).slice(0, 500),
+      handled: state.dialog.mode,
+      at: Date.now(),
+    };
+    const done =
+      state.dialog.mode === "accept" ? d.accept(state.dialog.text ?? undefined) : d.dismiss();
+    done.catch(() => {});
+  });
+  page.on("download", (d) => {
+    const entry = {
+      url: String(d.url()).slice(0, 500),
+      suggestedFilename: d.suggestedFilename(),
+      file: null,
+      state: "saving",
+      at: Date.now(),
+    };
+    state.downloads.push(entry);
+    const file = path.join(
+      sessionsDir(state.stateDir),
+      `download-${Date.now()}-${safeFilename(d.suggestedFilename())}`,
+    );
+    d.saveAs(file)
+      .then(() => {
+        entry.state = "saved";
+        entry.file = file;
+      })
+      .catch((err) => {
+        entry.state = "failed";
+        entry.error = String(err && err.message ? err.message : err).slice(0, 200);
+      });
+  });
+  page.on("close", () => {
+    if (state.current !== page) return;
+    const left = state.ctx.pages().filter((pg) => pg !== page);
+    if (left.length) {
+      state.current = left[left.length - 1];
+      state.frames.clear();
+    }
+  });
+}
 
 // Unlock the vault non-interactively (agent-key slot) inside the session process,
 // so a secret can be injected straight into the page without the controlling agent
@@ -130,15 +238,16 @@ export function assertFillAllowed(rec, host, field = null) {
   }
 }
 
-async function dispatch(page, msg, policy = null) {
+async function dispatch(state, msg, policy = null) {
   const p = msg.params || {};
+  const page = state.current;
   // Read-only sessions refuse the un-auditable/secret-bearing actions here;
   // everything else stays available because the network gate (applyAccessGuard)
   // is what actually stops mutations from reaching the service.
   if (policy) assertActionAllowed(policy, msg.action);
   switch (msg.action) {
     case "info":
-      return { url: page.url(), title: await page.title().catch(() => "") };
+      return { url: page.url(), title: await page.title().catch(() => ""), tabs: state.ctx.pages().length };
     case "navigate": {
       const resp = await page.goto(String(p.url), { waitUntil: "domcontentloaded", timeout: 30000 });
       return { url: page.url(), status: resp ? resp.status() : null };
@@ -146,20 +255,62 @@ async function dispatch(page, msg, policy = null) {
     case "back":
       await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
       return { url: page.url() };
-    case "snapshot":
-      return await page.evaluate(snapshotInPage);
+    case "snapshot": {
+      state.frames.clear();
+      const main = await page.evaluate(snapshotInPage, "");
+      const frames = [];
+      let skipped = 0;
+      let fCount = 0;
+      for (const f of page.frames()) {
+        if (f === page.mainFrame()) continue;
+        if (fCount >= MAX_FRAMES) {
+          skipped++;
+          continue;
+        }
+        let snap;
+        try {
+          snap = await f.evaluate(snapshotInPage, `f${fCount + 1}`);
+        } catch {
+          continue; // detached / navigating frame — nothing was tagged
+        }
+        fCount++;
+        state.frames.set(`f${fCount}`, f);
+        if (snap.elements.length) {
+          frames.push({ frame: `f${fCount}`, url: String(snap.url).slice(0, 200), elements: snap.elements.length });
+          main.elements.push(...snap.elements);
+        }
+      }
+      const tabs = state.ctx.pages().length;
+      return {
+        ...main,
+        ...(frames.length ? { frames } : {}),
+        ...(skipped ? { framesSkipped: skipped } : {}),
+        ...(tabs > 1 ? { tabs, tab: state.ctx.pages().indexOf(page) } : {}),
+      };
+    }
     case "text":
       return { text: String(await page.evaluate(() => (document.body ? document.body.innerText : ""))).slice(0, Number(p.maxChars || 6000)) };
     case "click":
-      await page.click(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await frameForRef(state, p.ref).click(sel(p.ref), { timeout: ACTION_TIMEOUT });
       return { clicked: p.ref };
-    case "type":
-      await page.fill(sel(p.ref), String(p.text ?? ""), { timeout: ACTION_TIMEOUT });
-      if (p.submit) await page.press(sel(p.ref), "Enter");
+    case "dblclick":
+      await frameForRef(state, p.ref).dblclick(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      return { dblclicked: p.ref };
+    case "check":
+      await frameForRef(state, p.ref).check(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      return { checked: p.ref };
+    case "uncheck":
+      await frameForRef(state, p.ref).uncheck(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      return { unchecked: p.ref };
+    case "type": {
+      const t = frameForRef(state, p.ref);
+      await t.fill(sel(p.ref), String(p.text ?? ""), { timeout: ACTION_TIMEOUT });
+      if (p.submit) await t.press(sel(p.ref), "Enter");
       return { typed: p.ref, submit: !!p.submit };
+    }
     case "fill": {
       const fields = Array.isArray(p.fields) ? p.fields : [];
-      for (const f of fields) await page.fill(sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
+      for (const f of fields) await frameForRef(state, f.ref).fill(sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
       return { filled: fields.map((f) => f.ref) };
     }
     case "fill-secret": {
@@ -170,13 +321,17 @@ async function dispatch(page, msg, policy = null) {
       if (dot <= 0) throw new Error(`fill-secret needs cred "name.field" (got "${p.cred}")`);
       const credName = String(p.cred).slice(0, dot);
       const field = String(p.cred).slice(dot + 1);
+      const target = frameForRef(state, p.ref);
       const vault = await openVaultAgentKey(msg._stateDir);
       try {
         const rec = vault.get(credName);
         if (!rec) throw new Error(`no credential "${credName}"`);
         // Refuse a sealed field, and refuse a page whose host isn't on the
-        // credential's allowlist — BEFORE reading the value into memory.
+        // credential's allowlist — BEFORE reading the value into memory. When
+        // the field lives in an iframe, the frame's origin is where the value
+        // actually goes, so BOTH the top page and the frame must pass.
         assertFillAllowed(rec, hostOfUrl(page.url()), field);
+        if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()), field);
         const value = rec[field];
         if (typeof value !== "string" || !value) {
           throw new Error(`"${credName}.${field}" is not a usable string field`);
@@ -184,8 +339,8 @@ async function dispatch(page, msg, policy = null) {
         // CRITICAL: patchright's fill/press errors echo the value being typed, so
         // never let the raw error escape — it would leak the secret to the agent.
         try {
-          await page.fill(sel(p.ref), value, { timeout: ACTION_TIMEOUT });
-          if (p.submit) await page.press(sel(p.ref), "Enter");
+          await target.fill(sel(p.ref), value, { timeout: ACTION_TIMEOUT });
+          if (p.submit) await target.press(sel(p.ref), "Enter");
         } catch {
           throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
         }
@@ -198,13 +353,16 @@ async function dispatch(page, msg, policy = null) {
       // Resolve the current 2FA code for a login/totp cred — generated from a
       // stored seed, or asked via the secure prompt — and type it.
       const credName = String(p.cred || "");
+      const target = frameForRef(state, p.ref);
       const vault = await openVaultAgentKey(msg._stateDir);
       let code;
       try {
         const rec = vault.get(credName);
         if (!rec) throw new Error(`no credential "${credName}"`);
-        // Audience binding: a live OTP code must not be typed into a foreign origin.
+        // Audience binding: a live OTP code must not be typed into a foreign
+        // origin — top page AND (for an iframe field) the frame itself.
         assertFillAllowed(rec, hostOfUrl(page.url()));
+        if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()));
         const otpCred =
           rec.type === "totp"
             ? { name: credName, otp: "totp", totpSecret: rec.secret, period: rec.period, digits: rec.digits, algorithm: rec.algorithm }
@@ -215,23 +373,62 @@ async function dispatch(page, msg, policy = null) {
       }
       // Same leak guard as fill-secret: never surface the value-bearing error.
       try {
-        await page.fill(sel(p.ref), code, { timeout: ACTION_TIMEOUT });
-        if (p.submit !== false) await page.press(sel(p.ref), "Enter");
+        await target.fill(sel(p.ref), code, { timeout: ACTION_TIMEOUT });
+        if (p.submit !== false) await target.press(sel(p.ref), "Enter");
       } catch {
         throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
       }
       return { filled: p.ref, otp: true };
     }
     case "select":
-      await page.selectOption(sel(p.ref), p.values, { timeout: ACTION_TIMEOUT });
+      await frameForRef(state, p.ref).selectOption(sel(p.ref), p.values, { timeout: ACTION_TIMEOUT });
       return { selected: p.ref };
     case "hover":
-      await page.hover(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await frameForRef(state, p.ref).hover(sel(p.ref), { timeout: ACTION_TIMEOUT });
       return { hovered: p.ref };
     case "press":
-      if (p.ref) await page.press(sel(p.ref), String(p.key));
+      if (p.ref) await frameForRef(state, p.ref).press(sel(p.ref), String(p.key));
       else await page.keyboard.press(String(p.key));
       return { pressed: p.key };
+    case "upload": {
+      // Attach local files to a file input (or a picker button that opens the
+      // native chooser). Refused on read-only sessions: sending the owner's
+      // local file content to a site is a write in spirit, even though the
+      // resulting POST would also die at the network gate.
+      const files = (Array.isArray(p.files) ? p.files : []).map(String).filter(Boolean);
+      if (!files.length) throw new Error("upload needs --files /path/a[,/path/b]");
+      for (const f of files) {
+        try {
+          await fs.access(f);
+        } catch {
+          throw new Error(`upload: file not found: ${f}`);
+        }
+      }
+      const t = frameForRef(state, p.ref);
+      const s = sel(p.ref);
+      const isFileInput = await t
+        .$eval(s, (el) => el.tagName === "INPUT" && el.type === "file")
+        .catch(() => false);
+      if (isFileInput) {
+        await t.setInputFiles(s, files, { timeout: ACTION_TIMEOUT });
+      } else {
+        // Not a bare <input type=file>: click it and feed the native chooser.
+        const [chooser] = await Promise.all([
+          page.waitForEvent("filechooser", { timeout: ACTION_TIMEOUT }),
+          t.click(s, { timeout: ACTION_TIMEOUT }),
+        ]);
+        await chooser.setFiles(files);
+      }
+      return { uploaded: p.ref, files: files.length };
+    }
+    case "drag": {
+      const from = frameForRef(state, p.ref);
+      if (from !== frameForRef(state, p.to)) {
+        throw new Error("drag: source and target must be in the same frame");
+      }
+      await from.dragAndDrop(sel(p.ref), sel(p.to), { timeout: ACTION_TIMEOUT });
+      return { dragged: p.ref, to: p.to };
+    }
     case "scroll":
       await page.mouse.wheel(Number(p.dx || 0), Number(p.dy || 600));
       return { scrolled: true };
@@ -244,8 +441,169 @@ async function dispatch(page, msg, policy = null) {
       return { result: await page.evaluate(String(p.expression)) };
     case "wait":
       if (p.text) await page.getByText(String(p.text)).first().waitFor({ timeout: Number(p.ms || 15000) });
-      else await page.waitForTimeout(Number(p.ms || 1000));
-      return { waited: true };
+      else if (p.url) {
+        const needle = String(p.url);
+        await page.waitForURL((u) => u.href.includes(needle), { timeout: Number(p.ms || 15000) });
+      } else if (p.load) {
+        const stateName = String(p.load);
+        if (!["load", "domcontentloaded", "networkidle"].includes(stateName)) {
+          throw new Error("wait --load must be load|domcontentloaded|networkidle");
+        }
+        await page.waitForLoadState(stateName, { timeout: Number(p.ms || 15000) });
+      } else await page.waitForTimeout(Number(p.ms || 1000));
+      return { waited: true, url: page.url() };
+    case "get": {
+      const what = String(p.what || "text");
+      if (what === "url") return { url: page.url() };
+      if (what === "title") return { title: await page.title().catch(() => "") };
+      if (!p.ref) throw new Error(`get --what ${what} needs --ref`);
+      const t = frameForRef(state, p.ref);
+      const s = sel(p.ref);
+      const cap = Number(p.maxChars || 4000);
+      switch (what) {
+        case "text":
+          return { text: String(await t.innerText(s, { timeout: ACTION_TIMEOUT })).slice(0, cap) };
+        case "html":
+          return { html: String(await t.innerHTML(s, { timeout: ACTION_TIMEOUT })).slice(0, cap) };
+        case "value":
+          await refusePasswordRead(t, s);
+          return { value: await t.inputValue(s, { timeout: ACTION_TIMEOUT }) };
+        case "attr": {
+          if (!p.attr) throw new Error("get --what attr needs --attr NAME");
+          if (String(p.attr).toLowerCase() === "value") await refusePasswordRead(t, s);
+          return { attr: p.attr, value: await t.getAttribute(s, String(p.attr), { timeout: ACTION_TIMEOUT }) };
+        }
+        default:
+          throw new Error(`get: unknown --what '${what}' (text|html|value|attr|url|title)`);
+      }
+    }
+    case "is": {
+      const what = String(p.what || "visible");
+      const t = frameForRef(state, p.ref);
+      const s = sel(p.ref);
+      switch (what) {
+        case "visible":
+          return { visible: await t.isVisible(s) };
+        case "enabled":
+          return { enabled: await t.isEnabled(s, { timeout: ACTION_TIMEOUT }) };
+        case "checked":
+          return { checked: await t.isChecked(s, { timeout: ACTION_TIMEOUT }) };
+        case "editable":
+          return { editable: await t.isEditable(s, { timeout: ACTION_TIMEOUT }) };
+        default:
+          throw new Error(`is: unknown --what '${what}' (visible|enabled|checked|editable)`);
+      }
+    }
+    case "tabs": {
+      const pages = state.ctx.pages();
+      return {
+        tabs: await Promise.all(
+          pages.map(async (pg, index) => ({
+            index,
+            url: pg.url(),
+            title: await pg.title().catch(() => ""),
+            ...(pg === state.current ? { current: true } : {}),
+          })),
+        ),
+      };
+    }
+    case "tab-new": {
+      const pg = await state.ctx.newPage();
+      if (p.url) await pg.goto(String(p.url), { waitUntil: "domcontentloaded", timeout: 30000 });
+      state.current = pg;
+      state.frames.clear();
+      return { index: state.ctx.pages().indexOf(pg), url: pg.url() };
+    }
+    case "tab-switch": {
+      const pages = state.ctx.pages();
+      const index = Number(p.index);
+      if (!Number.isInteger(index) || index < 0 || index >= pages.length) {
+        throw new Error(`no tab ${p.index} (open tabs: 0..${pages.length - 1})`);
+      }
+      state.current = pages[index];
+      state.frames.clear();
+      await state.current.bringToFront().catch(() => {});
+      return { index, url: state.current.url(), title: await state.current.title().catch(() => "") };
+    }
+    case "tab-close": {
+      const pages = state.ctx.pages();
+      if (pages.length <= 1) {
+        throw new Error("tab-close: closing the last tab would end the session — use `close`");
+      }
+      const index = p.index != null ? Number(p.index) : pages.indexOf(state.current);
+      if (!Number.isInteger(index) || index < 0 || index >= pages.length) {
+        throw new Error(`no tab ${p.index} (open tabs: 0..${pages.length - 1})`);
+      }
+      await pages[index].close(); // "close" listener re-points state.current if needed
+      return { closed: index, tabs: state.ctx.pages().length };
+    }
+    case "dialog": {
+      // Arm how JS dialogs (alert/confirm/prompt/beforeunload) are answered
+      // from now on; without --mode, just report the policy + last dialog seen.
+      if (p.mode != null) {
+        const mode = String(p.mode);
+        if (!["accept", "dismiss"].includes(mode)) throw new Error("dialog --mode must be accept|dismiss");
+        state.dialog = { mode, text: p.text != null ? String(p.text) : null };
+      }
+      return { mode: state.dialog.mode, promptText: state.dialog.text, last: state.lastDialog };
+    }
+    case "downloads":
+      return { downloads: state.downloads.slice(-Number(p.max || 20)) };
+    case "console": {
+      // Best-effort: patchright's stealth driver suppresses Runtime.enable
+      // (that's the point of it), which is the CDP channel console/pageerror
+      // events ride on — so on most pages this buffer stays empty. Say so,
+      // rather than letting an empty list read as "the page logged nothing".
+      const level = p.level ? String(p.level) : null;
+      let entries = state.console;
+      if (level === "error") entries = entries.filter((e) => e.type === "error");
+      else if (level === "warn") entries = entries.filter((e) => e.type === "error" || e.type === "warning");
+      return {
+        messages: entries.slice(-Number(p.max || 50)),
+        ...(state.console.length === 0
+          ? { note: "empty is expected: the stealth driver suppresses most console events — use `eval` to probe page state instead" }
+          : {}),
+      };
+    }
+    case "cookies": {
+      // Metadata only — values are session tokens, which stay sealed in the
+      // session by design (the agent never handles a secret).
+      const cookies = await state.ctx.cookies(p.url ? String(p.url) : undefined);
+      return {
+        cookies: cookies.map((c) => ({
+          name: c.name,
+          domain: c.domain,
+          path: c.path,
+          expires: c.expires,
+          httpOnly: c.httpOnly,
+          secure: c.secure,
+          sameSite: c.sameSite,
+        })),
+      };
+    }
+    case "batch": {
+      // Run a short scripted sequence in one round trip. Sub-actions go back
+      // through dispatch(), so per-action policy checks (read-only denials)
+      // still apply to each step. Stops at the first failure.
+      const actions = Array.isArray(p.actions) ? p.actions : [];
+      if (!actions.length) throw new Error('batch needs --actions \'[{"action":"click","params":{"ref":"e1"}}, …]\'');
+      if (actions.length > 20) throw new Error("batch: max 20 actions");
+      const results = [];
+      for (const a of actions) {
+        const name = a && typeof a.action === "string" ? a.action : null;
+        if (!name || name === "batch" || name === "close") {
+          throw new Error(`batch: unsupported action '${name}'`);
+        }
+        try {
+          const r = await dispatch(state, { action: name, params: a.params || {}, _stateDir: msg._stateDir }, policy);
+          results.push({ action: name, ok: true, ...r });
+        } catch (err) {
+          results.push({ action: name, ok: false, error: err.message || String(err) });
+          return { completed: results.length - 1, stopped: true, results };
+        }
+      }
+      return { completed: results.length, results };
+    }
     default:
       throw new Error(`unknown action: ${msg.action}`);
   }
@@ -274,6 +632,24 @@ export async function runSession({
     });
   }
   const page = ctx.pages()[0] || (await ctx.newPage());
+
+  // Live session state: the current tab, the frame map from the latest
+  // snapshot, and the ledgers the per-page listeners feed. Every page —
+  // including tabs the site opens later (target=_blank, window.open) — gets
+  // listeners via the context "page" event; the ro network gate is
+  // context-level routing, so new tabs are inside it automatically.
+  const state = {
+    ctx,
+    stateDir,
+    current: page,
+    frames: new Map(),
+    downloads: [],
+    console: [],
+    dialog: { mode: "dismiss", text: null },
+    lastDialog: null,
+  };
+  for (const pg of ctx.pages()) attachPage(state, pg);
+  ctx.on("page", (pg) => attachPage(state, pg));
 
   // Single, idempotent shutdown: close the browser, RESEAL the refreshed profile,
   // wipe the plaintext working copy, remove the session file, then exit. Guarded
@@ -309,7 +685,7 @@ export async function runSession({
       }
       msg._stateDir = stateDir;
       try {
-        const result = await dispatch(page, msg, policy);
+        const result = await dispatch(state, msg, policy);
         sock.end(JSON.stringify({ ok: true, ...result }) + "\n");
       } catch (err) {
         sock.end(JSON.stringify({ ok: false, error: err.message || String(err) }) + "\n");

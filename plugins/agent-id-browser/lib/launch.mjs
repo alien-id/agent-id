@@ -87,6 +87,9 @@ function launchOptions(headless) {
     viewport: null,
     ignoreDefaultArgs: ["--no-sandbox"],
     args: ["--test-type"],
+    // Explicit (it's the modern default) so the session server's download
+    // listener always gets Download objects rather than canceled downloads.
+    acceptDownloads: true,
   };
 }
 

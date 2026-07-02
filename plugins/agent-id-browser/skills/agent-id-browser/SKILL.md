@@ -1,10 +1,10 @@
 ---
 name: agent-id-browser
-description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, press keys, select, hover, navigate, screenshot, run JS) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. Two ways to log in: a HEADED Chrome login when a desktop browser is available, OR an agent-driven HEADLESS login from a stored `login` credential (auto-login, or snapshot + fill-secret/fill-otp) where the password and any 2FA code are entered over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI) — never via chat, never seen by the agent. Afterwards the agent drives the session HEADLESS. Sessions can be sealed READ-ONLY (--access ro): the session process blocks write requests at the network layer, so the agent can read mail/feeds/messages but never send, post, or delete. Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
+description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, upload files, press keys, select, hover, drag, navigate, screenshot, run JS, switch tabs, reach into iframes, handle dialogs, capture downloads) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. Two ways to log in: a HEADED Chrome login when a desktop browser is available, OR an agent-driven HEADLESS login from a stored `login` credential (auto-login, or snapshot + fill-secret/fill-otp) where the password and any 2FA code are entered over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI) — never via chat, never seen by the agent. Afterwards the agent drives the session HEADLESS. Sessions can be sealed READ-ONLY (--access ro): the session process blocks write requests at the network layer, so the agent can read mail/feeds/messages but never send, post, or delete. Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "7.1.0"
+  version: "7.2.0"
 allowed-tools: Bash(node *agent-id-browser/bin/cli.mjs:*) Read
 ---
 
@@ -143,9 +143,9 @@ the page makes is classified — `GET`/`HEAD`/`OPTIONS` and POST-tunneled reads
 (GraphQL `query`, JMAP `*/get`, JSON-RPC reads) pass; **writes are aborted at
 the wire**, so clicking "Send" fails harmlessly. WebSockets and service
 workers are disabled (they would bypass inspection), and `eval`,
-`fill-secret`, `fill-otp` are refused. Everything observational — `navigate`,
-`snapshot`, `click`, `type` (e.g. a search box), `page-text`, `screenshot`,
-`read`, `fetch` — works normally.
+`fill-secret`, `fill-otp`, `upload` are refused. Everything observational —
+`navigate`, `snapshot`, `click`, `type` (e.g. a search box), `page-text`,
+`screenshot`, `read`, `fetch` — works normally.
 
 Rules of the level:
 - A `login` credential with `access: "ro"` only ever mints ro sessions.
@@ -177,21 +177,27 @@ background** (it stays running) and wait for its `{"ready":true,...}` line:
 CLI open            # background; add --headed to watch
 ```
 
-**Observe** — get an accessibility snapshot; every actionable element has a `ref`:
+**Observe** — get an accessibility snapshot; every actionable element has a `ref`.
+Elements inside iframes get frame-prefixed refs (`f1e3`) and work with every
+action; when more than one tab is open the snapshot reports `tabs`:
 
 ```bash
 CLI snapshot
-# → { elements: [ { ref:"e5", role:"button", name:"Compose" }, … ] }
+# → { elements: [ { ref:"e5", role:"button", name:"Compose" },
+#                 { ref:"f1e2", role:"textbox", name:"Card number" }, … ],
+#     frames: [ { frame:"f1", url:"https://pay.example.com/…", elements: 4 } ] }
 ```
 
 **Act** — reference elements by their `ref` from the latest snapshot:
 
 ```bash
-CLI click  --ref e5
+CLI click  --ref e5                    # dblclick / check / uncheck take --ref too
 CLI type   --ref e8 --text "hello@there.com" [--submit]
 CLI fill   --fields '[{"ref":"e8","value":"a"},{"ref":"e9","value":"b"}]'
 CLI fill-secret --ref e8 --cred acme.password [--submit]   # inject a vaulted secret by ref
 CLI fill-otp    --ref e9 --cred acme                       # type the current 2FA code
+CLI upload --ref e7 --files /path/report.pdf,/path/pic.png # file input OR picker button
+CLI drag   --ref e4 --to e9            # same-frame drag & drop
 CLI select --ref e3 --values Option1
 CLI press  --key Enter [--ref e8]
 CLI hover  --ref e4
@@ -199,14 +205,39 @@ CLI scroll --dy 800
 CLI navigate --url https://mail.google.com/mail/u/0/
 CLI back
 CLI page-text --max-chars 4000     # visible text of the page
+CLI get    --ref e5 --what text|html|value|attr --attr href   # or --what url|title
+CLI is     --ref e5 --what visible|enabled|checked|editable
 CLI screenshot --path /tmp/shot.png [--full]
 CLI eval   --js "document.title"
-CLI wait   --text "Inbox"          # or --ms 1500
+CLI wait   --text "Inbox"          # or --url SUBSTR | --load networkidle | --ms 1500
+```
+
+**Tabs** — a click that opens a new tab (`target=_blank`) does NOT switch you;
+check `tabs` and switch when the snapshot shows more tabs than expected:
+
+```bash
+CLI tabs                            # [{index,url,title,current}]
+CLI tab-switch --index 1            # actions now run on that tab
+CLI tab-new [--url URL]             # open (and switch to) a fresh tab
+CLI tab-close [--index 1]           # never closes the last tab — use `close`
+```
+
+**Dialogs, downloads, diagnostics**:
+
+```bash
+CLI dialog --mode accept [--text "ok"]   # arm JS confirm/prompt handling (default: dismiss)
+CLI dialog                               # show policy + the last dialog seen
+CLI downloads                            # files the page saved: path + saving/saved/failed
+CLI console [--level error] [--max 50]   # page console + JS errors (best-effort:
+                                         # stealth driver drops most console events)
+CLI cookies [--url URL]                  # cookie metadata only — values stay sealed
+CLI batch --actions '[{"action":"click","params":{"ref":"e1"}},{"action":"snapshot"}]'
+                                         # one round trip, stops at first error
 ```
 
 **Re-snapshot after anything that changes the page** (click/navigate/submit) —
-refs are only valid until the next snapshot/navigation. After an action that
-navigates, `wait` for expected text, then `snapshot` again.
+refs (including frame refs) are only valid until the next snapshot/navigation.
+After an action that navigates, `wait` for expected text, then `snapshot` again.
 
 **Finish** — always close; this reseals the (refreshed) session and wipes the
 plaintext working copy:

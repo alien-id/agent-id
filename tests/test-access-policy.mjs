@@ -323,13 +323,19 @@ describe("isAccessRestricted", () => {
 describe("browser guard (pure pieces)", () => {
   const ro = { access: "ro" };
 
-  it("assertActionAllowed refuses eval/fill-secret/fill-otp on ro only", () => {
-    for (const action of ["eval", "fill-secret", "fill-otp"]) {
+  it("assertActionAllowed refuses eval/fill-secret/fill-otp/upload on ro only", () => {
+    for (const action of ["eval", "fill-secret", "fill-otp", "upload"]) {
       assert.throws(() => assertActionAllowed(ro, action), /read-only session/);
       assertActionAllowed({ access: "rw" }, action); // no throw
       assertActionAllowed({}, action);
     }
-    for (const action of ["navigate", "click", "type", "snapshot", "text", "screenshot"]) {
+    // Observational / DOM-interactive actions (incl. the tab/frame/dialog
+    // additions) stay available — the network gate is the write boundary.
+    for (const action of [
+      "navigate", "click", "type", "snapshot", "text", "screenshot",
+      "dblclick", "check", "drag", "get", "is", "tabs", "tab-switch",
+      "dialog", "downloads", "console", "cookies", "wait", "batch",
+    ]) {
       assertActionAllowed(ro, action);
     }
   });

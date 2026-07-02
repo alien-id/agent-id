@@ -68,8 +68,8 @@
     },
     {
       "name": "agent-id-browser",
-      "description": "Universal browser the agent drives fine-grained (click, type, fill forms, navigate, screenshot, run JS) via an accessibility snapshot with element refs, with the logged-in profile sealed in the agent vault. One-time headed login; headless thereafter. Drives the user's installed Chrome via patchright (installed at runtime into the plugin data dir on first session; no browser download). For authenticated sites that block API/OAuth/cookie approaches.",
-      "version": "7.1.0",
+      "description": "Universal browser the agent drives fine-grained (click, type, fill forms, upload files, navigate, switch tabs, reach into iframes, handle dialogs, capture downloads, screenshot, run JS) via an accessibility snapshot with element refs, with the logged-in profile sealed in the agent vault. One-time headed login; headless thereafter. Drives the user's installed Chrome via patchright (installed at runtime into the plugin data dir on first session; no browser download). For authenticated sites that block API/OAuth/cookie approaches.",
+      "version": "7.2.0",
       "source": "./plugins/agent-id-browser",
       "category": "identity",
       "keywords": [
