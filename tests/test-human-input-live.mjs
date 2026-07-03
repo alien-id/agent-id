@@ -138,3 +138,39 @@ test(
     }
   },
 );
+
+test(
+  "types into the first VISIBLE match when a hidden duplicate comes first (LinkedIn-style)",
+  { skip: patchrightAvailable ? false : "patchright/Chrome not installed" },
+  async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "human-dup-"));
+    let ctx;
+    try {
+      ctx = await launchContext({ profileDir: dir, headless: true });
+      const page = ctx.pages()[0] || (await ctx.newPage());
+      // A hidden copy of the field FIRST in DOM order, then the visible one — the
+      // shape LinkedIn's login page renders. A plain `.first()` targets the hidden
+      // copy and fills nothing; the fix is to target the first VISIBLE match.
+      await page.setContent(
+        `<input id="hidden" type="email" style="display:none">` +
+          `<input id="shown" type="email">`,
+      );
+      // Fill via the same kind of broad, multi-match selector the auto-login
+      // heuristic uses (matches BOTH inputs).
+      await humanType(page, 'input[type="email"]', "visible@example.com");
+      assert.equal(
+        await page.locator("#shown").inputValue(),
+        "visible@example.com",
+        "the visible field is the one that gets filled",
+      );
+      assert.equal(
+        await page.locator("#hidden").inputValue(),
+        "",
+        "the hidden duplicate is left untouched",
+      );
+    } finally {
+      if (ctx) await ctx.close().catch(() => {});
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  },
+);

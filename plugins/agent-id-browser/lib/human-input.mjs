@@ -99,12 +99,34 @@ export async function humanMove(page, x, y, { rng = Math.random } = {}) {
   lastPos.set(page, { x, y });
 }
 
+// Resolve `selector` to its first VISIBLE match, waiting up to `timeout` for one
+// to appear. A plain `.first()` grabs the first element in DOM order — but a site
+// can render a HIDDEN duplicate of a field first and the real (visible) one after
+// (LinkedIn's login page renders the whole form twice: a hidden copy, then the
+// visible one). Targeting the hidden copy makes every action against it time out,
+// which is exactly how an auto-login silently fails to fill anything. Poll for a
+// visible match; fall back to `.first()` if none turns up so `locate`'s own
+// waitFor still yields a normal "not visible" timeout. `root` is a Page OR Frame.
+async function firstVisible(root, selector, timeout) {
+  const loc = root.locator(selector);
+  const deadline = Date.now() + Math.max(0, timeout);
+  for (;;) {
+    const n = await loc.count().catch(() => 0);
+    for (let i = 0; i < n; i++) {
+      const el = loc.nth(i);
+      if (await el.isVisible().catch(() => false)) return el;
+    }
+    if (Date.now() >= deadline) return loc.first();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 // Resolve a selector to a first visible element, scrolled into view. `root` is
 // a Page OR a Frame — an element inside an iframe is located via its frame,
 // while the mouse/keyboard (below) stay page-global (they address viewport
 // coordinates and the focused element, which frames share).
 async function locate(root, selector, timeout) {
-  const el = root.locator(selector).first();
+  const el = await firstVisible(root, selector, timeout);
   await el.waitFor({ state: "visible", timeout });
   await el.scrollIntoViewIfNeeded({ timeout }).catch(() => {});
   return el;
@@ -154,7 +176,7 @@ export async function humanType(
   // swallowed: if the field can't be cleared we must fail rather than type into
   // (and corrupt) leftover content — the secret paths wrap this in a value-free
   // catch, so a throw never leaks the value.
-  await root.locator(selector).first().fill("", { timeout });
+  await (await firstVisible(root, selector, timeout)).fill("", { timeout });
   const delays = keystrokeDelays(value.length, { rng });
   for (let i = 0; i < value.length; i++) {
     await page.keyboard.type(value[i]);
