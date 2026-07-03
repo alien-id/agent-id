@@ -55,7 +55,7 @@ export function sessionFilePath(stateDir, name) {
 // returns a flat list. `prefix` namespaces refs per frame: "" for the main
 // frame ("e1", "e2", …), "f1" for the first iframe ("f1e1", …) — so a ref is
 // self-describing about which frame it lives in.
-function snapshotInPage(prefix) {
+export function snapshotInPage(prefix) {
   const pre = prefix || "";
   const SEL = [
     "a[href]", "button", "input:not([type=hidden])", "textarea", "select",
@@ -81,10 +81,24 @@ function snapshotInPage(prefix) {
     }
     const ref = pre + "e" + ++i;
     el.setAttribute("data-aibref", ref);
+    // el.value is a useful *label* only for button-like inputs (submit/button/
+    // reset), where the value IS the visible caption. For any text-entry field
+    // el.value is user-entered content that could be a secret — OTP/2FA fields
+    // are type=text/tel, and a show-password toggle flips a password field to
+    // type=text — so never surface it here (a subsequent snapshot would hand the
+    // agent a value the vault typed in). Also never surface a field the vault
+    // marked tainted ("data-aib-secret" — must match SECRET_TAINT_ATTR).
+    // Non-secret values stay readable on demand via `get --what value`.
+    const valueLabel =
+      el.tagName === "INPUT" &&
+      ["submit", "button", "reset"].includes(el.type) &&
+      !el.hasAttribute("data-aib-secret")
+        ? el.value
+        : "";
     const name = (
       el.getAttribute("aria-label") ||
       el.getAttribute("placeholder") ||
-      (el.tagName === "INPUT" || el.tagName === "TEXTAREA" ? el.value : "") ||
+      valueLabel ||
       el.innerText ||
       el.getAttribute("title") ||
       el.getAttribute("name") ||
@@ -131,15 +145,41 @@ function frameForRef(state, ref) {
   return frame;
 }
 
-// `get --what value|attr value` must not read back a password field: the vault
-// may have just typed a secret there via fill-secret, and returning it would
-// hand the agent the very value the vault exists to withhold.
-async function refusePasswordRead(target, selector) {
-  const isPassword = await target
-    .$eval(selector, (el) => el.tagName === "INPUT" && el.type === "password")
+// A field the vault typed a secret into is tagged with this attribute (see
+// markSecretField). It rides on the DOM element, not the ref — a re-snapshot
+// invalidates refs but only clears "data-aibref", so the taint survives across
+// snapshots as long as the site keeps the node. Kept in sync with the literal
+// hard-coded inside snapshotInPage (page functions can't close over module scope).
+export const SECRET_TAINT_ATTR = "data-aib-secret";
+
+// Tag the element a fill-secret/fill-otp just wrote to, so every later read-back
+// (get --what value, get --what attr value, and the snapshot el.value name
+// fallback) refuses it — REGARDLESS of the input's `type`. This is what closes
+// the leak for non-password fields: OTP/2FA inputs are type=text/tel, and a
+// show-password toggle flips a password field to type=text, so a type-only test
+// misses them. Best-effort: if the site has already swapped the node out there
+// is nothing (and no value) left to tag.
+export async function markSecretField(target, selector) {
+  await target
+    .$eval(selector, (el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
+    .catch(() => {});
+}
+
+// `get --what value|attr value` must not read back a field that holds an injected
+// secret: the vault may have just typed one there (fill-secret/fill-otp), and
+// returning it would hand the agent the very value the vault exists to withhold.
+// Refuse a password-type input AND any field the vault tagged tainted — the
+// latter catches secrets typed into a non-password field (see markSecretField).
+export async function refusePasswordRead(target, selector) {
+  const refuse = await target
+    .$eval(
+      selector,
+      (el, attr) => (el.tagName === "INPUT" && el.type === "password") || el.hasAttribute(attr),
+      SECRET_TAINT_ATTR,
+    )
     .catch(() => false);
-  if (isPassword) {
-    throw new Error("refusing to read a password field's value");
+  if (refuse) {
+    throw new Error("refusing to read a field that holds a password or an injected secret");
   }
 }
 
@@ -359,6 +399,8 @@ async function dispatch(state, msg, policy = null) {
         } catch {
           throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
         }
+        // Tag the field so a later read-back is refused whatever its input type.
+        await markSecretField(target, sel(p.ref));
       } finally {
         vault.lock();
       }
@@ -396,6 +438,10 @@ async function dispatch(state, msg, policy = null) {
       } catch {
         throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
       }
+      // A derived OTP isn't sealed at fill time (see assertFillAllowed), so the
+      // read-back guard is what protects it: tag the field so its value can't be
+      // read back regardless of the input's type (OTP inputs are text/tel).
+      await markSecretField(target, sel(p.ref));
       return { filled: p.ref, otp: true };
     }
     case "select":
