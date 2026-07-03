@@ -80,12 +80,26 @@ export async function loadChromium() {
   return chromium;
 }
 
-function launchOptions(headless) {
+// Chrome hard-refuses to start as root with the sandbox on ("Running as root
+// without --no-sandbox is not supported"), which is exactly the situation in a
+// containerized deployment (e.g. lethe-hosted per-user containers run as root;
+// the container itself is the isolation boundary there). This explicit opt-in
+// KEEPS patchright's injected --no-sandbox instead of stripping it. Default
+// (unset) preserves the stealth-validated sandbox-on launch. Not fingerprintable
+// from the page: --no-sandbox changes no JS surface and no request header.
+// Exported for tests.
+export function sandboxDisabled(env = process.env) {
+  return env.AGENT_ID_BROWSER_NO_SANDBOX === "1";
+}
+
+// Exported for tests (the env-driven sandbox toggle must be provable without a
+// browser launch).
+export function launchOptions(headless) {
   return {
     channel: "chrome",
     headless,
     viewport: null,
-    ignoreDefaultArgs: ["--no-sandbox"],
+    ignoreDefaultArgs: sandboxDisabled() ? [] : ["--no-sandbox"],
     args: ["--test-type"],
     // Explicit (it's the modern default) so the session server's download
     // listener always gets Download objects rather than canceled downloads.
@@ -123,7 +137,7 @@ async function resolveHeadlessUserAgent() {
       const browser = await chromium.launch({
         channel: "chrome",
         headless: true,
-        ignoreDefaultArgs: ["--no-sandbox"],
+        ignoreDefaultArgs: sandboxDisabled() ? [] : ["--no-sandbox"],
         args: ["--test-type"],
       });
       try {
