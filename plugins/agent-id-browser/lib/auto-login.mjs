@@ -213,9 +213,32 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now 
   return String(values.otp || "").trim();
 }
 
+// A visible CAPTCHA / anti-automation challenge WIDGET, matched by well-known
+// vendor markers rather than page copy — so it flags a challenge wall no matter
+// what language the page is in (the text classifier is inherently localized; a
+// datacenter host gets pages in the region's language). LinkedIn's post-login
+// checkpoint embeds an Arkose FunCaptcha; reCAPTCHA/hCaptcha/PerimeterX are the
+// other common ones. An automated login can't solve any of these, so a VISIBLE
+// one means "blocked" (the caller advises a one-time headed login). We match only
+// the interactive widgets — NOT reCAPTCHA v3's always-present `.grecaptcha-badge`
+// — and require visibility, so a routine invisible token doesn't trip it.
+// Exported for tests.
+export const CHALLENGE_WIDGET_SEL = [
+  'iframe[src*="captcha" i]',
+  'iframe[src*="arkoselabs" i]',
+  'iframe[src*="funcaptcha" i]',
+  'iframe[title*="captcha" i]',
+  'iframe[title*="challenge" i]',
+  ".g-recaptcha",
+  ".h-captcha",
+  "#px-captcha",
+  '[id*="arkose" i]',
+  '[class*="arkose" i]',
+].join(",");
+
 // Snapshot the page into the shape classifyLogin expects (browser-side).
 async function detectPageState(page) {
-  return page.evaluate(() => {
+  return page.evaluate((challengeSel) => {
     const all = (sel) => Array.from(document.querySelectorAll(sel));
     const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
     const hasPasswordField = all('input[type="password"]').some(visible);
@@ -226,8 +249,11 @@ async function detectPageState(page) {
       .map((e) => `${e.name || ""} ${e.id || ""} ${e.placeholder || ""} ${e.autocomplete || ""}`.trim())
       .filter(Boolean);
     const bodyText = (document.body && document.body.innerText ? document.body.innerText : "").slice(0, 4000);
-    return { hasPasswordField, hasOtpField, otpFieldNames, bodyText };
-  });
+    // Language-independent block signal: a visible challenge widget. Fed to
+    // classifyLogin via its `blocked` input so it wins over "logged-in".
+    const blocked = all(challengeSel).some(visible);
+    return { hasPasswordField, hasOtpField, otpFieldNames, bodyText, blocked };
+  }, CHALLENGE_WIDGET_SEL);
 }
 
 // Best-effort fill of the OTP field, then submit.
