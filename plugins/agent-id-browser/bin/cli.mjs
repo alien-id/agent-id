@@ -48,6 +48,7 @@ import {
   sealedProfileExists,
 } from "../lib/profile-store.mjs";
 import { launchContext } from "../lib/launch.mjs";
+import { DEFAULT_PROFILE, loginHint, noProfileHint } from "../lib/hints.mjs";
 import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
 import { runSession, callSession } from "../lib/session-server.mjs";
@@ -199,10 +200,8 @@ function waitForUserClose(ctx, timeoutMs) {
 // The default browser session is ONE shared cookie jar ("main") so logins — and
 // especially shared SSO like "Sign in with Google" — carry across sites. Pass
 // --name to opt into a separate, isolated session (a second account, a sandbox).
-const DEFAULT_PROFILE = "main";
 
 // Suggest the right login command: bare `login` for the shared default, `--name` otherwise.
-const loginHint = (name) => (name === DEFAULT_PROFILE ? "`login`" : "`login --name " + name + "`");
 
 // ─── Profile lifecycle: unseal → run → reseal → wipe ──────────────────────────────
 
@@ -212,7 +211,7 @@ async function withProfile({ flags, name, headless, action }) {
   try {
     const cred = vault.get(name);
     if (!cred || cred.type !== "browser-profile") {
-      const e = new Error(`no browser-profile named '${name}' — run ${loginHint(name)} first`);
+      const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
       e.code = "NO_PROFILE";
       throw e;
     }
@@ -680,7 +679,7 @@ async function cmdOpen(flags) {
   try {
     const cred = vault.get(name);
     if (!cred || cred.type !== "browser-profile") {
-      const e = new Error(`no browser-profile named '${name}' — run ${loginHint(name)} first`);
+      const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
       e.code = "NO_PROFILE";
       throw e;
     }
