@@ -10,7 +10,7 @@ Scenarios: setup, transfer (A→B), beacon discovery (best-effort/SKIP),
 conflict + `resolve --restore`, headless approval (`sync devices add --jkt`),
 and revoke.
 
-Run (opt-in — NOT part of `bun run test`; needs Docker + Compose):
+Run locally (needs Docker + Compose; CI runs this as the blocking `docker-e2e` job — it is not part of `bun run test`):
 
 ```bash
 ./run.sh              # build image + run the whole sequence, prints PASS/FAIL/SKIP
