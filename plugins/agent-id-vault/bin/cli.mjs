@@ -68,6 +68,7 @@ import {
   hasTty,
   promptNewPassphrase,
   promptSecret,
+  promptText,
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
 import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../lib/store.mjs";
@@ -81,8 +82,6 @@ import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { normalizeTotpInput } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { generateSolanaKeypair } from "@alien-id/agent-id-core/lib/solana.mjs";
 import { generateEvmKeypair } from "@alien-id/agent-id-core/lib/evm.mjs";
-
-import { createInterface } from "node:readline";
 
 import { verifyIdTokenSignatureOnly } from "@alien-id/agent-id-core/lib/oidc.mjs";
 import { connectToPeer, startSyncServer } from "../lib/sync/channel.mjs";
@@ -1228,22 +1227,63 @@ async function cmdExec() {
 
 // ─── sync ───────────────────────────────────────────────────────────────────────
 
+// Redact every secret-bearing field on a credential record before it is printed.
+// Used by `sync resolve` (no --restore) so the journaled *losing* record can be
+// inspected without leaking refreshToken/clientSecret/accessToken (oauth2),
+// password/totpSecret (login), privateKey (evm), secretSeed (solana), etc.
+// Pure: returns a shallow copy; the input is left untouched.
+export function redactSecretFields(rec) {
+  const redacted = { ...rec };
+  for (const f of SECRET_FIELDS) {
+    if (redacted[f] != null) redacted[f] = "(redacted — use --restore)";
+  }
+  return redacted;
+}
+
+// Validate the --listen --port flag. parseFlags yields boolean `true` for a bare
+// flag (last, or followed by another --flag); Number(true) === 1 would silently
+// bind port 1, so a boolean or non-digit value must be rejected. Returns 0 when
+// absent (ephemeral OS-assigned port). Throws Error (message names --port) so
+// the caller can outputError.
+export function parseListenPort(flags) {
+  if (flags.port == null) return 0;
+  if (typeof flags.port !== "string" || !/^[0-9]+$/.test(flags.port)) {
+    throw new Error("--port must be a number (0–65535)");
+  }
+  const port = Number(flags.port);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error("--port must be a number (0–65535)");
+  }
+  return port;
+}
+
 function promptApproval(peer) {
-  if (process.env.AGENT_ID_SYNC_AUTOAPPROVE === "1") return Promise.resolve(true);
+  if (process.env.AGENT_ID_SYNC_AUTOAPPROVE === "1") {
+    // Escape hatch for automated e2e (Docker) — never silent: surface a loud
+    // warning naming the peer so it is auditable in the driving process's logs.
+    stderr(
+      `⚠ AGENT_ID_SYNC_AUTOAPPROVE: auto-trusting sync peer ${peer.jkt} without human review`,
+    );
+    return Promise.resolve(true);
+  }
   if (!hasTty()) return Promise.resolve(false); // headless → approval-required path
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  // Read the y/N answer from the trusted /dev/tty channel — NOT process.stdin —
+  // so an agent driving this CLI over its stdin pipe cannot answer its own
+  // security prompt.
   const q =
     `\nNew sync peer:\n` +
     `  device : ${peer.label || "(unlabelled)"}\n` +
     `  agent  : ${peer.jkt}\n` +
     `  owner  : verified — same as this device (L${peer.level ?? "?"})\n` +
     `Trust this device and sync credentials with it? [y/N] `;
-  return new Promise((resolve) => {
-    rl.question(q, (answer) => {
-      rl.close();
-      resolve(/^y(es)?$/i.test(answer.trim()));
-    });
-  });
+  let answer;
+  try {
+    answer = promptText(q);
+  } catch (err) {
+    if (err instanceof TrustedInputUnavailable) return Promise.resolve(false);
+    throw err;
+  }
+  return Promise.resolve(/^y(es)?$/i.test(answer.trim()));
 }
 
 async function syncWith(stateDir, vault, identity, session) {
@@ -1270,15 +1310,45 @@ function describeSummary(summary) {
 async function cmdSyncRun(flags) {
   const stateDir = resolveStateDir(flags);
   const identity = await loadSyncIdentity(stateDir, flags.label ? { label: String(flags.label) } : {});
-  const vault = await openWithFlags(flags);
 
   if (flags.listen) {
+    // parseFlags yields boolean `true` for a bare flag, so validate coercions
+    // up-front rather than binding a bogus host/port silently.
+    let port;
+    try {
+      port = parseListenPort(flags);
+    } catch (err) {
+      return outputError(err.message);
+    }
+    if (flags.host != null && typeof flags.host !== "string") {
+      return outputError("--host must be a hostname/address string");
+    }
+    const host = flags.host ? String(flags.host) : "0.0.0.0";
+
     const srv = await startSyncServer({
-      host: flags.host ? String(flags.host) : "0.0.0.0",
-      port: flags.port ? Number(flags.port) : 0,
+      host,
+      port,
+      // Each incoming session gets its OWN short-lived vault handle: opened
+      // inside the process-level withVaultLock, then locked in a finally. This
+      // keeps the master key + plaintext secrets out of memory between sessions
+      // and re-reads the pinned-device set from disk each time (so an out-of-band
+      // `sync devices add` from another process takes effect without a restart).
       onSession: async (session) => {
         try {
-          const summary = await syncWith(stateDir, vault, identity, session);
+          const summary = await withVaultLock(stateDir, async () => {
+            const vault = await openWithFlags(flags);
+            try {
+              return await runSyncSession({
+                session,
+                vault,
+                identity,
+                approvePeer: promptApproval,
+                verifyIdToken: verifyIdTokenSignatureOnly,
+              });
+            } finally {
+              vault.lock();
+            }
+          });
           stderr(`✓ synced with ${summary.peer.label || summary.peer.jkt}: +${summary.received} / -${summary.sent} ops` +
             (summary.conflicts.length ? `, ${summary.conflicts.length} conflict(s) journaled` : ""));
         } catch (err) {
@@ -1300,7 +1370,8 @@ async function cmdSyncRun(flags) {
   // One-shot: explicit --peer wins; otherwise listen for beacons briefly.
   let peers = [];
   if (flags.peer) {
-    const [host, port] = String(flags.peer).split(":");
+    if (typeof flags.peer !== "string") return outputError("--peer must be host:port");
+    const [host, port] = flags.peer.split(":");
     if (!host || !port) return outputError("--peer must be host:port");
     peers = [{ host, port: Number(port) }];
   } else {
@@ -1314,15 +1385,21 @@ async function cmdSyncRun(flags) {
     }
   }
 
+  // Short-lived: open the vault once, sync each peer, lock in a finally.
+  const vault = await openWithFlags(flags);
   const results = [];
-  for (const peer of peers) {
-    try {
-      const session = await connectToPeer({ host: peer.host, port: peer.port });
-      const summary = await syncWith(stateDir, vault, identity, session);
-      results.push({ ok: true, ...describeSummary(summary) });
-    } catch (err) {
-      results.push({ ok: false, peer: `${peer.host}:${peer.port}`, error: err.message, code: err.code || null });
+  try {
+    for (const peer of peers) {
+      try {
+        const session = await connectToPeer({ host: peer.host, port: peer.port });
+        const summary = await syncWith(stateDir, vault, identity, session);
+        results.push({ ok: true, ...describeSummary(summary) });
+      } catch (err) {
+        results.push({ ok: false, peer: `${peer.host}:${peer.port}`, error: err.message, code: err.code || null });
+      }
     }
+  } finally {
+    vault.lock();
   }
   outputJson({ ok: results.every((r) => r.ok), results });
 }
@@ -1371,7 +1448,7 @@ async function cmdSyncResolve(flags) {
     return outputJson({
       ok: true, name: latest.name, winnerHash: latest.winnerHash,
       current: vault.get(String(flags.name)) ? "present" : "removed",
-      losingRecord: { ...latest.losingRecord, ...(latest.losingRecord.value ? { value: "(redacted — use --restore)" } : {}) },
+      losingRecord: redactSecretFields(latest.losingRecord),
       hint: "re-run with --restore to reinstate the losing version as a new edit",
     });
   }
@@ -1511,4 +1588,8 @@ for (const k of Object.keys(commands)) {
   };
 }
 
-runCli({ commands, printHelp });
+// Run the CLI only when invoked directly (`node cli.mjs …`), not when imported
+// (e.g. by the unit tests that exercise the pure helpers below).
+if (import.meta.main) {
+  runCli({ commands, printHelp });
+}
