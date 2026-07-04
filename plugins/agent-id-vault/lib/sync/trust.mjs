@@ -52,9 +52,9 @@ export function findDevice(sync, jkt) {
 export function pinDevice(sync, { deviceJkt, agentJwk = null, label = null, ownerSub = null, now = nowMs() }) {
   const existing = findDevice(sync, deviceJkt);
   if (existing) {
-    if (!existing.agentJwk && agentJwk) existing.agentJwk = agentJwk;
-    if (!existing.label && label) existing.label = label;
-    if (!existing.ownerSub && ownerSub) existing.ownerSub = ownerSub;
+    if (agentJwk) existing.agentJwk = agentJwk;
+    if (label) existing.label = label;
+    if (ownerSub) existing.ownerSub = ownerSub;
     return existing;
   }
   const device = { deviceJkt, agentJwk, label, ownerSub, addedAt: now };
@@ -163,6 +163,10 @@ export async function verifyHello({
   const verified = await verifyBundle(parsed, { verifyIdToken });
   if (!verified.ownerSub) {
     throw codedError("SYNC_PEER_UNBOUND", "peer agent has no owner binding (L0) — sync requires L1+");
+  }
+  const exp = verified.idTokenPayload?.exp;
+  if (exp !== undefined && exp !== null && exp < Math.floor(Date.now() / 1000)) {
+    throw codedError("SYNC_PEER_TOKEN_EXPIRED", "peer id_token is expired");
   }
   if (verified.ownerSub !== ownOwnerSub) {
     throw codedError("SYNC_OWNER_MISMATCH", "peer is bound to a different owner");

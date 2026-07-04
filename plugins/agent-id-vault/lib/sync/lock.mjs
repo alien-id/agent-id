@@ -10,7 +10,12 @@ import { statePaths } from "@alien-id/agent-id-core/lib/state.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function withVaultLock(stateDir, fn, { retries = 50, delayMs = 100, staleMs = 60_000 } = {}) {
+// Stale-lock takeover window. No caller overrides this — retries/delayMs are
+// the knobs tests actually need (to make backoff fast), while staleMs guards
+// against a crashed holder and doesn't need to vary per-call.
+const STALE_MS = 60_000;
+
+export async function withVaultLock(stateDir, fn, { retries = 50, delayMs = 100 } = {}) {
   const lockPath = statePaths(stateDir).vaultFile + ".lock";
   for (let attempt = 0; ; attempt++) {
     try {
@@ -21,7 +26,7 @@ export async function withVaultLock(stateDir, fn, { retries = 50, delayMs = 100,
     } catch (err) {
       if (err?.code !== "EEXIST") throw err;
       const stat = await fs.stat(lockPath).catch(() => null);
-      if (stat && Date.now() - stat.mtimeMs > staleMs) {
+      if (stat && Date.now() - stat.mtimeMs > STALE_MS) {
         await fs.unlink(lockPath).catch(() => {});
         continue;
       }

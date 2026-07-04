@@ -24,11 +24,11 @@ import {
 
 // A "bound" test identity: fake id_token whose payload carries sub + cnf.jkt.
 // verifyBundle receives our injected verifyIdToken, so no real SSO/JWKS is hit.
-function identity(sub, label) {
+function identity(sub, label, extraClaims = {}) {
   const pair = generateEd25519PemPair();
   const agentJwk = ed25519PublicKeyToJwk(pair.publicKeyPem);
   const jkt = jwkThumbprint(agentJwk);
-  const payload = { iss: "https://sso.test", sub, cnf: { jkt } };
+  const payload = { iss: "https://sso.test", sub, cnf: { jkt }, ...extraClaims };
   const idToken = ["e30", Buffer.from(JSON.stringify(payload)).toString("base64url"), "sig"].join(".");
   return { privateKeyPem: pair.privateKeyPem, agentJwk, jkt, idToken, ownerSub: sub, label };
 }
@@ -57,11 +57,37 @@ describe("sync trust", () => {
     const sync = freshSync();
     pinDevice(sync, { deviceJkt: "j1" }); // headless preapproval: jkt only
     assert.equal(findDevice(sync, "j1").agentJwk, null);
-    pinDevice(sync, { deviceJkt: "j1", agentJwk: { kty: "OKP" }, label: "mba" });
+    pinDevice(sync, { deviceJkt: "j1", agentJwk: { kty: "OKP" }, label: "mba", ownerSub: "owner-1" });
     assert.deepEqual(findDevice(sync, "j1").agentJwk, { kty: "OKP" });
+    assert.equal(findDevice(sync, "j1").ownerSub, "owner-1");
     assert.equal(sync.devices.length, 1);
     assert.equal(revokeDevice(sync, "j1"), true);
     assert.equal(findDevice(sync, "j1"), null);
+  });
+
+  it("pinDevice re-pin with a new ownerSub UPDATES the existing device (re-bind invariant)", () => {
+    const sync = freshSync();
+    const addedAt = 1000;
+    pinDevice(sync, {
+      deviceJkt: "j1",
+      agentJwk: { kty: "OKP", x: "old" },
+      label: "old-label",
+      ownerSub: "owner-1",
+      now: addedAt,
+    });
+    pinDevice(sync, {
+      deviceJkt: "j1",
+      agentJwk: { kty: "OKP", x: "new" },
+      label: "new-label",
+      ownerSub: "owner-2",
+      now: 2000,
+    });
+    const device = findDevice(sync, "j1");
+    assert.equal(device.ownerSub, "owner-2");
+    assert.equal(device.label, "new-label");
+    assert.deepEqual(device.agentJwk, { kty: "OKP", x: "new" });
+    assert.equal(device.addedAt, addedAt, "addedAt must stay stable across re-pin");
+    assert.equal(sync.devices.length, 1);
   });
 
   it("hello round-trips against the same EKM and fails on a different EKM (MITM)", async () => {
@@ -123,6 +149,32 @@ describe("sync trust", () => {
       }),
       (err) => err.code === "SYNC_PEER_UNBOUND",
     );
+  });
+
+  it("rejects an expired id_token at first contact", async () => {
+    const pastExp = Math.floor(Date.now() / 1000) - 3600;
+    const a = identity("owner-1", "dev-a", { exp: pastExp });
+    const ekm = randomBytes(32);
+    const hello = buildHello({ identity: a, ekm, role: "initiator", peerNonce: "n", label: a.label });
+    await assert.rejects(
+      () => verifyHello({
+        hello, ekm, peerRole: "initiator", ownNonce: "n",
+        ownJkt: "x", ownOwnerSub: "owner-1", sync: freshSync(), verifyIdToken: fakeVerifyIdToken,
+      }),
+      (err) => err.code === "SYNC_PEER_TOKEN_EXPIRED",
+    );
+  });
+
+  it("accepts a future-exp id_token at first contact", async () => {
+    const futureExp = Math.floor(Date.now() / 1000) + 3600;
+    const a = identity("owner-1", "dev-a", { exp: futureExp });
+    const ekm = randomBytes(32);
+    const hello = buildHello({ identity: a, ekm, role: "initiator", peerNonce: "n", label: a.label });
+    const peer = await verifyHello({
+      hello, ekm, peerRole: "initiator", ownNonce: "n",
+      ownJkt: "x", ownOwnerSub: "owner-1", sync: freshSync(), verifyIdToken: fakeVerifyIdToken,
+    });
+    assert.equal(peer.ownerSub, "owner-1");
   });
 
   it("a pinned peer skips id_token verification entirely (offline path)", async () => {
