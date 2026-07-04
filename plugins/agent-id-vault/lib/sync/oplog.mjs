@@ -156,7 +156,7 @@ export function reconcileLocalOps({ payload, device, privateKeyPem, now = nowMs(
   const sync = payload.sync;
   const { records } = foldView(sync.oplog);
   const appended = [];
-  const currentHeads = () => findHeads(sync.oplog);
+  const heads = new Set(findHeads(sync.oplog));
 
   for (const rec of payload.credentials) {
     if (LOCAL_ONLY_TYPES.has(rec.type)) continue;
@@ -164,9 +164,11 @@ export function reconcileLocalOps({ payload, device, privateKeyPem, now = nowMs(
     if (folded != null && recordsEqual(folded, rec)) continue;
     const kind = records.has(rec.name) ? "update" : "add";
     const op = createOp({
-      parents: currentHeads(), device, ts: rec.updatedAt || now,
+      parents: [...heads], device, ts: rec.updatedAt || now,
       kind, name: rec.name, record: stableRecord(rec), privateKeyPem,
     });
+    for (const p of op.parents) heads.delete(p);
+    heads.add(op.h);
     sync.oplog.push(op);
     appended.push(op);
   }
@@ -176,9 +178,11 @@ export function reconcileLocalOps({ payload, device, privateKeyPem, now = nowMs(
     if (folded == null || LOCAL_ONLY_TYPES.has(folded.type)) continue;
     if (present.has(name)) continue;
     const op = createOp({
-      parents: currentHeads(), device, ts: now,
+      parents: [...heads], device, ts: now,
       kind: "remove", name, record: null, privateKeyPem,
     });
+    for (const p of op.parents) heads.delete(p);
+    heads.add(op.h);
     sync.oplog.push(op);
     appended.push(op);
   }

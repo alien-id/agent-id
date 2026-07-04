@@ -150,6 +150,19 @@ describe("sync reconcile + applyView", () => {
     assert.equal(records.get("two").value, "2");
   });
 
+  it("genesis: reconcile of N records yields a single-head chain", () => {
+    const d = device("a");
+    const names = Array.from({ length: 20 }, (_, i) => `svc${i}`);
+    const payload = payloadWith(names.map((n) => rec(n, "1")));
+    const ops = reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem });
+    assert.equal(ops.length, 20);
+    assert.deepEqual(ops[0].parents, []);
+    for (let i = 1; i < ops.length; i++) {
+      assert.deepEqual(ops[i].parents, [ops[i - 1].h]);
+    }
+    assert.deepEqual(findHeads(payload.sync.oplog), [ops[ops.length - 1].h]);
+  });
+
   it("reconcile emits update and remove ops for drift, and nothing when clean", () => {
     const d = device("a");
     const payload = payloadWith([rec("one", "1")]);
