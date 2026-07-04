@@ -201,7 +201,15 @@ describe("proxy end-to-end", () => {
 
   it("access log lines include credential names but never values", async () => {
     const logPath = path.join(stateDir, "proxy.log");
-    const raw = await fs.readFile(logPath, "utf8").catch(() => "");
+    // The proxy flushes its access log asynchronously; poll until the expected
+    // line lands (or a short deadline) so the read never races the write under
+    // load — a single immediate read is flaky in CI.
+    let raw = "";
+    for (let i = 0; i < 50; i++) {
+      raw = await fs.readFile(logPath, "utf8").catch(() => "");
+      if (raw.includes("github-pat")) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
     assert.ok(raw.includes("github-pat"), "log should mention credential name");
     assert.ok(!raw.includes("ghp_SECRET_TOKEN"), "log must NOT contain secret value");
     assert.ok(!raw.includes("raw-key-value"), "log must NOT contain header value");
