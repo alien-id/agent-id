@@ -94,6 +94,10 @@ export async function startSyncServer({ host = "0.0.0.0", port = 0, onSession })
       onSession({ socket, ekm, io: makeLineIO(socket), role: "listener" });
     },
   );
+  // Bound pre-auth memory: each connection can buffer up to MAX_BUFFERED
+  // before the sync handshake authenticates it, so cap concurrent
+  // connections to keep unauthenticated peers from pinning unbounded RAM.
+  server.maxConnections = 32;
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, resolve);

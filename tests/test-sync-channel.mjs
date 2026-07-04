@@ -54,6 +54,7 @@ describe("sync channel", () => {
     assert.equal(session.ekm.toString("hex"), client.ekm.toString("hex"));
     assert.equal(session.role, "listener");
     assert.equal(client.role, "initiator");
+    assert.equal(srv.server.maxConnections, 32);
 
     client.io.write({ t: "ping", n: 1 });
     client.io.write({ t: "ping", n: 2 });

@@ -15,7 +15,6 @@ export function announceBeacon({
   deviceJkt,
   tcpPort,
   intervalMs = 2000,
-  group = BEACON_GROUP,
   port = BEACON_PORT,
 }) {
   const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
@@ -24,7 +23,7 @@ export function announceBeacon({
   socket.on("error", () => { /* discovery is best-effort */ });
   socket.bind(() => {
     try { socket.setMulticastTTL(1); } catch { /* not fatal */ }
-    const send = () => socket.send(message, port, group);
+    const send = () => socket.send(message, port, BEACON_GROUP);
     send();
     timer = setInterval(send, intervalMs);
     timer.unref?.();
@@ -40,7 +39,6 @@ export function announceBeacon({
 export function listenForBeacons({
   timeoutMs = 2500,
   ownJkt = null,
-  group = BEACON_GROUP,
   port = BEACON_PORT,
 } = {}) {
   return new Promise((resolve) => {
@@ -64,7 +62,7 @@ export function listenForBeacons({
       } catch { /* ignore malformed beacons */ }
     });
     socket.bind(port, () => {
-      try { socket.addMembership(group); } catch { /* no multicast here */ }
+      try { socket.addMembership(BEACON_GROUP); } catch { /* no multicast here */ }
       setTimeout(finish, timeoutMs).unref?.();
     });
   });
