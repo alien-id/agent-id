@@ -22,6 +22,7 @@ import {
   recordsEqual,
   verifyOp,
 } from "../plugins/agent-id-vault/lib/sync/oplog.mjs";
+import { wipePayload } from "../plugins/agent-id-vault/lib/store.mjs";
 
 function device(name) {
   const pair = generateEd25519PemPair();
@@ -199,5 +200,24 @@ describe("sync reconcile + applyView", () => {
   it("recordsEqual ignores lastUsedAt but not values", () => {
     assert.ok(recordsEqual({ ...rec("x", "1"), lastUsedAt: 1 }, { ...rec("x", "1"), lastUsedAt: 2 }));
     assert.ok(!recordsEqual(rec("x", "1"), rec("x", "2")));
+  });
+});
+
+describe("sync payload wipe", () => {
+  it("wipePayload scrubs secrets inside oplog records and conflict journal", () => {
+    const payload = {
+      version: 1,
+      credentials: [rec("one", "s3cret")],
+      sync: {
+        oplog: [{ h: "x", parents: [], device: "d", ts: 1,
+                  op: { kind: "add", name: "one", record: rec("one", "s3cret") }, sig: "s" }],
+        devices: [],
+        conflicts: [{ name: "one", losingRecord: rec("one", "l0ser"), losingHash: "y", winnerHash: "x", decidedAt: 1 }],
+      },
+    };
+    wipePayload(payload);
+    assert.equal(payload.credentials.length, 0);
+    assert.equal(payload.sync.oplog.length, 0);
+    assert.equal(payload.sync.conflicts.length, 0);
   });
 });

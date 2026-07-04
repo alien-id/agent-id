@@ -404,6 +404,12 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
       assertOpen();
       return state.file;
     },
+    // Direct payload access for the sync engine (oplog + syncMeta live inside
+    // the encrypted payload). Mutations become durable on the next save().
+    payload() {
+      assertOpen();
+      return state.payload;
+    },
   };
 }
 
