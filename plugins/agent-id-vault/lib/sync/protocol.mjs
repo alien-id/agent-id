@@ -15,12 +15,12 @@ import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
 
 import {
   applyView,
-  findHeads,
   foldView,
   mergeOps,
   reconcileLocalOps,
   verifyOp,
 } from "./oplog.mjs";
+import { validateRecord } from "../store.mjs";
 import { buildHello, ensureSyncMeta, findDevice, pinDevice, verifyHello } from "./trust.mjs";
 
 export class SyncRefusal extends Error {
@@ -47,18 +47,40 @@ export async function runSyncSession({ session, vault, identity, approvePeer = n
     const peerNonce = String((await io.expect("nonce")).nonce || "");
 
     // 2. Hello exchange — each side signs its own EKM view + role + peer nonce.
-    io.write(buildHello({ identity, ekm, role, peerNonce, label: identity.label }));
-    const hello = await io.expect("hello");
+    //
+    // ROLE-ORDERED to avoid pre-auth id_token disclosure: a hello embeds the
+    // full SSO id_token (owner sub, issuer, all OIDC claims). The listener must
+    // verify the initiator FIRST and only reveal its own hello once that peer
+    // is proven — otherwise any peer that merely sends a nonce could harvest
+    // the listener's owner identity. This is deadlock-free: the initiator
+    // writes, the listener reads→verifies→writes, the initiator reads.
+    //
+    // Residual: an initiator still discloses its hello to whatever peer it
+    // chose to dial, before that peer proves itself — acceptable, since the
+    // initiator picked the peer it is talking to.
     const peerRole = role === "initiator" ? "listener" : "initiator";
+    const ownHello = buildHello({ identity, ekm, role, peerNonce, label: identity.label });
+    const verifyPeerHello = async () => {
+      const hello = await io.expect("hello");
+      try {
+        return await verifyHello({
+          hello, ekm, peerRole, ownNonce,
+          ownJkt: identity.jkt, ownOwnerSub: identity.ownerSub, sync, verifyIdToken,
+        });
+      } catch (err) {
+        io.write({ t: "error", code: err.code || "hello-rejected" });
+        throw err;
+      }
+    };
     let peer;
-    try {
-      peer = await verifyHello({
-        hello, ekm, peerRole, ownNonce,
-        ownJkt: identity.jkt, ownOwnerSub: identity.ownerSub, sync, verifyIdToken,
-      });
-    } catch (err) {
-      io.write({ t: "error", code: err.code || "hello-rejected" });
-      throw err;
+    if (role === "initiator") {
+      io.write(ownHello);
+      peer = await verifyPeerHello();
+    } else {
+      // Listener: verify before disclosing. On failure verifyPeerHello throws
+      // BEFORE we ever write our hello, so an unverified peer never sees it.
+      peer = await verifyPeerHello();
+      io.write(ownHello);
     }
 
     // 3. Authorization: pinned, or approved right now (ceremony / preapproval).
@@ -83,7 +105,7 @@ export async function runSyncSession({ session, vault, identity, approvePeer = n
 
     // 5. Difference by full hash-set exchange (PoC; DAG-walk narrowing is phase 2).
     const ownHashes = sync.oplog.map((o) => o.h);
-    io.write({ t: "heads", heads: findHeads(sync.oplog), all: ownHashes });
+    io.write({ t: "heads", all: ownHashes });
     const theirs = await io.expect("heads");
     const ownSet = new Set(ownHashes);
     io.write({ t: "want", hashes: (theirs.all || []).filter((h) => !ownSet.has(h)) });
@@ -102,6 +124,17 @@ export async function runSyncSession({ session, vault, identity, approvePeer = n
       }
       if (!verifyOp(op, author.agentJwk)) {
         throw new SyncRefusal("bad-op-signature", `op ${op.h} failed signature verification`);
+      }
+      // Schema-validate the payload record before it can reach the vault. A
+      // signed op from a pinned device can still carry a malformed record; this
+      // runs before mergeOps/foldView/applyView so a bad remote record can
+      // never land. remove/null-record ops carry no record and skip this.
+      if (op.op?.record != null) {
+        try {
+          validateRecord(op.op.record);
+        } catch (err) {
+          throw new SyncRefusal("invalid-record", `op ${op.h} carries an invalid record: ${err.message}`);
+        }
       }
     }
     const { log, added } = mergeOps(sync.oplog, incoming);

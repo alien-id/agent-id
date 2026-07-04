@@ -19,7 +19,8 @@ import {
 import { ensureDir, statePaths, writeJsonFile } from "../plugins/agent-id-core/lib/state.mjs";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 import { connectToPeer, startSyncServer } from "../plugins/agent-id-vault/lib/sync/channel.mjs";
-import { loadSyncIdentity } from "../plugins/agent-id-vault/lib/sync/trust.mjs";
+import { buildHello, ensureSyncMeta, loadSyncIdentity } from "../plugins/agent-id-vault/lib/sync/trust.mjs";
+import { createOp, findHeads } from "../plugins/agent-id-vault/lib/sync/oplog.mjs";
 import { runSyncSession } from "../plugins/agent-id-vault/lib/sync/protocol.mjs";
 import { withVaultLock } from "../plugins/agent-id-vault/lib/sync/lock.mjs";
 
@@ -176,5 +177,113 @@ describe("sync protocol", () => {
     });
     // lock released → works again
     await withVaultLock(devA.stateDir, async () => {});
+  });
+
+  // F7: the listener must verify the initiator BEFORE disclosing its own hello.
+  // A hello embeds the full SSO id_token (owner sub, issuer, all OIDC claims),
+  // so a peer that fails verification must never receive the listener's hello.
+  it("listener refuses an unverifiable peer WITHOUT disclosing its own hello", async () => {
+    // dev-evil has a different owner → the listener's verifyHello throws
+    // SYNC_OWNER_MISMATCH and must write {t:"error"} before ever sending hello.
+    const devEvil = await makeDevice("owner-EVIL", "dev-evil");
+    try {
+      const a = await openDevice(devA); // listener, our real owner
+      const evil = await openDevice(devEvil); // manual initiator
+      let resolveListener, rejectListener;
+      const listenerDone = new Promise((resolve, reject) => { resolveListener = resolve; rejectListener = reject; });
+      listenerDone.catch(() => {}); // we assert its rejection below; pre-attach to avoid an unhandled-rejection warning
+      const srv = await startSyncServer({
+        host: "127.0.0.1",
+        onSession: (session) => {
+          runSyncSession({ session, vault: a.vault, identity: a.identity, verifyIdToken: fakeVerifyIdToken })
+            .then(resolveListener, rejectListener);
+        },
+      });
+      try {
+        const session = await connectToPeer({ host: "127.0.0.1", port: srv.port });
+        const { io, ekm } = session;
+        // Drive the initiator side of the handshake manually so we can observe
+        // exactly what frames the listener sends back after our hello.
+        const ownNonce = "aa".repeat(16);
+        io.write({ t: "nonce", nonce: ownNonce });
+        const peerNonce = String((await io.read()).nonce || "");
+        io.write(buildHello({ identity: evil.identity, ekm, role: "initiator", peerNonce, label: "dev-evil" }));
+
+        // Collect every subsequent frame until the socket closes. The listener
+        // must send {t:"error"} and MUST NOT send a {t:"hello"}.
+        const frames = [];
+        try {
+          // read() rejects when the connection closes; loop until then.
+          // eslint-disable-next-line no-constant-condition
+          while (true) frames.push(await io.read());
+        } catch { /* connection closed by the listener after error */ }
+
+        assert.ok(
+          frames.some((f) => f.t === "error"),
+          "listener must send {t:'error'} to the unverified peer",
+        );
+        assert.ok(
+          !frames.some((f) => f.t === "hello"),
+          "listener must NOT disclose its hello (id_token) to an unverified peer",
+        );
+        await assert.rejects(listenerDone, (err) => err.code === "SYNC_OWNER_MISMATCH");
+      } finally {
+        await srv.close();
+      }
+    } finally {
+      await fs.rm(devEvil.stateDir, { recursive: true, force: true });
+    }
+  });
+
+  // F6: an incoming op carrying a schema-invalid record is refused with
+  // 'invalid-record' before it can reach the vault — even though the op is
+  // validly signed by a pinned device.
+  it("refuses an incoming op with an invalid record and leaves the vault unchanged", async () => {
+    const devP = await makeDevice("owner-1", "dev-p"); // receiver
+    const devQ = await makeDevice("owner-1", "dev-q"); // sender, injects a bad op
+    try {
+      // 1. Seed the receiver with a known credential and pin the two devices to
+      //    each other via one clean sync (so dev-q's later op has an author).
+      {
+        const { vault } = await openDevice(devP);
+        vault.add({ name: "keep-me", type: "bearer", value: "safe", domains: ["api.example.com"] });
+        await vault.save();
+      }
+      await syncOnce(devP, devQ);
+      const before = await credNames(devP);
+      assert.ok(before.includes("keep-me"));
+
+      // 2. On dev-q, forge a validly-SIGNED op whose record is schema-invalid
+      //    (bearer with no `value`). createOp signs whatever it's given; it does
+      //    not validate — the receiver's staging loop must catch this.
+      {
+        const { vault, identity } = await openDevice(devQ);
+        const sync = ensureSyncMeta(vault.payload());
+        const badOp = createOp({
+          parents: findHeads(sync.oplog),
+          device: identity.jkt,
+          kind: "add",
+          name: "evil-cred",
+          record: { name: "evil-cred", type: "bearer", domains: ["api.example.com"] }, // no `value`
+          privateKeyPem: identity.privateKeyPem,
+        });
+        sync.oplog.push(badOp);
+        await vault.save();
+      }
+
+      // 3. Sync — the receiver must refuse the malformed op with 'invalid-record'.
+      await assert.rejects(
+        () => syncOnce(devP, devQ),
+        (err) => err.code === "invalid-record" || err.code === "peer-error",
+      );
+
+      // 4. The receiver's credential set is unchanged: no evil-cred landed.
+      const after = await credNames(devP);
+      assert.deepEqual(after, before);
+      assert.ok(!after.includes("evil-cred"));
+    } finally {
+      await fs.rm(devP.stateDir, { recursive: true, force: true });
+      await fs.rm(devQ.stateDir, { recursive: true, force: true });
+    }
   });
 });
