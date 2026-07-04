@@ -129,3 +129,83 @@ export function foldView(log) {
   }
   return { records, conflicts };
 }
+
+// ─── Local reconcile + view application ─────────────────────────────────────────
+
+// Record types that never sync — device-local by design (the vault holds only
+// a DEK; the sealed profile sidecar can't travel with the record).
+const LOCAL_ONLY_TYPES = new Set(["browser-profile"]);
+
+// lastUsedAt is volatile bookkeeping, not content — it must neither generate
+// ops nor be clobbered by an incoming winner.
+function stableRecord(rec) {
+  const copy = { ...rec };
+  delete copy.lastUsedAt;
+  return copy;
+}
+
+export function recordsEqual(a, b) {
+  return canonicalJSONString(stableRecord(a)) === canonicalJSONString(stableRecord(b));
+}
+
+// Diff payload.credentials against the folded oplog and append signed ops for
+// any drift. This single mechanism covers every local writer (CLI add/remove,
+// proxy, browser) with zero changes to their code paths — AND the genesis
+// migration of a pre-sync vault (empty log + N records → N chained add ops).
+export function reconcileLocalOps({ payload, device, privateKeyPem, now = nowMs() }) {
+  const sync = payload.sync;
+  const { records } = foldView(sync.oplog);
+  const appended = [];
+  const currentHeads = () => findHeads(sync.oplog);
+
+  for (const rec of payload.credentials) {
+    if (LOCAL_ONLY_TYPES.has(rec.type)) continue;
+    const folded = records.get(rec.name);
+    if (folded != null && recordsEqual(folded, rec)) continue;
+    const kind = records.has(rec.name) ? "update" : "add";
+    const op = createOp({
+      parents: currentHeads(), device, ts: rec.updatedAt || now,
+      kind, name: rec.name, record: stableRecord(rec), privateKeyPem,
+    });
+    sync.oplog.push(op);
+    appended.push(op);
+  }
+
+  const present = new Set(payload.credentials.map((c) => c.name));
+  for (const [name, folded] of records) {
+    if (folded == null || LOCAL_ONLY_TYPES.has(folded.type)) continue;
+    if (present.has(name)) continue;
+    const op = createOp({
+      parents: currentHeads(), device, ts: now,
+      kind: "remove", name, record: null, privateKeyPem,
+    });
+    sync.oplog.push(op);
+    appended.push(op);
+  }
+  return appended;
+}
+
+// Replace payload.credentials with the folded view. Local record objects are
+// kept when content matches (preserving lastUsedAt); device-local types are
+// carried over untouched; tombstones drop records.
+export function applyView(payload, records) {
+  const localByName = new Map(payload.credentials.map((c) => [c.name, c]));
+  const next = [];
+  for (const [name, rec] of records) {
+    if (rec == null) continue; // tombstone
+    const local = localByName.get(name);
+    if (local && recordsEqual(local, rec)) {
+      next.push(local);
+      continue;
+    }
+    const merged = { ...rec };
+    if (local?.lastUsedAt && (!merged.lastUsedAt || local.lastUsedAt > merged.lastUsedAt)) {
+      merged.lastUsedAt = local.lastUsedAt;
+    }
+    next.push(merged);
+  }
+  for (const c of payload.credentials) {
+    if (LOCAL_ONLY_TYPES.has(c.type)) next.push(c);
+  }
+  payload.credentials = next;
+}

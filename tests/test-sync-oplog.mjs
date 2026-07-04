@@ -12,11 +12,14 @@ import {
   generateEd25519PemPair,
 } from "../plugins/agent-id-core/lib/crypto.mjs";
 import {
+  applyView,
   createOp,
   findHeads,
   foldView,
   mergeOps,
   opHash,
+  reconcileLocalOps,
+  recordsEqual,
   verifyOp,
 } from "../plugins/agent-id-vault/lib/sync/oplog.mjs";
 
@@ -126,5 +129,75 @@ describe("sync oplog", () => {
       const alt = foldView(shuffled);
       assert.deepEqual([...alt.records.entries()].sort(), [...baseline.records.entries()].sort());
     }
+  });
+});
+
+describe("sync reconcile + applyView", () => {
+  function payloadWith(creds) {
+    return { version: 1, credentials: creds, sync: { oplog: [], devices: [], conflicts: [] } };
+  }
+
+  it("genesis: reconcile turns existing records into a chained op per record", () => {
+    const d = device("a");
+    const payload = payloadWith([rec("one", "1"), rec("two", "2")]);
+    const ops = reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem });
+    assert.equal(ops.length, 2);
+    assert.deepEqual(ops[0].parents, []);
+    assert.deepEqual(ops[1].parents, [ops[0].h]); // chained, single head
+    const { records } = foldView(payload.sync.oplog);
+    assert.equal(records.get("one").value, "1");
+    assert.equal(records.get("two").value, "2");
+  });
+
+  it("reconcile emits update and remove ops for drift, and nothing when clean", () => {
+    const d = device("a");
+    const payload = payloadWith([rec("one", "1")]);
+    reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem });
+    // no drift → no ops
+    assert.equal(reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem }).length, 0);
+    // update + remove drift
+    payload.credentials = [ { ...rec("one", "CHANGED"), updatedAt: 9 } ];
+    const ops2 = reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem });
+    assert.deepEqual(ops2.map((o) => o.op.kind).sort(), ["update"]);
+    payload.credentials = [];
+    const ops3 = reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem });
+    assert.deepEqual(ops3.map((o) => o.op.kind), ["remove"]);
+    assert.equal(foldView(payload.sync.oplog).records.get("one"), null);
+  });
+
+  it("reconcile ignores lastUsedAt-only drift and browser-profile records", () => {
+    const d = device("a");
+    const payload = payloadWith([rec("one", "1")]);
+    reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem });
+    payload.credentials[0].lastUsedAt = 123456;
+    assert.equal(reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem }).length, 0);
+    payload.credentials.push({
+      name: "chrome", type: "browser-profile", domains: ["*"],
+      dek: "a".repeat(64), profileFile: "p.enc", createdAt: 1, updatedAt: 1,
+    });
+    assert.equal(reconcileLocalOps({ payload, device: "jkt-a", privateKeyPem: d.privateKeyPem }).length, 0);
+  });
+
+  it("applyView writes the fold, preserves local lastUsedAt, keeps browser-profile", () => {
+    const local = { ...rec("one", "1"), lastUsedAt: 777 };
+    const bp = {
+      name: "chrome", type: "browser-profile", domains: ["*"],
+      dek: "a".repeat(64), profileFile: "p.enc", createdAt: 1, updatedAt: 1,
+    };
+    const payload = payloadWith([local, bp]);
+    const view = new Map([
+      ["one", rec("one", "1")],          // same content → keep local object
+      ["two", rec("two", "2")],          // new from remote
+      ["gone", null],                     // tombstone
+    ]);
+    applyView(payload, view);
+    const names = payload.credentials.map((c) => c.name).sort();
+    assert.deepEqual(names, ["chrome", "one", "two"]);
+    assert.equal(payload.credentials.find((c) => c.name === "one").lastUsedAt, 777);
+  });
+
+  it("recordsEqual ignores lastUsedAt but not values", () => {
+    assert.ok(recordsEqual({ ...rec("x", "1"), lastUsedAt: 1 }, { ...rec("x", "1"), lastUsedAt: 2 }));
+    assert.ok(!recordsEqual(rec("x", "1"), rec("x", "2")));
   });
 });
