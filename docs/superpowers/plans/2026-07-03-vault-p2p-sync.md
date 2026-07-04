@@ -1434,7 +1434,7 @@ async function makeDevice(sub, label) {
   await ensureDir(path.dirname(paths.mainKey));
   await writeJsonFile(paths.mainKey, { agentId: "main", ...pair });
   const idPayload = { iss: "https://sso.test", sub, cnf: { jkt } };
-  const idToken = ["e30", Buffer.from(JSON.stringify(idPayload)).toString("base64url"), "s"].join(".");
+  const idToken = ["e30", Buffer.from(JSON.stringify(idPayload)).toString("base64url"), "sig"].join(".");
   await writeJsonFile(paths.ownerSession, { idToken });
   await initVault({ stateDir, privateKeyPem: pair.privateKeyPem, agentId: "main" });
   return { stateDir, pair, label };
@@ -2253,7 +2253,7 @@ async function makeDevice(sub, label) {
   await ensureDir(path.dirname(paths.mainKey));
   await writeJsonFile(paths.mainKey, { agentId: "main", ...pair });
   const idPayload = { iss: "https://sso.test", sub, cnf: { jkt } };
-  const idToken = ["e30", Buffer.from(JSON.stringify(idPayload)).toString("base64url"), "s"].join(".");
+  const idToken = ["e30", Buffer.from(JSON.stringify(idPayload)).toString("base64url"), "sig"].join(".");
   await writeJsonFile(paths.ownerSession, { idToken });
   await initVault({ stateDir, privateKeyPem: pair.privateKeyPem, agentId: "main" });
   return { stateDir, pair, label, jkt };
