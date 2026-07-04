@@ -11,7 +11,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { redactSecretFields, parseListenPort } from "../plugins/agent-id-vault/bin/cli.mjs";
+import { redactSecretFields, parseListenPort } from "../plugins/agent-id-vault/lib/sync/cli-helpers.mjs";
 import { SECRET_FIELDS } from "../plugins/agent-id-vault/lib/store.mjs";
 
 const REDACTION = "(redacted — use --restore)";
