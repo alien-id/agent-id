@@ -1,0 +1,57 @@
+# Vault p2p sync full e2e — real CLIs across real container/network boundaries.
+#
+#   sso         real examples/dev-sso.mjs (auto-approve, fixed owner sub)
+#   device-a/b/c  real agent-id-core + agent-id-vault CLIs, one per "device"
+#
+# Every service is built from the same image (tests/e2e-docker/Dockerfile) with
+# the build context at the repo root so plugins/ + examples/ can be COPYied.
+
+name: agent-id-vault-sync-e2e
+
+x-device: &device
+  build:
+    context: ../..
+    dockerfile: tests/e2e-docker/Dockerfile
+  image: agent-id-vault-sync-e2e:latest
+  depends_on:
+    sso:
+      condition: service_healthy
+  networks: [mesh]
+  # Per-device isolated state on a tmpfs (fast, ephemeral, no leakage between runs).
+  tmpfs:
+    - /state
+  entrypoint: ["/app/e2e/device-entry.sh"]
+  init: true
+
+services:
+  sso:
+    build:
+      context: ../..
+      dockerfile: tests/e2e-docker/Dockerfile
+    image: agent-id-vault-sync-e2e:latest
+    networks: [mesh]
+    entrypoint: ["/app/e2e/sso-entry.sh"]
+    init: true
+    healthcheck:
+      # Reachable on the network via socat once dev-sso is up on loopback.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5050/.well-known/openid-configuration"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  device-a:
+    <<: *device
+    environment: [DEVICE=device-a]
+
+  device-b:
+    <<: *device
+    environment: [DEVICE=device-b]
+
+  device-c:
+    <<: *device
+    environment: [DEVICE=device-c]
+
+networks:
+  mesh:
+    driver: bridge

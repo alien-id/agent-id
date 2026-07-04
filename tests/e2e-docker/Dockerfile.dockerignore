@@ -1,0 +1,17 @@
+# Per-Dockerfile ignore (BuildKit convention). Lives next to the Dockerfile so
+# the build context stays at the repo root WITHOUT a forbidden root .dockerignore.
+# We COPY explicit paths, so this only trims the transfer for speed/cleanliness.
+.git
+node_modules
+**/node_modules
+docs
+CHANGELOG.md
+*.log
+.changeset
+scripts
+skills
+.github
+plugins/agent-id-auth
+plugins/agent-id-git
+plugins/agent-id-proxy
+plugins/agent-id-browser
