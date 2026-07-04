@@ -62,6 +62,15 @@ describe("self-signed cert generation", () => {
       assert.equal(fingerprintOfCertPem(certPem), fingerprint, `fingerprint stable: ${label}`);
     }
   });
+
+  it("PEM never contains a blank line and always loads into a TLS context", async () => {
+    const tls = await import("node:tls");
+    for (let i = 0; i < 100; i++) {
+      const { certPem, keyPem } = generateControlCert();
+      assert.ok(!certPem.includes("\n\n"), "blank line inside PEM");
+      tls.createSecureContext({ cert: certPem, key: keyPem }); // throws on malformed PEM
+    }
+  });
 });
 
 // HTTPS request that pins `expectedFp` (no CA trust). Rejects on mismatch.

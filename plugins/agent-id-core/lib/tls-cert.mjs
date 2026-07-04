@@ -78,8 +78,12 @@ function utcTime(date) {
   );
 }
 
+// Invariant: never emit a blank line, even when the base64 body length is an
+// exact multiple of 64 — Node's PEM parser rejects a blank line inside a PEM
+// block (e.g. `replace(/(.{64})/g, "$1\n")` would leave a trailing "\n" that,
+// combined with the "\n" added below, produces "\n\n" before the footer).
 function pem(label, der) {
-  const b64 = der.toString("base64").replace(/(.{64})/g, "$1\n");
+  const b64 = (der.toString("base64").match(/.{1,64}/g) || [""]).join("\n");
   return `-----BEGIN ${label}-----\n${b64}\n-----END ${label}-----\n`;
 }
 
