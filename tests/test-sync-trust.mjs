@@ -31,7 +31,7 @@ describe("sync trust", () => {
   it("ensureSyncMeta creates and preserves the sync section", () => {
     const payload = { version: 1, credentials: [] };
     const sync = ensureSyncMeta(payload);
-    assert.deepEqual(sync, { oplog: [], devices: [], conflicts: [] });
+    assert.deepEqual(sync, { oplog: [], devices: [], conflicts: [], version: 1 });
     sync.devices.push({ deviceJkt: "x" });
     assert.equal(ensureSyncMeta(payload).devices.length, 1);
   });

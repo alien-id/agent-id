@@ -98,7 +98,8 @@ its own minor changeset for the sync feature).
   h:       "sha256 of the canonical JSON of the body",   // operation id
   parents: ["h1", "h2"],   // DAG heads at creation time (usually 1)
   device:  "jkt thumbprint of the author's agent key",
-  ts:      1730000000000,  // informational; causality comes from the DAG
+  lc:      42,             // Lamport clock: 1 + max(parents' lc); decides concurrent ties
+  ts:      1730000000000,  // informational only (display / journal); NOT used for ordering
   op:      { kind: "add" | "update" | "remove", name: "github-pat",
              record: {...} | null },
   sig:     "Ed25519 signature of h by the author device's agent key"
@@ -109,8 +110,11 @@ its own minor changeset for the sync feature).
 
 For each record name the causally-latest operation wins. When operations are
 truly concurrent (neither is an ancestor of the other), both sides pick the
-same winner via the deterministic tiebreak: the op with the greater `ts`
-wins; on equal `ts`, the lexicographically greater `h` wins. The losing version
+same winner via the deterministic tiebreak: the op with the greater Lamport
+clock `lc` wins; on equal `lc`, the lexicographically greater `h` wins. `lc` is
+used instead of wall-clock `ts` so an honest device with a skewed clock cannot
+systematically win a concurrent conflict (a compromised *pinned* device is
+outside this guarantee — it is already trusted to author any op). The losing version
 is written to the **conflict journal** (local, never synced):
 `{name, losingRecord, winnerHash, decidedAt}`. `sync resolve <name>` lets the
 human re-instate a journaled version (which becomes a new op, superseding the
@@ -203,7 +207,7 @@ are idempotent by hash).
 | Owner mismatch | polite `owner-mismatch` refusal, no details leaked |
 | Peer not approved, no TTY | `approval-required`, jkt logged, no sync |
 | Network drop mid-sync | staging discarded, vault intact |
-| Skewed clocks | causality unaffected (DAG); tiebreak stays deterministic |
+| Skewed clocks | causality unaffected (DAG); concurrent tiebreak uses the Lamport clock `lc`, not wall-clock, so skew cannot decide a winner |
 | Concurrent local CRUD during apply | advisory lock: second writer waits or fails explicitly |
 | `user`-mode vault ↔ `dev`-mode vault | sync allowed (mode governs slots, not records), warning printed |
 | Revoked device | new connections refused; previously accepted ops remain (history is not rewritten) |

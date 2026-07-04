@@ -38,7 +38,7 @@ describe("sync oplog", () => {
   it("createOp produces a self-consistent signed op", () => {
     const d = device("a");
     const op = createOp({
-      parents: [], device: "jkt-a", ts: 100, kind: "add",
+      parents: [], device: "jkt-a", lc: 1, ts: 100, kind: "add",
       name: "gh", record: rec("gh", "tok"), privateKeyPem: d.privateKeyPem,
     });
     assert.equal(op.h, opHash(op));
@@ -48,7 +48,7 @@ describe("sync oplog", () => {
   it("verifyOp rejects a tampered record and a foreign key", () => {
     const d = device("a"), e = device("b");
     const op = createOp({
-      parents: [], device: "jkt-a", ts: 100, kind: "add",
+      parents: [], device: "jkt-a", lc: 1, ts: 100, kind: "add",
       name: "gh", record: rec("gh", "tok"), privateKeyPem: d.privateKeyPem,
     });
     assert.equal(verifyOp(op, e.jwk), false);
@@ -60,15 +60,15 @@ describe("sync oplog", () => {
 
   it("findHeads returns ops nothing points to", () => {
     const d = device("a");
-    const o1 = createOp({ parents: [], device: "a", ts: 1, kind: "add", name: "x", record: rec("x", "1"), privateKeyPem: d.privateKeyPem });
-    const o2 = createOp({ parents: [o1.h], device: "a", ts: 2, kind: "update", name: "x", record: rec("x", "2"), privateKeyPem: d.privateKeyPem });
+    const o1 = createOp({ parents: [], device: "a", lc: 1, ts: 1, kind: "add", name: "x", record: rec("x", "1"), privateKeyPem: d.privateKeyPem });
+    const o2 = createOp({ parents: [o1.h], device: "a", lc: 2, ts: 2, kind: "update", name: "x", record: rec("x", "2"), privateKeyPem: d.privateKeyPem });
     assert.deepEqual(findHeads([o1, o2]), [o2.h]);
   });
 
   it("mergeOps dedupes by hash and reports added", () => {
     const d = device("a");
-    const o1 = createOp({ parents: [], device: "a", ts: 1, kind: "add", name: "x", record: rec("x", "1"), privateKeyPem: d.privateKeyPem });
-    const o2 = createOp({ parents: [o1.h], device: "a", ts: 2, kind: "update", name: "x", record: rec("x", "2"), privateKeyPem: d.privateKeyPem });
+    const o1 = createOp({ parents: [], device: "a", lc: 1, ts: 1, kind: "add", name: "x", record: rec("x", "1"), privateKeyPem: d.privateKeyPem });
+    const o2 = createOp({ parents: [o1.h], device: "a", lc: 2, ts: 2, kind: "update", name: "x", record: rec("x", "2"), privateKeyPem: d.privateKeyPem });
     const { log, added } = mergeOps([o1], [o1, o2]);
     assert.equal(log.length, 2);
     assert.deepEqual(added.map((o) => o.h), [o2.h]);
@@ -76,9 +76,9 @@ describe("sync oplog", () => {
 
   it("fold: causally-later op wins regardless of ts", () => {
     const d = device("a");
-    const o1 = createOp({ parents: [], device: "a", ts: 999, kind: "add", name: "x", record: rec("x", "old"), privateKeyPem: d.privateKeyPem });
+    const o1 = createOp({ parents: [], device: "a", lc: 1, ts: 999, kind: "add", name: "x", record: rec("x", "old"), privateKeyPem: d.privateKeyPem });
     // ts is EARLIER but causally later — must win (clock-skew independence).
-    const o2 = createOp({ parents: [o1.h], device: "a", ts: 5, kind: "update", name: "x", record: rec("x", "new"), privateKeyPem: d.privateKeyPem });
+    const o2 = createOp({ parents: [o1.h], device: "a", lc: 2, ts: 5, kind: "update", name: "x", record: rec("x", "new"), privateKeyPem: d.privateKeyPem });
     const { records, conflicts } = foldView([o1, o2]);
     assert.equal(records.get("x").value, "new");
     assert.equal(conflicts.length, 0);
@@ -86,12 +86,12 @@ describe("sync oplog", () => {
 
   it("fold: concurrent edits pick a deterministic winner and journal the loser", () => {
     const a = device("a"), b = device("b");
-    const base = createOp({ parents: [], device: "a", ts: 1, kind: "add", name: "x", record: rec("x", "base"), privateKeyPem: a.privateKeyPem });
-    const fromA = createOp({ parents: [base.h], device: "a", ts: 10, kind: "update", name: "x", record: rec("x", "A"), privateKeyPem: a.privateKeyPem });
-    const fromB = createOp({ parents: [base.h], device: "b", ts: 10, kind: "update", name: "x", record: rec("x", "B"), privateKeyPem: b.privateKeyPem });
+    const base = createOp({ parents: [], device: "a", lc: 1, ts: 1, kind: "add", name: "x", record: rec("x", "base"), privateKeyPem: a.privateKeyPem });
+    const fromA = createOp({ parents: [base.h], device: "a", lc: 2, ts: 10, kind: "update", name: "x", record: rec("x", "A"), privateKeyPem: a.privateKeyPem });
+    const fromB = createOp({ parents: [base.h], device: "b", lc: 2, ts: 10, kind: "update", name: "x", record: rec("x", "B"), privateKeyPem: b.privateKeyPem });
     const r1 = foldView([base, fromA, fromB]);
     const r2 = foldView([base, fromB, fromA]);
-    // Equal ts → lexicographically greater hash wins; same on both sides.
+    // Equal lc → lexicographically greater hash wins; same on both sides.
     const expected = fromA.h > fromB.h ? "A" : "B";
     assert.equal(r1.records.get("x").value, expected);
     assert.equal(r2.records.get("x").value, expected);
@@ -101,10 +101,29 @@ describe("sync oplog", () => {
     assert.equal(r1.conflicts[0].losingRecord.value, expected === "A" ? "B" : "A");
   });
 
+  it("fold: Lamport clock decides concurrent ties, NOT wall-clock ts (clock-skew independence)", () => {
+    const a = device("a"), b = device("b");
+    const base = createOp({ parents: [], device: "a", lc: 1, ts: 1, kind: "add", name: "x", record: rec("x", "base"), privateKeyPem: a.privateKeyPem });
+    // fromA has a much LARGER wall-clock ts (simulating a skewed-ahead clock)
+    // but a SMALLER lc than fromB. Both are concurrent (neither is an
+    // ancestor of the other) — the Lamport winner (fromB) must be chosen
+    // regardless of ts, and regardless of hash order (rig lc to differ so the
+    // hash tiebreak never comes into play).
+    const fromA = createOp({ parents: [base.h], device: "a", lc: 2, ts: 999999, kind: "update", name: "x", record: rec("x", "A"), privateKeyPem: a.privateKeyPem });
+    const fromB = createOp({ parents: [base.h], device: "b", lc: 3, ts: 1, kind: "update", name: "x", record: rec("x", "B"), privateKeyPem: b.privateKeyPem });
+    const r1 = foldView([base, fromA, fromB]);
+    const r2 = foldView([base, fromB, fromA]);
+    assert.equal(r1.records.get("x").value, "B");
+    assert.equal(r2.records.get("x").value, "B");
+    assert.equal(r1.conflicts.length, 1);
+    assert.equal(r1.conflicts[0].winnerHash, fromB.h);
+    assert.equal(r1.conflicts[0].losingRecord.value, "A");
+  });
+
   it("fold: remove produces a tombstone (null)", () => {
     const d = device("a");
-    const o1 = createOp({ parents: [], device: "a", ts: 1, kind: "add", name: "x", record: rec("x", "1"), privateKeyPem: d.privateKeyPem });
-    const o2 = createOp({ parents: [o1.h], device: "a", ts: 2, kind: "remove", name: "x", record: null, privateKeyPem: d.privateKeyPem });
+    const o1 = createOp({ parents: [], device: "a", lc: 1, ts: 1, kind: "add", name: "x", record: rec("x", "1"), privateKeyPem: d.privateKeyPem });
+    const o2 = createOp({ parents: [o1.h], device: "a", lc: 2, ts: 2, kind: "remove", name: "x", record: null, privateKeyPem: d.privateKeyPem });
     const { records } = foldView([o1, o2]);
     assert.equal(records.get("x"), null);
   });
@@ -113,10 +132,12 @@ describe("sync oplog", () => {
     const a = device("a"), b = device("b");
     const ops = [];
     let heads = [];
+    let lc = 0;
     for (let i = 0; i < 8; i++) {
       const d = i % 2 ? a : b;
+      lc += 1;
       const op = createOp({
-        parents: heads, device: d.name, ts: 100 - i, kind: i === 5 ? "remove" : "update",
+        parents: heads, device: d.name, lc, ts: 100 - i, kind: i === 5 ? "remove" : "update",
         name: `cred-${i % 3}`, record: i === 5 ? null : rec(`cred-${i % 3}`, `v${i}`),
         privateKeyPem: d.privateKeyPem,
       });

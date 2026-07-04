@@ -5,13 +5,17 @@
 // `credentials` array is a deterministic fold of this log, so any two devices
 // holding the same op set converge to the same view without trusting clocks.
 //
-//   { h, parents: [h...], device: <author jkt>, ts,
+//   { h, parents: [h...], device: <author jkt>, lc, ts,
 //     op: { kind: add|update|remove, name, record|null },
 //     sig: Ed25519(h) by the author device's agent key }
 //
 // Causally-latest op per name wins; true concurrency (neither op an ancestor
-// of the other) is resolved by the deterministic tiebreak "greater ts, then
-// lexicographically greater h" and the loser goes to the conflict journal.
+// of the other) is resolved by the deterministic tiebreak "greater Lamport
+// clock (lc), then lexicographically greater h" and the loser goes to the
+// conflict journal. `lc` is a Lamport logical clock — causally consistent and
+// immune to honest wall-clock skew between devices (unlike `ts`, which is
+// kept only as informational metadata for the conflict journal's
+// decidedAt/display and is NOT used for ordering).
 
 import { createPublicKey } from "node:crypto";
 
@@ -22,6 +26,11 @@ import {
   signEd25519Base64Url,
   verifyEd25519Base64Url,
 } from "@alien-id/agent-id-core/lib/crypto.mjs";
+
+// Sync-section format version, for future compaction/format negotiation. Not
+// yet embedded anywhere — ensureSyncMeta (trust.mjs) should stamp this into
+// the sync section in a follow-up change.
+export const SYNC_VERSION = 1;
 
 export function jwkToPublicKeyPem(jwk) {
   return createPublicKey({ key: jwk, format: "jwk" })
@@ -34,6 +43,7 @@ function opBody(op) {
   return {
     parents: [...op.parents].sort(),
     device: op.device,
+    lc: op.lc,
     ts: op.ts,
     op: op.op,
   };
@@ -43,8 +53,8 @@ export function opHash(op) {
   return sha256Hex(canonicalJSONString(opBody(op)));
 }
 
-export function createOp({ parents, device, ts = nowMs(), kind, name, record = null, privateKeyPem }) {
-  const base = { parents: [...parents].sort(), device, ts, op: { kind, name, record } };
+export function createOp({ parents, device, lc, ts = nowMs(), kind, name, record = null, privateKeyPem }) {
+  const base = { parents: [...parents].sort(), device, lc, ts, op: { kind, name, record } };
   const h = opHash(base);
   return { ...base, h, sig: signEd25519Base64Url(h, privateKeyPem) };
 }
@@ -112,8 +122,8 @@ export function foldView(log) {
     const maximal = ops.filter(
       (o) => !ops.some((other) => other !== o && ancestors(other.h).has(o.h)),
     );
-    // Winner first: greater ts, then lexicographically greater hash.
-    maximal.sort((a, b) => (b.ts - a.ts) || (a.h < b.h ? 1 : a.h > b.h ? -1 : 0));
+    // Winner first: greater Lamport clock, then lexicographically greater hash.
+    maximal.sort((a, b) => (b.lc - a.lc) || (a.h < b.h ? 1 : a.h > b.h ? -1 : 0));
     const winner = maximal[0];
     for (const loser of maximal.slice(1)) {
       if (loser.op.record != null) {
@@ -157,6 +167,18 @@ export function reconcileLocalOps({ payload, device, privateKeyPem, now = nowMs(
   const { records } = foldView(sync.oplog);
   const appended = [];
   const heads = new Set(findHeads(sync.oplog));
+  const byHash = new Map(sync.oplog.map((o) => [o.h, o]));
+
+  // Running Lamport value of the current frontier (the ops in `heads`).
+  // Initialized from the existing log's head ops; 0 for an empty log. Each
+  // appended op is `1 + max(lc over its parent ops)`, and since reconcile
+  // always appends a single-head chain, the new op becomes the sole head and
+  // its lc becomes the new frontier value.
+  let frontierLc = 0;
+  for (const h of heads) {
+    const parentLc = byHash.get(h)?.lc ?? 0;
+    if (parentLc > frontierLc) frontierLc = parentLc;
+  }
 
   for (const rec of payload.credentials) {
     if (LOCAL_ONLY_TYPES.has(rec.type)) continue;
@@ -164,11 +186,13 @@ export function reconcileLocalOps({ payload, device, privateKeyPem, now = nowMs(
     if (folded != null && recordsEqual(folded, rec)) continue;
     const kind = records.has(rec.name) ? "update" : "add";
     const op = createOp({
-      parents: [...heads], device, ts: rec.updatedAt || now,
+      parents: [...heads], device, lc: 1 + frontierLc, ts: rec.updatedAt || now,
       kind, name: rec.name, record: stableRecord(rec), privateKeyPem,
     });
     for (const p of op.parents) heads.delete(p);
     heads.add(op.h);
+    byHash.set(op.h, op);
+    frontierLc = op.lc; // single head after append — its lc is the new frontier
     sync.oplog.push(op);
     appended.push(op);
   }
@@ -178,11 +202,13 @@ export function reconcileLocalOps({ payload, device, privateKeyPem, now = nowMs(
     if (folded == null || LOCAL_ONLY_TYPES.has(folded.type)) continue;
     if (present.has(name)) continue;
     const op = createOp({
-      parents: [...heads], device, ts: now,
+      parents: [...heads], device, lc: 1 + frontierLc, ts: now,
       kind: "remove", name, record: null, privateKeyPem,
     });
     for (const p of op.parents) heads.delete(p);
     heads.add(op.h);
+    byHash.set(op.h, op);
+    frontierLc = op.lc; // single head after append — its lc is the new frontier
     sync.oplog.push(op);
     appended.push(op);
   }

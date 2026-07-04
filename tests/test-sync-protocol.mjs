@@ -227,6 +227,7 @@ describe("sync protocol", () => {
         const badOp = createOp({
           parents: findHeads(sync.oplog),
           device: identity.jkt,
+          lc: 1,
           kind: "add",
           name: "evil-cred",
           record: { name: "evil-cred", type: "bearer", domains: ["api.example.com"] }, // no `value`

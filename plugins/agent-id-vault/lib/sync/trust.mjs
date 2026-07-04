@@ -22,7 +22,7 @@ import { buildV3Bundle, parseBundle, verifyBundle } from "@alien-id/agent-id-cor
 import { parseJwt } from "@alien-id/agent-id-core/lib/oidc.mjs";
 import { readJsonFile, statePaths } from "@alien-id/agent-id-core/lib/state.mjs";
 
-import { jwkToPublicKeyPem } from "./oplog.mjs";
+import { jwkToPublicKeyPem, SYNC_VERSION } from "./oplog.mjs";
 
 export const SYNC_EKM_LABEL = "agent-id-vault-sync-v1";
 
@@ -40,6 +40,10 @@ export function ensureSyncMeta(payload) {
   if (!Array.isArray(sync.oplog)) sync.oplog = [];
   if (!Array.isArray(sync.devices)) sync.devices = [];
   if (!Array.isArray(sync.conflicts)) sync.conflicts = [];
+  // Op-log/sync-format version. Stamped so a future format change (e.g. oplog
+  // compaction, which makes a missing ancestor below a checkpoint legal) can be
+  // negotiated instead of forcing a data migration.
+  if (typeof sync.version !== "number") sync.version = SYNC_VERSION;
   return sync;
 }
 
