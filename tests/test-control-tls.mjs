@@ -19,7 +19,7 @@ import {
   generateControlCert,
   fingerprintOfCertPem,
   normalizeFingerprint,
-} from "../plugins/agent-id-proxy/lib/control-tls.mjs";
+} from "../plugins/agent-id-core/lib/tls-cert.mjs";
 import { deviceUnsealMasterKey, sealToPublicKey } from "../plugins/agent-id-vault/lib/format.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
