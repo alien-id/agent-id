@@ -18,27 +18,10 @@ import {
   ensureSyncMeta,
   verifyHello,
 } from "../plugins/agent-id-vault/lib/sync/trust.mjs";
-import {
-  ed25519PublicKeyToJwk,
-  generateEd25519PemPair,
-  jwkThumbprint,
-} from "../plugins/agent-id-core/lib/crypto.mjs";
+import { fakeVerifyIdToken, makeIdentity as identity } from "./sync-test-helpers.mjs";
 
 const closers = [];
 after(async () => { for (const c of closers.reverse()) await c(); });
-
-function identity(sub) {
-  const pair = generateEd25519PemPair();
-  const agentJwk = ed25519PublicKeyToJwk(pair.publicKeyPem);
-  const jkt = jwkThumbprint(agentJwk);
-  const payload = { iss: "https://sso.test", sub, cnf: { jkt } };
-  const idToken = ["e30", Buffer.from(JSON.stringify(payload)).toString("base64url"), "sig"].join(".");
-  return { privateKeyPem: pair.privateKeyPem, agentJwk, jkt, idToken, ownerSub: sub, label: "t" };
-}
-const fakeVerifyIdToken = async ({ idToken }) => {
-  const payload = JSON.parse(Buffer.from(idToken.split(".")[1], "base64url").toString("utf8"));
-  return { signatureValid: true, issuer: payload.iss, payload, header: {} };
-};
 
 describe("sync channel", () => {
   it("both ends export the same EKM and can exchange framed JSON", async () => {

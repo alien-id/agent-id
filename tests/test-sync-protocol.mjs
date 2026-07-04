@@ -8,48 +8,13 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 
-import {
-  ed25519PublicKeyToJwk,
-  generateEd25519PemPair,
-  jwkThumbprint,
-} from "../plugins/agent-id-core/lib/crypto.mjs";
-import { ensureDir, statePaths, writeJsonFile } from "../plugins/agent-id-core/lib/state.mjs";
-import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 import { connectToPeer, startSyncServer } from "../plugins/agent-id-vault/lib/sync/channel.mjs";
-import { buildHello, ensureSyncMeta, loadSyncIdentity } from "../plugins/agent-id-vault/lib/sync/trust.mjs";
+import { buildHello, ensureSyncMeta } from "../plugins/agent-id-vault/lib/sync/trust.mjs";
 import { createOp, findHeads } from "../plugins/agent-id-vault/lib/sync/oplog.mjs";
 import { runSyncSession } from "../plugins/agent-id-vault/lib/sync/protocol.mjs";
 import { withVaultLock } from "../plugins/agent-id-vault/lib/sync/lock.mjs";
-
-const fakeVerifyIdToken = async ({ idToken }) => {
-  const payload = JSON.parse(Buffer.from(idToken.split(".")[1], "base64url").toString("utf8"));
-  return { signatureValid: true, issuer: payload.iss, payload, header: {} };
-};
-
-// A full simulated device: stateDir + agent key + owner session + vault.
-async function makeDevice(sub, label) {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `sync-${label}-`));
-  const pair = generateEd25519PemPair();
-  const agentJwk = ed25519PublicKeyToJwk(pair.publicKeyPem);
-  const jkt = jwkThumbprint(agentJwk);
-  const paths = statePaths(stateDir);
-  await ensureDir(path.dirname(paths.mainKey));
-  await writeJsonFile(paths.mainKey, { agentId: "main", ...pair });
-  const idPayload = { iss: "https://sso.test", sub, cnf: { jkt } };
-  const idToken = ["e30", Buffer.from(JSON.stringify(idPayload)).toString("base64url"), "sig"].join(".");
-  await writeJsonFile(paths.ownerSession, { idToken });
-  await initVault({ stateDir, privateKeyPem: pair.privateKeyPem, agentId: "main" });
-  return { stateDir, pair, label };
-}
-
-async function openDevice(device) {
-  const vault = await openVault({ stateDir: device.stateDir, privateKeyPem: device.pair.privateKeyPem });
-  const identity = await loadSyncIdentity(device.stateDir, { label: device.label });
-  return { vault, identity };
-}
+import { fakeVerifyIdToken, makeDevice, openDevice } from "./sync-test-helpers.mjs";
 
 // One full sync between two devices over loopback TLS. approve defaults to yes.
 async function syncOnce(devA, devB, { approveA = async () => true, approveB = async () => true } = {}) {

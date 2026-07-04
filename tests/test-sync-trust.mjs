@@ -21,24 +21,7 @@ import {
   revokeDevice,
   verifyHello,
 } from "../plugins/agent-id-vault/lib/sync/trust.mjs";
-
-// A "bound" test identity: fake id_token whose payload carries sub + cnf.jkt.
-// verifyBundle receives our injected verifyIdToken, so no real SSO/JWKS is hit.
-function identity(sub, label, extraClaims = {}) {
-  const pair = generateEd25519PemPair();
-  const agentJwk = ed25519PublicKeyToJwk(pair.publicKeyPem);
-  const jkt = jwkThumbprint(agentJwk);
-  const payload = { iss: "https://sso.test", sub, cnf: { jkt }, ...extraClaims };
-  const idToken = ["e30", Buffer.from(JSON.stringify(payload)).toString("base64url"), "sig"].join(".");
-  return { privateKeyPem: pair.privateKeyPem, agentJwk, jkt, idToken, ownerSub: sub, label };
-}
-
-// Injected verifier: trusts the token body (signature is out of scope here —
-// verifyBundle's structural checks + cnf.jkt binding still run for real).
-const fakeVerifyIdToken = async ({ idToken }) => {
-  const payload = JSON.parse(Buffer.from(idToken.split(".")[1], "base64url").toString("utf8"));
-  return { signatureValid: true, issuer: payload.iss, payload, header: { alg: "RS256" } };
-};
+import { fakeVerifyIdToken, makeIdentity as identity } from "./sync-test-helpers.mjs";
 
 function freshSync() {
   return ensureSyncMeta({ version: 1, credentials: [] });
