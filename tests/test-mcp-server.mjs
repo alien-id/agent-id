@@ -87,8 +87,13 @@ test("agent_id_probe_env reports the runtime + browser reachability", { skip }, 
     await withClient(dir, async (client) => {
       const probe = parse(await client.callTool({ name: "agent_id_probe_env", arguments: {} }));
       assert.equal(probe.ok, true);
-      // Runs on this dev machine (a real host), not a sandbox VM.
-      assert.equal(probe.runtime, "host");
+      // The probe REPORTS the runtime — assert it's a known classification, not a
+      // specific one (a macOS dev box is "host"; a Linux CI runner is
+      // "unknown-linux"; the real Cowork VM would be "cowork-vm").
+      assert.ok(
+        ["host", "cowork-vm", "unknown-linux"].includes(probe.runtime),
+        `unexpected runtime: ${probe.runtime}`,
+      );
       assert.equal(probe.platform, process.platform);
       assert.equal(typeof probe.localhostBindable, "boolean");
       assert.equal(typeof probe.chrome.found, "boolean");
