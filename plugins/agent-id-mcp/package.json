@@ -7,6 +7,9 @@
   "bin": {
     "agent-id-mcp": "./bin/server.mjs"
   },
+  "scripts": {
+    "build:bundle": "bun build bin/server.mjs --target=node --outfile=cowork/server.bundle.mjs"
+  },
   "engines": {
     "node": ">=18.0.0"
   },

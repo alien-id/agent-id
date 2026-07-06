@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, "..", "plugins", "agent-id-mcp", "bin", "server.mjs");
+const BUNDLE = path.join(HERE, "..", "plugins", "agent-id-mcp", "cowork", "server.bundle.mjs");
 
 let Client, StdioClientTransport;
 try {
@@ -26,11 +27,12 @@ try {
 }
 const skip = Client ? false : "@modelcontextprotocol/sdk not installed";
 
-async function withClient(stateDir, fn) {
+async function withClient(stateDir, fn, { serverPath = SERVER, cwd } = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [SERVER],
+    args: [serverPath],
     env: { ...process.env, AGENT_ID_STATE_DIR: stateDir },
+    ...(cwd ? { cwd } : {}),
   });
   const client = new Client({ name: "agent-id-mcp-test", version: "1.0.0" });
   await client.connect(transport);
@@ -76,6 +78,55 @@ test("agent_id_status flows CLI JSON back through the MCP result", { skip }, asy
     });
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("agent_id_probe_env reports the runtime + browser reachability", { skip }, async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-probe-"));
+  try {
+    await withClient(dir, async (client) => {
+      const probe = parse(await client.callTool({ name: "agent_id_probe_env", arguments: {} }));
+      assert.equal(probe.ok, true);
+      // Runs on this dev machine (a real host), not a sandbox VM.
+      assert.equal(probe.runtime, "host");
+      assert.equal(probe.platform, process.platform);
+      assert.equal(typeof probe.localhostBindable, "boolean");
+      assert.equal(typeof probe.chrome.found, "boolean");
+      assert.ok(probe.verdict, "carries a plain-English verdict");
+    });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the Cowork bundle runs self-contained (no node_modules) — proves no runtime install", { skip }, async () => {
+  let bundleExists = true;
+  try {
+    await fs.access(BUNDLE);
+  } catch {
+    bundleExists = false;
+  }
+  if (!bundleExists) {
+    // Bundle is a build output; regenerate with `bun run build:bundle` in plugins/agent-id-mcp.
+    return; // nothing to assert without the artifact
+  }
+  // Copy ONLY the bundle into a fresh dir with no node_modules — this is the
+  // Cowork condition (the SessionStart npm-install hook never runs there).
+  const iso = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-bundle-"));
+  try {
+    await fs.copyFile(BUNDLE, path.join(iso, "server.bundle.mjs"));
+    await withClient(
+      iso,
+      async (client) => {
+        const { tools } = await client.listTools();
+        assert.ok(tools.some((t) => t.name === "agent_id_probe_env"), "probe tool present in the bundle");
+        const probe = parse(await client.callTool({ name: "agent_id_probe_env", arguments: {} }));
+        assert.equal(probe.ok, true, "the bundled server answers with no node_modules present");
+      },
+      { serverPath: path.join(iso, "server.bundle.mjs"), cwd: iso },
+    );
+  } finally {
+    await fs.rm(iso, { recursive: true, force: true });
   }
 });
 
