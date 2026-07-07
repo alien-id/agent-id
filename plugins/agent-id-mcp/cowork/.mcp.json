@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agent-id": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server.bundle.mjs"]
+    }
+  }
+}

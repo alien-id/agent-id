@@ -77,6 +77,19 @@
         "patchright",
         "agent-identity"
       ]
+    },
+    {
+      "name": "agent-id-mcp",
+      "description": "MCP server exposing agent-id identity, vault, and the vault-sealed browser as MCP tools — the connector shape Claude Cowork (and other MCP hosts) consume, where the CLI/hook/local-Chrome plugin model can't run. Thin adapter over the agent-id-* CLIs; runs stdio locally or Streamable-HTTP when hosted.",
+      "version": "7.2.0",
+      "source": "./plugins/agent-id-mcp",
+      "category": "identity",
+      "keywords": [
+        "mcp",
+        "agent-identity",
+        "credential-vault",
+        "cowork"
+      ]
     }
   ]
 }

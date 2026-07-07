@@ -1,0 +1,12 @@
+{
+  "name": "agent-id",
+  "version": "7.2.0",
+  "description": "Alien Agent ID as MCP tools: verifiable agent identity, an encrypted credential vault, and a vault-sealed browser — plus an environment probe (agent_id_probe_env) to validate host-vs-VM execution in Cowork. Self-contained stdio server; no runtime install.",
+  "author": {
+    "name": "Alien",
+    "email": "support@alien.org"
+  },
+  "homepage": "https://github.com/alien-id/agent-id",
+  "keywords": ["mcp", "agent-identity", "credential-vault", "cowork"],
+  "mcpServers": "./.mcp.json"
+}
