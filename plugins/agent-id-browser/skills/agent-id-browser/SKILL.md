@@ -209,6 +209,58 @@ CLI eval   --js "document.title"
 CLI wait   --text "Inbox"          # or --url SUBSTR | --load networkidle | --ms 1500
 ```
 
+**Vision (coordinate) fallback** — the ref-based actions above are the default:
+cheaper (a snapshot is smaller than a screenshot on heavy pages), deterministic,
+and robust to layout shifts. Reach for coordinates ONLY when the snapshot can't
+express the target — a `<canvas>`, a map, a custom-rendered widget, a drag on a
+visual slider. The loop is: `screenshot` → read the PNG → point at a pixel.
+
+```bash
+CLI screenshot --path /tmp/shot.png
+# → { screenshot:"/tmp/shot.png", dpr:2, viewport:{width:1280,height:800},
+#     image:{width:2560,height:1600} }   # coords you give are in IMAGE pixels
+CLI click-xy --x 1840 --y 220          # [--double] [--button right|middle]
+CLI type-text --text "wireless mouse" --submit   # into whatever click-xy focused
+CLI move-xy --x 400 --y 300            # hover by pixel
+CLI drag-xy --x 200 --y 500 --tox 900 --toy 500  # visual drag (sliders, canvas)
+CLI scroll-xy --x 900 --y 500 --dy -300          # wheel AT a point (dy<0 zoom in
+                                                 # on maps); scrolls an inner pane
+CLI probe-xy --x 1840 --y 220          # what's under the pixel: {tag,role,name,ref}
+CLI zoom --region 1700,150,1980,300    # cropped closer view — read tiny icons/text
+```
+
+All coordinate actions — `click-xy`, `move-xy`, `drag-xy`, `scroll-xy`,
+`probe-xy`, and `zoom --region` — take **screenshot pixels** and divide by `dpr`
+for you (retina screenshots are 2× the viewport), so pass what you see in the
+PNG. Add `--css` only if your coords are already CSS pixels (e.g. from a
+`getBoundingClientRect` via `eval`). Coords address the **viewport**: scroll the
+target into view first, and use a viewport screenshot (not `--full`) as the
+reference — a full-page shot is taller than the clickable area. `type-text` types
+**plaintext only** (and appends — it doesn't clear the field); a secret still
+goes through ref-based `fill-secret`/`fill-otp`.
+`probe-xy` is read-only (works on ro sessions) — use it to confirm a click landed
+on the intended element, or to recover a `ref` for a ref-based follow-up.
+
+**Batch coordinate sequences** — `batch` runs any of these (incl. `click-xy` /
+`drag-xy` / `scroll-xy`) in ONE round trip; add `--delay MS` to pace steps for
+sites that animate between actions:
+
+```bash
+CLI batch --delay 150 --actions '[
+  {"action":"click-xy","params":{"x":900,"y":500}},
+  {"action":"drag-xy","params":{"x":900,"y":500,"tox":1200,"toy":500}}]'
+```
+
+**Window size** — the window opens at 1440×900 (override with env
+`AGENT_ID_BROWSER_WINDOW_SIZE=1600x1000`); resize it live when a task needs more
+room or a specific layout. `--width/--height` are the window's **outer** size —
+the resulting **inner** viewport is smaller (minus chrome), and `resize` returns
+it, so do coordinate math against the returned `viewport`, not the values you passed:
+
+```bash
+CLI resize --width 1600 --height 1000   # → { resized:{…}, viewport:{width:1600,height:857} }
+```
+
 **Tabs** — a click that opens a new tab (`target=_blank`) does NOT switch you;
 check `tabs` and switch when the snapshot shows more tabs than expected:
 

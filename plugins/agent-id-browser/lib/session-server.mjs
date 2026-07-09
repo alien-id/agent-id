@@ -40,6 +40,7 @@ import {
 import {
   humanClick,
   humanHover,
+  humanMove,
   humanScroll,
   humanType,
 } from "./human-input.mjs";
@@ -130,6 +131,45 @@ export function frameRefId(ref) {
 export function safeFilename(name) {
   const cleaned = String(name || "").replace(/[^\w.-]+/g, "_").replace(/^\.+/, "");
   return (cleaned || "file").slice(0, 80);
+}
+
+// Screenshot pixels → viewport (CSS) pixels. The PNG is captured at the context's
+// devicePixelRatio (retina = 2×); page.mouse takes CSS px, so divide by dpr.
+// `--css` skips this (coords already CSS px). Pure — exported for tests.
+export function imageToViewport(x, y, dpr) {
+  const d = Number(dpr) > 0 ? Number(dpr) : 1;
+  return { x: Number(x) / d, y: Number(y) / d };
+}
+
+// The live devicePixelRatio (1 when --css). One place for the dpr rule every
+// coordinate action shares. Best-effort: a page that can't run JS reports dpr 1.
+async function liveDpr(page, css) {
+  if (css) return 1;
+  return page.evaluate(() => window.devicePixelRatio || 1).catch(() => 1);
+}
+
+// Convert an agent-supplied screenshot pixel to a viewport CSS point, rejecting
+// non-numeric coords with an action-specific message.
+function toXY(x, y, dpr, label) {
+  const pt = imageToViewport(x, y, dpr);
+  if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
+    throw new Error(`${label} needs numeric --x and --y`);
+  }
+  return pt;
+}
+
+// A screenshot region [x0,y0,x1,y1] in image px → a Playwright `clip` in CSS px
+// (crop for `screenshot --region` / `zoom`). Order-agnostic (min/abs), divides by
+// dpr like imageToViewport. Pure — exported for tests.
+export function regionToClip(region, dpr) {
+  const d = Number(dpr) > 0 ? Number(dpr) : 1;
+  const [x0, y0, x1, y1] = region.map(Number);
+  return {
+    x: Math.min(x0, x1) / d,
+    y: Math.min(y0, y1) / d,
+    width: Math.abs(x1 - x0) / d,
+    height: Math.abs(y1 - y0) / d,
+  };
 }
 
 // Resolve the Frame (or current Page, which proxies its main frame) a ref
@@ -496,10 +536,190 @@ async function dispatch(state, msg, policy = null) {
     case "scroll":
       await humanScroll(page, Number(p.dx || 0), Number(p.dy || 600));
       return { scrolled: true };
+    case "scroll-xy": {
+      // Wheel-scroll with the cursor positioned at a screenshot pixel. `scroll`
+      // wheels wherever the cursor happens to be; `scroll-xy` puts it at (x,y)
+      // first — needed for zoom-toward-point (maps zoom on the cursor) and for
+      // scrolling an inner pane rather than the page. dx/dy are wheel deltas
+      // (dy>0 scrolls down; sites map that to zoom-out, negative to zoom-in).
+      const { x, y } = toXY(p.x, p.y, await liveDpr(page, p.css), "scroll-xy");
+      await humanMove(page, x, y);
+      const dx = Number(p.dx || 0);
+      const dy = Number(p.dy || 0);
+      await page.mouse.wheel(dx, dy);
+      return { scrolled: { x, y, dx, dy } };
+    }
+    // Coordinate (vision) actions — the hybrid to ref-based clicking. The agent
+    // points at a screenshot pixel; toXY converts to viewport CSS px (÷dpr) and
+    // page.mouse acts. Coords address the VIEWPORT — scroll into view first and
+    // use a viewport screenshot (not --full) as the reference.
+    case "click-xy": {
+      const { x, y } = toXY(p.x, p.y, await liveDpr(page, p.css), "click-xy");
+      const button = ["left", "right", "middle"].includes(String(p.button)) ? String(p.button) : "left";
+      await humanMove(page, x, y); // stealth trail; the click itself lands at (x,y)
+      await page.mouse.click(x, y, { button, clickCount: p.double ? 2 : 1 });
+      return { clicked: { x, y }, button, ...(p.double ? { double: true } : {}) };
+    }
+    case "move-xy": {
+      const { x, y } = toXY(p.x, p.y, await liveDpr(page, p.css), "move-xy");
+      await humanMove(page, x, y);
+      return { moved: { x, y } };
+    }
+    case "drag-xy": {
+      const dpr = await liveDpr(page, p.css);
+      const from = imageToViewport(p.x, p.y, dpr);
+      const to = imageToViewport(p.tox, p.toy, dpr);
+      if (![from.x, from.y, to.x, to.y].every(Number.isFinite)) {
+        throw new Error("drag-xy needs numeric --x --y --tox --toy");
+      }
+      await humanMove(page, from.x, from.y);
+      await page.mouse.down();
+      await humanMove(page, to.x, to.y);
+      await page.mouse.up();
+      return { dragged: { from, to } };
+    }
+    case "type-text": {
+      // Keyboard typing into whatever is focused (usually after a click-xy).
+      // PLAINTEXT ONLY — secrets stay ref-based via fill-secret/fill-otp. Note it
+      // APPENDS (no clear) unlike ref-based `type`; click a field's clear/select-all
+      // first if replacing. Only the length leaves the session, never the text.
+      const text = String(p.text ?? "");
+      await page.keyboard.type(text, { delay: 25 });
+      if (p.submit) await page.keyboard.press("Enter");
+      return { typed: text.length, submit: !!p.submit };
+    }
+    case "probe-xy": {
+      // Read-only vision→DOM bridge: what element sits under a screenshot pixel?
+      // Runs a fixed elementFromPoint (not agent JS like `eval`), reads no input
+      // `value`, mutates nothing — so it is allowed on read-only sessions.
+      const { x, y } = toXY(p.x, p.y, await liveDpr(page, p.css), "probe-xy");
+      const element = await page.evaluate(([px, py]) => {
+        const el = document.elementFromPoint(px, py);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const clip = (s) => (s ? String(s).replace(/\s+/g, " ").trim().slice(0, 100) : "");
+        return {
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute("role") || null,
+          type: el.getAttribute("type") || null,
+          ref: el.getAttribute("data-aibref") || null, // present only after a snapshot
+          name: clip(
+            el.getAttribute("aria-label") ||
+              el.getAttribute("placeholder") ||
+              el.getAttribute("title") ||
+              el.textContent,
+          ),
+          href: el.getAttribute("href") || null,
+          box: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
+        };
+      }, [x, y]);
+      return { at: { x, y }, element };
+    }
+    case "resize": {
+      // Resize the live browser window. viewport:null ties the page viewport to
+      // the real window, so a scripted setViewportSize is rejected — drive window
+      // bounds over CDP. width/height are the OUTER window size; the resulting
+      // INNER viewport (what coordinate actions use) is smaller and is returned.
+      const width = Math.round(Number(p.width));
+      const height = Math.round(Number(p.height));
+      if (![width, height].every(Number.isFinite) || width < 200 || height < 200) {
+        throw new Error("resize needs numeric --width and --height (min 200 each)");
+      }
+      const before = await page
+        .evaluate(() => [window.innerWidth, window.innerHeight])
+        .catch(() => null);
+      const cdp = await state.ctx.newCDPSession(page);
+      try {
+        const { windowId } = await cdp.send("Browser.getWindowForTarget");
+        // Two steps: exit maximized/fullscreen FIRST, else Chrome applies the
+        // state change and ignores the bounds in the same call.
+        await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }).catch(() => {});
+        await cdp.send("Browser.setWindowBounds", { windowId, bounds: { width, height } });
+      } catch (err) {
+        throw new Error(`resize failed (CDP window bounds unavailable — needs a headed/cloud Chrome): ${err.message || err}`);
+      } finally {
+        await cdp.detach().catch(() => {});
+      }
+      // setWindowBounds acks before the renderer re-lays-out — wait for the inner
+      // size to actually change (best-effort) so the returned viewport isn't stale.
+      if (before) {
+        await page
+          .waitForFunction(
+            (b) => window.innerWidth !== b[0] || window.innerHeight !== b[1],
+            before,
+            { timeout: 3000 },
+          )
+          .catch(() => {});
+      }
+      const viewport = await page
+        .evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+        .catch(() => null);
+      return { resized: { width, height }, ...(viewport ? { viewport } : {}) };
+    }
     case "screenshot": {
       const out = p.path ? String(p.path) : path.join(sessionsDir(msg._stateDir), `shot-${Date.now()}.png`);
+      // dims are BEST-EFFORT and must never block the capture: a JS-hostile page
+      // (PDF viewer, chrome://, mid-navigation) can't run this evaluate, but the
+      // pixel capture is exactly what you still want there. Default dpr=1, no
+      // viewport, on failure. `image` echoes the pixel bounds the agent can point
+      // within; a --full shot is taller than the viewport, so `image` is omitted.
+      const info = await page
+        .evaluate(() => ({
+          dpr: window.devicePixelRatio || 1,
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+        }))
+        .catch(() => ({ dpr: 1, viewport: null }));
+      // --region [x0,y0,x1,y1] (image px) crops a zoomed-in view of a UI area. If
+      // --region is given it MUST be 4 finite numbers — otherwise error, never
+      // silently fall through to a full shot the agent would mistake for a crop.
+      let region = null;
+      if (p.region != null) {
+        region = Array.isArray(p.region) ? p.region.map(Number) : null;
+        if (!region || region.length !== 4 || !region.every(Number.isFinite)) {
+          throw new Error("screenshot --region needs 4 numbers: x0,y0,x1,y1");
+        }
+      }
+      // `zoom` sets requireRegion — a region-less zoom is a mistake, not a full shot.
+      if (p.requireRegion && !region) throw new Error("zoom needs --region x0,y0,x1,y1");
+      if (region) {
+        const clip = regionToClip(region, p.css ? 1 : info.dpr);
+        // Clamp to the viewport so an over-large region gives a helpful error
+        // instead of a raw Playwright "clipped area outside image".
+        if (info.viewport) {
+          clip.x = Math.max(0, Math.min(clip.x, info.viewport.width));
+          clip.y = Math.max(0, Math.min(clip.y, info.viewport.height));
+          clip.width = Math.min(clip.width, info.viewport.width - clip.x);
+          clip.height = Math.min(clip.height, info.viewport.height - clip.y);
+        }
+        if (clip.width < 1 || clip.height < 1) {
+          throw new Error("screenshot --region has zero area (or lies outside the viewport)");
+        }
+        // Guard the capture too: when viewport was unknown (JS-hostile page) we
+        // couldn't clamp, so a raw clip error becomes a readable one.
+        try {
+          await page.screenshot({ path: out, clip });
+        } catch (err) {
+          throw new Error(`screenshot --region could not capture (region likely outside the page): ${err.message || err}`);
+        }
+        return {
+          screenshot: out,
+          dpr: info.dpr,
+          region,
+          image: { width: Math.round(clip.width * info.dpr), height: Math.round(clip.height * info.dpr) },
+        };
+      }
       await page.screenshot({ path: out, fullPage: !!p.fullPage });
-      return { screenshot: out };
+      const result = { screenshot: out, dpr: info.dpr };
+      if (info.viewport) result.viewport = info.viewport;
+      if (p.fullPage) {
+        result.fullPage = true; // spans the whole page — not a valid click reference
+      } else if (info.viewport) {
+        result.image = {
+          width: Math.round(info.viewport.width * info.dpr),
+          height: Math.round(info.viewport.height * info.dpr),
+        };
+      }
+      return result;
     }
     case "eval":
       return { result: await page.evaluate(String(p.expression)) };
@@ -647,11 +867,15 @@ async function dispatch(state, msg, policy = null) {
     }
     case "batch": {
       // Run a short scripted sequence in one round trip. Sub-actions go back
-      // through dispatch(), so per-action policy checks (read-only denials)
-      // still apply to each step. Stops at the first failure.
+      // through dispatch(), so per-action policy checks (read-only denials) still
+      // apply to each step, AND coordinate actions (click-xy/drag-xy/scroll-xy/…)
+      // work here too. Stops at the first failure. Optional --delay MS pauses
+      // between steps (capped 5s) for sites that need time to settle (animations,
+      // canvas repaints) before the next action.
       const actions = Array.isArray(p.actions) ? p.actions : [];
       if (!actions.length) throw new Error('batch needs --actions \'[{"action":"click","params":{"ref":"e1"}}, …]\'');
       if (actions.length > 20) throw new Error("batch: max 20 actions");
+      const delay = Number(p.delay) > 0 ? Math.min(Number(p.delay), 5000) : 0;
       const results = [];
       for (const a of actions) {
         const name = a && typeof a.action === "string" ? a.action : null;
@@ -665,6 +889,7 @@ async function dispatch(state, msg, policy = null) {
           results.push({ action: name, ok: false, error: err.message || String(err) });
           return { completed: results.length - 1, stopped: true, results };
         }
+        if (delay) await new Promise((r) => setTimeout(r, delay));
       }
       return { completed: results.length, results };
     }

@@ -92,15 +92,28 @@ export function sandboxDisabled(env = process.env) {
   return env.AGENT_ID_BROWSER_NO_SANDBOX === "1";
 }
 
+// Initial window size "W,H" for --window-size. Default 1440x900; override via
+// AGENT_ID_BROWSER_WINDOW_SIZE ("1600x1000" or "1600,1000"). Sets the launch-time
+// size (the `resize` action changes it later, but only once a page exists).
+// Exported for tests.
+export function windowSize(env = process.env) {
+  const m = /^\s*(\d{3,5})\s*[x,]\s*(\d{3,5})\s*$/.exec(env.AGENT_ID_BROWSER_WINDOW_SIZE || "");
+  return m ? `${m[1]},${m[2]}` : "1440,900";
+}
+
 // Exported for tests (the env-driven sandbox toggle must be provable without a
 // browser launch).
 export function launchOptions(headless) {
   return {
     channel: "chrome",
     headless,
+    // viewport:null keeps the page viewport tied to the real window (stealth —
+    // not a scripted viewport). Chromium's default window is a cramped ~800×600,
+    // so size it explicitly: --window-size drives the real window (headed) AND the
+    // virtual screen (headless), leaving viewport:null intact.
     viewport: null,
     ignoreDefaultArgs: sandboxDisabled() ? [] : ["--no-sandbox"],
-    args: ["--test-type"],
+    args: ["--test-type", `--window-size=${windowSize()}`],
     // Explicit (it's the modern default) so the session server's download
     // listener always gets Download objects rather than canceled downloads.
     acceptDownloads: true,
