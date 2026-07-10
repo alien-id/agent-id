@@ -777,6 +777,8 @@ const requireUrl = (f) => {
   return String(f.url);
 };
 const csv = (v) => (v == null ? undefined : String(v).split(",").map((s) => s.trim()).filter(Boolean));
+// "x0,y0,x1,y1" → [n,n,n,n] for screenshot --region / zoom.
+const region = (v) => (v == null ? undefined : String(v).split(",").map((s) => Number(s.trim())));
 
 runCli({
   commands: {
@@ -808,7 +810,17 @@ runCli({
     press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
     hover: actionCmd("hover", (f) => ({ ref: f.ref })),
     scroll: actionCmd("scroll", (f) => ({ dx: f.dx, dy: f.dy })),
-    screenshot: actionCmd("screenshot", (f) => ({ path: f.path, fullPage: f.full === true || f.fullPage === true })),
+    // Coordinate (vision) actions — pair with `screenshot` for the hybrid path.
+    "click-xy": actionCmd("click-xy", (f) => ({ x: f.x, y: f.y, button: f.button, double: f.double === true, css: f.css === true })),
+    "move-xy": actionCmd("move-xy", (f) => ({ x: f.x, y: f.y, css: f.css === true })),
+    "drag-xy": actionCmd("drag-xy", (f) => ({ x: f.x, y: f.y, tox: f.tox, toy: f.toy, css: f.css === true })),
+    "scroll-xy": actionCmd("scroll-xy", (f) => ({ x: f.x, y: f.y, dx: f.dx, dy: f.dy, css: f.css === true })),
+    "type-text": actionCmd("type-text", (f) => ({ text: f.text ?? "", submit: f.submit === true })),
+    "probe-xy": actionCmd("probe-xy", (f) => ({ x: f.x, y: f.y, css: f.css === true })),
+    resize: actionCmd("resize", (f) => ({ width: f.width, height: f.height })),
+    screenshot: actionCmd("screenshot", (f) => ({ path: f.path, fullPage: f.full === true || f.fullPage === true, region: region(f.region) })),
+    // zoom = a cropped, closer screenshot of a UI region (image px x0,y0,x1,y1).
+    zoom: actionCmd("screenshot", (f) => ({ path: f.path, region: region(f.region), requireRegion: true, css: f.css === true })),
     eval: actionCmd("eval", (f) => ({ expression: f.js ?? f.expression })),
     wait: actionCmd("wait", (f) => ({ text: f.text, ms: f.ms, url: f.url, load: f.load })),
     get: actionCmd("get", (f) => ({ ref: f.ref, what: f.what, attr: f.attr, maxChars: f["max-chars"] })),
@@ -821,7 +833,7 @@ runCli({
     downloads: actionCmd("downloads", (f) => ({ max: f.max })),
     console: actionCmd("console", (f) => ({ level: f.level, max: f.max })),
     cookies: actionCmd("cookies", (f) => ({ url: f.url })),
-    batch: actionCmd("batch", (f) => ({ actions: JSON.parse(f.actions || "[]") }), 320000),
+    batch: actionCmd("batch", (f) => ({ actions: JSON.parse(f.actions || "[]"), delay: f.delay }), 320000),
   },
   printHelp: () =>
     stderr(
@@ -865,6 +877,21 @@ runCli({
         "  drag    --name N --ref eN --to eM           same-frame drag & drop\n" +
         "  select  --name N --ref eN --values a,b      press --name N --key Enter [--ref eN]\n" +
         "  hover   --name N --ref eN                   scroll --name N [--dy 600]\n" +
+        "  Vision (coordinate) actions — pair with `screenshot`; prefer ref-based\n" +
+        "  actions above, use these when the DOM/snapshot is unusable (canvas etc.):\n" +
+        "  click-xy --name N --x N --y N [--double] [--button right|middle] [--css]\n" +
+        "          click a screenshot PIXEL; coords are auto-converted for retina (dpr)\n" +
+        "  move-xy  --name N --x N --y N [--css]        drag-xy --x N --y N --tox N --toy N\n" +
+        "  scroll-xy --name N --x N --y N [--dy N] [--dx N]   wheel at a pixel\n" +
+        "          (zoom-toward-point on maps; scroll an inner pane). dy>0 = down.\n" +
+        "  type-text --name N --text T [--submit]       type into the focused element\n" +
+        "          (plaintext only — secrets stay ref-based via fill-secret/fill-otp)\n" +
+        "  probe-xy --name N --x N --y N                what element is at a pixel\n" +
+        "          (tag/role/name/ref — vision→DOM bridge; read-only, ro-safe)\n" +
+        "  zoom    --name N --region x0,y0,x1,y1 [--path P]   cropped closer view of\n" +
+        "          a UI area (read small icons/text without guessing coords)\n" +
+        "  resize  --name N --width W --height H        resize the window (OUTER size;\n" +
+        "          the returned `viewport` is the smaller INNER area — use it for coords)\n" +
         "  navigate --name N --url URL                 back --name N\n" +
         "  page-text --name N [--max-chars K]\n" +
         "  wait    --name N [--text T | --url SUBSTR | --load networkidle | --ms N]\n" +
@@ -876,8 +903,10 @@ runCli({
         "  console [--level error|warn] [--max K]       page console + JS errors (best-\n" +
         "          effort: the stealth driver suppresses most console events)\n" +
         "  cookies [--url U]       cookie metadata (names/domains — values stay sealed)\n" +
-        "  batch   --actions '[{\"action\":\"click\",\"params\":{\"ref\":\"e1\"}},…]'  (stops on error)\n" +
-        "  screenshot --name N [--path P] [--full]     eval --name N --js 'EXPR'\n" +
+        "  batch   --actions '[{\"action\":\"click-xy\",\"params\":{\"x\":9,\"y\":9}},…]' [--delay MS]\n" +
+        "          one round trip; any action incl. click-xy/drag-xy; stops on error\n" +
+        "  screenshot --name N [--path P] [--full]     PNG + {dpr,viewport,image} for click-xy\n" +
+        "  eval    --name N --js 'EXPR'\n" +
         "  sessions                list open sessions   close --name N\n\n" +
         "Unlock: agent-key (auto) | --passphrase-file F | --passphrase-env V |\n" +
         "        owner-approval (approve in the Alien app; --no-owner-approval to skip).\n" +

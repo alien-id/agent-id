@@ -12,7 +12,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { sandboxDisabled, launchOptions } from "../plugins/agent-id-browser/lib/launch.mjs";
+import { sandboxDisabled, windowSize, launchOptions } from "../plugins/agent-id-browser/lib/launch.mjs";
+
+test("windowSize: defaults to 1440,900 and accepts x/comma overrides", () => {
+  assert.equal(windowSize({}), "1440,900");
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1600x1000" }), "1600,1000");
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1600,1000" }), "1600,1000");
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: " 800 x 600 " }), "800,600");
+  // Garbage / injection attempts fall back to the default (no arbitrary flag text).
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1440,900 --foo" }), "1440,900");
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "huge" }), "1440,900");
+});
 
 test("sandboxDisabled: only the literal '1' opts out", () => {
   assert.equal(sandboxDisabled({}), false);
@@ -36,7 +46,7 @@ test("opt-in keeps patchright's --no-sandbox (root-in-container launch works)", 
     assert.deepEqual(opts.ignoreDefaultArgs, []);
     // Everything else about the stealth config is unchanged.
     assert.equal(opts.channel, "chrome");
-    assert.deepEqual(opts.args, ["--test-type"]);
+    assert.deepEqual(opts.args, ["--test-type", "--window-size=1440,900"]);
   } finally {
     delete process.env.AGENT_ID_BROWSER_NO_SANDBOX;
   }
