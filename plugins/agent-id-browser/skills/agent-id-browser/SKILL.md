@@ -221,6 +221,7 @@ CLI screenshot --path /tmp/shot.png
 #     image:{width:2560,height:1600} }   # coords you give are in IMAGE pixels
 CLI click-xy --x 1840 --y 220          # [--double] [--button right|middle]
 CLI type-text --text "wireless mouse" --submit   # into whatever click-xy focused
+CLI fill-text --text "long paste-style text"     # same target, one-shot insert
 CLI move-xy --x 400 --y 300            # hover by pixel
 CLI drag-xy --x 200 --y 500 --tox 900 --toy 500  # visual drag (sliders, canvas)
 CLI scroll-xy --x 900 --y 500 --dy -300          # wheel AT a point (dy<0 zoom in
@@ -235,9 +236,13 @@ for you (retina screenshots are 2× the viewport), so pass what you see in the
 PNG. Add `--css` only if your coords are already CSS pixels (e.g. from a
 `getBoundingClientRect` via `eval`). Coords address the **viewport**: scroll the
 target into view first, and use a viewport screenshot (not `--full`) as the
-reference — a full-page shot is taller than the clickable area. `type-text` types
-**plaintext only** (and appends — it doesn't clear the field); a secret still
-goes through ref-based `fill-secret`/`fill-otp`.
+reference — a full-page shot is taller than the clickable area. `type-text` and
+`fill-text` both write into the focused element, **plaintext only** (and append —
+they don't clear the field); a secret still goes through ref-based
+`fill-secret`/`fill-otp`. Choose by how the page listens: `type-text` sends real
+keystrokes (search-as-you-type, autocomplete, key-filtered inputs), `fill-text`
+inserts the whole text at once like a paste (fast for long text, immune to
+per-key handlers mangling input).
 `probe-xy` is read-only (works on ro sessions) — use it to confirm a click landed
 on the intended element, or to recover a `ref` for a ref-based follow-up.
 

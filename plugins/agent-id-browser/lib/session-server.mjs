@@ -588,6 +588,20 @@ async function dispatch(state, msg, policy = null) {
       if (p.submit) await page.keyboard.press("Enter");
       return { typed: text.length, submit: !!p.submit };
     }
+    case "fill-text": {
+      // Paste-style counterpart to `type-text`: insert the whole text at the
+      // caret in one shot (insertText — an `input` event, no per-key keydown/
+      // keyup), the way a clipboard paste lands. Use it for long text where
+      // per-keystroke typing is slow or where key handlers mangle input; use
+      // `type-text` when the page needs real keystrokes (search-as-you-type,
+      // autocomplete). Same contract otherwise: PLAINTEXT ONLY (secrets stay
+      // ref-based via fill-secret/fill-otp), APPENDS at the caret (no clear),
+      // and only the length leaves the session, never the text.
+      const text = String(p.text ?? "");
+      await page.keyboard.insertText(text);
+      if (p.submit) await page.keyboard.press("Enter");
+      return { filled: text.length, submit: !!p.submit };
+    }
     case "probe-xy": {
       // Read-only vision→DOM bridge: what element sits under a screenshot pixel?
       // Runs a fixed elementFromPoint (not agent JS like `eval`), reads no input
