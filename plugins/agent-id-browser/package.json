@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-browser",
-  "version": "7.3.0",
+  "version": "7.3.1",
   "type": "module",
   "private": true,
   "description": "Universal browser automation with the profile sealed in the agent vault.",
