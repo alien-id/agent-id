@@ -21,6 +21,7 @@
 import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
 import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
 import { hostMatchesAllowlist, validateAccessFields } from "./access.mjs";
+import { validateCapabilityPolicy } from "./capability.mjs";
 
 // Domain matching lives in access.mjs (access rules share the syntax); kept
 // exported here for the proxy/browser consumers that import it from store.
@@ -128,6 +129,31 @@ export function validateRecord(rec) {
   // Optional per-credential access level + rules (enforced by the proxy and
   // the browser session server; see access.mjs).
   validateAccessFields(rec);
+  if (
+    rec.capabilityPolicyEpoch != null &&
+    (!Number.isSafeInteger(rec.capabilityPolicyEpoch) || rec.capabilityPolicyEpoch < 1)
+  ) {
+    throw new Error(`Credential ${rec.name}: capabilityPolicyEpoch must be a positive integer`);
+  }
+  if (rec.capabilityPolicy != null) {
+    validateCapabilityPolicy(rec.capabilityPolicy, rec.name);
+    if (rec.capabilityPolicyEpoch == null) {
+      throw new Error(
+        `Credential ${rec.name}: capabilityPolicyEpoch is required with capabilityPolicy`,
+      );
+    }
+    if (rec.capabilityPolicyEpoch !== rec.capabilityPolicy.epoch) {
+      throw new Error(
+        `Credential ${rec.name}: capabilityPolicyEpoch must match capabilityPolicy.epoch`,
+      );
+    }
+  }
+  if (
+    rec.credentialRevision != null &&
+    (!Number.isSafeInteger(rec.credentialRevision) || rec.credentialRevision < 1)
+  ) {
+    throw new Error(`Credential ${rec.name}: credentialRevision must be a positive safe integer`);
+  }
   switch (rec.type) {
     case "bearer":
       requireNonEmpty(rec, ["value"]);
@@ -280,14 +306,62 @@ export function validateRecord(rec) {
 // ─── Payload serializer ─────────────────────────────────────────────────────────
 
 export function emptyPayload() {
-  return { version: 1, credentials: [] };
+  return {
+    version: 1,
+    credentials: [],
+    capabilityEpochs: Object.create(null),
+    credentialRevisions: Object.create(null),
+  };
 }
 
 export function parsePayload(jsonString) {
   if (!jsonString || jsonString === "{}") return emptyPayload();
   const parsed = JSON.parse(jsonString);
   if (!parsed.credentials) return emptyPayload();
-  for (const rec of parsed.credentials) validateRecord(rec);
+  if (
+    parsed.capabilityEpochs != null &&
+    (typeof parsed.capabilityEpochs !== "object" || Array.isArray(parsed.capabilityEpochs))
+  ) {
+    throw new Error("Vault capabilityEpochs must be an object");
+  }
+  const epochEntries = Object.entries(parsed.capabilityEpochs || {});
+  parsed.capabilityEpochs = Object.create(null);
+  for (const [name, epoch] of epochEntries) {
+    if (!NAME_RE.test(name) || !Number.isSafeInteger(epoch) || epoch < 1) {
+      throw new Error(`Vault capabilityEpochs has invalid entry '${name}'`);
+    }
+    parsed.capabilityEpochs[name] = epoch;
+  }
+  const revisionEntries = Object.entries(parsed.credentialRevisions || {});
+  parsed.credentialRevisions = Object.create(null);
+  for (const [name, revision] of revisionEntries) {
+    if (!NAME_RE.test(name) || !Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error(`Vault credentialRevisions has invalid entry '${name}'`);
+    }
+    parsed.credentialRevisions[name] = revision;
+  }
+  for (const rec of parsed.credentials) {
+    validateRecord(rec);
+    const knownEpoch = parsed.capabilityEpochs[rec.name] || 0;
+    const recordEpoch = rec.capabilityPolicyEpoch || 0;
+    if (recordEpoch < knownEpoch) {
+      throw new Error(
+        `Credential ${rec.name}: capability epoch rollback (${recordEpoch} < ${knownEpoch})`,
+      );
+    }
+    if (recordEpoch > knownEpoch) parsed.capabilityEpochs[rec.name] = recordEpoch;
+    const knownRevision = parsed.credentialRevisions[rec.name] || 0;
+    const recordRevision = rec.credentialRevision || 0;
+    if (recordRevision < knownRevision) {
+      throw new Error(
+        `Credential ${rec.name}: credential revision rollback ` +
+          `(${recordRevision} < ${knownRevision})`,
+      );
+    }
+    if (recordRevision > knownRevision) {
+      parsed.credentialRevisions[rec.name] = recordRevision;
+    }
+  }
   return parsed;
 }
 
@@ -298,11 +372,36 @@ export function serializePayload(payload) {
 // ─── CRUD ───────────────────────────────────────────────────────────────────────
 
 export function addCredential(payload, record) {
-  validateRecord(record);
-  const idx = payload.credentials.findIndex((c) => c.name === record.name);
+  // The store exclusively owns every nested object it retains. Without a deep
+  // copy, a caller could mutate domains/rules/policy/cookies after validation
+  // and save the change without advancing credentialRevision.
+  const ownedRecord = structuredClone(record);
+  const idx = payload.credentials.findIndex((c) => c.name === ownedRecord.name);
+  if (!payload.credentialRevisions) payload.credentialRevisions = Object.create(null);
+  const knownRevision = Object.prototype.hasOwnProperty.call(
+    payload.credentialRevisions,
+    ownedRecord.name,
+  )
+    ? payload.credentialRevisions[ownedRecord.name]
+    : payload.credentials[idx]?.credentialRevision || 0;
+  const nextRevision = knownRevision + 1;
+  const revisedRecord = { ...ownedRecord, credentialRevision: nextRevision };
+  validateRecord(revisedRecord);
+  if (!payload.capabilityEpochs) payload.capabilityEpochs = Object.create(null);
+  const knownEpoch = Object.prototype.hasOwnProperty.call(payload.capabilityEpochs, revisedRecord.name)
+    ? payload.capabilityEpochs[revisedRecord.name]
+    : 0;
+  const recordEpoch = revisedRecord.capabilityPolicyEpoch || 0;
+  if (knownEpoch > 0 && recordEpoch < knownEpoch) {
+    throw new Error(
+      `Credential ${revisedRecord.name}: capability epoch rollback (${recordEpoch} < ${knownEpoch})`,
+    );
+  }
+  if (recordEpoch > knownEpoch) payload.capabilityEpochs[revisedRecord.name] = recordEpoch;
+  payload.credentialRevisions[revisedRecord.name] = nextRevision;
   const now = nowMs();
   const finalRecord = {
-    ...record,
+    ...revisedRecord,
     createdAt: idx >= 0 ? payload.credentials[idx].createdAt : now,
     updatedAt: now,
     lastUsedAt: idx >= 0 ? payload.credentials[idx].lastUsedAt || null : null,
@@ -312,13 +411,21 @@ export function addCredential(payload, record) {
   } else {
     payload.credentials.push(finalRecord);
   }
-  return finalRecord;
+  return structuredClone(finalRecord);
 }
 
 export function removeCredential(payload, name) {
   const idx = payload.credentials.findIndex((c) => c.name === name);
   if (idx < 0) return null;
   const [removed] = payload.credentials.splice(idx, 1);
+  if (removed.capabilityPolicyEpoch != null) {
+    payload.capabilityEpochs ||= Object.create(null);
+    payload.capabilityEpochs[name] =
+      Math.max(payload.capabilityEpochs[name] || 0, removed.capabilityPolicyEpoch) + 1;
+  }
+  payload.credentialRevisions ||= Object.create(null);
+  payload.credentialRevisions[name] =
+    Math.max(payload.credentialRevisions[name] || 0, removed.credentialRevision || 0) + 1;
   return removed;
 }
 
@@ -327,7 +434,7 @@ export function getCredential(payload, name) {
 }
 
 export function listMetadata(payload) {
-  return payload.credentials.map((c) => ({
+  return structuredClone(payload.credentials.map((c) => ({
     name: c.name,
     type: c.type,
     domains: c.domains,
@@ -336,6 +443,26 @@ export function listMetadata(payload) {
     // which operations a credential permits (and how to ask for more).
     ...(c.access ? { access: c.access } : {}),
     ...(Array.isArray(c.accessRules) ? { accessRules: c.accessRules } : {}),
+    ...(c.capabilityPolicy
+      ? {
+          capabilityPolicy: {
+            version: c.capabilityPolicy.version,
+            epoch: c.capabilityPolicy.epoch,
+            onUnmatched: c.capabilityPolicy.onUnmatched,
+            grants: c.capabilityPolicy.grants.map((grant) => ({
+              id: grant.id,
+              principal: grant.principal,
+              capability: grant.capability,
+              decision: grant.decision,
+              ...(grant.label ? { label: grant.label } : {}),
+            })),
+          },
+        }
+      : {}),
+    ...(c.capabilityPolicyEpoch != null
+      ? { capabilityPolicyEpoch: c.capabilityPolicyEpoch }
+      : {}),
+    ...(c.credentialRevision != null ? { credentialRevision: c.credentialRevision } : {}),
     // The wallet address is public by design — agents need it to build
     // transactions and check balances without opening the record.
     ...(c.publicKey ? { publicKey: c.publicKey } : {}),
@@ -347,7 +474,7 @@ export function listMetadata(payload) {
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     lastUsedAt: c.lastUsedAt || null,
-  }));
+  })));
 }
 
 export function touchLastUsed(payload, name) {
@@ -390,14 +517,11 @@ export function wipePayload(payload) {
       const v = cred[f];
       if (Buffer.isBuffer(v)) v.fill(0);
       // Drop the vault's reference to the secret (string or nested object) so it
-      // becomes GC-eligible. We deliberately do NOT recurse into nested objects
-      // to delete their keys: a record's object fields (e.g. a cookie-jar's
-      // `cookies`) may be aliased by the caller that supplied them via
-      // vault.add(), and the vault must not destroy objects it doesn't
-      // exclusively own. Releasing the reference is the achievable guarantee.
+      // becomes GC-eligible. Store ingress is deep-cloned, so these objects are
+      // exclusively owned; deleting the root reference cannot mutate caller
+      // data. JavaScript strings themselves still cannot be overwritten.
       if (f in cred) delete cred[f];
     }
   }
   payload.credentials.length = 0;
 }
-

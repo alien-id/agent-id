@@ -31,6 +31,8 @@ import { launchContext } from "./launch.mjs";
 import { sealProfile } from "./profile-store.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
 import { SECRET_FIELDS, hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
+import { isAccessRestricted } from "@alien-id/agent-id-vault/lib/access.mjs";
+import { agentPrincipalFromPublicKeyPem } from "@alien-id/agent-id-core/lib/principal.mjs";
 import { resolveOtp } from "./auto-login.mjs";
 import {
   applyAccessGuard,
@@ -210,6 +212,16 @@ async function openVaultAgentKey(stateDir) {
   return openVault({ stateDir, privateKeyPem: pk });
 }
 
+async function principalFromMainKey(stateDir) {
+  const privateKeyPem = await loadAgentPrivateKey(stateDir);
+  if (!privateKeyPem) return null;
+  const publicKeyPem = crypto
+    .createPublicKey(privateKeyPem)
+    .export({ format: "pem", type: "spki" })
+    .toString();
+  return agentPrincipalFromPublicKeyPem(publicKeyPem);
+}
+
 // The hostname of a page URL ("" for about:blank / unparseable). Exported for tests.
 export function hostOfUrl(url) {
   try {
@@ -230,6 +242,12 @@ export function hostOfUrl(url) {
 // Pure (no page object) so it unit-tests without a browser. Throws on violation.
 export function assertFillAllowed(rec, host, field = null) {
   if (!rec) throw new Error("no such credential");
+  if (isAccessRestricted(rec)) {
+    throw new Error(
+      `credential "${rec.name || "(unnamed)"}" is access-restricted and cannot be ` +
+        "materialized into a browser page without a credential-bound adapter",
+    );
+  }
   if (field && rec.exportable === false && SECRET_FIELDS.includes(field)) {
     throw new Error(
       `"${field}" is sealed (generated in-vault) and cannot be typed into a page — use the proxy`,
@@ -242,6 +260,158 @@ export function assertFillAllowed(rec, host, field = null) {
         "credential's domains (wildcards like *.example.com are allowed).",
     );
   }
+}
+
+// Only actions that can plausibly cause an outbound request get a correlation
+// window. Observational commands are deliberately absent: a polling request
+// blocked while the agent takes a snapshot must not make the snapshot look
+// like a denied mutation.
+const NETWORK_ACTIONS = new Set([
+  "navigate",
+  "back",
+  "click",
+  "dblclick",
+  "check",
+  "uncheck",
+  "type",
+  "fill",
+  "select",
+  "press",
+  "upload",
+  "drag",
+  "tab-new",
+  "tab-close",
+]);
+const DIRECT_NAVIGATION_ACTIONS = new Set(["navigate", "back", "tab-new"]);
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const ACTION_FEEDBACK_SETTLE_MS = 75;
+
+function requestPage(request) {
+  try {
+    return request?.frame?.()?.page?.() || null;
+  } catch {
+    return null;
+  }
+}
+
+function requestIsNavigation(request) {
+  try {
+    return request?.isNavigationRequest?.() === true || request?.resourceType?.() === "document";
+  } catch {
+    return false;
+  }
+}
+
+function requestResourceType(request) {
+  try {
+    return request?.resourceType?.() || null;
+  } catch {
+    return null;
+  }
+}
+
+function feedbackRelevance(active, feedback, request) {
+  if (!active) return 0;
+  const navigation = requestIsNavigation(request);
+  // tab-new necessarily navigates a page that did not exist when its action
+  // window opened. Other actions stay strictly bound to their original tab.
+  if (active.action !== "tab-new" && requestPage(request) !== active.page) return 0;
+  if (DIRECT_NAVIGATION_ACTIONS.has(active.action)) return navigation ? 500 : 0;
+
+  const method = String(feedback?.request?.method || "GET").toUpperCase();
+  const resourceType = requestResourceType(request);
+  const actionableResource =
+    resourceType == null || ["document", "fetch", "xhr"].includes(resourceType);
+  if (!actionableResource) return 0;
+
+  const matchedCapability =
+    (Array.isArray(feedback?.grants) && feedback.grants.length > 0) ||
+    (Array.isArray(feedback?.capabilities) && feedback.capabilities.length > 0);
+  if (navigation) return 400 + (matchedCapability ? 50 : 0);
+  if (!SAFE_METHODS.has(method)) return 300 + (matchedCapability ? 100 : 0);
+  // A semantic adapter may intentionally classify a state-changing GET. Only
+  // attribute one when a concrete capability/grant matched; unmatched denied
+  // GET polling is background noise, not evidence that the action failed.
+  if (matchedCapability) return 250;
+  return 0;
+}
+
+// Temporal + page-bound correlator between the context-level network route and
+// one agent action. runSession serializes actions, so there is at most one open
+// window. The highest-confidence event wins (matched capability > navigation >
+// generic unsafe method), avoiding unrelated denied assets/background GETs.
+export function createActionFeedbackTracker() {
+  let active = null;
+  let nextId = 0;
+  return {
+    begin(action, page) {
+      if (!NETWORK_ACTIONS.has(action)) return null;
+      const token = { id: ++nextId, action, page, events: [] };
+      active = token;
+      return token;
+    },
+    record(feedback, request) {
+      if (!active) return;
+      const relevance = feedbackRelevance(active, feedback, request);
+      if (relevance > 0) active.events.push({ feedback, relevance, order: active.events.length });
+    },
+    end(token) {
+      if (!token || active !== token) return null;
+      active = null;
+      token.events.sort((a, b) => b.relevance - a.relevance || a.order - b.order);
+      return token.events[0]?.feedback || null;
+    },
+  };
+}
+
+export function policyFeedbackError(feedback) {
+  const request = feedback?.request || {};
+  const target =
+    request.origin && request.path
+      ? `${request.method} ${request.origin}${request.path}`
+      : `${request.method || "request"}`;
+  const prefix =
+    feedback?.verdict === "ask"
+      ? "Browser action requires owner approval"
+      : "Browser action was denied by policy";
+  const err = new Error(`${prefix}: ${target}. ${feedback?.explanation || ""}`.trim());
+  err.code = feedback?.code || "BROWSER_POLICY_DENIED";
+  err.policyDecision = feedback;
+  return err;
+}
+
+export function actionErrorPayload(err) {
+  if (err?.policyDecision) {
+    return {
+      error: err.code || "BROWSER_POLICY_DENIED",
+      message: err.message || "Browser action was denied by policy",
+      policyDecision: err.policyDecision,
+    };
+  }
+  return { error: err?.message || String(err) };
+}
+
+async function dispatchWithPolicyFeedback(state, msg, policy = null) {
+  const tracker = state.policyFeedback;
+  const token = tracker?.begin(msg.action, state.current) || null;
+  let result;
+  let actionError = null;
+  try {
+    result = await dispatch(state, msg, policy);
+  } catch (err) {
+    actionError = err;
+  }
+  if (token && !actionError) {
+    // Click handlers often schedule fetch() without awaiting it. Keep the
+    // window open for a small bounded grace period so its route event is
+    // attributed, while serialization prevents a following action from being
+    // blamed. The same-page/relevance checks discard background asset noise.
+    await new Promise((resolve) => setTimeout(resolve, ACTION_FEEDBACK_SETTLE_MS));
+  }
+  const feedback = tracker?.end(token) || null;
+  if (feedback) throw policyFeedbackError(feedback);
+  if (actionError) throw actionError;
+  return result;
 }
 
 async function dispatch(state, msg, policy = null) {
@@ -309,19 +479,35 @@ async function dispatch(state, msg, policy = null) {
       await frameForRef(state, p.ref).uncheck(sel(p.ref), { timeout: ACTION_TIMEOUT });
       return { unchecked: p.ref };
     case "type":
-      await humanType(page, sel(p.ref), String(p.text ?? ""), {
-        timeout: ACTION_TIMEOUT,
-        submit: !!p.submit,
-        root: frameForRef(state, p.ref),
-      });
-      return { typed: p.ref, submit: !!p.submit };
+      if (p.paste === true) {
+        // Atomic paste: set the value in one call (no per-keystroke typing).
+        // Playwright's fill() clears, sets the value, and fires an `input`
+        // event so React-controlled fields register it. For non-sensitive,
+        // long, or speed-sensitive text where human cadence doesn't matter.
+        await frameForRef(state, p.ref).fill(sel(p.ref), String(p.text ?? ""), { timeout: ACTION_TIMEOUT });
+        if (p.submit) await frameForRef(state, p.ref).press(sel(p.ref), "Enter", { timeout: ACTION_TIMEOUT });
+      } else {
+        await humanType(page, sel(p.ref), String(p.text ?? ""), {
+          timeout: ACTION_TIMEOUT,
+          submit: !!p.submit,
+          root: frameForRef(state, p.ref),
+        });
+      }
+      return { typed: p.ref, submit: !!p.submit, paste: p.paste === true };
     case "fill": {
       const fields = Array.isArray(p.fields) ? p.fields : [];
       for (const f of fields) {
-        await humanType(page, sel(f.ref), String(f.value ?? ""), {
-          timeout: ACTION_TIMEOUT,
-          root: frameForRef(state, f.ref),
-        });
+        // Per-field `paste:true` (or a call-level `paste:true`) uses the atomic
+        // fill above; otherwise fall back to human-cadence typing (the default).
+        // Secrets never take this branch — they go through `fill-secret`.
+        if (p.paste === true || f.paste === true) {
+          await frameForRef(state, f.ref).fill(sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
+        } else {
+          await humanType(page, sel(f.ref), String(f.value ?? ""), {
+            timeout: ACTION_TIMEOUT,
+            root: frameForRef(state, f.ref),
+          });
+        }
       }
       return { filled: fields.map((f) => f.ref) };
     }
@@ -613,10 +799,14 @@ async function dispatch(state, msg, policy = null) {
           throw new Error(`batch: unsupported action '${name}'`);
         }
         try {
-          const r = await dispatch(state, { action: name, params: a.params || {}, _stateDir: msg._stateDir }, policy);
+          const r = await dispatchWithPolicyFeedback(
+            state,
+            { action: name, params: a.params || {}, _stateDir: msg._stateDir },
+            policy,
+          );
           results.push({ action: name, ok: true, ...r });
         } catch (err) {
-          results.push({ action: name, ok: false, error: err.message || String(err) });
+          results.push({ action: name, ok: false, ...actionErrorPayload(err) });
           return { completed: results.length - 1, stopped: true, results };
         }
       }
@@ -628,7 +818,8 @@ async function dispatch(state, msg, policy = null) {
 }
 
 // Launch the session and serve actions until `close` (or a signal). Blocks.
-// `policy` is the profile record's access policy ({access, accessRules}) —
+// `policy` is the profile record's access policy ({access, accessRules,
+// capabilityPolicy}) —
 // enforced HERE, in the process holding the live cookies, not in the client.
 export async function runSession({
   stateDir,
@@ -638,16 +829,29 @@ export async function runSession({
   profileFile,
   workDir,
   policy = null,
+  principal = null,
+  onAsk = null,
 }) {
-  const ctx = await launchContext({
-    profileDir: workDir,
-    headless,
-    contextOptions: policy ? contextOptionsForAccess(policy) : {},
-  });
-  if (policy) {
-    await applyAccessGuard(ctx, policy, {
-      log: (m) => process.stderr.write(`${m}\n`),
+  const requestPrincipal = principal || (await principalFromMainKey(stateDir));
+  const policyFeedback = createActionFeedbackTracker();
+  let ctx;
+  try {
+    ctx = await launchContext({
+      profileDir: workDir,
+      headless,
+      contextOptions: policy ? contextOptionsForAccess(policy) : {},
     });
+    if (policy) {
+      await applyAccessGuard(ctx, policy, {
+        log: (m) => process.stderr.write(`${m}\n`),
+        principal: requestPrincipal,
+        onAsk,
+        onBlocked: (feedback, request) => policyFeedback.record(feedback, request),
+      });
+    }
+  } catch (error) {
+    await ctx?.close().catch(() => {});
+    throw error;
   }
   const page = ctx.pages()[0] || (await ctx.newPage());
 
@@ -665,6 +869,7 @@ export async function runSession({
     console: [],
     dialog: { mode: "dismiss", text: null },
     lastDialog: null,
+    policyFeedback,
   };
   for (const pg of ctx.pages()) attachPage(state, pg);
   ctx.on("page", (pg) => attachPage(state, pg));
@@ -686,6 +891,7 @@ export async function runSession({
   }
 
   const token = crypto.randomBytes(24).toString("hex");
+  let actionQueue = Promise.resolve();
   const server = net.createServer((sock) => {
     let buf = "";
     sock.on("data", async (d) => {
@@ -703,10 +909,14 @@ export async function runSession({
       }
       msg._stateDir = stateDir;
       try {
-        const result = await dispatch(state, msg, policy);
+        // A single active action makes network attribution deterministic even
+        // when multiple local clients connect concurrently.
+        const current = actionQueue.then(() => dispatchWithPolicyFeedback(state, msg, policy));
+        actionQueue = current.catch(() => {});
+        const result = await current;
         sock.end(JSON.stringify({ ok: true, ...result }) + "\n");
       } catch (err) {
-        sock.end(JSON.stringify({ ok: false, error: err.message || String(err) }) + "\n");
+        sock.end(JSON.stringify({ ok: false, ...actionErrorPayload(err) }) + "\n");
       }
     });
     sock.on("error", () => {});

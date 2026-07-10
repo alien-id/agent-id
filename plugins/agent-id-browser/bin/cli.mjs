@@ -31,6 +31,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createPublicKey } from "node:crypto";
 
 import {
   outputError,
@@ -40,6 +41,8 @@ import {
   stderr,
 } from "@alien-id/agent-id-core/lib/cli-runtime.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
+import { agentPrincipalFromPublicKeyPem } from "@alien-id/agent-id-core/lib/principal.mjs";
+import { capabilityCredentialBindingHash } from "@alien-id/agent-id-vault/lib/capability.mjs";
 
 import {
   newDek,
@@ -56,11 +59,13 @@ import {
   ACCESS_LEVELS,
   effectiveAccess,
   isAccessRelaxation,
+  isAccessRestricted,
   strictestAccess,
 } from "@alien-id/agent-id-vault/lib/access.mjs";
 import {
   applyAccessGuard,
   contextOptionsForAccess,
+  exactImmediateApproval,
   guardDecision,
 } from "../lib/access-guard.mjs";
 
@@ -204,6 +209,37 @@ const DEFAULT_PROFILE = "main";
 // Suggest the right login command: bare `login` for the shared default, `--name` otherwise.
 const loginHint = (name) => (name === DEFAULT_PROFILE ? "`login`" : "`login --name " + name + "`");
 
+async function resolveBrowserPrincipal(stateDir) {
+  const privateKeyPem = await loadAgentPrivateKey(stateDir);
+  if (!privateKeyPem) return null;
+  const publicKeyPem = createPublicKey(privateKeyPem)
+    .export({ format: "pem", type: "spki" })
+    .toString();
+  return agentPrincipalFromPublicKeyPem(publicKeyPem);
+}
+
+// Development-only stand-in for the phone. It is deliberately synchronous:
+// browser writes are never parked and resumed after page state may have moved.
+function devPhoneApproval(flags, vault) {
+  if (flags["dev-phone-simulator"] == null) return null;
+  const mode = String(flags["dev-phone-simulator"]);
+  if (!["approve", "deny"].includes(mode)) {
+    throw new Error("--dev-phone-simulator must be approve or deny");
+  }
+  if (vault.mode !== "dev") {
+    throw new Error("--dev-phone-simulator is only available for a dev-mode vault");
+  }
+  stderr(
+    `WARNING: DEV PHONE SIMULATOR is active (${mode.toUpperCase()}). ` +
+      "This is not owner authentication; each browser ask is decided immediately and once.",
+  );
+  return (decision) => ({
+    approved: mode === "approve",
+    scope: "once",
+    actionDigest: decision.actionDigest,
+  });
+}
+
 // ─── Profile lifecycle: unseal → run → reseal → wipe ──────────────────────────────
 
 async function withProfile({ flags, name, headless, action }) {
@@ -221,23 +257,30 @@ async function withProfile({ flags, name, headless, action }) {
       e.code = "NO_PROFILE";
       throw e;
     }
+    const principal = await resolveBrowserPrincipal(stateDir);
+    const onAsk = devPhoneApproval(flags, vault);
 
     const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-bwork-"));
     try {
       await unsealProfile({ stateDir, file: cred.profileFile, dekHex: cred.dek, destDir: work });
       const useHeadless = headless != null ? headless : cred.headless !== false;
-      const ctx = await launchContext({
-        profileDir: work,
-        headless: useHeadless,
-        contextOptions: contextOptionsForAccess(cred),
-      });
-      // Read-only profile → network gate on everything this context does.
-      await applyAccessGuard(ctx, cred, { log: (m) => stderr(m) });
+      let ctx;
       let result;
       try {
-        result = await action(ctx, cred);
+        ctx = await launchContext({
+          profileDir: work,
+          headless: useHeadless,
+          contextOptions: contextOptionsForAccess(cred),
+        });
+        // Restricted profile → network gate on everything this context does.
+        await applyAccessGuard(ctx, cred, {
+          log: (m) => stderr(m),
+          principal,
+          onAsk,
+        });
+        result = await action(ctx, cred, { principal, onAsk });
       } finally {
-        await ctx.close();
+        await ctx?.close().catch(() => {});
       }
       // Re-seal to capture the refreshed session (rotated cookies), then persist.
       await sealProfile({ stateDir, file: cred.profileFile, dekHex: cred.dek, sourceDir: work });
@@ -277,20 +320,20 @@ async function cmdLogin(flags) {
       // one cookie jar — sign into Google once and every "Sign in with Google" site
       // reuses it. `--fresh` discards the existing session and starts clean.
       const existing = vault.get(name);
+      const storedProfile = existing && existing.type === "browser-profile" ? existing : null;
       const resuming =
         flags.fresh !== true &&
-        existing &&
-        existing.type === "browser-profile" &&
-        (await sealedProfileExists(stateDir, existing.profileFile));
+        storedProfile &&
+        (await sealedProfileExists(stateDir, storedProfile.profileFile));
       if (resuming) {
         await unsealProfile({ stateDir, file: existing.profileFile, dekHex: existing.dek, destDir: work });
       }
       const reuse = resuming ? existing : null;
       // A login can create a restricted session or tighten one — never widen
       // one. Widening is the owner's call: `agent-id-vault set-access`.
-      if (reuse && access && isAccessRelaxation(reuse, { ...reuse, access })) {
+      if (storedProfile && access && isAccessRelaxation(storedProfile, { ...storedProfile, access })) {
         return outputError(
-          `session '${name}' has access level '${effectiveAccess(reuse)}' — a re-login cannot ` +
+          `session '${name}' has access level '${effectiveAccess(storedProfile)}' — a re-login cannot ` +
             `widen it to '${access}'. The owner can: agent-id-vault set-access --name ${name} --access ${access}`,
         );
       }
@@ -324,6 +367,18 @@ async function cmdLogin(flags) {
       const { bytes } = await sealProfile({ stateDir, file, dekHex: dek, sourceDir: work });
       vault.add({
         ...(reuse || {}),
+        // `--fresh` resets cookies, not authorization. Preserve every stored
+        // policy field even though the browser profile itself is rebuilt.
+        ...(!reuse && storedProfile?.access != null ? { access: storedProfile.access } : {}),
+        ...(!reuse && storedProfile?.accessRules != null
+          ? { accessRules: storedProfile.accessRules }
+          : {}),
+        ...(!reuse && storedProfile?.capabilityPolicy != null
+          ? { capabilityPolicy: storedProfile.capabilityPolicy }
+          : {}),
+        ...(!reuse && storedProfile?.capabilityPolicyEpoch != null
+          ? { capabilityPolicyEpoch: storedProfile.capabilityPolicyEpoch }
+          : {}),
         name,
         type: "browser-profile",
         domains: ["*"],
@@ -401,6 +456,13 @@ async function cmdAutoLogin(flags) {
     }
     if (!cred.loginUrl) {
       return outputError(`login '${credName}' has no loginUrl — set one so auto-login knows where to start`);
+    }
+    if (isAccessRestricted(cred)) {
+      return outputError(
+        `login credential '${credName}' is access-restricted; auto-login would materialize it ` +
+          "before the resulting profile guard exists. Use a headed manual login, then attach " +
+          "the policy to the sealed browser profile.",
+      );
     }
 
     const profileName = String(flags.name || cred.profile || DEFAULT_PROFILE);
@@ -495,6 +557,12 @@ async function cmdAutoLogin(flags) {
         // A fresh profile inherits the login credential's rules; an existing
         // profile keeps its own (carried by the reuse spread).
         ...(!reuse && Array.isArray(cred.accessRules) ? { accessRules: cred.accessRules } : {}),
+        ...(!reuse && cred.capabilityPolicy != null
+          ? { capabilityPolicy: cred.capabilityPolicy }
+          : {}),
+        ...(!reuse && cred.capabilityPolicyEpoch != null
+          ? { capabilityPolicyEpoch: cred.capabilityPolicyEpoch }
+          : {}),
         ...(reuse?.account || cred.username ? { account: reuse?.account || cred.username } : {}),
         lastSyncedAt: Date.now(),
       });
@@ -580,15 +648,26 @@ async function cmdFetch(flags) {
       flags,
       name,
       headless: resolveHeadless(flags),
-      action: async (ctx, cred) => {
+      action: async (ctx, cred, enforcement) => {
         // ctx.request bypasses route interception — check the policy directly.
-        const decision = guardDecision(cred, { method: "GET", url, postData: null });
-        if (!decision.allowed) {
+        const decision = guardDecision(cred, {
+          method: "GET",
+          url,
+          postData: null,
+          principal: enforcement.principal,
+        });
+        const approved =
+          decision.verdict === "ask" &&
+          exactImmediateApproval(decision, enforcement.onAsk);
+        if (!decision.allowed && !approved) {
           throw new Error(
-            `access level '${effectiveAccess(cred)}' blocks GET ${url} (${decision.reason})`,
+            `access policy blocks GET ${url} (${decision.reason})`,
           );
         }
-        const resp = await ctx.request.get(url, { timeout: 30000 });
+        // Redirects would be a second target that bypasses context routing;
+        // require the caller to fetch that URL separately so it gets its own
+        // exact capability decision.
+        const resp = await ctx.request.get(url, { timeout: 30000, maxRedirects: 0 });
         const httpStatus = resp.status();
         let body = "";
         try {
@@ -677,6 +756,8 @@ async function cmdOpen(flags) {
   let profileFile;
   let headlessDefault;
   let policy = null;
+  let principal = null;
+  let onAsk = null;
   try {
     const cred = vault.get(name);
     if (!cred || cred.type !== "browser-profile") {
@@ -692,12 +773,22 @@ async function cmdOpen(flags) {
     dekHex = cred.dek;
     profileFile = cred.profileFile;
     headlessDefault = cred.headless !== false;
-    if (cred.access != null || cred.accessRules != null) {
+    if (cred.access != null || cred.accessRules != null || cred.capabilityPolicy != null) {
       policy = {
         ...(cred.access != null ? { access: cred.access } : {}),
         ...(cred.accessRules != null ? { accessRules: cred.accessRules } : {}),
+        ...(cred.capabilityPolicy != null ? { capabilityPolicy: cred.capabilityPolicy } : {}),
+        ...(cred.capabilityPolicyEpoch != null
+          ? { capabilityPolicyEpoch: cred.capabilityPolicyEpoch }
+          : {}),
+        ...(cred.capabilityPolicy != null
+          ? { credentialBindingHash: capabilityCredentialBindingHash(cred) }
+          : {}),
+        name: cred.name,
       };
     }
+    principal = await resolveBrowserPrincipal(stateDir);
+    onAsk = devPhoneApproval(flags, vault);
   } catch (err) {
     vault.lock();
     return handleErr(err);
@@ -714,7 +805,17 @@ async function cmdOpen(flags) {
         `${policy && effectiveAccess(policy) === "ro" ? ", READ-ONLY" : ""}). Keep this process ` +
         `running (background it); issue actions, then \`close --name ${name}\`.`,
     );
-    await runSession({ stateDir, name, headless, dekHex, profileFile, workDir, policy }); // blocks until close
+    await runSession({
+      stateDir,
+      name,
+      headless,
+      dekHex,
+      profileFile,
+      workDir,
+      policy,
+      principal,
+      onAsk,
+    }); // blocks until close
   } catch (err) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     handleErr(err);
@@ -799,8 +900,8 @@ runCli({
     uncheck: actionCmd("uncheck", (f) => ({ ref: f.ref })),
     drag: actionCmd("drag", (f) => ({ ref: f.ref, to: f.to })),
     upload: actionCmd("upload", (f) => ({ ref: f.ref, files: csv(f.files) })),
-    type: actionCmd("type", (f) => ({ ref: f.ref, text: f.text ?? "", submit: f.submit === true })),
-    fill: actionCmd("fill", (f) => ({ fields: JSON.parse(f.fields || "[]") })),
+    type: actionCmd("type", (f) => ({ ref: f.ref, text: f.text ?? "", submit: f.submit === true, paste: f.paste === true })),
+    fill: actionCmd("fill", (f) => ({ fields: JSON.parse(f.fields || "[]"), paste: f.paste === true })),
     // Secret injection by reference: the agent picks the element (ref) from a
     // snapshot; the vault supplies the value, which never returns to the agent.
     "fill-secret": actionCmd("fill-secret", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit === true })),
@@ -848,15 +949,21 @@ runCli({
         "          one-shot: navigate (headless) → page text + final URL + sessionExpired\n" +
         "  fetch   [--name N] --url URL [--max-chars K]\n" +
         "          one-shot authenticated HTTP GET via the session (API / feed)\n" +
+        "          DEV ONLY: --dev-phone-simulator approve|deny resolves an exact\n" +
+        "          capability ask immediately; accepted only by dev-mode vaults\n" +
         "  status  [--name N]      list sealed sessions\n\n" +
         "Interactive session (--name optional; defaults to 'main'):\n" +
         "  open    --name N [--headed]   start a persistent session (run in background)\n" +
+        "          DEV ONLY: --dev-phone-simulator approve|deny resolves capability asks\n" +
+        "          immediately and once; it is not real owner authentication\n" +
         "  snapshot --name N             accessibility tree with element refs; iframe\n" +
         "          elements get frame-prefixed refs (f1e3); reports open tabs when >1\n" +
         "  click   --name N --ref eN                   dblclick --name N --ref eN\n" +
         "  check   --name N --ref eN                   uncheck  --name N --ref eN\n" +
-        "  type    --name N --ref eN --text T [--submit]\n" +
-        "  fill    --name N --fields '[{\"ref\":\"e1\",\"value\":\"..\"}]'\n" +
+        "  type    --name N --ref eN --text T [--submit] [--paste]\n" +
+        "  fill    --name N --fields '[{\"ref\":\"e1\",\"value\":\"..\"}]' [--paste]\n" +
+        "          --paste sets values atomically (no human-cadence typing) — for long,\n" +
+        "          non-secret fields; also per-field via {\"ref\":..,\"value\":..,\"paste\":true}\n" +
         "  fill-secret --name N --ref eN --cred NAME.field [--submit]\n" +
         "          inject a vaulted secret into the ref'd field (agent never sees the value)\n" +
         "  fill-otp    --name N --ref eN --cred NAME\n" +

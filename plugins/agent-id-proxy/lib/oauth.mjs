@@ -13,6 +13,9 @@
 import http from "node:http";
 import https from "node:https";
 
+const TOKEN_ENDPOINT_TIMEOUT_MS = 30_000;
+const TOKEN_RESPONSE_MAX_BYTES = 256 * 1024;
+
 export class OAuthError extends Error {
   constructor(message, { oauthError = null, status = null } = {}) {
     super(message);
@@ -27,6 +30,14 @@ export class OAuthError extends Error {
 // for loopback endpoints (local dev / tests) — see store.mjs validation.
 function postForm(urlString, formBody) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let totalTimer = null;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (totalTimer) clearTimeout(totalTimer);
+      fn(value);
+    };
     let url;
     try {
       url = new URL(urlString);
@@ -36,7 +47,14 @@ function postForm(urlString, formBody) {
     }
     const client = url.protocol === "https:" ? https : http;
     const payload = Buffer.from(formBody, "utf8");
-    const req = client.request(
+    let req = null;
+    totalTimer = setTimeout(() => {
+      const err = new OAuthError("Token endpoint total deadline exceeded");
+      if (req) req.destroy(err);
+      finish(reject, err);
+    }, TOKEN_ENDPOINT_TIMEOUT_MS);
+    if (totalTimer.unref) totalTimer.unref();
+    req = client.request(
       {
         protocol: url.protocol,
         hostname: url.hostname,
@@ -51,13 +69,38 @@ function postForm(urlString, formBody) {
       },
       (res) => {
         const chunks = [];
-        res.on("data", (c) => chunks.push(c));
+        let total = 0;
+        res.on("data", (c) => {
+          total += c.length;
+          if (total > TOKEN_RESPONSE_MAX_BYTES) {
+            const err = new OAuthError("Token endpoint response is too large", {
+              status: res.statusCode,
+            });
+            res.destroy(err);
+            finish(reject, err);
+            return;
+          }
+          chunks.push(c);
+        });
         res.on("end", () =>
-          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
+          finish(resolve, {
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
         );
       },
     );
-    req.on("error", (err) => reject(new OAuthError(`Token endpoint unreachable: ${err.message}`)));
+    req.setTimeout(TOKEN_ENDPOINT_TIMEOUT_MS, () => {
+      req.destroy(new OAuthError("Token endpoint timed out"));
+    });
+    req.on("error", (err) =>
+      finish(
+        reject,
+        err instanceof OAuthError
+          ? err
+          : new OAuthError(`Token endpoint unreachable: ${err.message}`),
+      ),
+    );
     req.end(payload);
   });
 }

@@ -27,7 +27,10 @@ function sortValue(value) {
   if (!value || typeof value !== "object") {
     return value;
   }
-  const out = {};
+  // A normal `{}` treats an own `__proto__` assignment as prototype mutation,
+  // silently dropping that JSON member and creating canonicalization collisions.
+  // Null-prototype objects preserve every own JSON key verbatim.
+  const out = Object.create(null);
   const keys = Object.keys(value).sort();
   for (const key of keys) {
     out[key] = sortValue(value[key]);

@@ -47,6 +47,32 @@ test("AUDIENCE: typing is allowed on a listed host and via a wildcard", () => {
   assert.throws(() => assertFillAllowed(login({ domains: ["*.unige.ch"] }), "evil.com", "password"), /allowlist/i);
 });
 
+test("CAPABILITY: a restricted target credential cannot be materialized through an unrestricted profile", () => {
+  assert.throws(
+    () =>
+      assertFillAllowed(
+        login({
+          capabilityPolicy: {
+            version: 1,
+            epoch: 1,
+            onUnmatched: "deny",
+            grants: [
+              {
+                id: "login-deny",
+                principal: "*",
+                capability: "account.login",
+                decision: "deny",
+              },
+            ],
+          },
+        }),
+        "portail.unige.ch",
+        "password",
+      ),
+    /access-restricted/,
+  );
+});
+
 test("OTP path (no field): origin-checked only, no seal check", () => {
   assert.doesNotThrow(() => assertFillAllowed(login(), "portail.unige.ch"));
   assert.throws(() => assertFillAllowed(login(), "attacker.example"), /allowlist/i);

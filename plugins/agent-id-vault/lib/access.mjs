@@ -69,7 +69,11 @@ export function effectiveAccess(rec) {
 // the credential, so its plaintext must be sealed and the browser's
 // route-bypass channels closed — otherwise the rule is theater.
 export function isAccessRestricted(rec) {
-  return effectiveAccess(rec) === "ro" || Array.isArray(rec && rec.accessRules);
+  return (
+    effectiveAccess(rec) === "ro" ||
+    Array.isArray(rec && rec.accessRules) ||
+    (rec && rec.capabilityPolicy != null)
+  );
 }
 
 // ─── Validation (called from store.mjs validateRecord) ────────────────────────
@@ -257,26 +261,36 @@ export function evaluateAccess(rec, { method, host, path, body }) {
     for (let i = 0; i < rec.accessRules.length; i++) {
       const rule = rec.accessRules[i];
       if (ruleMatches(rule, { method: m, host: h, path: p })) {
-        return { allowed: rule.effect === "allow", reason: `rule_${i}_${rule.effect}` };
+        return {
+          verdict: rule.effect === "allow" ? "allow" : "deny",
+          allowed: rule.effect === "allow",
+          reason: `rule_${i}_${rule.effect}`,
+        };
       }
     }
   }
 
-  if (effectiveAccess(rec) === "rw") return { allowed: true, reason: "level_rw" };
+  if (effectiveAccess(rec) === "rw") {
+    return { verdict: "allow", allowed: true, reason: "level_rw" };
+  }
 
-  if (READ_METHODS.includes(m)) return { allowed: true, reason: "read_method" };
+  if (READ_METHODS.includes(m)) {
+    return { verdict: "allow", allowed: true, reason: "read_method" };
+  }
 
   // Every non-read method other than POST is a write under "ro" — its body is
   // never consulted, so a read-shaped payload can't unlock a DELETE/PUT/PATCH.
-  if (m !== "POST") return { allowed: false, reason: "write_blocked" };
+  if (m !== "POST") {
+    return { verdict: "deny", allowed: false, reason: "write_blocked" };
+  }
 
   if (body === undefined) {
-    return { allowed: false, reason: "write_blocked", needsBody: true };
+    return { verdict: "deny", allowed: false, reason: "write_blocked", needsBody: true };
   }
   if (classifyBodyRead(body) === "read") {
-    return { allowed: true, reason: "read_classified" };
+    return { verdict: "allow", allowed: true, reason: "read_classified" };
   }
-  return { allowed: false, reason: "write_blocked" };
+  return { verdict: "deny", allowed: false, reason: "write_blocked" };
 }
 
 // ─── Relaxation detection (gates the human ceremony in `set-access`) ──────────
@@ -332,6 +346,16 @@ function rulesOverlap(a, b) {
  * the owner ceremony.
  */
 export function isAccessRelaxation(before, after) {
+  // Capability policies are owner-authored authorization programs. Conservatively
+  // treat every addition, removal, or edit as a potential relaxation; the
+  // dedicated policy command can then require the owner ceremony uniformly.
+  // This also prevents `add --overwrite` from silently dropping a policy.
+  if (
+    JSON.stringify(before && before.capabilityPolicy) !==
+    JSON.stringify(after && after.capabilityPolicy)
+  ) {
+    return true;
+  }
   if (ACCESS_RANK[effectiveAccess(after)] > ACCESS_RANK[effectiveAccess(before)]) return true;
   const beforeAllow = ruleSet(before, "allow");
   for (const r of ruleSet(after, "allow")) {

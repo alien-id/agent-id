@@ -337,6 +337,11 @@ node plugins/agent-id-auth/bin/cli.mjs support --url https://example.com
 The vault holds external-service credentials (GitHub PATs, OpenAI keys, Stripe secrets, cookies, TOTP seeds, …) in a single encrypted file at `~/.agent-id/vault.enc` with a LUKS-style slot construction. The vault pairs with `agent-id-proxy` so the **agent uses credentials by name without ever seeing the value**.
 
 Full details + architecture diagram: **[docs/VAULT-PROXY.md](docs/VAULT-PROXY.md)**.
+For principal-scoped action authorization, see
+**[docs/CAPABILITY-BROKER.md](docs/CAPABILITY-BROKER.md)**.
+For the owner-facing capability policy flow, settled MVP choices, trusted
+interfaces, Universal Protected Mode, and TEE advisor requirements, see
+**[docs/CAPABILITY-POLICY-UX-REQUIREMENTS.md](docs/CAPABILITY-POLICY-UX-REQUIREMENTS.md)**.
 
 ```bash
 # 1. Initialize — pick how it unlocks. Passkey (Touch ID) is recommended; the agent
@@ -358,6 +363,44 @@ node plugins/agent-id-vault/bin/cli.mjs remove --name github-pat
 ```
 
 Supported credential types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `secret` (arbitrary key material — SSH/RSA keys, PEMs, service-account JSON, used via `exec`), `solana-keypair`, `evm-keypair`, and `login` (a direct service login — username + password + a 2FA policy — driven by `agent-id-browser auto-login`; attach a TOTP seed later with `set-totp`). Value-input channels — pick the smallest attack surface: `--form` (out-of-band, via the pluggable **secure-entry channel**: browser form → `/dev/tty` → hosted-harness form, set by `AGENT_ID_SECURE_PROMPT`), `--<field>-file`, `--<field>-env`, piped stdin, raw `--<field>` arg (visible in `ps`; avoid). **Never paste a secret into chat; transcripts persist.**
+
+### Capability broker — allow, deny, or ask for an exact action
+
+A credential can carry a versioned `capabilityPolicy` that grants a named
+principal specific actions such as `mail.read`, `mail.send`, `form.submit`, or
+`commerce.purchase`. Each grant selects `allow`, `deny`, or `ask` and can match
+the HTTP method/host/port/path/query plus JSON fields and constraints. Omitted
+ports mean the scheme's default port; non-default ports must be explicit. The proxy
+binds an `ask` to an exact digest of the principal, credential, policy epoch,
+target, headers, query, and body; one approval releases one parked request.
+The sealed browser evaluates the same policy at its network boundary. When an
+interactive action's request is stopped, the agent receives a sanitized
+`BROWSER_POLICY_DENIED` or `BROWSER_APPROVAL_REQUIRED` result naming the policy
+reason, matched grant label, safe method/origin/path, and policy generation;
+query values, headers, bodies, credentials, and exact digests stay hidden.
+
+Install or remove policy with the owner-confirmed vault command:
+
+```bash
+# For an existing credential named work-api (replace the example policy's JKT):
+node plugins/agent-id-vault/bin/cli.mjs set-capabilities \
+  --name work-api --policy-file examples/capability-policy.example.json
+
+node plugins/agent-id-vault/bin/cli.mjs set-capabilities \
+  --name work-api --clear-policy
+```
+
+The vault owns a monotonic policy epoch, including a tombstone after clear, and
+requires the secure owner form for every change. A running local proxy
+authenticates and reloads the vault at request boundaries, invalidating an
+in-flight stale approval. Persistent browser sessions remain snapshots, so
+close and reopen them after a policy change.
+
+For development only, a dev-mode vault can exercise approval mechanics with
+`agent-id-proxy start --dev-phone-simulator approve|deny`. The browser accepts
+the same flag on `open`, but resolves asks synchronously so mutable page state is
+never parked. Both simulators automatically apply the configured decision;
+neither is phone authentication or a production approval path.
 
 ### Blockchain wallets — keys born in the vault
 
@@ -516,6 +559,7 @@ See [docs/VAULT-PROXY.md](docs/VAULT-PROXY.md) for the format + threat model. Fu
 | `init [--unlock passkey\|passphrase\|agent-key] [--no-agent-key]` | Create the portable vault, choosing how it unlocks. Passkey (Touch ID) and passphrase are *hard boundaries* (the agent can't self-unlock) and default to no agent-key slot; plain `init` = agent-key auto-unlock. |
 | `add --name N --type T --domains H[,H…] [type-specific value flags]` | Add or replace a credential. Types: `bearer`, `basic`, `header`, `query`, `cookie`, `cookie-jar`, `totp`, `oauth2`, `secret`, `login` (`--login-url`, `--otp none\|totp\|interactive`, `--profile`). Value-input flags: `--form` (out-of-band, via the secure-entry channel), `--<field>-file`, `--<field>-env`, stdin, or raw `--<field>`. |
 | `set-totp --name N [--form]` | Attach/update a 2FA seed on a `login` or `totp` credential (raw base32 or an `otpauth://` URI), entered out-of-band — for when 2FA is enabled after the login was stored. |
+| `set-capabilities --name N (--policy-file F \| --policy JSON \| --clear-policy)` | Owner-confirmed replacement/removal of the credential's principal-scoped `allow`/`deny`/`ask` policy. The vault assigns a monotonic epoch. |
 | `show --name N` | Retrieve plaintext. Prefer the proxy for runtime use — `show` is for manual export. |
 | `list` | List metadata + slots (no plaintext). |
 | `remove --name N` | Delete a record. |
@@ -534,7 +578,7 @@ See [docs/VAULT-PROXY.md](docs/VAULT-PROXY.md) for the URL-rewrite request flow 
 
 | Command | Purpose |
 | --- | --- |
-| `start [--port N] [--host H] [--passphrase-file F \| --passphrase-env V] [--no-agent-key] [--idle-timeout 12h\|30m\|never]` | Unlock the vault and listen on localhost. Default port 48771, default idle-lock 12h. Foreground (Ctrl-C exits). |
+| `start [--port N] [--host H] [--passphrase-file F \| --passphrase-env V] [--no-agent-key] [--idle-timeout 12h\|30m\|never] [--dev-phone-simulator approve\|deny]` | Unlock the vault and listen on localhost. Default port 48771, default idle-lock 12h. The simulator is dev-vault/loopback-only and is not owner authentication. |
 | `status` | JSON: running, pid, port, uptime, configured idleTimeout. |
 | `stop` | SIGTERM the running proxy. |
 

@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "epoch": 1,
+  "onUnmatched": "deny",
+  "grants": [
+    {
+      "id": "account-security-deny",
+      "principal": "*",
+      "capability": "account.security.modify",
+      "label": "Change account security settings",
+      "decision": "deny",
+      "priority": 1000,
+      "match": {
+        "methods": ["POST", "PUT", "PATCH", "DELETE"],
+        "hosts": ["api.example.com"],
+        "path": "/v1/account/security/*"
+      }
+    },
+    {
+      "id": "mail-read-primary-agent",
+      "principal": "agent:jkt:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "capability": "mail.read",
+      "label": "Read work email",
+      "decision": "allow",
+      "priority": 100,
+      "match": {
+        "methods": ["GET", "HEAD"],
+        "hosts": ["api.example.com"],
+        "path": "/v1/mail/messages/*"
+      }
+    },
+    {
+      "id": "mail-draft-internal",
+      "principal": "agent:jkt:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "capability": "mail.draft",
+      "label": "Create an internal email draft",
+      "decision": "allow",
+      "priority": 200,
+      "match": {
+        "methods": ["POST"],
+        "hosts": ["api.example.com"],
+        "path": "/v1/mail/drafts"
+      },
+      "constraints": [
+        {
+          "path": "/to",
+          "op": "domainIn",
+          "values": ["example.com"]
+        }
+      ],
+      "previewFields": ["/to", "/cc", "/subject"]
+    },
+    {
+      "id": "mail-send-internal-ask",
+      "principal": "agent:jkt:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "capability": "mail.send",
+      "label": "Send an internal email",
+      "decision": "ask",
+      "priority": 200,
+      "match": {
+        "methods": ["POST"],
+        "hosts": ["api.example.com"],
+        "path": "/v1/mail/messages/send"
+      },
+      "constraints": [
+        {
+          "path": "/to",
+          "op": "domainIn",
+          "values": ["example.com"]
+        }
+      ],
+      "previewFields": ["/to", "/cc", "/subject", "/attachments"]
+    },
+    {
+      "id": "form-submit-ask",
+      "principal": "agent:jkt:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "capability": "form.submit",
+      "label": "Submit the customer form",
+      "decision": "ask",
+      "priority": 200,
+      "match": {
+        "methods": ["POST"],
+        "hosts": ["api.example.com"],
+        "path": "/v1/forms/customer/*/submit"
+      },
+      "previewFields": ["/formId", "/destination", "/fieldNames"]
+    },
+    {
+      "id": "purchase-over-limit-deny",
+      "principal": "agent:jkt:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "capability": "commerce.purchase",
+      "label": "Purchase over CHF 500",
+      "decision": "deny",
+      "priority": 900,
+      "match": {
+        "methods": ["POST"],
+        "hosts": ["api.example.com"],
+        "path": "/v1/commerce/orders/commit"
+      },
+      "constraints": [
+        {
+          "path": "/currency",
+          "op": "eq",
+          "value": "CHF"
+        },
+        {
+          "path": "/totalMinor",
+          "op": "gte",
+          "value": 50001
+        }
+      ],
+      "previewFields": ["/merchant", "/items", "/totalMinor", "/currency", "/recurring"]
+    },
+    {
+      "id": "purchase-up-to-limit-ask",
+      "principal": "agent:jkt:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "capability": "commerce.purchase",
+      "label": "Purchase up to CHF 500",
+      "decision": "ask",
+      "priority": 200,
+      "match": {
+        "methods": ["POST"],
+        "hosts": ["api.example.com"],
+        "path": "/v1/commerce/orders/commit"
+      },
+      "constraints": [
+        {
+          "path": "/currency",
+          "op": "eq",
+          "value": "CHF"
+        },
+        {
+          "path": "/totalMinor",
+          "op": "lte",
+          "value": 50000
+        }
+      ],
+      "previewFields": ["/merchant", "/items", "/totalMinor", "/currency", "/recurring"]
+    }
+  ]
+}

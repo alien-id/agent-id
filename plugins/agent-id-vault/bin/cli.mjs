@@ -77,6 +77,12 @@ import {
   isAccessRelaxation,
   isAccessRestricted,
 } from "../lib/access.mjs";
+import {
+  CAPABILITY_POLICY_VERSION,
+  capabilityPolicyHash,
+  parseCapabilityPolicyJSON,
+  validateCapabilityPolicy,
+} from "../lib/capability.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { normalizeTotpInput } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { generateSolanaKeypair } from "@alien-id/agent-id-core/lib/solana.mjs";
@@ -385,6 +391,12 @@ async function cmdAdd(flags) {
     if (existing) {
       if (!access && existing.access != null) record.access = existing.access;
       if (existing.accessRules != null) record.accessRules = existing.accessRules;
+      if (existing.capabilityPolicy != null) {
+        record.capabilityPolicy = existing.capabilityPolicy;
+      }
+      if (existing.capabilityPolicyEpoch != null) {
+        record.capabilityPolicyEpoch = existing.capabilityPolicyEpoch;
+      }
       if (isAccessRelaxation(existing, record)) {
         return outputError(
           `Credential '${name}' has access level '${effectiveAccess(existing)}' — re-adding it ` +
@@ -672,6 +684,12 @@ async function cmdGenerate(flags) {
     if (existing) {
       if (!access && existing.access != null) record.access = existing.access;
       if (existing.accessRules != null) record.accessRules = existing.accessRules;
+      if (existing.capabilityPolicy != null) {
+        record.capabilityPolicy = existing.capabilityPolicy;
+      }
+      if (existing.capabilityPolicyEpoch != null) {
+        record.capabilityPolicyEpoch = existing.capabilityPolicyEpoch;
+      }
       if (isAccessRelaxation(existing, record)) {
         return outputError(
           `Credential '${name}' has access level '${effectiveAccess(existing)}' — ` +
@@ -817,6 +835,207 @@ async function cmdSetAccess(flags) {
   }
 }
 
+// ─── set-capabilities: replace / clear semantic capability policy ─────────────
+//
+// Every mutation uses the owner ceremony, including apparent tightenings. A
+// capability policy is an authorization program rather than a single ordered
+// rule list, so conservatively treating every edit as sensitive keeps policy
+// replacement and removal out of the agent's unilateral control.
+
+const CLEAR_CAPABILITY_POLICY = Symbol("clear-capability-policy");
+
+async function readCapabilityPolicyFlag(flags) {
+  const hasFile = flags["policy-file"] != null;
+  const hasInline = flags.policy != null;
+  const hasClear = flags["clear-policy"] != null;
+  if (Number(hasFile) + Number(hasInline) + Number(hasClear) !== 1) {
+    throw new Error(
+      "pass exactly one of --policy-file <FILE>, --policy '<JSON>', or --clear-policy",
+    );
+  }
+  if (hasClear) {
+    if (flags["clear-policy"] !== true) {
+      throw new Error("--clear-policy does not take a value");
+    }
+    return CLEAR_CAPABILITY_POLICY;
+  }
+
+  let raw;
+  if (hasFile) {
+    if (typeof flags["policy-file"] !== "string") {
+      throw new Error("--policy-file requires a file path");
+    }
+    raw = await fs.readFile(flags["policy-file"], "utf8");
+  } else {
+    if (typeof flags.policy !== "string") {
+      throw new Error("--policy requires a JSON object");
+    }
+    raw = flags.policy;
+  }
+  try {
+    return parseCapabilityPolicyJSON(raw);
+  } catch (err) {
+    throw new Error(`capability policy must be valid JSON: ${err.message}`);
+  }
+}
+
+function fullPolicyReview(policy) {
+  if (!policy) return "";
+  const counts = { allow: 0, ask: 0, deny: 0 };
+  for (const grant of policy.grants) counts[grant.decision]++;
+  // This is an authorization ceremony, so no grant, predicate, priority,
+  // validity bound, query, or value may be summarized away. The secure form is
+  // scrollable; show the complete validated, epoch-assigned document that will
+  // be installed. The hash is computed from canonical JSON; this display uses
+  // ordinary JSON key order and is an integrity aid, not a substitute for human
+  // review. The proposed structured replacement is specified in
+  // docs/CAPABILITY-POLICY-UX-REQUIREMENTS.md.
+  const fullPolicy = JSON.stringify(policy);
+  return (
+    `Policy hash ${capabilityPolicyHash(policy)}. Decisions: ` +
+    `${counts.allow} allow, ${counts.ask} ask, ${counts.deny} deny. ` +
+    `FULL POLICY JSON — review every field before approving: ${fullPolicy}`
+  );
+}
+
+async function confirmCapabilityPolicyChange({ name, record, before, after }) {
+  const beforeSummary = before
+    ? `epoch ${before.epoch} (${before.grants.length} grant(s))`
+    : "no policy";
+  const afterSummary = after
+    ? `epoch ${after.epoch} (${after.grants.length} grant(s), unmatched: ${after.onUnmatched})`
+    :
+      `no semantic policy (removed); fallback is legacy access ` +
+      `${effectiveAccess(record)} with ${(record.accessRules || []).length} rule(s)`;
+  let values;
+  try {
+    ({ values } = await collectSecret({
+      title: `Change capability policy: ${name}`,
+      description:
+        `The agent asks to change what '${name}' may do: ` +
+        `${beforeSummary} → ${afterSummary}. ` +
+        `${after ? fullPolicyReview(after) : "Removing may restore broad legacy rw access."} ` +
+        "Approve only if YOU reviewed this exact policy and intend the result.",
+      fields: [
+        {
+          name: "confirm",
+          label: `Type the credential name (${name}) to approve`,
+          secret: false,
+        },
+      ],
+      label: `change capability policy for "${name}"`,
+      security: "Typed by you, out of the agent's sight. Mismatch = no change.",
+    }));
+  } catch (err) {
+    throw new Error(`owner confirmation: ${err.message}`);
+  }
+  if (String(values.confirm || "").trim() !== name) {
+    throw new Error("owner confirmation did not match the credential name — policy unchanged");
+  }
+}
+
+async function cmdSetCapabilities(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+
+  let requested;
+  try {
+    requested = await readCapabilityPolicyFlag(flags);
+  } catch (err) {
+    return outputError(err.message);
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    const before = rec.capabilityPolicy || null;
+    const clearing = requested === CLEAR_CAPABILITY_POLICY;
+    if (clearing && before == null) {
+      return outputError(`Credential '${name}' has no capability policy to clear`);
+    }
+    if (
+      !clearing &&
+      requested != null &&
+      (typeof requested !== "object" || Array.isArray(requested))
+    ) {
+      return outputError("capability policy must be a JSON object");
+    }
+    if (!clearing && requested == null) {
+      return outputError("capability policy must be a JSON object");
+    }
+
+    const after = { ...rec };
+    const currentEpoch = Math.max(before?.epoch || 0, rec.capabilityPolicyEpoch || 0);
+    let nextPolicy = null;
+    if (clearing) {
+      delete after.capabilityPolicy;
+      // Keep a monotonic tombstone. Without it, clear + re-add of the same
+      // policy could roll the epoch back and revive an approval parked before
+      // the clear.
+      after.capabilityPolicyEpoch = currentEpoch + 1;
+    } else {
+      // Epoch ownership belongs to the vault. Ignore any caller-supplied
+      // version/epoch so a policy cannot choose a future epoch or roll back the
+      // active one; all other unknown keys are rejected by the closed schema.
+      nextPolicy = {
+        ...requested,
+        version: CAPABILITY_POLICY_VERSION,
+        epoch: currentEpoch + 1,
+      };
+      try {
+        validateCapabilityPolicy(nextPolicy, name);
+      } catch (err) {
+        return outputError(err.message);
+      }
+      after.capabilityPolicy = nextPolicy;
+      after.capabilityPolicyEpoch = nextPolicy.epoch;
+    }
+
+    try {
+      validateRecord(after);
+    } catch (err) {
+      return outputError(err.message);
+    }
+
+    try {
+      await confirmCapabilityPolicyChange({ name, record: rec, before, after: nextPolicy });
+    } catch (err) {
+      return outputError(err.message);
+    }
+
+    vault.add(after);
+    await vault.save();
+    if (nextPolicy) {
+      stderr(
+        `Capability policy on '${name}' is now epoch ${nextPolicy.epoch} ` +
+          `(${nextPolicy.grants.length} grant(s)).`,
+      );
+    } else {
+      stderr(
+        `Capability policy on '${name}' was removed (epoch tombstone ` +
+          `${after.capabilityPolicyEpoch}).`,
+      );
+    }
+    outputJson({
+      ok: true,
+      name,
+      capabilityPolicy: nextPolicy
+        ? {
+            version: nextPolicy.version,
+            epoch: nextPolicy.epoch,
+            onUnmatched: nextPolicy.onUnmatched,
+            grants: nextPolicy.grants.length,
+            hash: capabilityPolicyHash(nextPolicy),
+          }
+        : null,
+      capabilityPolicyEpoch: after.capabilityPolicyEpoch,
+    });
+  } finally {
+    vault.lock();
+  }
+}
+
 async function cmdList(flags) {
   const vault = await openWithFlags(flags);
   try {
@@ -831,8 +1050,35 @@ async function cmdRemove(flags) {
   if (!name) return outputError("--name <NAME> is required");
   const vault = await openWithFlags(flags);
   try {
+    const existing = vault.get(name);
+    if (!existing) return outputError(`No credential named '${name}'`);
+    if (existing.capabilityPolicyEpoch != null) {
+      let values;
+      try {
+        ({ values } = await collectSecret({
+          title: `Remove capability-protected credential: ${name}`,
+          description:
+            `This deletes the credential and advances its capability tombstone past epoch ` +
+            `${existing.capabilityPolicyEpoch}, keeping the name reserved against remove/re-add rollback. ` +
+            "Approve only if YOU intend to remove this resource.",
+          fields: [
+            {
+              name: "confirm",
+              label: `Type the credential name (${name}) to remove it`,
+              secret: false,
+            },
+          ],
+          label: `remove capability-protected credential "${name}"`,
+          security: "Typed by you, out of the agent's sight. Mismatch = no removal.",
+        }));
+      } catch (err) {
+        return outputError(`owner confirmation: ${err.message}`);
+      }
+      if (String(values.confirm || "").trim() !== name) {
+        return outputError("owner confirmation did not match — credential unchanged");
+      }
+    }
     const removed = vault.remove(name);
-    if (!removed) return outputError(`No credential named '${name}'`);
     await vault.save();
     stderr(`Removed credential '${name}'.`);
     outputJson({ ok: true, name });
@@ -972,6 +1218,31 @@ async function cmdImport(flags) {
   const inPath = flags.in;
   if (!inPath) return outputError("--in <PATH> is required");
   const stateDir = resolveStateDir(flags);
+  if (flags.overwrite && (await vaultFileExists(stateDir))) {
+    let values;
+    try {
+      ({ values } = await collectSecret({
+        title: "Overwrite the encrypted credential vault",
+        description:
+          "Import --overwrite can restore older credentials and authorization policy. " +
+          "The local file format cannot prove that a backup is the newest generation.",
+        fields: [
+          {
+            name: "confirm",
+            label: "Type OVERWRITE VAULT to continue",
+            secret: false,
+          },
+        ],
+        label: "overwrite the credential vault from an import",
+        security: "Only continue after independently verifying the backup and its policy generation.",
+      }));
+    } catch (err) {
+      return outputError(`owner confirmation: ${err.message}`);
+    }
+    if (String(values.confirm || "").trim() !== "OVERWRITE VAULT") {
+      return outputError("owner confirmation did not match — vault unchanged");
+    }
+  }
   const written = await importVault({
     stateDir,
     inPath,
@@ -1250,6 +1521,10 @@ function printHelp() {
       "              once; WIDENING requires the owner to confirm via the secure",
       "              prompt (the agent cannot self-upgrade). Rules: JSON array of",
       '              {"effect":"allow|deny","methods":[..],"hosts":[..],"path":"/glob*"}',
+      "  set-capabilities --name N (--policy-file F | --policy '<JSON>' | --clear-policy)",
+      "              replace or remove the semantic capability policy. The vault",
+      "              assigns version/epoch, validates a closed schema, and requires",
+      "              the owner's secure-form confirmation for EVERY change.",
       "  generate --name N --type solana-keypair|evm-keypair --domains H[,H…] [--overwrite]",
       "      creates the keypair inside the vault; prints ONLY the public address",
       "      evm:    [--chain-id-allowlist 1,137] [--to-allowlist 0x..,0x..]",
@@ -1292,6 +1567,7 @@ const commands = {
   add: cmdAdd,
   "set-totp": cmdSetTotp,
   "set-access": cmdSetAccess,
+  "set-capabilities": cmdSetCapabilities,
   generate: cmdGenerate,
   show: cmdShow,
   list: cmdList,

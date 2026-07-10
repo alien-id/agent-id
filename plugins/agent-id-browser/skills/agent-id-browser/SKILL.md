@@ -1,6 +1,6 @@
 ---
 name: agent-id-browser
-description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, upload files, press keys, select, hover, drag, navigate, screenshot, run JS, switch tabs, reach into iframes, handle dialogs, capture downloads) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. Two ways to log in: a HEADED Chrome login when a desktop browser is available, OR an agent-driven HEADLESS login from a stored `login` credential (auto-login, or snapshot + fill-secret/fill-otp) where the password and any 2FA code are entered over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI) — never via chat, never seen by the agent. Afterwards the agent drives the session HEADLESS. Sessions can be sealed READ-ONLY (--access ro): the session process blocks write requests at the network layer, so the agent can read mail/feeds/messages but never send, post, or delete. Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
+description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control via accessibility refs plus one-shot read/fetch. By default sites share one session so SSO login is reused; pass --name only for an isolated account. Login can be headed or agent-driven headless from stored credentials, with secrets and 2FA entered through a secure-entry channel and never shown to the agent. Sessions support READ-ONLY access and principal-scoped CAPABILITY POLICIES so the session process allows, denies, or asks about named actions at the network boundary, binding any development approval to the exact request. Use for authenticated sites that block API/OAuth/cookie access (for example Gmail/Workspace), browser form workflows, or any task needing a real logged-in session without exposing credentials.
 license: MIT
 metadata:
   author: Alien Wallet
@@ -164,6 +164,59 @@ GraphQL** (a hash, not the query text — e.g. Reddit, X) has its reads
 collateral-blocked too. The server-rendered page (the initial `GET`) reads
 fine; dynamically-loaded content may not populate. That's the fail-safe
 tradeoff, not a bug.
+
+## Capability-controlled sessions (`allow` / `deny` / `ask`)
+
+A browser-profile credential can carry the same principal-scoped
+`capabilityPolicy` as a proxy credential. The session process derives the Agent
+ID principal and evaluates the actual outgoing URL, headers, query, and post
+body at the network route. Invalid policy, missing principal, and evaluation
+errors fail closed; an unmatched request follows the policy's
+`onUnmatched`. Capability-restricted login credentials are deliberately refused
+by `auto-login`, because it would materialize the login secret before the new
+profile guard exists. Sign in manually in a headed session, then attach policy
+to the resulting browser-profile credential.
+
+Set or remove policy with the owner-confirmed vault command, then close/reopen
+any persistent session so it loads the new epoch:
+
+```bash
+node …/agent-id-vault/bin/cli.mjs set-capabilities \
+  --name work --policy-file /path/policy.json
+```
+
+For a matching request, `allow` continues and `deny` aborts. `ask` also aborts
+unless a synchronous exact one-shot development callback is active. The browser
+does not park a live page while CSRF tokens, totals, or DOM state can change.
+An interactive action whose same-page request is blocked returns a structured
+`BROWSER_POLICY_DENIED` or `BROWSER_APPROVAL_REQUIRED` error. Surface its
+`message` and `policyDecision.explanation` to the user. The decision also names
+the matched capability/grants, safe method/origin/path, and policy epoch/hash;
+it deliberately excludes query values, headers, body, preview, envelope, nonce,
+and action digest. A click can overlap background traffic, so this correlation
+explains the most relevant request observed during the action window—it is not a
+trusted semantic classification of the widget. Site adapters remain necessary
+for labels such as “send”, “like”, and “purchase”. Never retry through another
+tool after either error.
+For development testing only:
+
+```bash
+CLI open --name work --dev-phone-simulator approve   # or: deny
+```
+
+The flag requires a dev-mode vault and immediately applies that decision to
+**every** browser ask while echoing its exact digest and `scope: once`. It is an
+in-process auto-decider—not the proxy control plane, a separate phone, or owner
+authentication. There is no production remote-phone browser ask path yet, and
+browser capability decisions are not yet written to the proxy's signed audit
+stream.
+
+Any capability-managed session also refuses `eval`, `fill-secret`, `fill-otp`,
+and `upload`, and keeps service workers, WebSockets, WebTransport, WebRTC peer
+connections, workers, and shared workers blocked. Supported `fetch` does an
+explicit policy check and disables redirects because direct browser request
+APIs bypass route interception. If policy blocks an action, report it; do not
+switch tools or retry to evade the grant.
 
 ## 2) Interactive control (the main loop)
 

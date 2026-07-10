@@ -1,6 +1,6 @@
 ---
 name: agent-id-vault
-description: Portable encrypted credential vault with LUKS-style slots (passkey/Touch ID, passphrase, agent-key, phone) and typed/domain-scoped credential records. Credentials can carry an ACCESS LEVEL (--access ro) so the agent can read a service but never write to it — enforced by the proxy and the sealed browser, widened only with the owner's out-of-band confirmation (set-access). Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them at request time. Can also GENERATE blockchain wallet keys (Solana ed25519, EVM secp256k1) inside the vault — the private key is sealed, only the address is printed, and transactions are signed by the proxy. Use whenever the user asks to save, fetch, or remove a service credential, create a crypto wallet for the agent, or whenever a downstream tool needs an external-service secret that must not appear in shell history, source files, or process arguments.
+description: Portable encrypted credential vault with LUKS-style slots (passkey/Touch ID, passphrase, agent-key, phone) and typed/domain-scoped credential records. Credentials can carry an ACCESS LEVEL (--access ro) or a principal-scoped CAPABILITY POLICY that allows, denies, or asks the owner about named exact actions — enforced by the proxy and sealed browser, changed only with owner confirmation. Pairs with agent-id-proxy so the agent never sees credential values — the proxy injects them at request time. Can also GENERATE blockchain wallet keys (Solana ed25519, EVM secp256k1) inside the vault — the private key is sealed, only the address is printed, and transactions are signed by the proxy. Use whenever the user asks to save, fetch, remove, or limit an external-service credential; grant an agent specific actions such as reading mail, sending, form submission, or purchase; create a crypto wallet; or keep a downstream secret out of shell history, source files, and process arguments.
 license: MIT
 metadata:
   author: Alien Wallet
@@ -159,6 +159,43 @@ the access level being granted.
 Any credential the proxy restricts (level `ro`, or `rw` with rules) is also
 sealed against `show`/`exec` — its plaintext can't be extracted to sidestep the
 gate.
+
+## Capability policies — principal-scoped `allow` / `deny` / `ask`
+
+Use a `capabilityPolicy` when `ro`/`rw` is too coarse: one Agent ID principal
+may read mail automatically, while sending, submitting a form, or purchasing
+requires an exact one-use approval. A version-1 policy contains non-empty
+`grants` with `principal`, semantic `capability`, `decision`, and optional
+method/host/port/path/query/JSON matchers, constraints, labels, and preview fields.
+Start with `onUnmatched: "deny"`; use the `*` principal only deliberately, never
+as the convenient default for a write grant.
+
+Matchers that omit `ports` authorize only the scheme's default port. Use
+`ports: ["default", "8443"]` (for example) only when both services were reviewed;
+a hostname alone must not authorize arbitrary listeners on that host.
+
+Install a reviewed JSON file (or use `--policy '<JSON>'` for controlled
+fixtures):
+
+```bash
+node CLI set-capabilities --name work-api --policy-file /path/policy.json
+node CLI set-capabilities --name work-api --clear-policy
+```
+
+Exactly one of `--policy-file`, `--policy`, or `--clear-policy` is required.
+Every actual change—including tightening and clear—opens the secure owner form;
+the owner must type the credential name. The vault ignores caller-supplied
+version/epoch values, assigns version 1, and advances a monotonic
+`capabilityPolicyEpoch`. Clear leaves an incremented epoch tombstone so a later
+re-add cannot revive an old approval generation.
+
+Capability-managed credentials are sealed against `show`/`exec`. They must use
+the proxy's URL-rewrite request shape; legacy stub injection refuses them. A
+running proxy authenticates and reloads the vault at request boundaries, so a
+policy change invalidates stale in-flight work. Persistent browser sessions
+hold a snapshot and must be closed/reopened after a policy change. Development
+phone simulators are documented in the proxy/browser skills and are never real
+owner approval.
 
 ### Where `ro` works — the operation must be legible in the request
 

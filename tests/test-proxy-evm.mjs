@@ -154,6 +154,7 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
     const rec = vault.get("evm-hot");
     rec.upstreamScheme = "http";
     rec.domains = [upstream.hostname];
+    vault.add(rec);
     await vault.save();
 
     proxy = createProxy({ vault, logPath: path.join(stateDir, "proxy.log") });

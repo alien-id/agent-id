@@ -14,6 +14,7 @@
 // to passphrase if provided. Throws if neither works.
 
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
 import {
   buildAgentKeySlot,
@@ -60,9 +61,30 @@ import {
   setPrivateFilePermissions,
   statePaths,
 } from "@alien-id/agent-id-core/lib/state.mjs";
+import { withFileLock } from "@alien-id/agent-id-core/lib/file-lock.mjs";
 import path from "node:path";
 
 const VAULT_LOCKED = Symbol("vault-locked");
+
+const fileToken = (file) => JSON.stringify(file);
+const OAUTH_IDENTITY_FIELDS = Object.freeze([
+  "type",
+  "tokenEndpoint",
+  "clientId",
+]);
+
+function sameOauthIdentity(left, right) {
+  return OAUTH_IDENTITY_FIELDS.every(
+    (field) => (left?.[field] ?? null) === (right?.[field] ?? null),
+  );
+}
+
+function oauthCredentialChanged(name) {
+  const err = new Error(`OAuth credential '${name}' changed while refresh was in flight`);
+  err.code = "OAUTH_CREDENTIAL_CHANGED";
+  err.status = 409;
+  return err;
+}
 
 async function readVaultFile(filePath) {
   try {
@@ -74,13 +96,52 @@ async function readVaultFile(filePath) {
   }
 }
 
-async function writeVaultFile(filePath, vaultFile) {
+async function writeVaultFile(filePath, vaultFile, { beforeCommit = null } = {}) {
   await ensureDir(path.dirname(filePath));
-  await fs.writeFile(filePath, JSON.stringify(vaultFile, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await setPrivateFilePermissions(filePath);
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  let tempHandle = null;
+  try {
+    tempHandle = await fs.open(tempPath, "wx", 0o600);
+    await tempHandle.writeFile(JSON.stringify(vaultFile, null, 2) + "\n", "utf8");
+    // A provider may invalidate a single-use refresh token as soon as it
+    // returns the successor. Sync the new inode before publishing it.
+    await tempHandle.sync();
+    await tempHandle.close();
+    tempHandle = null;
+    await setPrivateFilePermissions(tempPath);
+    if (beforeCommit) await beforeCommit();
+    await fs.rename(tempPath, filePath);
+    await setPrivateFilePermissions(filePath);
+    // Persist the directory entry as well, so a successful rotation is not
+    // acknowledged while the rename exists only in the page cache.
+    const dirHandle = await fs.open(path.dirname(filePath), "r");
+    try {
+      await dirHandle.sync();
+    } finally {
+      await dirHandle.close();
+    }
+  } finally {
+    await tempHandle?.close().catch(() => {});
+    await fs.unlink(tempPath).catch(() => {});
+  }
+}
+
+async function withVaultFileLock(filePath, operation) {
+  try {
+    return await withFileLock(
+      {
+        directory: path.join(path.dirname(filePath), "locks"),
+        name: `vault:${path.basename(filePath)}`,
+        timeoutMs: 10_000,
+        pollMs: 10,
+      },
+      operation,
+    );
+  } catch (err) {
+    if (err?.code === "FILE_LOCK_BUSY") err.code = "VAULT_BUSY";
+    if (err?.code === "FILE_LOCK_LOST") err.code = "VAULT_LOCK_LOST";
+    throw err;
+  }
 }
 
 export async function vaultFileExists(stateDir) {
@@ -215,7 +276,10 @@ export async function openVaultWithMasterKey({ stateDir, masterKey }) {
   }
   verifyModeTag(file, masterKey);
 
-  return buildVaultHandle({ stateDir, file, masterKey, payload });
+  // The control-plane caller owns (and immediately zeroes) its recovered
+  // buffer. Keep an independent copy inside the unlocked handle so authenticated
+  // reload/save operations remain possible for the lifetime of the session.
+  return buildVaultHandle({ stateDir, file, masterKey: Buffer.from(masterKey), payload });
 }
 
 // Read the mobile-slot challenges without unlocking. The proxy hands these to
@@ -278,9 +342,17 @@ export async function recoverMasterKeyViaOwnerApproval(stateDir, kek) {
 
 function buildVaultHandle({ stateDir, file, masterKey, payload }) {
   let state = { file, masterKey, payload };
+  let persistedToken = fileToken(file);
+  let ioQueue = Promise.resolve();
 
   function assertOpen() {
     if (state === VAULT_LOCKED) throw new Error("Vault is locked");
+  }
+
+  function enqueueIo(operation) {
+    const result = ioQueue.then(operation, operation);
+    ioQueue = result.catch(() => {});
+    return result;
   }
 
   return {
@@ -308,7 +380,8 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     },
     get(name) {
       assertOpen();
-      return getCredential(state.payload, name);
+      const record = getCredential(state.payload, name);
+      return record ? structuredClone(record) : null;
     },
     has(name) {
       assertOpen();
@@ -320,11 +393,118 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     },
     remove(name) {
       assertOpen();
-      return removeCredential(state.payload, name);
+      const removed = removeCredential(state.payload, name);
+      return removed ? structuredClone(removed) : null;
     },
     touchLastUsed(name) {
       assertOpen();
       touchLastUsed(state.payload, name);
+    },
+    capabilityEpochs() {
+      assertOpen();
+      return Object.assign(Object.create(null), state.payload.capabilityEpochs || {});
+    },
+    credentialRevisions() {
+      assertOpen();
+      return Object.assign(Object.create(null), state.payload.credentialRevisions || {});
+    },
+    // Refresh the authenticated payload with the already-held master key. This
+    // lets a long-running broker observe owner-confirmed policy changes made by
+    // another process without exposing or re-requesting the key. Reloads and
+    // in-process saves are serialized so an older async read cannot overwrite a
+    // newer one. Existing request-local records remain valid JS objects; they
+    // are intentionally left for GC rather than wiped out from under a request.
+    async reload() {
+      assertOpen();
+      return enqueueIo(async () => {
+        assertOpen();
+        const paths = statePaths(stateDir);
+        const nextFile = await readVaultFile(paths.vaultFile);
+        if (!nextFile) {
+          const err = new Error(`Vault not found at ${paths.vaultFile}.`);
+          err.code = "VAULT_NOT_FOUND";
+          throw err;
+        }
+        validateVaultHeader(nextFile);
+        const nextPayload = parsePayload(decryptPayload(state.masterKey, nextFile.payload));
+        verifyModeTag(nextFile, state.masterKey);
+        state.file = nextFile;
+        state.payload = nextPayload;
+        persistedToken = fileToken(nextFile);
+        return true;
+      });
+    },
+    // Merge a provider-rotated refresh token into the newest authenticated
+    // vault file. Policy/description/access edits may legitimately race an
+    // OAuth exchange, so this is narrower than save()'s whole-file CAS: the
+    // OAuth client identity and exact refresh token used must still match.
+    // This infrastructure rotation preserves credentialRevision because it is
+    // the same account/authority, not a user-requested credential replacement.
+    async rotateOauthRefreshToken({
+      name,
+      expectedCredential,
+      expectedRefreshToken,
+      nextRefreshToken,
+    }) {
+      assertOpen();
+      if (
+        !name ||
+        expectedCredential?.type !== "oauth2" ||
+        typeof expectedRefreshToken !== "string" ||
+        typeof nextRefreshToken !== "string" ||
+        nextRefreshToken.length === 0
+      ) {
+        throw new Error("rotateOauthRefreshToken requires an OAuth credential and tokens");
+      }
+      return enqueueIo(async () => {
+        assertOpen();
+        const paths = statePaths(stateDir);
+        return withVaultFileLock(paths.vaultFile, async (lease) => {
+          const currentFile = await readVaultFile(paths.vaultFile);
+          if (!currentFile) throw oauthCredentialChanged(name);
+          validateVaultHeader(currentFile);
+          const currentPayload = parsePayload(
+            decryptPayload(state.masterKey, currentFile.payload),
+          );
+          verifyModeTag(currentFile, state.masterKey);
+          const live = getCredential(currentPayload, name);
+          if (
+            !live ||
+            live.type !== "oauth2" ||
+            !sameOauthIdentity(live, expectedCredential) ||
+            (live.refreshToken !== expectedRefreshToken &&
+              live.refreshToken !== nextRefreshToken)
+          ) {
+            throw oauthCredentialChanged(name);
+          }
+
+          const startingToken = fileToken(currentFile);
+          if (live.refreshToken !== nextRefreshToken) {
+            live.refreshToken = nextRefreshToken;
+            currentFile.payload = encryptPayload(
+              state.masterKey,
+              serializePayload(currentPayload),
+            );
+            await writeVaultFile(paths.vaultFile, currentFile, {
+              beforeCommit: async () => {
+                await lease.renewAndAssert();
+                const latestFile = await readVaultFile(paths.vaultFile);
+                if (!latestFile || fileToken(latestFile) !== startingToken) {
+                  const err = new Error(
+                    "Vault changed during OAuth token merge; retry the request",
+                  );
+                  err.code = "VAULT_CONFLICT";
+                  throw err;
+                }
+              },
+            });
+          }
+          state.file = currentFile;
+          state.payload = currentPayload;
+          persistedToken = fileToken(currentFile);
+          return structuredClone(live);
+        });
+      });
     },
     addPassphraseSlot(passphrase) {
       assertOpen();
@@ -341,28 +521,28 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
       const id = nextSlotId(state.file.slots);
       const slot = buildPassphraseSlot(id, state.masterKey, passphrase);
       state.file.slots.push(slot);
-      return slot;
+      return structuredClone(slot);
     },
     addAgentKeySlot(privateKeyPem, agentId = null) {
       assertOpen();
       const id = nextSlotId(state.file.slots);
       const slot = buildAgentKeySlot(id, state.masterKey, privateKeyPem, agentId);
       state.file.slots.push(slot);
-      return slot;
+      return structuredClone(slot);
     },
     addMobileSlot(devicePubKeyHex, deviceId = null) {
       assertOpen();
       const id = nextSlotId(state.file.slots);
       const slot = buildMobileSlot(id, state.masterKey, devicePubKeyHex, deviceId);
       state.file.slots.push(slot);
-      return slot;
+      return structuredClone(slot);
     },
     addPasskeySlot(prfSecret, { credentialId, rpId, prfSalt, deviceLabel = null } = {}) {
       assertOpen();
       const id = nextSlotId(state.file.slots);
       const slot = buildPasskeySlot(id, state.masterKey, prfSecret, { credentialId, rpId, prfSalt, deviceLabel });
       state.file.slots.push(slot);
-      return slot;
+      return structuredClone(slot);
     },
     addOwnerApprovalSlot(kek, { keyRef, ssoBaseUrl = null, providerAddress = null } = {}) {
       assertOpen();
@@ -373,7 +553,7 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
         providerAddress,
       });
       state.file.slots.push(slot);
-      return slot;
+      return structuredClone(slot);
     },
     removeSlot(id) {
       assertOpen();
@@ -386,9 +566,35 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     },
     async save() {
       assertOpen();
-      const paths = statePaths(stateDir);
-      state.file.payload = encryptPayload(state.masterKey, serializePayload(state.payload));
-      await writeVaultFile(paths.vaultFile, state.file);
+      return enqueueIo(async () => {
+        assertOpen();
+        const paths = statePaths(stateDir);
+        await withVaultFileLock(paths.vaultFile, async (lease) => {
+          const currentFile = await readVaultFile(paths.vaultFile);
+          if (!currentFile || fileToken(currentFile) !== persistedToken) {
+            const err = new Error(
+              "Vault changed in another process; reload and retry instead of overwriting it",
+            );
+            err.code = "VAULT_CONFLICT";
+            throw err;
+          }
+          state.file.payload = encryptPayload(state.masterKey, serializePayload(state.payload));
+          await writeVaultFile(paths.vaultFile, state.file, {
+            beforeCommit: async () => {
+              await lease.renewAndAssert();
+              const latestFile = await readVaultFile(paths.vaultFile);
+              if (!latestFile || fileToken(latestFile) !== persistedToken) {
+                const err = new Error(
+                  "Vault changed before commit; refusing to overwrite the newer file",
+                );
+                err.code = "VAULT_CONFLICT";
+                throw err;
+              }
+            },
+          });
+          persistedToken = fileToken(state.file);
+        });
+      });
     },
     lock() {
       if (state !== VAULT_LOCKED) {
@@ -402,7 +608,7 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     },
     raw() {
       assertOpen();
-      return state.file;
+      return structuredClone(state.file);
     },
   };
 }
@@ -460,7 +666,23 @@ export async function initVault({
     payloadPlaintext: serializePayload(emptyPayload()),
     mode,
   });
-  await writeVaultFile(paths.vaultFile, file);
+  await withVaultFileLock(paths.vaultFile, async (lease) => {
+    if (await readVaultFile(paths.vaultFile)) {
+      const err = new Error(`Vault already exists at ${paths.vaultFile}`);
+      err.code = "VAULT_EXISTS";
+      throw err;
+    }
+    await writeVaultFile(paths.vaultFile, file, {
+      beforeCommit: async () => {
+        await lease.renewAndAssert();
+        if (await readVaultFile(paths.vaultFile)) {
+          const err = new Error(`Vault already exists at ${paths.vaultFile}`);
+          err.code = "VAULT_EXISTS";
+          throw err;
+        }
+      },
+    });
+  });
   return { path: paths.vaultFile, slots: file.slots.length, version: VAULT_VERSION, mode };
 }
 
@@ -475,21 +697,34 @@ export async function exportVault({ stateDir, outPath }) {
 
 export async function importVault({ stateDir, inPath, overwrite = false }) {
   const paths = statePaths(stateDir);
-  if (!overwrite) {
-    const existing = await readVaultFile(paths.vaultFile);
-    if (existing) {
-      const err = new Error(
-        `Vault already exists at ${paths.vaultFile}. Use --overwrite to replace.`,
-      );
-      err.code = "VAULT_EXISTS";
-      throw err;
-    }
-  }
   const data = await fs.readFile(inPath, "utf8");
   // Parse to validate it's a real vault file before clobbering anything.
   const parsed = JSON.parse(data);
   validateVaultHeader(parsed);
-  await fs.writeFile(paths.vaultFile, data, { encoding: "utf8", mode: 0o600 });
-  await setPrivateFilePermissions(paths.vaultFile);
+  await withVaultFileLock(paths.vaultFile, async (lease) => {
+    const startingFile = await readVaultFile(paths.vaultFile);
+    if (!overwrite) {
+      if (startingFile) {
+        const err = new Error(
+          `Vault already exists at ${paths.vaultFile}. Use --overwrite to replace.`,
+        );
+        err.code = "VAULT_EXISTS";
+        throw err;
+      }
+    }
+    const startingToken = startingFile ? fileToken(startingFile) : null;
+    await writeVaultFile(paths.vaultFile, parsed, {
+      beforeCommit: async () => {
+        await lease.renewAndAssert();
+        const latestFile = await readVaultFile(paths.vaultFile);
+        const latestToken = latestFile ? fileToken(latestFile) : null;
+        if (latestToken !== startingToken) {
+          const err = new Error("Vault changed before import commit; retry the import");
+          err.code = "VAULT_CONFLICT";
+          throw err;
+        }
+      },
+    });
+  });
   return paths.vaultFile;
 }

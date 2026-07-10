@@ -14,6 +14,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +22,7 @@ import path from "node:path";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
 import { refreshAccessToken, OAuthError } from "../plugins/agent-id-proxy/lib/oauth.mjs";
+import { fileLockPrefix } from "../plugins/agent-id-core/lib/file-lock.mjs";
 
 // ── Fake upstream: records the Authorization header it received ────────────────
 function startUpstream() {
@@ -41,16 +43,50 @@ function startUpstream() {
 
 // ── Fake token endpoint: mints incrementing access tokens; configurable mode ──
 function startTokenEndpoint() {
-  const stats = { count: 0, lastBody: null };
-  const cfg = { mode: "ok", rotateTo: null };
+  const stats = { count: 0, lastBody: null, active: 0, maxActive: 0 };
+  const cfg = {
+    mode: "ok",
+    rotateTo: null,
+    rotateSequence: null,
+    validRefreshToken: null,
+  };
+  let nextResponseGate = null;
+  function holdNextResponse() {
+    if (nextResponseGate) throw new Error("a token response is already held");
+    let markArrived;
+    let releaseResponse;
+    const arrived = new Promise((resolve) => {
+      markArrived = resolve;
+    });
+    const released = new Promise((resolve) => {
+      releaseResponse = resolve;
+    });
+    nextResponseGate = { markArrived, released };
+    return { arrived, release: releaseResponse };
+  }
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       const chunks = [];
       req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
+      req.on("end", async () => {
         stats.count += 1;
+        stats.active += 1;
+        stats.maxActive = Math.max(stats.maxActive, stats.active);
+        res.once("finish", () => {
+          stats.active -= 1;
+        });
         stats.lastBody = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
-        if (cfg.mode === "invalid_grant") {
+        const gate = nextResponseGate;
+        nextResponseGate = null;
+        if (gate) {
+          gate.markArrived();
+          await gate.released;
+        }
+        if (
+          cfg.mode === "invalid_grant" ||
+          (cfg.validRefreshToken &&
+            stats.lastBody.get("refresh_token") !== cfg.validRefreshToken)
+        ) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end('{"error":"invalid_grant","error_description":"Token revoked"}');
           return;
@@ -60,14 +96,26 @@ function startTokenEndpoint() {
           expires_in: 3600,
           token_type: "Bearer",
         };
-        if (cfg.rotateTo) body.refresh_token = cfg.rotateTo;
+        const rotated = Array.isArray(cfg.rotateSequence)
+          ? cfg.rotateSequence.shift() || null
+          : cfg.rotateTo;
+        if (rotated) {
+          body.refresh_token = rotated;
+          if (cfg.validRefreshToken) cfg.validRefreshToken = rotated;
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(body));
       });
     });
     server.listen(0, "127.0.0.1", () => {
       const a = server.address();
-      resolve({ server, url: `http://${a.address}:${a.port}/token`, stats, cfg });
+      resolve({
+        server,
+        url: `http://${a.address}:${a.port}/token`,
+        stats,
+        cfg,
+        holdNextResponse,
+      });
     });
   });
 }
@@ -127,7 +175,7 @@ describe("oauth.refreshAccessToken (unit)", () => {
 });
 
 describe("oauth2 credential through the proxy", () => {
-  let stateDir, upstream, token, proxy, proxyPort;
+  let stateDir, upstream, token, proxy, proxyPort, vault;
   let clock = 1_000_000_000_000; // fixed start; advanced by tests
 
   before(async () => {
@@ -136,7 +184,7 @@ describe("oauth2 credential through the proxy", () => {
     token = await startTokenEndpoint();
 
     await initVault({ stateDir, passphrase: "test-pass" });
-    const vault = await openVault({ stateDir, passphrase: "test-pass" });
+    vault = await openVault({ stateDir, passphrase: "test-pass" });
     vault.add({
       name: "gmail",
       type: "oauth2",
@@ -210,5 +258,225 @@ describe("oauth2 credential through the proxy", () => {
     assert.equal(r.status, 401);
     assert.equal(JSON.parse(r.body).error, "oauth_refresh_token_invalid");
     token.cfg.mode = "ok";
+  });
+
+  it("persists token rotation across a concurrent metadata-only edit", async () => {
+    token.cfg.rotateTo = "rt-after-metadata-edit";
+    clock += 3600 * 1000 + 1;
+    const gate = token.holdNextResponse();
+    const pending = callProxy({
+      port: proxyPort,
+      path: `/gmail/${upstream.host}/v1/messages`,
+    });
+    await gate.arrived;
+
+    const editor = await openVault({ stateDir, passphrase: "test-pass" });
+    editor.add({
+      ...editor.get("gmail"),
+      description: "owner-updated description while refresh was in flight",
+    });
+    await editor.save();
+    editor.lock();
+    await vault.reload();
+
+    gate.release();
+    const response = await pending;
+    assert.equal(response.status, 409, "the old request retries under the new revision");
+
+    const reopened = await openVault({ stateDir, passphrase: "test-pass" });
+    assert.equal(reopened.get("gmail").refreshToken, "rt-after-metadata-edit");
+    assert.match(reopened.get("gmail").description, /owner-updated/);
+    reopened.lock();
+    token.cfg.rotateTo = null;
+  });
+
+  it("invalidates the OAuth cache when the owner replaces a seeded access token", async () => {
+    const beforeRefreshes = token.stats.count;
+    const editor = await openVault({ stateDir, passphrase: "test-pass" });
+    editor.add({
+      ...editor.get("gmail"),
+      accessToken: "owner-seed-b",
+      accessTokenExpiresAt: clock + 3600 * 1000,
+    });
+    await editor.save();
+    editor.lock();
+
+    const response = await callProxy({
+      port: proxyPort,
+      path: `/gmail/${upstream.host}/v1/messages`,
+    });
+    assert.equal(response.status, 200);
+    assert.equal(upstream.seen.authorization, "Bearer owner-seed-b");
+    assert.equal(token.stats.count, beforeRefreshes, "fresh owner seed needs no refresh");
+  });
+
+  it("merges rotation but never publishes an old refresh result over a new seed", async () => {
+    clock += 3600 * 1000 + 1;
+    token.cfg.rotateTo = "rt-after-seed-race";
+    const gate = token.holdNextResponse();
+    const pending = callProxy({
+      port: proxyPort,
+      path: `/gmail/${upstream.host}/v1/messages`,
+    });
+    await gate.arrived;
+
+    const editor = await openVault({ stateDir, passphrase: "test-pass" });
+    editor.add({
+      ...editor.get("gmail"),
+      accessToken: "owner-seed-c",
+      accessTokenExpiresAt: clock + 3600 * 1000,
+    });
+    await editor.save();
+    editor.lock();
+    await vault.reload();
+
+    gate.release();
+    const stale = await pending;
+    assert.equal(stale.status, 409);
+    assert.equal(JSON.parse(stale.body).error, "oauth_credential_changed");
+
+    const reopened = await openVault({ stateDir, passphrase: "test-pass" });
+    assert.equal(reopened.get("gmail").refreshToken, "rt-after-seed-race");
+    assert.equal(reopened.get("gmail").accessToken, "owner-seed-c");
+    reopened.lock();
+
+    const beforeRefreshes = token.stats.count;
+    const current = await callProxy({
+      port: proxyPort,
+      path: `/gmail/${upstream.host}/v1/messages`,
+    });
+    assert.equal(current.status, 200);
+    assert.equal(upstream.seen.authorization, "Bearer owner-seed-c");
+    assert.equal(token.stats.count, beforeRefreshes);
+    token.cfg.rotateTo = null;
+  });
+
+  it("serializes single-use refresh tokens across broker processes", async () => {
+    clock += 3600 * 1000 + 1;
+    const currentVault = await openVault({ stateDir, passphrase: "test-pass" });
+    const startingRefreshToken = currentVault.get("gmail").refreshToken;
+    currentVault.lock();
+    token.cfg.validRefreshToken = startingRefreshToken;
+    token.cfg.rotateSequence = ["cross-process-r2", "cross-process-r3"];
+    token.stats.maxActive = 0;
+    const beforeRefreshes = token.stats.count;
+
+    const secondVault = await openVault({ stateDir, passphrase: "test-pass" });
+    const secondProxy = createProxy({
+      vault: secondVault,
+      stateDir,
+      logPath: path.join(stateDir, "proxy-second.log"),
+      now: () => clock,
+    });
+    const secondPort = (await secondProxy.listen()).port;
+    try {
+      const [first, second] = await Promise.all([
+        callProxy({ port: proxyPort, path: `/gmail/${upstream.host}/v1/messages` }),
+        callProxy({ port: secondPort, path: `/gmail/${upstream.host}/v1/messages` }),
+      ]);
+      assert.deepEqual([first.status, second.status], [200, 200]);
+      assert.equal(token.stats.count, beforeRefreshes + 2);
+      assert.equal(token.stats.maxActive, 1, "provider exchanges must never overlap");
+
+      const reopened = await openVault({ stateDir, passphrase: "test-pass" });
+      assert.equal(reopened.get("gmail").refreshToken, "cross-process-r3");
+      reopened.lock();
+    } finally {
+      await secondProxy.close();
+    }
+
+    // The next refresh must start from the tail of the chain, not replay the
+    // invalidated predecessor used by either concurrent broker.
+    clock += 3600 * 1000 + 1;
+    token.cfg.rotateSequence = ["cross-process-r4"];
+    const next = await callProxy({
+      port: proxyPort,
+      path: `/gmail/${upstream.host}/v1/messages`,
+    });
+    assert.equal(next.status, 200);
+    assert.equal(token.stats.lastBody.get("refresh_token"), "cross-process-r3");
+    token.cfg.rotateSequence = null;
+    token.cfg.validRefreshToken = null;
+  });
+
+  it("does not persist or inject an old refresh result after credential replacement", async () => {
+    token.cfg.rotateTo = "rt-from-old-account";
+    clock += 3600 * 1000 + 1;
+    const gate = token.holdNextResponse();
+    const pending = callProxy({
+      port: proxyPort,
+      path: `/gmail/${upstream.host}/v1/messages`,
+    });
+    await gate.arrived;
+
+    const editor = await openVault({ stateDir, passphrase: "test-pass" });
+    editor.add({
+      ...editor.get("gmail"),
+      clientId: "replacement-client",
+      refreshToken: "rt-replacement-account",
+    });
+    await editor.save();
+    editor.lock();
+    await vault.reload();
+
+    const beforeUpstream = upstream.seen.count;
+    gate.release();
+    const response = await pending;
+    assert.equal(response.status, 409);
+    assert.equal(JSON.parse(response.body).error, "oauth_credential_changed");
+    assert.equal(upstream.seen.count, beforeUpstream, "stale access token was not injected");
+
+    const reopened = await openVault({ stateDir, passphrase: "test-pass" });
+    assert.equal(reopened.get("gmail").clientId, "replacement-client");
+    assert.equal(reopened.get("gmail").refreshToken, "rt-replacement-account");
+    reopened.lock();
+    token.cfg.rotateTo = null;
+  });
+
+  it("reaps a dead OAuth refresh contender without a canonical-lock ABA race", async () => {
+    clock += 3600 * 1000 + 1;
+    const lockDir = path.join(stateDir, "locks");
+    await fs.mkdir(lockDir, { recursive: true });
+    const prefix = fileLockPrefix("oauth:gmail");
+    const lockPath = path.join(
+      lockDir,
+      `${prefix}.ticket.1.99999999.${randomUUID()}`,
+    );
+    await fs.writeFile(lockPath, "99999999\n", { mode: 0o600 });
+
+    const response = await callProxy({
+      port: proxyPort,
+      path: `/gmail/${upstream.host}/v1/messages`,
+    });
+    assert.equal(response.status, 200);
+    await assert.rejects(fs.stat(lockPath), (err) => err?.code === "ENOENT");
+  });
+
+  it("discards an OAuth refresh response that completes after vault lock", async () => {
+    clock += 3600 * 1000 + 1;
+    token.cfg.rotateTo = "rt-rotated-during-lock";
+    const gate = token.holdNextResponse();
+    const pending = callProxy({
+      port: proxyPort,
+      path: `/gmail/${upstream.host}/v1/messages`,
+    });
+    await gate.arrived;
+    const beforeUpstream = upstream.seen.count;
+
+    proxy.forceLock("oauth_refresh_test");
+    gate.release();
+    const response = await pending;
+    assert.equal(response.status, 409);
+    assert.equal(JSON.parse(response.body).error, "oauth_refresh_stale");
+    assert.equal(upstream.seen.count, beforeUpstream, "post-lock token was not injected");
+
+    const reopened = await openVault({ stateDir, passphrase: "test-pass" });
+    assert.equal(
+      reopened.get("gmail").refreshToken,
+      "rt-rotated-during-lock",
+      "provider rotation must be durable even though the data plane locked",
+    );
+    reopened.lock();
+    token.cfg.rotateTo = null;
   });
 });

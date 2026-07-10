@@ -28,6 +28,8 @@
     "tests",
     "CHANGELOG.md",
     "docs/AGENT-SSO.md",
+    "docs/CAPABILITY-BROKER.md",
+    "docs/CAPABILITY-POLICY-UX-REQUIREMENTS.md",
     "docs/INTEGRATION.md",
     "docs/VAULT-PROXY.md"
   ],

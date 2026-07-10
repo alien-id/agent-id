@@ -1,6 +1,6 @@
 ---
 name: agent-id-proxy
-description: Local credential-injecting HTTP proxy. The agent calls `http://localhost:PORT/<credname>/<upstream-host>/<path>`; the proxy looks up the credential in the vault, validates the host against that credential's allowlist (default-deny), materializes the credential into the appropriate request location, and forwards over real HTTPS. For vault-generated wallet credentials it signs blockchain transactions in-process — Solana `sendTransaction` bodies are ed25519-signed, EVM `eth_sendTransaction` becomes a signed EIP-1559 `eth_sendRawTransaction`. The agent never sees the credential value or private key. Use whenever the agent calls an external service with a vaulted credential, or needs to send a blockchain transaction from a vault-held wallet (payments, trading, x402, transfers).
+description: Local credential-injecting HTTP proxy with semantic action authorization. The agent calls a localhost URL containing the credential name, upstream host, and path; the proxy validates the credential's host allowlist and principal-scoped capability policy, decides allow/deny/ask, binds approval to the exact request, then injects the credential and forwards over real HTTPS. For vault-generated wallets it signs Solana/EVM transactions in-process. The agent never sees the credential value or private key. Use whenever an agent calls an external service with a vaulted credential, needs narrowly controlled actions such as email send/form submit/purchase, or sends a transaction from a vault-held wallet.
 license: MIT
 metadata:
   author: Alien Wallet
@@ -37,7 +37,15 @@ node CLI start --passphrase-file ~/.agent-id-pass
 
 # Idle auto-lock window (default 12h; "never" disables for unattended agents):
 node CLI start --idle-timeout 30m
+
+# DEVELOPMENT TEST ONLY: automatically resolve every capability ask one way.
+node CLI start --dev-phone-simulator approve   # or: deny
 ```
+
+`--dev-phone-simulator` requires a dev-mode vault and the default loopback HTTP
+control plane. It cannot unlock the vault. It auto-approves or auto-denies every
+capability ask without human judgment; never describe it as phone/owner
+authentication and never use it in production.
 
 The CLI prints the suggested env exports. Set them in any shell that should route through the proxy:
 
@@ -113,6 +121,41 @@ text), opaque binary RPC (gRPC-web/Connect), or an unknown JSON-RPC method —
 fails safe: it's denied, not allowed. So `ro` works cleanly on REST-with-verbs,
 inline GraphQL, JMAP, and known JSON-RPC, and over-blocks (reads too) on
 hash-only endpoints. See the vault skill's "Where `ro` works" table.
+
+## Capability broker — named exact actions
+
+When a credential has `capabilityPolicy`, the CLI derives the local Agent ID
+principal from its main key (never from a request header), and the proxy
+evaluates that principal's grants before OAuth refresh, wallet signing,
+credential injection, or opening the upstream socket:
+
+- `allow` forwards the exact request;
+- `deny` returns `403 capability_denied`; and
+- `ask` parks that original request and exposes a bounded, policy-selected preview plus action
+  digest on the control plane. Exact `scope: "once"` approval releases it once;
+  deny, timeout, client disconnect, wrong digest, stale policy, or unavailable
+  approval fails closed. Do not retry the write.
+
+The digest commits the principal, credential, selected grants, policy
+hash/epoch, adapter, scheme/host/port/path, normalized headers, query, raw body,
+nonce, and expiry. Capability decisions are appended to the signed audit trail;
+ordinary logs keep commitments and metadata, not request bodies or credentials.
+Grant matchers are default-port-only unless `match.ports` explicitly names
+`"default"` and/or a decimal non-default port; never assume a host grant covers
+every service listening on that hostname.
+
+Capability policies require URL-rewrite mode. Legacy stub injection returns
+`capability_requires_url_rewrite` because it cannot bind an exact body approval.
+Method/host/path labels are only transport descriptions; use JSON constraints
+or a trusted versioned adapter before claiming recipient-, form-, or
+purchase-level semantics for opaque payloads.
+
+Policy changes are owner-confirmed with `agent-id-vault set-capabilities`. The
+running local proxy authenticates and reloads `vault.enc` at request entry,
+after approval, and before materialization; a stale in-flight action fails and
+must be retried under the new policy. `--dev-phone-simulator approve|deny` tests
+this loop but automatically applies the configured decision; it is not a
+separate phone or a security boundary.
 
 ## Wallet credentials — transaction signing in the proxy
 
@@ -196,6 +239,8 @@ node CLI start --idle-timeout never     # disable (unattended agents)
 { "ok": false, "error": "host_not_allowed", "credential": "github-pat", "host": "evil.example.com", "allowed": ["*.github.com"] }
 { "ok": false, "error": "vault_locked", "reason": "idle_timeout" }
 { "ok": false, "error": "access_denied", "credential": "mail-ro", "access": "ro", "reason": "write_blocked" }
+{ "ok": false, "error": "capability_denied", "credential": "mail", "reason": "capability_deny" }
+{ "ok": false, "error": "approval_unavailable" }
 { "ok": false, "error": "bad_request", "message": "..." }
 ```
 
@@ -212,7 +257,7 @@ node CLI stop
 
 - **HTTPS only at the upstream leg** in URL-rewrite mode. The agent-to-proxy leg is plain HTTP loopback by design.
 - Authorization gates: per-credential **host allowlist**, **access level**
-  (`ro`/`rw` + rules), and — when started with `--require-consent` — a
-  per-(credential, host) human consent grant.
-- Stub-injection mode (legacy) enforces access levels by method/host/path only
-  — POST-tunneled reads are not classified there; use URL-rewrite mode.
+  (`ro`/`rw` + rules), principal-scoped **capability policy**, and — when
+  started with `--require-consent` — a per-(credential, host) consent grant.
+- Stub-injection mode (legacy) rejects capability-managed credentials and
+  enforces legacy access levels by method/host/path only; use URL-rewrite mode.

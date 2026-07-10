@@ -43,6 +43,7 @@ import { authenticatePasskey } from "@alien-id/agent-id-vault/lib/passkey.mjs";
 import { requestUnlockSecret } from "@alien-id/agent-id-vault/lib/owner-approval.mjs";
 import { sealToPublicKey } from "@alien-id/agent-id-vault/lib/format.mjs";
 import { SignatureEngine } from "@alien-id/agent-id-core/lib/signature-engine.mjs";
+import { agentPrincipalFromPublicKeyPem } from "@alien-id/agent-id-core/lib/principal.mjs";
 import {
   hasTty,
   promptSecret,
@@ -50,6 +51,7 @@ import {
 import { collectViaForm } from "@alien-id/agent-id-core/lib/secure-form.mjs";
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
+import { startDevPhoneSimulator } from "../lib/dev-phone.mjs";
 import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
 import { normalizeFingerprint } from "../lib/control-tls.mjs";
 
@@ -377,13 +379,33 @@ async function cmdStart(flags) {
   const controlEnabled = flags.control !== false;
   const awaitMobile = !!flags["await-mobile"];
   const requireConsent = !!flags["require-consent"];
+  const devPhoneDecision = flags["dev-phone-simulator"] || null;
 
   if (awaitMobile && !controlEnabled) {
     outputError("--await-mobile requires the control plane (drop --no-control).");
     return;
   }
 
+  if (devPhoneDecision != null && !["approve", "deny"].includes(devPhoneDecision)) {
+    outputError("--dev-phone-simulator requires an explicit 'approve' or 'deny' value.");
+    return;
+  }
+  if (devPhoneDecision && !controlEnabled) {
+    outputError("--dev-phone-simulator requires the control plane (drop --no-control).");
+    return;
+  }
+  if (devPhoneDecision && awaitMobile) {
+    outputError(
+      "--dev-phone-simulator cannot unlock a vault; open a dev vault without --await-mobile.",
+    );
+    return;
+  }
+
   const vault = awaitMobile ? null : await loadVaultForProxy(stateDir, flags);
+  if (devPhoneDecision && vault?.mode !== "dev") {
+    outputError("--dev-phone-simulator is restricted to a dev-mode vault.");
+    return;
+  }
   await ensureDir(path.dirname(paths.proxyLog));
 
   const idleTimeoutMs =
@@ -400,6 +422,14 @@ async function cmdStart(flags) {
   );
   const controlIsLoopback =
     controlHost === "127.0.0.1" || controlHost === "::1" || controlHost === "localhost";
+  if (devPhoneDecision && !controlIsLoopback) {
+    outputError("--dev-phone-simulator requires a loopback --control-host.");
+    return;
+  }
+  if (devPhoneDecision && flags["control-tls"] === true) {
+    outputError("--dev-phone-simulator currently requires the default loopback HTTP control plane.");
+    return;
+  }
   const control = controlEnabled
     ? {
         listen: {
@@ -420,6 +450,14 @@ async function cmdStart(flags) {
   const grantTtlMs =
     flags["grant-ttl"] != null ? parseDuration(flags["grant-ttl"]) : 60 * 60_000;
 
+  // The canonical key thumbprint is the principal named by capability grants.
+  // Capability decisions are additionally appended to the signed, hash-chained
+  // Agent ID audit trail. A failed signed append fails the protected request.
+  const auditEngine = new SignatureEngine({ baseDir: stateDir });
+  await auditEngine.init();
+  const mainKey = await auditEngine.ensureMainKey();
+  const principal = agentPrincipalFromPublicKeyPem(mainKey.publicKeyPem);
+
   const proxy = createProxy({
     vault,
     stateDir,
@@ -430,6 +468,14 @@ async function cmdStart(flags) {
     requireConsent,
     grantTtlMs,
     blockPrivateHosts: !!flags["block-private-hosts"],
+    principal,
+    capabilityAudit: (event) =>
+      auditEngine.appendOperation({
+        operationType: "capability",
+        action: event.event,
+        payload: event,
+        ctx: { agentId: "main" },
+      }),
     onLock: (reason) => {
       if (controlEnabled) {
         stderr(`Vault locked (${reason}). Next request will ask for an unlock approval.`);
@@ -441,6 +487,16 @@ async function cmdStart(flags) {
   });
   const addr = await proxy.listen();
   const controlAddr = proxy.controlAddress;
+  let devPhone = null;
+  if (devPhoneDecision) {
+    devPhone = startDevPhoneSimulator({
+      controlHost,
+      controlPort: controlAddr.port,
+      controlToken: proxy.controlToken,
+      decision: devPhoneDecision,
+      onError: (error) => stderr(`Dev phone simulator: ${error.message}`),
+    });
+  }
   // The control token is written to the 0600 proxy state file so same-user
   // tooling (and external approvers) can present it; it never goes to stdout.
   await writeProxyState(paths, {
@@ -457,6 +513,8 @@ async function cmdStart(flags) {
     idleTimeoutMs: Number.isFinite(idleTimeoutMs) ? idleTimeoutMs : null,
     requireConsent,
     awaitMobile,
+    principal,
+    devPhoneSimulator: devPhoneDecision,
     stateDir,
   });
 
@@ -501,6 +559,11 @@ async function cmdStart(flags) {
   stderr(`Log:   ${paths.proxyLog}`);
   stderr(`Idle lock: ${formatDuration(idleTimeoutMs)}`);
   if (requireConsent) stderr(`Consent: per-credential, grant TTL ${formatDuration(grantTtlMs)}`);
+  if (devPhoneDecision) {
+    stderr(
+      `⚠ DEV ONLY: simulated phone will ${devPhoneDecision} exact, one-shot capability asks.`,
+    );
+  }
   stderr("Press Ctrl-C to stop.");
 
   if (flags["print-config"]) {
@@ -526,6 +589,7 @@ async function cmdStart(flags) {
   const shutdown = async (signal) => {
     stderr(`Received ${signal}, shutting down…`);
     approver?.stop();
+    await devPhone?.stop();
     await proxy.close();
     vault?.lock();
     await clearProxyState(paths);
@@ -662,6 +726,7 @@ function printHelp() {
       "        [--no-control] [--control-port N] [--control-host H] [--control-tls|--no-control-tls]",
       "        [--await-mobile]",
       "        [--require-consent] [--approval-timeout 2m] [--grant-ttl 1h]",
+      "        [--dev-phone-simulator approve|deny]   dev vault + loopback only",
       "        [--block-private-hosts]",
       "  pair [--control-host H]   show a QR for a phone to scan (control URL + token)",
       "  status",

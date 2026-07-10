@@ -83,15 +83,22 @@ export function createPendingRegistry({
       id,
       info,
       createdAt: now(),
+      settled: false,
       _resolve: resolveFn,
       _reject: rejectFn,
       resolve(value) {
+        if (this.settled) return false;
+        this.settled = true;
         settle();
         resolveFn(value);
+        return true;
       },
       reject(err) {
+        if (this.settled) return false;
+        this.settled = true;
         settle();
         rejectFn(err);
+        return true;
       },
     });
     return { id, promise };
@@ -100,15 +107,13 @@ export function createPendingRegistry({
   function resolve(id, value) {
     const entry = pending.get(id);
     if (!entry) return false;
-    entry.resolve(value);
-    return true;
+    return entry.resolve(value);
   }
 
   function reject(id, reason) {
     const entry = pending.get(id);
     if (!entry) return false;
-    entry.reject(approvalError(reason || "denied"));
-    return true;
+    return entry.reject(approvalError(reason || "denied"));
   }
 
   function get(id) {
