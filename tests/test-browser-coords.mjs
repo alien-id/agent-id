@@ -12,7 +12,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { imageToViewport, regionToClip } from "../plugins/agent-id-browser/lib/session-server.mjs";
+import {
+  clampClipToViewport,
+  imageToViewport,
+  regionToClip,
+} from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 test("imageToViewport: dpr=1 is identity", () => {
   assert.deepEqual(imageToViewport(300, 200, 1), { x: 300, y: 200 });
@@ -57,4 +61,44 @@ test("regionToClip: order-agnostic (x1<x0 / y1<y0 still yields positive size)", 
 
 test("regionToClip: string coords (from CLI) are coerced", () => {
   assert.deepEqual(regionToClip(["200", "100", "800", "500"], "2"), { x: 100, y: 50, width: 300, height: 200 });
+});
+
+// clampClipToViewport — keep a region crop inside the visible viewport
+
+const VIEWPORT = { width: 1280, height: 800 };
+
+test("clampClipToViewport: clip inside the viewport is unchanged", () => {
+  const clip = { x: 100, y: 50, width: 300, height: 200 };
+  assert.deepEqual(clampClipToViewport(clip, VIEWPORT), clip);
+});
+
+test("clampClipToViewport: oversized clip is trimmed to the viewport edges", () => {
+  assert.deepEqual(clampClipToViewport({ x: 1000, y: 700, width: 600, height: 300 }, VIEWPORT), {
+    x: 1000,
+    y: 700,
+    width: 280,
+    height: 100,
+  });
+});
+
+test("clampClipToViewport: negative origin is pulled back to 0", () => {
+  assert.deepEqual(clampClipToViewport({ x: -40, y: -20, width: 100, height: 100 }, VIEWPORT), {
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+  });
+});
+
+test("clampClipToViewport: clip fully outside collapses to non-positive area", () => {
+  const clamped = clampClipToViewport({ x: 2000, y: 1200, width: 300, height: 200 }, VIEWPORT);
+  assert.equal(clamped.x, VIEWPORT.width);
+  assert.equal(clamped.y, VIEWPORT.height);
+  assert.ok(clamped.width < 1);
+  assert.ok(clamped.height < 1);
+});
+
+test("clampClipToViewport: unknown viewport (JS-hostile page) passes the clip through", () => {
+  const clip = { x: 5000, y: 5000, width: 100, height: 100 };
+  assert.deepEqual(clampClipToViewport(clip, null), clip);
 });

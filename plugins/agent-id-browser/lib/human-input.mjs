@@ -177,6 +177,21 @@ export async function humanType(
   // (and corrupt) leftover content — the secret paths wrap this in a value-free
   // catch, so a throw never leaks the value.
   await (await firstVisible(root, selector, timeout)).fill("", { timeout });
+  await humanTypeFocused(page, value, { rng, submit });
+}
+
+// Type into whatever currently holds focus, key-by-key with the same jittered
+// cadence as humanType — for coordinate-mode typing (`type-text`), where focus
+// came from a click-xy rather than a locator. No click, no clear: it appends at
+// the caret. `submit` presses Enter after a short dwell. With human input
+// disabled the keystrokes are sent back-to-back (still real key events).
+export async function humanTypeFocused(page, text, { rng = Math.random, submit = false } = {}) {
+  const value = String(text ?? "");
+  if (!humanInputEnabled()) {
+    await page.keyboard.type(value);
+    if (submit) await page.keyboard.press("Enter");
+    return;
+  }
   const delays = keystrokeDelays(value.length, { rng });
   for (let i = 0; i < value.length; i++) {
     await page.keyboard.type(value[i]);

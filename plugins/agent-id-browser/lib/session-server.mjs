@@ -43,6 +43,7 @@ import {
   humanMove,
   humanScroll,
   humanType,
+  humanTypeFocused,
 } from "./human-input.mjs";
 
 function sessionsDir(stateDir) {
@@ -169,6 +170,23 @@ export function regionToClip(region, dpr) {
     y: Math.min(y0, y1) / d,
     width: Math.abs(x1 - x0) / d,
     height: Math.abs(y1 - y0) / d,
+  };
+}
+
+// Clamp a clip (CSS px) to the viewport: an oversized region degrades to its
+// visible part, and one fully outside collapses to zero/negative area for the
+// caller to reject with a readable error (instead of Playwright's raw "clipped
+// area outside image"). Unknown viewport (JS-hostile page — the capture must
+// still be attempted) passes the clip through. Pure — exported for tests.
+export function clampClipToViewport(clip, viewport) {
+  if (!viewport) return { ...clip };
+  const x = Math.max(0, Math.min(clip.x, viewport.width));
+  const y = Math.max(0, Math.min(clip.y, viewport.height));
+  return {
+    x,
+    y,
+    width: Math.min(clip.width, viewport.width - x),
+    height: Math.min(clip.height, viewport.height - y),
   };
 }
 
@@ -583,9 +601,10 @@ async function dispatch(state, msg, policy = null) {
       // PLAINTEXT ONLY — secrets stay ref-based via fill-secret/fill-otp. Note it
       // APPENDS (no clear) unlike ref-based `type`; click a field's clear/select-all
       // first if replacing. Only the length leaves the session, never the text.
+      // Cadence comes from humanTypeFocused — the same jittered per-key delays as
+      // ref-based `type`; a fixed inter-key interval is itself a bot fingerprint.
       const text = String(p.text ?? "");
-      await page.keyboard.type(text, { delay: 25 });
-      if (p.submit) await page.keyboard.press("Enter");
+      await humanTypeFocused(page, text, { submit: !!p.submit });
       return { typed: text.length, submit: !!p.submit };
     }
     case "fill-text": {
@@ -670,6 +689,13 @@ async function dispatch(state, msg, policy = null) {
         .catch(() => null);
       return { resized: { width, height }, ...(viewport ? { viewport } : {}) };
     }
+    case "zoom":
+      // At the CLI `zoom` is sugar that the client maps onto `screenshot` with
+      // requireRegion set — but `batch` re-enters dispatch() by raw action name,
+      // so the alias must exist here too (SKILL.md promises batch runs any
+      // action). Force the region requirement and fall into the handler.
+      p.requireRegion = true;
+    // fallthrough
     case "screenshot": {
       const out = p.path ? String(p.path) : path.join(sessionsDir(msg._stateDir), `shot-${Date.now()}.png`);
       // dims are BEST-EFFORT and must never block the capture: a JS-hostile page
@@ -696,15 +722,9 @@ async function dispatch(state, msg, policy = null) {
       // `zoom` sets requireRegion — a region-less zoom is a mistake, not a full shot.
       if (p.requireRegion && !region) throw new Error("zoom needs --region x0,y0,x1,y1");
       if (region) {
-        const clip = regionToClip(region, p.css ? 1 : info.dpr);
         // Clamp to the viewport so an over-large region gives a helpful error
         // instead of a raw Playwright "clipped area outside image".
-        if (info.viewport) {
-          clip.x = Math.max(0, Math.min(clip.x, info.viewport.width));
-          clip.y = Math.max(0, Math.min(clip.y, info.viewport.height));
-          clip.width = Math.min(clip.width, info.viewport.width - clip.x);
-          clip.height = Math.min(clip.height, info.viewport.height - clip.y);
-        }
+        const clip = clampClipToViewport(regionToClip(region, p.css ? 1 : info.dpr), info.viewport);
         if (clip.width < 1 || clip.height < 1) {
           throw new Error("screenshot --region has zero area (or lies outside the viewport)");
         }
