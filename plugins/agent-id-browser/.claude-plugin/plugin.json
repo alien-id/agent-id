@@ -1,6 +1,6 @@
 {
   "name": "agent-id-browser",
-  "version": "7.3.0",
+  "version": "7.3.1",
   "description": "Universal browser the agent drives, with the logged-in profile sealed in the agent vault. One-time headed login; headless automated reads/fetches thereafter.",
   "author": {
     "name": "Alien",
