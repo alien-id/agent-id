@@ -16,6 +16,7 @@ import {
   clampClipToViewport,
   imageToViewport,
   regionToClip,
+  screenshotEncoding,
 } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 test("imageToViewport: dpr=1 is identity", () => {
@@ -101,4 +102,27 @@ test("clampClipToViewport: clip fully outside collapses to non-positive area", (
 test("clampClipToViewport: unknown viewport (JS-hostile page) passes the clip through", () => {
   const clip = { x: 5000, y: 5000, width: 100, height: 100 };
   assert.deepEqual(clampClipToViewport(clip, null), clip);
+});
+
+// screenshotEncoding — JPEG by default, PNG only for an explicit .png path
+test("screenshotEncoding: default (jpg path) is jpeg at quality 80", () => {
+  assert.deepEqual(screenshotEncoding("/tmp/shot.jpg"), { type: "jpeg", quality: 80 });
+});
+
+test("screenshotEncoding: an explicit .png path stays lossless PNG (no type/quality)", () => {
+  assert.deepEqual(screenshotEncoding("/tmp/shot.png"), {});
+  assert.deepEqual(screenshotEncoding("/tmp/SHOT.PNG"), {}); // case-insensitive
+});
+
+test("screenshotEncoding: quality is honored and clamped to 1..100", () => {
+  assert.equal(screenshotEncoding("/tmp/a.jpg", 50).quality, 50);
+  assert.equal(screenshotEncoding("/tmp/a.jpg", 0).quality, 1);
+  assert.equal(screenshotEncoding("/tmp/a.jpg", 999).quality, 100);
+  assert.equal(screenshotEncoding("/tmp/a.jpg", 61.7).quality, 62); // rounded
+});
+
+test("screenshotEncoding: non-numeric quality falls back to 80", () => {
+  assert.equal(screenshotEncoding("/tmp/a.jpg", undefined).quality, 80);
+  assert.equal(screenshotEncoding("/tmp/a.jpg", "").quality, 80);
+  assert.equal(screenshotEncoding("/tmp/a.jpg", "abc").quality, 80);
 });
