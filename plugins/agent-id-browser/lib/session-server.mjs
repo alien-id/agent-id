@@ -29,6 +29,7 @@ import crypto from "node:crypto";
 
 import { launchContext } from "./launch.mjs";
 import { sealProfile } from "./profile-store.mjs";
+import { startStreamServer } from "./stream-server.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
 import { SECRET_FIELDS, hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { resolveOtp } from "./auto-login.mjs";
@@ -432,6 +433,9 @@ async function dispatch(state, msg, policy = null) {
       const credName = String(p.cred).slice(0, dot);
       const field = String(p.cred).slice(dot + 1);
       const target = frameForRef(state, p.ref);
+      // Viewport-stream blackout while the value is on its way into the page —
+      // watchers see nothing and viewer input is ignored until resume.
+      state.stream?.suspend();
       const vault = await openVaultAgentKey(msg._stateDir);
       try {
         const rec = vault.get(credName);
@@ -461,6 +465,7 @@ async function dispatch(state, msg, policy = null) {
         await markSecretField(target, sel(p.ref));
       } finally {
         vault.lock();
+        state.stream?.resume();
       }
       return { filled: p.ref, cred: p.cred };
     }
@@ -469,38 +474,45 @@ async function dispatch(state, msg, policy = null) {
       // stored seed, or asked via the secure prompt — and type it.
       const credName = String(p.cred || "");
       const target = frameForRef(state, p.ref);
-      const vault = await openVaultAgentKey(msg._stateDir);
-      let code;
+      // Same viewport-stream blackout as fill-secret: an OTP is typed into a
+      // visible text/tel input, so watchers must not see the keystrokes.
+      state.stream?.suspend();
       try {
-        const rec = vault.get(credName);
-        if (!rec) throw new Error(`no credential "${credName}"`);
-        // Audience binding: a live OTP code must not be typed into a foreign
-        // origin — top page AND (for an iframe field) the frame itself.
-        assertFillAllowed(rec, hostOfUrl(page.url()));
-        if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()));
-        const otpCred =
-          rec.type === "totp"
-            ? { name: credName, otp: "totp", totpSecret: rec.secret, period: rec.period, digits: rec.digits, algorithm: rec.algorithm }
-            : rec;
-        code = await resolveOtp(otpCred, {});
+        const vault = await openVaultAgentKey(msg._stateDir);
+        let code;
+        try {
+          const rec = vault.get(credName);
+          if (!rec) throw new Error(`no credential "${credName}"`);
+          // Audience binding: a live OTP code must not be typed into a foreign
+          // origin — top page AND (for an iframe field) the frame itself.
+          assertFillAllowed(rec, hostOfUrl(page.url()));
+          if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()));
+          const otpCred =
+            rec.type === "totp"
+              ? { name: credName, otp: "totp", totpSecret: rec.secret, period: rec.period, digits: rec.digits, algorithm: rec.algorithm }
+              : rec;
+          code = await resolveOtp(otpCred, {});
+        } finally {
+          vault.lock();
+        }
+        // Same leak guard as fill-secret: never surface the value-bearing error.
+        try {
+          await humanType(page, sel(p.ref), code, {
+            timeout: ACTION_TIMEOUT,
+            submit: p.submit !== false,
+            root: target,
+          });
+        } catch {
+          throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+        }
+        // A derived OTP isn't sealed at fill time (see assertFillAllowed), so the
+        // read-back guard is what protects it: tag the field so its value can't be
+        // read back regardless of the input's type (OTP inputs are text/tel).
+        await markSecretField(target, sel(p.ref));
+        return { filled: p.ref, otp: true };
       } finally {
-        vault.lock();
+        state.stream?.resume();
       }
-      // Same leak guard as fill-secret: never surface the value-bearing error.
-      try {
-        await humanType(page, sel(p.ref), code, {
-          timeout: ACTION_TIMEOUT,
-          submit: p.submit !== false,
-          root: target,
-        });
-      } catch {
-        throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
-      }
-      // A derived OTP isn't sealed at fill time (see assertFillAllowed), so the
-      // read-back guard is what protects it: tag the field so its value can't be
-      // read back regardless of the input's type (OTP inputs are text/tel).
-      await markSecretField(target, sel(p.ref));
-      return { filled: p.ref, otp: true };
     }
     case "select":
       await frameForRef(state, p.ref).selectOption(sel(p.ref), p.values, { timeout: ACTION_TIMEOUT });
@@ -974,6 +986,15 @@ export async function runSession({
   for (const pg of ctx.pages()) attachPage(state, pg);
   ctx.on("page", (pg) => attachPage(state, pg));
 
+  // Live viewport stream ("watch Lethe browse" / pair browsing). Its port +
+  // token ride in the session file so the host runtime can relay it to the
+  // owner's client; the feed and viewer input are suspended while fill-secret
+  // / fill-otp inject credential values (see those dispatch cases).
+  const stream = await startStreamServer(state, {
+    log: (m) => process.stderr.write(`${m}\n`),
+  });
+  state.stream = stream;
+
   // Single, idempotent shutdown: close the browser, RESEAL the refreshed profile,
   // wipe the plaintext working copy, remove the session file, then exit. Guarded
   // so the ctx "close" event (which ctx.close() itself fires) can't re-enter and
@@ -986,6 +1007,7 @@ export async function runSession({
     try { await sealProfile({ stateDir, file: profileFile, dekHex, sourceDir: workDir }); } catch { /* best effort */ }
     try { await fs.rm(workDir, { recursive: true, force: true }); } catch { /* best effort */ }
     try { await fs.rm(sessionFilePath(stateDir, name), { force: true }); } catch { /* best effort */ }
+    try { stream.close(); } catch { /* not listening */ }
     try { server.close(); } catch { /* not listening */ }
     process.exit(0);
   }
@@ -1022,7 +1044,15 @@ export async function runSession({
   await fs.mkdir(sessionsDir(stateDir), { recursive: true, mode: 0o700 });
   await fs.writeFile(
     sessionFilePath(stateDir, name),
-    JSON.stringify({ port, token, pid: process.pid, headless, startedAt: Date.now() }),
+    JSON.stringify({
+      port,
+      token,
+      pid: process.pid,
+      headless,
+      startedAt: Date.now(),
+      streamPort: stream.port,
+      streamToken: stream.token,
+    }),
     { mode: 0o600 },
   );
   // Readiness signal: the agent runs `open` in the background and waits for this
