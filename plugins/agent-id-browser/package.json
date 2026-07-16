@@ -11,6 +11,11 @@
     "skills",
     ".claude-plugin"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alien-id/agent-id.git",
+    "directory": "plugins/agent-id-browser"
+  },
   "type": "module",
   "description": "Universal browser automation with the profile sealed in the agent vault.",
   "bin": {
