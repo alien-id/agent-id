@@ -715,7 +715,7 @@ async function cmdOpen(flags) {
         `${policy && effectiveAccess(policy) === "ro" ? ", READ-ONLY" : ""}). Keep this process ` +
         `running (background it); issue actions, then \`close --name ${name}\`.`,
     );
-    await runSession({ stateDir, name, headless, dekHex, profileFile, workDir, policy }); // blocks until close
+    await runSession({ stateDir, name, headless, dekHex, profileFile, workDir, policy, startUrl: flags.url }); // blocks until close
   } catch (err) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     handleErr(err);
@@ -866,7 +866,8 @@ runCli({
         "          one-shot authenticated HTTP GET via the session (API / feed)\n" +
         "  status  [--name N]      list sealed sessions\n\n" +
         "Interactive session (--name optional; defaults to 'main'):\n" +
-        "  open    --name N [--headed]   start a persistent session (run in background);\n" +
+        "  open    --name N [--headed] [--url START]   start a persistent session (run in\n" +
+        "          background); navigates to START before reporting ready;\n" +
         "          missing default 'main' auto-creates as an anonymous L0 profile\n" +
         "  snapshot --name N             accessibility tree with element refs; iframe\n" +
         "          elements get frame-prefixed refs (f1e3); reports open tabs when >1\n" +

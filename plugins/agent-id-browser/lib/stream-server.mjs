@@ -166,6 +166,10 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
   let cdpPage = null;
   let suspended = 0; // depth-counted: nested fills keep it suspended
   let closed = false;
+  // Input events apply strictly in arrival order. page.mouse/keyboard calls are
+  // async; firing them unawaited lets a press overtake the move before it (or a
+  // release overtake the press), which drops clicks sent in a burst.
+  let inputChain = Promise.resolve();
 
   function broadcast(obj) {
     if (clients.size === 0) return;
@@ -258,10 +262,17 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
       // Input is disabled while a credential fill is in flight — the viewer
       // must not be able to interact with a form mid-injection.
       if (suspended > 0) return;
-      const page = state.current;
-      if (!page || page.isClosed?.()) return;
       if (mutatesPage(msg)) state.invalidateRefs?.("owner used live browser control");
-      applyInput(page, msg).catch(() => {});
+      // Queue, don't fire-and-forget: the suspend/page checks re-run at apply
+      // time so a fill starting mid-queue still blacks out the queued tail.
+      inputChain = inputChain
+        .then(() => {
+          if (suspended > 0) return;
+          const page = state.current;
+          if (!page || page.isClosed?.()) return;
+          return applyInput(page, msg);
+        })
+        .catch(() => {});
     });
     socket.on("data", parse);
 

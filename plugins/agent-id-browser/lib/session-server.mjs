@@ -1240,6 +1240,7 @@ export async function runSession({
   profileFile,
   workDir,
   policy = null,
+  startUrl = null,
 }) {
   const ctx = await launchContext({
     profileDir: workDir,
@@ -1344,9 +1345,23 @@ export async function runSession({
     }),
     { mode: 0o600 },
   );
+  // Optional start page: navigate BEFORE the ready line so "ready" means "up
+  // and on the requested page". Non-fatal — a bad/slow URL still yields a
+  // usable session; the outcome rides along in the ready JSON.
+  let navigation = null;
+  if (startUrl) {
+    try {
+      const resp = await page.goto(String(startUrl), { waitUntil: "domcontentloaded", timeout: 30000 });
+      navigation = { url: page.url(), status: resp ? resp.status() : null };
+    } catch (err) {
+      navigation = { url: String(startUrl), error: String(err?.message || err) };
+    }
+  }
   // Readiness signal: the agent runs `open` in the background and waits for this
   // line before issuing actions.
-  process.stdout.write(JSON.stringify({ ok: true, ready: true, session: name, headless, port }) + "\n");
+  process.stdout.write(
+    JSON.stringify({ ok: true, ready: true, session: name, headless, port, ...(navigation ? { navigation } : {}) }) + "\n",
+  );
 
   // Reseal + clean up if the browser dies or we're terminated. finalize() handles
   // the exit itself, so these just invoke it (idempotent).
