@@ -2,8 +2,9 @@
 
 // Alien Agent ID — Browser plugin CLI.
 //
-// A universal browser the agent can drive, with the logged-in profile sealed in
-// the vault. By DEFAULT every command shares ONE session ("main") — sign into
+// A universal browser the agent can drive, with an anonymous-or-logged-in
+// profile sealed in the vault. By DEFAULT every command shares ONE session
+// ("main") — public browsing auto-creates it; sign into
 // Google once and every "Sign in with Google" site reuses it. `login` is ADDITIVE:
 // re-run it to add more sites to the same session. Pass --name to opt into a
 // SEPARATE, isolated session (a second account, a sandbox). After a HEADED login
@@ -46,9 +47,10 @@ import {
   sealProfile,
   unsealProfile,
   sealedProfileExists,
+  ensureAnonymousDefaultProfile,
 } from "../lib/profile-store.mjs";
 import { launchContext } from "../lib/launch.mjs";
-import { DEFAULT_PROFILE, loginHint, noProfileHint } from "../lib/hints.mjs";
+import { DEFAULT_PROFILE, loginHint, noProfileHint, profileName } from "../lib/hints.mjs";
 import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
 import { runSession, callSession } from "../lib/session-server.mjs";
@@ -209,7 +211,7 @@ async function withProfile({ flags, name, headless, action }) {
   const stateDir = resolveStateDir(flags);
   const vault = await openVaultUnlocked(flags);
   try {
-    const cred = vault.get(name);
+    const cred = await ensureAnonymousDefaultProfile({ vault, stateDir, name });
     if (!cred || cred.type !== "browser-profile") {
       const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
       e.code = "NO_PROFILE";
@@ -254,7 +256,7 @@ async function withProfile({ flags, name, headless, action }) {
 // ─── Commands ─────────────────────────────────────────────────────────────────────
 
 async function cmdLogin(flags) {
-  const name = String(flags.name || DEFAULT_PROFILE);
+  const name = profileName(flags.name);
   const stateDir = resolveStateDir(flags);
   const startUrl = flags.url ? String(flags.url) : "about:blank";
   const access = flags.access != null ? String(flags.access) : null;
@@ -402,16 +404,16 @@ async function cmdAutoLogin(flags) {
       return outputError(`login '${credName}' has no loginUrl — set one so auto-login knows where to start`);
     }
 
-    const profileName = String(flags.name || cred.profile || DEFAULT_PROFILE);
+    const targetProfile = profileName(flags.name || cred.profile);
     // A login and its sealed browser-profile are two records in ONE name
     // namespace — sealing into the login's own name would overwrite it.
-    if (profileName === credName) {
+    if (targetProfile === credName) {
       return outputError(
-        `target profile '${profileName}' must differ from the login credential '${credName}' ` +
+        `target profile '${targetProfile}' must differ from the login credential '${credName}' ` +
           "(they share the vault namespace) — pass --name <other> or set the cred's `profile`",
       );
     }
-    const existing = vault.get(profileName);
+    const existing = vault.get(targetProfile);
     const reuse = existing && existing.type === "browser-profile" ? existing : null;
 
     // The session's access level is the STRICTEST of: the login credential's
@@ -427,8 +429,8 @@ async function cmdAutoLogin(flags) {
     }
     if (reuse && requestedAccess && isAccessRelaxation(reuse, { ...reuse, access: requestedAccess })) {
       return outputError(
-        `session '${profileName}' has access level '${effectiveAccess(reuse)}' — auto-login cannot ` +
-          `widen it. The owner can: agent-id-vault set-access --name ${profileName} --access ${requestedAccess}`,
+        `session '${targetProfile}' has access level '${effectiveAccess(reuse)}' — auto-login cannot ` +
+          `widen it. The owner can: agent-id-vault set-access --name ${targetProfile} --access ${requestedAccess}`,
       );
     }
     const sessionAccess = strictestAccess(
@@ -436,7 +438,7 @@ async function cmdAutoLogin(flags) {
       reuse ? effectiveAccess(reuse) : "rw",
     );
 
-    const file = reuse ? reuse.profileFile : `${profileName}.tar.enc`;
+    const file = reuse ? reuse.profileFile : `${targetProfile}.tar.enc`;
     const dek = reuse ? reuse.dek : newDek();
     const headless = resolveHeadless(flags) ?? true;
 
@@ -462,11 +464,11 @@ async function cmdAutoLogin(flags) {
           outcome === "blocked"
             ? `Auto-login for '${credName}' was blocked by an anti-automation wall (bot ` +
               "challenge / network-security block). This hits the login handshake specifically; " +
-              `sign in yourself once with headed \`login --name ${profileName}` +
+              `sign in yourself once with headed \`login --name ${targetProfile}` +
               `${requestedAccess ? ` --access ${requestedAccess}` : ""}\` — it seals the same session.`
             : `Auto-login for '${credName}' did not complete (${outcome}). ` +
               "Verify the credentials / loginUrl, add a `recipe` to the credential, or bootstrap " +
-              `once with headed \`login --name ${profileName}\`.`;
+              `once with headed \`login --name ${targetProfile}\`.`;
         outputJson({
           ok: false,
           error: "AUTO_LOGIN_FAILED",
@@ -482,7 +484,7 @@ async function cmdAutoLogin(flags) {
       const { bytes } = await sealProfile({ stateDir, file, dekHex: dek, sourceDir: work });
       vault.add({
         ...(reuse || {}),
-        name: profileName,
+        name: targetProfile,
         type: "browser-profile",
         domains: ["*"],
         description: reuse?.description || `Auto-login session for '${credName}' (agent-id-browser)`,
@@ -502,12 +504,12 @@ async function cmdAutoLogin(flags) {
       outputJson({
         ok: true,
         cred: credName,
-        profile: profileName,
+        profile: targetProfile,
         outcome: result.outcome,
         finalUrl: result.finalUrl,
         access: sessionAccess,
         sealedBytes: bytes,
-        message: `Logged in and sealed session '${profileName}'. Reuse it: \`read --name ${profileName} --url …\`.`,
+        message: `Logged in and sealed session '${targetProfile}'. Reuse it: \`read --name ${targetProfile} --url …\`.`,
       });
     } finally {
       await fs.rm(work, { recursive: true, force: true });
@@ -520,7 +522,7 @@ async function cmdAutoLogin(flags) {
 }
 
 async function cmdRead(flags) {
-  const name = String(flags.name || DEFAULT_PROFILE);
+  const name = profileName(flags.name);
   if (!flags.url) return outputError("--url is required");
   const url = String(flags.url);
   const maxChars = Number(flags["max-chars"] || 4000);
@@ -569,7 +571,7 @@ async function cmdRead(flags) {
 }
 
 async function cmdFetch(flags) {
-  const name = String(flags.name || DEFAULT_PROFILE);
+  const name = profileName(flags.name);
   if (!flags.url) return outputError("--url is required");
   const url = String(flags.url);
   const maxChars = Number(flags["max-chars"] || 8000);
@@ -621,7 +623,7 @@ async function cmdFetch(flags) {
 
 async function cmdStatus(flags) {
   const stateDir = resolveStateDir(flags);
-  const only = flags.name ? String(flags.name) : null;
+  const only = flags.name ? profileName(flags.name) : null;
   let vault;
   try {
     // Don't drive an Alien-app prompt just to report status — agent-key/passphrase only.
@@ -664,7 +666,7 @@ async function cmdStatus(flags) {
 // ─── Interactive session: open / close / actions ─────────────────────────────────
 
 async function cmdOpen(flags) {
-  const name = String(flags.name || DEFAULT_PROFILE);
+  const name = profileName(flags.name);
   const stateDir = resolveStateDir(flags);
   let vault;
   try {
@@ -677,7 +679,7 @@ async function cmdOpen(flags) {
   let headlessDefault;
   let policy = null;
   try {
-    const cred = vault.get(name);
+    const cred = await ensureAnonymousDefaultProfile({ vault, stateDir, name });
     if (!cred || cred.type !== "browser-profile") {
       const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
       e.code = "NO_PROFILE";
@@ -713,7 +715,7 @@ async function cmdOpen(flags) {
         `${policy && effectiveAccess(policy) === "ro" ? ", READ-ONLY" : ""}). Keep this process ` +
         `running (background it); issue actions, then \`close --name ${name}\`.`,
     );
-    await runSession({ stateDir, name, headless, dekHex, profileFile, workDir, policy }); // blocks until close
+    await runSession({ stateDir, name, headless, dekHex, profileFile, workDir, policy, startUrl: flags.url }); // blocks until close
   } catch (err) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     handleErr(err);
@@ -722,7 +724,7 @@ async function cmdOpen(flags) {
 
 async function cmdClose(flags) {
   const stateDir = resolveStateDir(flags);
-  const name = String(flags.name || DEFAULT_PROFILE);
+  const name = profileName(flags.name);
   try {
     const r = await callSession(stateDir, name, "close", {});
     outputJson({ ok: true, closed: name, ...r });
@@ -760,7 +762,7 @@ async function cmdSessions(flags) {
 function actionCmd(action, map, timeoutMs) {
   return async (flags) => {
     const stateDir = resolveStateDir(flags);
-    const name = String(flags.name || DEFAULT_PROFILE);
+    const name = profileName(flags.name);
     try {
       const params = map ? map(flags) : {};
       const r = await callSession(stateDir, name, action, params, timeoutMs);
@@ -791,6 +793,8 @@ runCli({
     close: cmdClose,
     sessions: cmdSessions,
     snapshot: actionCmd("snapshot"),
+    "form-inspect": actionCmd("form-inspect"),
+    "form-fill": actionCmd("form-fill", (f) => JSON.parse(f.spec || "{}"), 120000),
     navigate: actionCmd("navigate", (f) => ({ url: requireUrl(f) })),
     back: actionCmd("back"),
     "page-text": actionCmd("text", (f) => ({ maxChars: f["max-chars"] })),
@@ -862,9 +866,16 @@ runCli({
         "          one-shot authenticated HTTP GET via the session (API / feed)\n" +
         "  status  [--name N]      list sealed sessions\n\n" +
         "Interactive session (--name optional; defaults to 'main'):\n" +
-        "  open    --name N [--headed]   start a persistent session (run in background)\n" +
+        "  open    --name N [--headed] [--url START]   start a persistent session (run in\n" +
+        "          background); navigates to START before reporting ready;\n" +
+        "          missing default 'main' auto-creates as an anonymous L0 profile\n" +
         "  snapshot --name N             accessibility tree with element refs; iframe\n" +
         "          elements get frame-prefixed refs (f1e3); reports open tabs when >1\n" +
+        "  form-inspect --name N           compact form controls + labels/types/requirements\n" +
+        "  form-fill --name N --spec '{\"fields\":[{\"ref\":\"e1\",\"value\":\"A\"}],\n" +
+        "          \"checks\":[{\"ref\":\"e2\",\"checked\":true}],\"selects\":[...],\n" +
+        "          \"uploads\":[{\"ref\":\"e3\",\"files\":[\"/a.pdf\"]}]}'\n" +
+        "          atomic fast fill with per-control verification; max 50 controls\n" +
         "  click   --name N --ref eN                   dblclick --name N --ref eN\n" +
         "  check   --name N --ref eN                   uncheck  --name N --ref eN\n" +
         "  type    --name N --ref eN --text T [--submit]\n" +

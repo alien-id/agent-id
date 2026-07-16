@@ -1,18 +1,9 @@
 {
   "name": "@alien-id/agent-id-browser",
-  "version": "7.3.2",
+  "version": "7.5.1",
   "type": "module",
+  "private": true,
   "description": "Universal browser automation with the profile sealed in the agent vault.",
-  "publishConfig": {
-    "access": "public"
-  },
-  "files": [
-    "lib",
-    "bin",
-    "hooks",
-    "skills",
-    ".claude-plugin"
-  ],
   "bin": {
     "agent-id-browser": "./bin/cli.mjs"
   },

@@ -323,8 +323,8 @@ describe("isAccessRestricted", () => {
 describe("browser guard (pure pieces)", () => {
   const ro = { access: "ro" };
 
-  it("assertActionAllowed refuses eval/fill-secret/fill-otp/upload on ro only", () => {
-    for (const action of ["eval", "fill-secret", "fill-otp", "upload"]) {
+  it("assertActionAllowed refuses secret/file/form writes on ro only", () => {
+    for (const action of ["eval", "fill-secret", "fill-otp", "upload", "form-fill"]) {
       assert.throws(() => assertActionAllowed(ro, action), /read-only session/);
       assertActionAllowed({ access: "rw" }, action); // no throw
       assertActionAllowed({}, action);

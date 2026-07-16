@@ -3,6 +3,19 @@
 
 export const DEFAULT_PROFILE = "main";
 
+// Session names become filenames under browser-sessions/browser-profiles.
+// Keep the public name identical to the filesystem slug rather than trying to
+// sanitize a dangerous value differently at each call site.
+export function profileName(value = DEFAULT_PROFILE) {
+  const name = String(value || DEFAULT_PROFILE);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
+    const error = new Error("browser profile name must be 1-64 letters, digits, '_' or '-'");
+    error.code = "INVALID_PROFILE_NAME";
+    throw error;
+  }
+  return name;
+}
+
 // Re-authenticate an EXISTING profile (headed). Used when a sealed session has
 // gone stale (logged out) — headed `login` re-signs into the same session.
 export const loginHint = (name) =>

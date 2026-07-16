@@ -29,7 +29,7 @@ import {
 // DOM-interactive stays available; mutations die at the network gate.
 // `upload` is denied too: feeding the owner's local files into a page is a
 // write in spirit (and page JS could exfiltrate the content over allowed GETs).
-const RO_DENIED_ACTIONS = Object.freeze(["eval", "fill-secret", "fill-otp", "upload"]);
+const RO_DENIED_ACTIONS = Object.freeze(["eval", "fill-secret", "fill-otp", "upload", "form-fill"]);
 
 // Pure — unit-tests without a browser. Throws on a denied action.
 export function assertActionAllowed(rec, action) {

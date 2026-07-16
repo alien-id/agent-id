@@ -1,7 +1,7 @@
 {
   "name": "agent-id-browser",
-  "version": "7.3.2",
-  "description": "Universal browser the agent drives, with the logged-in profile sealed in the agent vault. One-time headed login; headless automated reads/fetches thereafter.",
+  "version": "7.5.1",
+  "description": "Alien Browser with anonymous L0 public browsing, vault-sealed login profiles, and compact verified form filling.",
   "author": {
     "name": "Alien",
     "email": "support@alien.org"

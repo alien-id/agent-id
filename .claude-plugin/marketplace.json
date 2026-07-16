@@ -68,8 +68,8 @@
     },
     {
       "name": "agent-id-browser",
-      "description": "Universal browser the agent drives fine-grained (click, type, fill forms, upload files, navigate, switch tabs, reach into iframes, handle dialogs, capture downloads, screenshot, run JS) via an accessibility snapshot with element refs, with the logged-in profile sealed in the agent vault. One-time headed login; headless thereafter. Drives the user's installed Chrome via patchright (installed at runtime into the plugin data dir on first session; no browser download). For authenticated sites that block API/OAuth/cookie approaches.",
-      "version": "7.3.2",
+      "description": "Alien Browser with an auto-created anonymous L0 profile for public pages and vault-sealed logged-in profiles. Includes compact form inspection and one-call verified filling for fields, checks, selects, and uploads, plus fine-grained refs, tabs, dialogs, downloads, screenshots, and live viewport control.",
+      "version": "7.5.1",
       "source": "./plugins/agent-id-browser",
       "category": "identity",
       "keywords": [
