@@ -11,7 +11,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DEFAULT_PROFILE, loginHint, noProfileHint } from "../plugins/agent-id-browser/lib/hints.mjs";
+import { DEFAULT_PROFILE, loginHint, noProfileHint, profileName } from "../plugins/agent-id-browser/lib/hints.mjs";
+
+test("profileName accepts safe slugs and rejects traversal", () => {
+  assert.equal(profileName(), DEFAULT_PROFILE);
+  assert.equal(profileName("work-2_A"), "work-2_A");
+  assert.throws(() => profileName("../../etc/passwd"), /1-64 letters/);
+  assert.throws(() => profileName("a/b"), /1-64 letters/);
+  assert.throws(() => profileName("x".repeat(65)), /1-64 letters/);
+});
 
 test("loginHint: bare for the default profile, named otherwise", () => {
   assert.equal(loginHint(DEFAULT_PROFILE), "`login`");

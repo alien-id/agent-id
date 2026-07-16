@@ -28,6 +28,8 @@ import path from "node:path";
 import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
 import {
   snapshotInPage,
+  formSnapshotInPage,
+  fillForm,
   refusePasswordRead,
   markSecretField,
   SECRET_TAINT_ATTR,
@@ -40,9 +42,13 @@ const patchrightAvailable = !!resolvePatchright();
 // visible label). The OTP/benign fields carry a value but NO aria-label /
 // placeholder / name, so el.value is the only fallback that could surface them.
 const FORM = `<!doctype html><meta charset=utf-8><title>login</title><form>
-  <input id="pw" type="password" value="hunter2">
+  <label for="pw">Password</label><input id="pw" type="password" value="hunter2" required>
   <input id="otp" type="text" autocomplete="one-time-code" value="778899">
-  <input id="who" type="text" value="alice@example.com">
+  <input id="who" name="full_name" type="text" value="alice@example.com">
+  <label for="plain">Plain text</label><input id="plain" name="plain">
+  <label><input id="agree" type="checkbox" style="display:none"> Agree to terms</label>
+  <label for="resume">Resume</label><input id="resume" type="file" style="display:none" accept=".pdf">
+  <select id="degree" name="degree"><option value="bs">Bachelor's</option><option value="ms">Master's</option></select>
   <input id="go" type="submit" value="Sign in">
 </form>`;
 
@@ -80,6 +86,74 @@ test("snapshot never surfaces a text field's value, but keeps a submit's label",
 
   // A submit button's value is a visible caption, not user content — still shown.
   assert.ok(names.includes("Sign in"), "a submit button's value is its label and stays visible");
+});
+
+test("form snapshot is compact, labelled, and includes hidden native controls", { skip }, async () => {
+  const snap = await page.evaluate(formSnapshotInPage, "");
+  assert.ok(Array.isArray(snap.controls));
+  assert.ok(!JSON.stringify(snap).includes("hunter2"), "password value must never appear");
+  assert.ok(!JSON.stringify(snap).includes("alice@example.com"), "text value must never appear");
+
+  const password = snap.controls.find((control) => control.type === "password");
+  assert.equal(password.label, "Password");
+  assert.equal(password.required, true);
+
+  const plain = snap.controls.find((control) => control.name === "plain");
+  assert.equal(plain.type, "text", "an input without an explicit type defaults to text");
+
+  const checkbox = snap.controls.find((control) => control.type === "checkbox");
+  assert.equal(checkbox.hidden, true);
+  assert.match(checkbox.label, /Agree to terms/);
+
+  const upload = snap.controls.find((control) => control.type === "file");
+  assert.equal(upload.hidden, true);
+  assert.equal(upload.accept, ".pdf");
+
+  const degree = snap.controls.find((control) => control.type === "select");
+  assert.deepEqual(degree.options.map((option) => option.value), ["bs", "ms"]);
+});
+
+test("atomic form fill handles text, hidden checks, selects, and verifies each", { skip }, async () => {
+  const snap = await page.evaluate(formSnapshotInPage, "");
+  const text = snap.controls.find((control) => control.name === "full_name");
+  const checkbox = snap.controls.find((control) => control.type === "checkbox");
+  const degree = snap.controls.find((control) => control.name === "degree");
+  const state = {
+    current: page,
+    frames: new Map(),
+    refsValid: true,
+    refsInvalidReason: null,
+  };
+  const result = await fillForm(state, {
+    fields: [{ ref: text.ref, value: "Grace Hopper" }],
+    checks: [{ ref: checkbox.ref, checked: true }],
+    selects: [{ ref: degree.ref, values: ["ms"] }],
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.completed, 3);
+  assert.equal(result.failed, 0);
+  assert.ok(result.results.every((entry) => entry.ok));
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      who: document.querySelector("#who").value,
+      agree: document.querySelector("#agree").checked,
+      degree: document.querySelector("#degree").value,
+    })),
+    { who: "Grace Hopper", agree: true, degree: "ms" },
+  );
+});
+
+test("ordinary form fill refuses password fields without echoing the value", { skip }, async () => {
+  const snap = await page.evaluate(formSnapshotInPage, "");
+  const password = snap.controls.find((control) => control.type === "password");
+  const result = await fillForm(
+    { current: page, frames: new Map(), refsValid: true, refsInvalidReason: null },
+    { fields: [{ ref: password.ref, value: "never-echo-this" }] },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.failed, 1);
+  assert.match(result.results[0].error, /fill-secret|fill-otp/);
+  assert.ok(!JSON.stringify(result).includes("never-echo-this"));
 });
 
 test("read-back guard: password refused, benign text allowed, tainted field refused", { skip }, async () => {

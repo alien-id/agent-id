@@ -117,6 +117,94 @@ export function snapshotInPage(prefix) {
   return { url: location.href, title: document.title, elements: out };
 }
 
+// Compact, form-specific observation. Unlike the generic accessibility
+// snapshot it includes CSS-hidden checkbox/radio/file inputs because modern
+// forms commonly render a styled label over the real control. Values from text
+// inputs are deliberately never returned; validation reports lengths/matches,
+// not the contents the user or vault supplied.
+export function formSnapshotInPage(prefix) {
+  const pre = prefix || "";
+  const SEL = [
+    "input:not([type=hidden])", "textarea", "select", "button",
+    "[role=textbox]", "[role=combobox]", "[role=checkbox]", "[role=radio]",
+    "[contenteditable=true]",
+  ].join(",");
+  for (const old of document.querySelectorAll("[data-aibref]")) old.removeAttribute("data-aibref");
+
+  const clip = (value, max = 120) =>
+    String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+  const labelledBy = (el) =>
+    clip(
+      (el.getAttribute("aria-labelledby") || "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((id) => document.getElementById(id)?.textContent || "")
+        .join(" "),
+    );
+  const labelOf = (el) => {
+    const native = Array.from(el.labels || []).map((label) => label.textContent || "").join(" ");
+    const wrapped = el.closest("label")?.textContent || "";
+    const legend = el.closest("fieldset")?.querySelector("legend")?.textContent || "";
+    return clip(
+      el.getAttribute("aria-label") || labelledBy(el) || native || wrapped ||
+        el.getAttribute("placeholder") || el.getAttribute("title") ||
+        el.getAttribute("name") || legend,
+    );
+  };
+  const visibleOf = (el) => {
+    const r = el.getBoundingClientRect();
+    const st = window.getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+  };
+
+  const controls = [];
+  let i = 0;
+  for (const el of document.querySelectorAll(SEL)) {
+    const tag = el.tagName.toLowerCase();
+    const type = clip(
+      el.getAttribute("type") || (tag === "input" ? el.type || "text" : tag === "select" ? "select" : tag),
+      40,
+    ).toLowerCase();
+    const visible = visibleOf(el);
+    // Hidden native controls remain actionable through setChecked/setInputFiles.
+    if (!visible && !["checkbox", "radio", "file"].includes(type)) continue;
+    const ref = pre + "e" + ++i;
+    el.setAttribute("data-aibref", ref);
+    const form = el.closest("form");
+    const role = el.getAttribute("role") || tag;
+    const entry = {
+      ref,
+      role,
+      type,
+      label: labelOf(el),
+      ...(el.getAttribute("name") ? { name: clip(el.getAttribute("name"), 100) } : {}),
+      ...(el.required ? { required: true } : {}),
+      ...(el.disabled || el.getAttribute("aria-disabled") === "true" ? { disabled: true } : {}),
+      ...(el.readOnly ? { readonly: true } : {}),
+      ...(!visible ? { hidden: true } : {}),
+      ...(form ? { form: clip(form.getAttribute("name") || form.id || form.getAttribute("action") || "form", 160) } : {}),
+    };
+    if (type === "checkbox" || type === "radio" || role === "checkbox" || role === "radio") {
+      entry.checked = el.checked === true || el.getAttribute("aria-checked") === "true";
+    }
+    if (tag === "select") {
+      entry.multiple = !!el.multiple;
+      entry.options = Array.from(el.options).slice(0, 100).map((option) => ({
+        value: clip(option.value, 160),
+        label: clip(option.label || option.textContent, 160),
+        ...(option.disabled ? { disabled: true } : {}),
+        ...(option.selected ? { selected: true } : {}),
+      }));
+    }
+    if (type === "file") {
+      entry.multiple = !!el.multiple;
+      if (el.accept) entry.accept = clip(el.accept, 200);
+    }
+    controls.push(entry);
+  }
+  return { url: location.href, title: document.title, controls };
+}
+
 const sel = (ref) => `[data-aibref="${String(ref).replace(/["\\]/g, "")}"]`;
 const ACTION_TIMEOUT = 15000;
 const MAX_FRAMES = 12; // iframes snapshotted per page (ad-heavy pages have dozens)
@@ -195,6 +283,11 @@ export function clampClipToViewport(clip, viewport) {
 // points into. Child-frame refs are only valid until the next snapshot —
 // same contract as the refs themselves.
 function frameForRef(state, ref) {
+  if (!state.refsValid) {
+    throw new Error(
+      `ref '${ref}' is stale (${state.refsInvalidReason || "page changed"}) — run form-inspect or snapshot again`,
+    );
+  }
   const id = frameRefId(ref);
   if (!id) return state.current;
   const frame = state.frames.get(id);
@@ -202,6 +295,19 @@ function frameForRef(state, ref) {
     throw new Error(`frame for ref '${ref}' is gone — re-snapshot and retry`);
   }
   return frame;
+}
+
+function invalidateRefs(state, reason = "page changed") {
+  state.refsValid = false;
+  state.refsInvalidReason = reason;
+  state.frames.clear();
+}
+
+function activateRefs(state) {
+  state.refGeneration += 1;
+  state.refsValid = true;
+  state.refsInvalidReason = null;
+  return state.refGeneration;
 }
 
 // A field the vault typed a secret into is tagged with this attribute (see
@@ -290,12 +396,13 @@ function attachPage(state, page) {
         entry.error = String(err && err.message ? err.message : err).slice(0, 200);
       });
   });
+  page.on("framenavigated", () => invalidateRefs(state, "page navigated"));
   page.on("close", () => {
     if (state.current !== page) return;
     const left = state.ctx.pages().filter((pg) => pg !== page);
     if (left.length) {
       state.current = left[left.length - 1];
-      state.frames.clear();
+      invalidateRefs(state, "current tab changed");
     }
   });
 }
@@ -343,6 +450,172 @@ export function assertFillAllowed(rec, host, field = null) {
   }
 }
 
+async function uploadFiles(page, target, ref, files) {
+  const paths = (Array.isArray(files) ? files : []).map(String).filter(Boolean);
+  if (!paths.length) throw new Error("upload needs at least one file");
+  for (const file of paths) {
+    try {
+      await fs.access(file);
+    } catch {
+      throw new Error(`upload: file not found: ${file}`);
+    }
+  }
+  const selector = sel(ref);
+  const isFileInput = await target
+    .$eval(selector, (el) => el.tagName === "INPUT" && el.type === "file")
+    .catch(() => false);
+  if (isFileInput) {
+    await target.setInputFiles(selector, paths, { timeout: ACTION_TIMEOUT });
+  } else {
+    const [chooser] = await Promise.all([
+      page.waitForEvent("filechooser", { timeout: ACTION_TIMEOUT }),
+      target.click(selector, { timeout: ACTION_TIMEOUT }),
+    ]);
+    await chooser.setFiles(paths);
+  }
+  return paths.length;
+}
+
+function safeFormError(error, secret = "") {
+  let message = String(error?.message || error || "form operation failed").replace(/\s+/g, " ");
+  if (secret) message = message.split(secret).join("[value]");
+  return message.slice(0, 300);
+}
+
+async function validateTaggedControls(state) {
+  if (!state.refsValid) return { stale: true, invalid: [] };
+  const targets = [state.current, ...new Set(state.frames.values())];
+  const invalid = [];
+  for (const target of targets) {
+    const entries = await target
+      .$$eval("[data-aibref]", (elements) =>
+        elements
+          .filter((el) => el.willValidate === true && el.checkValidity() === false)
+          .map((el) => ({
+            ref: el.getAttribute("data-aibref"),
+            reason: String(el.validationMessage || "invalid").slice(0, 160),
+          })),
+      )
+      .catch(() => []);
+    invalid.push(...entries);
+  }
+  return { valid: invalid.length === 0, invalid };
+}
+
+// Atomic, fast form executor: one model/tool round-trip fills ordinary fields,
+// toggles styled controls, selects options, and attaches files. Every operation
+// is checked after it runs and failures are returned individually so one bad
+// field cannot discard the successful half of a long application form.
+export async function fillForm(state, p) {
+  const fields = Array.isArray(p.fields) ? p.fields : [];
+  const checks = Array.isArray(p.checks) ? p.checks : [];
+  const selects = Array.isArray(p.selects) ? p.selects : [];
+  const uploads = Array.isArray(p.uploads) ? p.uploads : [];
+  const operationCount = fields.length + checks.length + selects.length + uploads.length;
+  if (!operationCount) throw new Error("form-fill needs fields, checks, selects, or uploads");
+  if (operationCount > 50) throw new Error("form-fill: max 50 controls");
+  if (!state.refsValid) frameForRef(state, fields[0]?.ref || checks[0]?.ref || selects[0]?.ref || uploads[0]?.ref || "?");
+
+  const results = [];
+  for (const field of fields) {
+    const ref = String(field?.ref || "");
+    const value = String(field?.value ?? "");
+    try {
+      const target = frameForRef(state, ref);
+      const locator = target.locator(sel(ref));
+      const secretTarget = await locator.evaluate(
+        (el, attr) => (el.tagName === "INPUT" && el.type === "password") || el.hasAttribute(attr),
+        SECRET_TAINT_ATTR,
+      );
+      if (secretTarget) throw new Error("password/secret fields require fill-secret or fill-otp");
+      await locator.fill(value, { timeout: ACTION_TIMEOUT });
+      const matches = await locator.evaluate((el, expected) => {
+        const actual = "value" in el ? el.value : el.textContent || "";
+        return { matches: actual === expected, length: String(actual).length };
+      }, value);
+      if (!matches.matches) throw new Error("page did not retain the supplied value");
+      results.push({ ref, kind: "field", ok: true, length: matches.length });
+    } catch (error) {
+      results.push({ ref, kind: "field", ok: false, error: safeFormError(error, value) });
+    }
+  }
+  for (const check of checks) {
+    const ref = String(check?.ref || "");
+    const checked = check?.checked !== false;
+    try {
+      const locator = frameForRef(state, ref).locator(sel(ref));
+      const native = await locator.evaluate((el) => ({
+        native: el.tagName === "INPUT" && ["checkbox", "radio"].includes(el.type),
+        visible: !!(el.getBoundingClientRect().width && el.getBoundingClientRect().height) &&
+          getComputedStyle(el).visibility !== "hidden" && getComputedStyle(el).display !== "none",
+      }));
+      if (native.native && !native.visible) {
+        // Styled controls often hide the native input completely. Playwright's
+        // check action still insists on visibility even with force in patched
+        // drivers, so update the real control and emit the same bubbling events
+        // frameworks observe.
+        await locator.evaluate((el, desired) => {
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set;
+          if (setter) setter.call(el, desired);
+          else el.checked = desired;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }, checked);
+      } else if (native.native) {
+        await locator.setChecked(checked, { timeout: ACTION_TIMEOUT });
+      } else {
+        const before = (await locator.getAttribute("aria-checked")) === "true";
+        if (before !== checked) await locator.click({ timeout: ACTION_TIMEOUT });
+      }
+      const actual = native.native
+        ? await locator.isChecked()
+        : (await locator.getAttribute("aria-checked")) === "true";
+      if (actual !== checked) throw new Error("page did not retain the checked state");
+      results.push({ ref, kind: "check", ok: true, checked: actual });
+    } catch (error) {
+      results.push({ ref, kind: "check", ok: false, error: safeFormError(error) });
+    }
+  }
+  for (const select of selects) {
+    const ref = String(select?.ref || "");
+    const values = (Array.isArray(select?.values) ? select.values : [select?.value]).filter((v) => v != null).map(String);
+    try {
+      const selected = await frameForRef(state, ref).selectOption(sel(ref), values, { timeout: ACTION_TIMEOUT });
+      const matches = values.every((value) => selected.includes(value));
+      if (!matches) throw new Error("page did not retain the selected option(s)");
+      results.push({ ref, kind: "select", ok: true, selected });
+    } catch (error) {
+      results.push({ ref, kind: "select", ok: false, error: safeFormError(error) });
+    }
+  }
+  for (const upload of uploads) {
+    const ref = String(upload?.ref || "");
+    try {
+      const count = await uploadFiles(state.current, frameForRef(state, ref), ref, upload?.files);
+      results.push({ ref, kind: "upload", ok: true, files: count });
+    } catch (error) {
+      results.push({ ref, kind: "upload", ok: false, error: safeFormError(error) });
+    }
+  }
+
+  const failed = results.filter((result) => !result.ok).length;
+  let submitted = false;
+  if (!failed && p.submit) {
+    const ref = String(p.submit);
+    await frameForRef(state, ref).click(sel(ref), { timeout: ACTION_TIMEOUT });
+    submitted = true;
+  }
+  const validation = await validateTaggedControls(state);
+  return {
+    ok: failed === 0 && validation.invalid.length === 0,
+    completed: results.length - failed,
+    failed,
+    results,
+    validation,
+    ...(submitted ? { submitted: true } : {}),
+  };
+}
+
 async function dispatch(state, msg, policy = null) {
   const p = msg.params || {};
   const page = state.current;
@@ -386,13 +659,50 @@ async function dispatch(state, msg, policy = null) {
         }
       }
       const tabs = state.ctx.pages().length;
+      const generation = activateRefs(state);
       return {
         ...main,
+        generation,
         ...(frames.length ? { frames } : {}),
         ...(skipped ? { framesSkipped: skipped } : {}),
         ...(tabs > 1 ? { tabs, tab: state.ctx.pages().indexOf(page) } : {}),
       };
     }
+    case "form-inspect": {
+      state.frames.clear();
+      const main = await page.evaluate(formSnapshotInPage, "");
+      const frames = [];
+      let skipped = 0;
+      let fCount = 0;
+      for (const frame of page.frames()) {
+        if (frame === page.mainFrame()) continue;
+        if (fCount >= MAX_FRAMES) {
+          skipped++;
+          continue;
+        }
+        let snap;
+        try {
+          snap = await frame.evaluate(formSnapshotInPage, `f${fCount + 1}`);
+        } catch {
+          continue;
+        }
+        fCount++;
+        state.frames.set(`f${fCount}`, frame);
+        if (snap.controls.length) {
+          frames.push({ frame: `f${fCount}`, url: String(snap.url).slice(0, 200), controls: snap.controls.length });
+          main.controls.push(...snap.controls);
+        }
+      }
+      const generation = activateRefs(state);
+      return {
+        ...main,
+        generation,
+        ...(frames.length ? { frames } : {}),
+        ...(skipped ? { framesSkipped: skipped } : {}),
+      };
+    }
+    case "form-fill":
+      return fillForm(state, p);
     case "text":
       return { text: String(await page.evaluate(() => (document.body ? document.body.innerText : ""))).slice(0, Number(p.maxChars || 6000)) };
     case "click":
@@ -417,10 +727,7 @@ async function dispatch(state, msg, policy = null) {
     case "fill": {
       const fields = Array.isArray(p.fields) ? p.fields : [];
       for (const f of fields) {
-        await humanType(page, sel(f.ref), String(f.value ?? ""), {
-          timeout: ACTION_TIMEOUT,
-          root: frameForRef(state, f.ref),
-        });
+        await frameForRef(state, f.ref).fill(sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
       }
       return { filled: fields.map((f) => f.ref) };
     }
@@ -529,31 +836,9 @@ async function dispatch(state, msg, policy = null) {
       // native chooser). Refused on read-only sessions: sending the owner's
       // local file content to a site is a write in spirit, even though the
       // resulting POST would also die at the network gate.
-      const files = (Array.isArray(p.files) ? p.files : []).map(String).filter(Boolean);
-      if (!files.length) throw new Error("upload needs --files /path/a[,/path/b]");
-      for (const f of files) {
-        try {
-          await fs.access(f);
-        } catch {
-          throw new Error(`upload: file not found: ${f}`);
-        }
-      }
       const t = frameForRef(state, p.ref);
-      const s = sel(p.ref);
-      const isFileInput = await t
-        .$eval(s, (el) => el.tagName === "INPUT" && el.type === "file")
-        .catch(() => false);
-      if (isFileInput) {
-        await t.setInputFiles(s, files, { timeout: ACTION_TIMEOUT });
-      } else {
-        // Not a bare <input type=file>: click it and feed the native chooser.
-        const [chooser] = await Promise.all([
-          page.waitForEvent("filechooser", { timeout: ACTION_TIMEOUT }),
-          t.click(s, { timeout: ACTION_TIMEOUT }),
-        ]);
-        await chooser.setFiles(files);
-      }
-      return { uploaded: p.ref, files: files.length };
+      const count = await uploadFiles(page, t, p.ref, p.files);
+      return { uploaded: p.ref, files: count };
     }
     case "drag": {
       const from = frameForRef(state, p.ref);
@@ -841,7 +1126,7 @@ async function dispatch(state, msg, policy = null) {
       const pg = await state.ctx.newPage();
       if (p.url) await pg.goto(String(p.url), { waitUntil: "domcontentloaded", timeout: 30000 });
       state.current = pg;
-      state.frames.clear();
+      invalidateRefs(state, "current tab changed");
       return { index: state.ctx.pages().indexOf(pg), url: pg.url() };
     }
     case "tab-switch": {
@@ -851,7 +1136,7 @@ async function dispatch(state, msg, policy = null) {
         throw new Error(`no tab ${p.index} (open tabs: 0..${pages.length - 1})`);
       }
       state.current = pages[index];
-      state.frames.clear();
+      invalidateRefs(state, "current tab changed");
       await state.current.bringToFront().catch(() => {});
       return { index, url: state.current.url(), title: await state.current.title().catch(() => "") };
     }
@@ -978,11 +1263,15 @@ export async function runSession({
     stateDir,
     current: page,
     frames: new Map(),
+    refsValid: false,
+    refsInvalidReason: "no snapshot yet",
+    refGeneration: 0,
     downloads: [],
     console: [],
     dialog: { mode: "dismiss", text: null },
     lastDialog: null,
   };
+  state.invalidateRefs = (reason) => invalidateRefs(state, reason);
   for (const pg of ctx.pages()) attachPage(state, pg);
   ctx.on("page", (pg) => attachPage(state, pg));
 

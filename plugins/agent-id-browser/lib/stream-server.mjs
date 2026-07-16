@@ -141,6 +141,16 @@ async function applyInput(page, msg) {
   }
 }
 
+// Pointer movement alone does not change page state. Clicks, wheel events, and
+// keyboard input can navigate or mutate a form, so refs observed by the agent
+// must be invalidated before viewer control is applied.
+function mutatesPage(msg) {
+  return (
+    (msg.type === "input_mouse" && ["mousePressed", "mouseWheel"].includes(msg.eventType)) ||
+    (msg.type === "input_keyboard" && ["keyDown", "char"].includes(msg.eventType))
+  );
+}
+
 // ── Stream server ─────────────────────────────────────────────────────────────
 
 /**
@@ -250,6 +260,7 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
       if (suspended > 0) return;
       const page = state.current;
       if (!page || page.isClosed?.()) return;
+      if (mutatesPage(msg)) state.invalidateRefs?.("owner used live browser control");
       applyInput(page, msg).catch(() => {});
     });
     socket.on("data", parse);

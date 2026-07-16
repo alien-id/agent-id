@@ -72,6 +72,42 @@ export async function sealedProfileExists(stateDir, file) {
   }
 }
 
+// Bootstrap the shared default cookie jar for an L0 identity. Public browsing
+// must not require a fake login credential, while explicitly named profiles
+// remain opt-in account boundaries and therefore never auto-create.
+export async function ensureAnonymousDefaultProfile({ vault, stateDir, name, defaultName = "main" }) {
+  const existing = vault.get(name);
+  if (existing) return existing;
+  if (name !== defaultName) {
+    const error = new Error(`no browser-profile named '${name}'`);
+    error.code = "NO_PROFILE";
+    throw error;
+  }
+
+  const file = `${defaultName}.tar.enc`;
+  const dek = newDek();
+  const empty = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-banon-"));
+  try {
+    await sealProfile({ stateDir, file, dekHex: dek, sourceDir: empty });
+  } finally {
+    await fs.rm(empty, { recursive: true, force: true });
+  }
+  const record = vault.add({
+    name: defaultName,
+    type: "browser-profile",
+    domains: ["*"],
+    description: "Anonymous L0 browser profile (agent-id-browser)",
+    dek,
+    profileFile: file,
+    headless: true,
+    exportable: false,
+    bootstrap: "anonymous-l0",
+    lastSyncedAt: Date.now(),
+  });
+  await vault.save();
+  return record;
+}
+
 // tar the profile dir (excluding caches) → AES-256-GCM seal with the DEK →
 // write the sidecar (0600). Returns the sealed byte count.
 export async function sealProfile({ stateDir, file, dekHex, sourceDir }) {

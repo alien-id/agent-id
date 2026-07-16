@@ -1,10 +1,10 @@
 ---
 name: agent-id-browser
-description: Drive a real, logged-in browser whose session is sealed in the agent vault — fine-grained control (click, type, fill forms, upload files, press keys, select, hover, drag, navigate, screenshot, run JS, switch tabs, reach into iframes, handle dialogs, capture downloads) via an accessibility snapshot with element refs, plus one-shot read/fetch. By default all sites share ONE session — sign into Google once and every "Sign in with Google" site reuses it; pass --name only for a separate isolated session. Two ways to log in: a HEADED Chrome login when a desktop browser is available, OR an agent-driven HEADLESS login from a stored `login` credential (auto-login, or snapshot + fill-secret/fill-otp) where the password and any 2FA code are entered over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI) — never via chat, never seen by the agent. Afterwards the agent drives the session HEADLESS. Sessions can be sealed READ-ONLY (--access ro): the session process blocks write requests at the network layer, so the agent can read mail/feeds/messages but never send, post, or delete. Use for authenticated sites that block API/OAuth/cookie access (e.g. Gmail/Workspace) or any task needing a real logged-in browser — the agent never sees a credential, it drives the browser.
+description: Drive Alien Browser with an anonymous L0 profile created automatically for public pages, or a logged-in profile sealed in the agent vault. Inspect forms compactly and fill/verify up to 50 fields, checks, selects, and file uploads in one call; use fine-grained refs, screenshots, tabs, dialogs, and downloads for the rest. By default all sites share ONE session; pass --name only for a separate isolated session. Credentials and 2FA use the secure vault injection path and are never seen by the agent. Sessions may be sealed READ-ONLY, where writes are blocked at the network layer.
 license: MIT
 metadata:
   author: Alien Wallet
-  version: "7.2.0"
+  version: "7.5.0"
 allowed-tools: Bash(node *agent-id-browser/bin/cli.mjs:*) Read
 ---
 
@@ -28,6 +28,11 @@ it to add another site to the same session; existing logins are kept.
   nothing with `main`. Don't create one per site; that's what reintroduces the
   double-login.
 - **Start over:** `login --fresh` discards the current session and logs in clean.
+
+On first public browse, `open`, `read`, or `fetch` creates `main` automatically
+as an empty **anonymous L0** profile and seals it. Do not create a credential or
+run `auto-login` just to visit a public page; login setup is only for sites that
+actually require an account.
 
 patchright is **installed automatically** into the plugin's data dir on first
 session (a SessionStart hook; ~17 MB, no browser download — it drives your
@@ -143,7 +148,7 @@ the page makes is classified — `GET`/`HEAD`/`OPTIONS` and POST-tunneled reads
 (GraphQL `query`, JMAP `*/get`, JSON-RPC reads) pass; **writes are aborted at
 the wire**, so clicking "Send" fails harmlessly. WebSockets and service
 workers are disabled (they would bypass inspection), and `eval`,
-`fill-secret`, `fill-otp`, `upload` are refused. Everything observational —
+`fill-secret`, `fill-otp`, `upload`, and `form-fill` are refused. Everything observational —
 `navigate`, `snapshot`, `click`, `type` (e.g. a search box), `page-text`,
 `screenshot`, `read`, `fetch` — works normally.
 
@@ -174,7 +179,27 @@ background** (it stays running) and wait for its `{"ready":true,...}` line:
 CLI open            # background; add --headed to watch
 ```
 
-**Observe** — get an accessibility snapshot; every actionable element has a `ref`.
+**For forms, prefer the compact two-call path.** It is much faster and cheaper
+than one LLM turn per field, and it verifies what the page retained:
+
+```bash
+CLI form-inspect
+# → { controls:[{ref:"e1",type:"text",label:"First name",required:true},
+#               {ref:"e2",type:"checkbox",label:"Agree",checked:false},
+#               {ref:"e3",type:"file",label:"Resume",accept:".pdf"}] }
+CLI form-fill --spec '{
+  "fields":[{"ref":"e1","value":"Ada"}],
+  "checks":[{"ref":"e2","checked":true}],
+  "selects":[{"ref":"e4","values":["masters"]}],
+  "uploads":[{"ref":"e3","files":["/workspace/resume.pdf"]}]
+}'
+```
+
+One bad control does not stop the rest: the result reports per-control success,
+failed refs, and native required/validity errors. It never returns text/password
+values. Use `fill-secret`/`fill-otp` separately for credentials.
+
+**Observe other UI** — get an accessibility snapshot; every actionable element has a `ref`.
 Elements inside iframes get frame-prefixed refs (`f1e3`) and work with every
 action; when more than one tab is open the snapshot reports `tabs`:
 
@@ -190,7 +215,7 @@ CLI snapshot
 ```bash
 CLI click  --ref e5                    # dblclick / check / uncheck take --ref too
 CLI type   --ref e8 --text "hello@there.com" [--submit]
-CLI fill   --fields '[{"ref":"e8","value":"a"},{"ref":"e9","value":"b"}]'
+CLI fill   --fields '[{"ref":"e8","value":"a"},{"ref":"e9","value":"b"}]' # compatibility; form-fill is preferred
 CLI fill-secret --ref e8 --cred acme.password [--submit]   # inject a vaulted secret by ref
 CLI fill-otp    --ref e9 --cred acme                       # type the current 2FA code
 CLI upload --ref e7 --files /path/report.pdf,/path/pic.png # file input OR picker button
@@ -291,7 +316,9 @@ CLI batch --actions '[{"action":"click","params":{"ref":"e1"}},{"action":"snapsh
 
 **Re-snapshot after anything that changes the page** (click/navigate/submit) —
 refs (including frame refs) are only valid until the next snapshot/navigation.
-After an action that navigates, `wait` for expected text, then `snapshot` again.
+Live-viewer mouse/keyboard control also invalidates all refs immediately; a stale
+ref error means the owner changed the page, so inspect/snapshot again. After an
+action that navigates, `wait` for expected text, then `snapshot` again.
 
 **Finish** — always close; this reseals the (refreshed) session and wipes the
 plaintext working copy:
@@ -344,8 +371,8 @@ return `"sessionExpired": true` with `"action": "re_login"`. On that signal,
   `AGENT_ID_SECURE_PROMPT=browser|tty|hosted` pins a backend.
 - The session is unsealed to a temp working dir only while a session/read runs,
   re-sealed (capturing new logins + rotated cookies) when it ends, and wiped.
-- **Human-like input.** `click`/`type`/`fill`/`hover`/`scroll` (and auto-login's
-  form filling) drive the page with real cursor travel and key-by-key typing
+- **Human-like interactive input.** `click`/`type`/`hover`/`scroll` (and auto-login's
+  credential entry) drive the page with real cursor travel and key-by-key typing
   rather than instantaneous synthetic events — because you're a real Chrome on
   the user's real IP, behaviour is the only residual bot signal, and robotic
   motion against a pristine fingerprint is itself the tell. It costs a little
