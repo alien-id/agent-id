@@ -213,7 +213,7 @@ CLI wait   --text "Inbox"          # or --url SUBSTR | --load networkidle | --ms
 cheaper (a snapshot is smaller than a screenshot on heavy pages), deterministic,
 and robust to layout shifts. Reach for coordinates ONLY when the snapshot can't
 express the target — a `<canvas>`, a map, a custom-rendered widget, a drag on a
-visual slider. The loop is: `screenshot` → read the PNG → point at a pixel.
+visual slider. The loop is: `screenshot` → read the image → point at a pixel.
 
 ```bash
 CLI screenshot --path /tmp/shot.jpg
@@ -233,7 +233,7 @@ CLI zoom --region 1700,150,1980,300    # cropped closer view — read tiny icons
 All coordinate actions — `click-xy`, `move-xy`, `drag-xy`, `scroll-xy`,
 `probe-xy`, and `zoom --region` — take **screenshot pixels** and divide by `dpr`
 for you (retina screenshots are 2× the viewport), so pass what you see in the
-PNG. Add `--css` only if your coords are already CSS pixels (e.g. from a
+image. Add `--css` only if your coords are already CSS pixels (e.g. from a
 `getBoundingClientRect` via `eval`). Coords address the **viewport**: scroll the
 target into view first, and use a viewport screenshot (not `--full`) as the
 reference — a full-page shot is taller than the clickable area. `type-text` and
@@ -245,9 +245,14 @@ inserts the whole text at once like a paste (fast for long text, immune to
 per-key handlers mangling input).
 `probe-xy` is read-only (works on ro sessions) — use it to confirm a click landed
 on the intended element, or to recover a `ref` for a ref-based follow-up.
-Screenshots are **JPEG by default** (a fraction of a retina PNG's size, so the
-model reads them far faster); pass a `--path` ending in `.png` for lossless PNG,
-and tune JPEG quality with `AGENT_ID_SCREENSHOT_QUALITY` (1–100, default 80).
+Screenshots are **JPEG by default** — a fraction of a retina PNG's bytes, so
+they're quicker to read off disk and send. This does **not** cut token cost:
+images are billed by pixel dimensions (`⌈w/28⌉ × ⌈h/28⌉` visual tokens), so a
+JPEG and a PNG of the same shot cost the same. To spend fewer tokens, shrink the
+image (`zoom --region` a crop, or a smaller viewport) — not the encoding.
+Pass a `--path` ending in `.png` for lossless PNG when JPEG artifacts around
+sharp text would hurt, and tune quality with `AGENT_ID_SCREENSHOT_QUALITY`
+(1–100, default 80).
 
 **Batch coordinate sequences** — `batch` runs any of these (incl. `click-xy` /
 `drag-xy` / `scroll-xy`) in ONE round trip; add `--delay MS` to pace steps for

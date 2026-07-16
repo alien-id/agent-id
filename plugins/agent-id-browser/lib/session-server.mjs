@@ -134,7 +134,7 @@ export function safeFilename(name) {
   return (cleaned || "file").slice(0, 80);
 }
 
-// Screenshot pixels → viewport (CSS) pixels. The PNG is captured at the context's
+// Screenshot pixels → viewport (CSS) pixels. The image is captured at the context's
 // devicePixelRatio (retina = 2×); page.mouse takes CSS px, so divide by dpr.
 // `--css` skips this (coords already CSS px). Pure — exported for tests.
 export function imageToViewport(x, y, dpr) {
@@ -173,9 +173,11 @@ export function regionToClip(region, dpr) {
   };
 }
 
-// Screenshot encoding. Default to JPEG: a JPEG is a fraction of the equivalent
-// retina PNG, so the model ingests the image far faster (the dominant cost of a
-// vision step). Emit lossless PNG only when the caller's --path asks for it by a
+// Screenshot encoding. Default to JPEG: a fraction of the equivalent retina PNG's
+// bytes, so it's quicker to read off disk and send. This buys transfer latency,
+// NOT tokens — images bill by pixel dimensions (⌈w/28⌉ × ⌈h/28⌉ visual tokens),
+// so the same shot costs the same either way; shrink the image to spend less.
+// Emit lossless PNG only when the caller's --path asks for it by a
 // `.png` extension. `quality` (JPEG only — invalid for PNG) is tunable via
 // AGENT_ID_SCREENSHOT_QUALITY, clamped to 1..100, default 80 (kept high so `zoom`
 // crops of tiny text/icons stay legible). Pure — exported for tests.
