@@ -13,8 +13,7 @@
   "ignore": [
     "@alien-id/agent-id-auth",
     "@alien-id/agent-id-git",
-    "@alien-id/agent-id-proxy",
-    "@alien-id/agent-id-browser"
+    "@alien-id/agent-id-proxy"
   ],
   "___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH": {
     "updateInternalDependents": "always"
