@@ -28,7 +28,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import { launchContext } from "./launch.mjs";
-import { sealProfile } from "./profile-store.mjs";
+import { captureSessionCookies, sealProfile } from "./profile-store.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
 import { SECRET_FIELDS, hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { resolveOtp } from "./auto-login.mjs";
@@ -1001,6 +1001,7 @@ export async function runSession({
   async function finalize() {
     if (finalizing) return;
     finalizing = true;
+    try { await captureSessionCookies({ context: ctx, profileDir: workDir }); } catch { /* already gone */ }
     try { await ctx.close(); } catch { /* already gone */ }
     try { await sealProfile({ stateDir, file: profileFile, dekHex, sourceDir: workDir }); } catch { /* best effort */ }
     try { await fs.rm(workDir, { recursive: true, force: true }); } catch { /* best effort */ }

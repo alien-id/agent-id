@@ -42,6 +42,7 @@ import {
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
 
 import {
+  captureSessionCookies,
   newDek,
   sealProfile,
   unsealProfile,
@@ -236,6 +237,7 @@ async function withProfile({ flags, name, headless, action }) {
       try {
         result = await action(ctx, cred);
       } finally {
+        await captureSessionCookies({ context: ctx, profileDir: work }).catch(() => {});
         await ctx.close();
       }
       // Re-seal to capture the refreshed session (rotated cookies), then persist.
@@ -300,6 +302,11 @@ async function cmdLogin(flags) {
         flags["headed-default"] === true ? false : reuse ? reuse.headless !== false : true;
 
       const ctx = await launchContext({ profileDir: work, headless: false });
+      const cookieCheckpoint = setInterval(
+        () => captureSessionCookies({ context: ctx, profileDir: work }).catch(() => {}),
+        1000,
+      );
+      cookieCheckpoint.unref();
       stderr(
         resuming
           ? `A browser opened with your '${name}' session loaded${flags.url ? " at " + startUrl : ""}. ` +
@@ -314,7 +321,9 @@ async function cmdLogin(flags) {
         /* about:blank or slow page — fine, the user drives from here */
       }
       await waitForUserClose(ctx, Number(flags["timeout-sec"] || 600) * 1000);
+      clearInterval(cookieCheckpoint);
       try {
+        await captureSessionCookies({ context: ctx, profileDir: work });
         await ctx.close();
       } catch {
         /* already closed by the user */
@@ -449,6 +458,7 @@ async function cmdAutoLogin(flags) {
         result = await autoLogin({ page, cred, env: process.env, log: (m) => stderr(m) });
       } finally {
         // Close so the context flushes cookies/storage to the work dir before sealing.
+        await captureSessionCookies({ context: ctx, profileDir: work }).catch(() => {});
         await ctx.close().catch(() => {});
       }
 

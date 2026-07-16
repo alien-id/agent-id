@@ -29,6 +29,8 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+import { restoreSessionCookies } from "./profile-store.mjs";
+
 const require = createRequire(import.meta.url);
 const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -180,5 +182,7 @@ export async function launchContext({ profileDir, headless = true, contextOption
     const ua = await resolveHeadlessUserAgent();
     if (ua) opts.userAgent = ua;
   }
-  return chromium.launchPersistentContext(profileDir, opts);
+  const context = await chromium.launchPersistentContext(profileDir, opts);
+  await restoreSessionCookies({ context, profileDir });
+  return context;
 }

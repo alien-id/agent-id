@@ -21,6 +21,7 @@ import { promisify } from "node:util";
 const pExecFile = promisify(execFile);
 
 const PROFILES_SUBDIR = "browser-profiles";
+const SESSION_COOKIES_FILE = ".agent-id-session-cookies.json";
 
 // Chrome writes large, regenerable caches into the profile; excluding them keeps
 // a sealed profile to ~2 MB instead of tens of MB.
@@ -42,6 +43,41 @@ export function sealedProfilePath(stateDir, file) {
 
 export function newDek() {
   return crypto.randomBytes(32).toString("hex");
+}
+
+// Chrome removes session-only cookies from its cookie database on a clean
+// shutdown. Keep those cookies inside the plaintext working profile while the
+// browser is live so they are included in the encrypted profile sidecar and can
+// be restored on the next launch. Persistent cookies remain Chrome-managed.
+export async function captureSessionCookies({ context, profileDir }) {
+  const cookies = await context.cookies();
+  const sessionCookies = cookies.filter((cookie) => cookie.expires === -1);
+  const file = path.join(profileDir, SESSION_COOKIES_FILE);
+  const tmp = `${file}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(sessionCookies), { mode: 0o600 });
+  await fs.rename(tmp, file);
+  return sessionCookies.length;
+}
+
+export async function restoreSessionCookies({ context, profileDir }) {
+  let cookies;
+  try {
+    cookies = JSON.parse(await fs.readFile(path.join(profileDir, SESSION_COOKIES_FILE), "utf8"));
+  } catch (err) {
+    if (err?.code === "ENOENT" || err instanceof SyntaxError) return 0;
+    throw err;
+  }
+  if (!Array.isArray(cookies) || cookies.length === 0) return 0;
+  const valid = cookies.filter(
+    (cookie) =>
+      cookie &&
+      typeof cookie.name === "string" &&
+      typeof cookie.value === "string" &&
+      typeof cookie.domain === "string" &&
+      typeof cookie.path === "string",
+  );
+  if (valid.length) await context.addCookies(valid);
+  return valid.length;
 }
 
 // Layout: iv(12) | gcm-tag(16) | ciphertext
