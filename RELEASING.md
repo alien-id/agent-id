@@ -7,21 +7,27 @@ and approve two gates.
 
 ## What is published
 
-Only the two shared libraries go to npm:
+Three packages go to npm:
 
 | Package | npm | Why |
 | --- | --- | --- |
 | `@alien-id/agent-id-core` | public | shared crypto / bundle / verifier / OIDC / state |
 | `@alien-id/agent-id-vault` | public | encrypted credential vault (depends on core) |
+| `@alien-id/agent-id-browser` | public | vault-sealed browser automation; also consumed as a library (the Lethe desktop bundles it as an npm dependency) |
 
-The four consuming plugins — `agent-id-auth`, `agent-id-git`,
-`agent-id-proxy`, `agent-id-browser` — are **marketplace-only**. They are
-`"private": true` and listed under `ignore` in `.changeset/config.json`, so
-changesets never versions or publishes them. At runtime each one `npm install`s
-`@alien-id/agent-id-core` (+ `-vault`) into its persistent plugin-data dir via a
-`SessionStart` hook (`hooks/install-deps.sh`) and symlinks it into the plugin
-root so the bare `@alien-id/*` ESM imports resolve. **Core and vault must exist
-on npm before those plugins can install** — see Bootstrap below.
+`agent-id-browser` is dual-channel: it ships as a marketplace plugin **and** is
+published to npm, so external apps can depend on it instead of vendoring a
+tarball. Its published tarball carries `^`-ranged `@alien-id/agent-id-core` (+
+`-vault`) deps, so an `npm install` pulls them transitively.
+
+The three remaining consuming plugins — `agent-id-auth`, `agent-id-git`,
+`agent-id-proxy` — are **marketplace-only**. They are `"private": true` and
+listed under `ignore` in `.changeset/config.json`, so changesets never versions
+or publishes them. At runtime each one `npm install`s `@alien-id/agent-id-core`
+(+ `-vault`) into its persistent plugin-data dir via a `SessionStart` hook
+(`hooks/install-deps.sh`) and symlinks it into the plugin root so the bare
+`@alien-id/*` ESM imports resolve. **Core and vault must exist on npm before
+those plugins can install** — see Bootstrap below.
 
 ## Three manual gates
 
@@ -53,8 +59,8 @@ degrading to a decision, so a network blip can never skip a real publish.
 
 ## Adding a changeset
 
-On any branch that touches code shipped to npm (`plugins/agent-id-core/**` or
-`plugins/agent-id-vault/**`):
+On any branch that touches code shipped to npm (`plugins/agent-id-core/**`,
+`plugins/agent-id-vault/**`, or `plugins/agent-id-browser/**`):
 
 ```bash
 bun changeset
@@ -70,10 +76,10 @@ bump too (`updateInternalDependents: always`).
 
 | Bumping... | Auto-patches |
 | --- | --- |
-| `@alien-id/agent-id-core` | `@alien-id/agent-id-vault` |
-| `@alien-id/agent-id-vault` | (nothing published) |
+| `@alien-id/agent-id-core` | `@alien-id/agent-id-vault`, `@alien-id/agent-id-browser` |
+| `@alien-id/agent-id-vault` | `@alien-id/agent-id-browser` |
 
-The four `ignore`d plugins keep their own `version` (changesets never bumps
+The three `ignore`d plugins keep their own `version` (changesets never bumps
 it), but `changeset version` **does rewrite their dependency range** — e.g. a
 core minor turns `"@alien-id/agent-id-core": "^7.0.0"` into `"^7.1.0"` in each
 plugin's `package.json`. So a Version PR carries package.json diffs for the
@@ -138,9 +144,13 @@ After that, the changesets pipeline owns all subsequent releases.
 
 ## Manual operator tasks (one-time)
 
-1. Configure npm **trusted publishers** for `@alien-id/agent-id-core` and
-   `@alien-id/agent-id-vault` to authorize `.github/workflows/release.yml`
-   (the `publish` job). Without this, OIDC publish fails `EUNAUTHORIZED`.
+1. Configure npm **trusted publishers** for `@alien-id/agent-id-core`,
+   `@alien-id/agent-id-vault`, and `@alien-id/agent-id-browser` to authorize
+   `.github/workflows/release.yml` (the `publish` job). Without this, OIDC
+   publish fails `EUNAUTHORIZED`. `agent-id-browser` is a **new** publish
+   target — its trusted-publisher entry must be created before the first
+   release, and since 7.3.1 is not yet on npm the publish job will pick it up
+   on the next push to `main`.
 2. Create the **`npm-publish` GitHub Environment** with the maintainer set as
    required reviewers.
 3. Do the one-time **Bootstrap** publish above so the marketplace plugins can
