@@ -223,7 +223,7 @@ export function safeFilename(name) {
   return (cleaned || "file").slice(0, 80);
 }
 
-// Screenshot pixels → viewport (CSS) pixels. The PNG is captured at the context's
+// Screenshot pixels → viewport (CSS) pixels. The image is captured at the context's
 // devicePixelRatio (retina = 2×); page.mouse takes CSS px, so divide by dpr.
 // `--css` skips this (coords already CSS px). Pure — exported for tests.
 export function imageToViewport(x, y, dpr) {
@@ -260,6 +260,22 @@ export function regionToClip(region, dpr) {
     width: Math.abs(x1 - x0) / d,
     height: Math.abs(y1 - y0) / d,
   };
+}
+
+// Screenshot encoding. Default to JPEG: a fraction of the equivalent retina PNG's
+// bytes, so it's quicker to read off disk and send. This buys transfer latency,
+// NOT tokens — images bill by pixel dimensions (⌈w/28⌉ × ⌈h/28⌉ visual tokens),
+// so the same shot costs the same either way; shrink the image to spend less.
+// Emit lossless PNG only when the caller's --path asks for it by a
+// `.png` extension. `quality` (JPEG only — invalid for PNG) is tunable via
+// AGENT_ID_SCREENSHOT_QUALITY, clamped to 1..100, default 80 (kept high so `zoom`
+// crops of tiny text/icons stay legible). Pure — exported for tests.
+export function screenshotEncoding(outPath, quality) {
+  if (/\.png$/i.test(String(outPath || ""))) return {};
+  const raw = typeof quality === "string" ? quality.trim() : quality;
+  const n = Number(raw);
+  const set = raw != null && raw !== "" && Number.isFinite(n);
+  return { type: "jpeg", quality: set ? Math.min(100, Math.max(1, Math.round(n))) : 80 };
 }
 
 // Clamp a clip (CSS px) to the viewport: an oversized region degrades to its
@@ -994,7 +1010,9 @@ async function dispatch(state, msg, policy = null) {
       p.requireRegion = true;
     // fallthrough
     case "screenshot": {
-      const out = p.path ? String(p.path) : path.join(sessionsDir(msg._stateDir), `shot-${Date.now()}.png`);
+      const out = p.path ? String(p.path) : path.join(sessionsDir(msg._stateDir), `shot-${Date.now()}.jpg`);
+      const enc = screenshotEncoding(out, process.env.AGENT_ID_SCREENSHOT_QUALITY);
+      const format = enc.type || "png";
       // dims are BEST-EFFORT and must never block the capture: a JS-hostile page
       // (PDF viewer, chrome://, mid-navigation) can't run this evaluate, but the
       // pixel capture is exactly what you still want there. Default dpr=1, no
@@ -1028,19 +1046,20 @@ async function dispatch(state, msg, policy = null) {
         // Guard the capture too: when viewport was unknown (JS-hostile page) we
         // couldn't clamp, so a raw clip error becomes a readable one.
         try {
-          await page.screenshot({ path: out, clip });
+          await page.screenshot({ path: out, clip, ...enc });
         } catch (err) {
           throw new Error(`screenshot --region could not capture (region likely outside the page): ${err.message || err}`);
         }
         return {
           screenshot: out,
+          format,
           dpr: info.dpr,
           region,
           image: { width: Math.round(clip.width * info.dpr), height: Math.round(clip.height * info.dpr) },
         };
       }
-      await page.screenshot({ path: out, fullPage: !!p.fullPage });
-      const result = { screenshot: out, dpr: info.dpr };
+      await page.screenshot({ path: out, fullPage: !!p.fullPage, ...enc });
+      const result = { screenshot: out, format, dpr: info.dpr };
       if (info.viewport) result.viewport = info.viewport;
       if (p.fullPage) {
         result.fullPage = true; // spans the whole page — not a valid click reference

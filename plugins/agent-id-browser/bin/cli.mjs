@@ -919,7 +919,8 @@ runCli({
         "  cookies [--url U]       cookie metadata (names/domains — values stay sealed)\n" +
         "  batch   --actions '[{\"action\":\"click-xy\",\"params\":{\"x\":9,\"y\":9}},…]' [--delay MS]\n" +
         "          one round trip; any action incl. click-xy/drag-xy; stops on error\n" +
-        "  screenshot --name N [--path P] [--full]     PNG + {dpr,viewport,image} for click-xy\n" +
+        "  screenshot --name N [--path P] [--full]     JPEG (PNG if --path *.png) +\n" +
+        "          {format,dpr,viewport,image} for click-xy\n" +
         "  eval    --name N --js 'EXPR'\n" +
         "  sessions                list open sessions   close --name N\n\n" +
         "Unlock: agent-key (auto) | --passphrase-file F | --passphrase-env V |\n" +
