@@ -204,7 +204,7 @@ CLI back
 CLI page-text --max-chars 4000     # visible text of the page
 CLI get    --ref e5 --what text|html|value|attr --attr href   # or --what url|title
 CLI is     --ref e5 --what visible|enabled|checked|editable
-CLI screenshot --path /tmp/shot.png [--full]
+CLI screenshot --path /tmp/shot.jpg [--full]   # JPEG by default; pass a *.png path for lossless PNG
 CLI eval   --js "document.title"
 CLI wait   --text "Inbox"          # or --url SUBSTR | --load networkidle | --ms 1500
 ```
@@ -216,8 +216,8 @@ express the target — a `<canvas>`, a map, a custom-rendered widget, a drag on 
 visual slider. The loop is: `screenshot` → read the PNG → point at a pixel.
 
 ```bash
-CLI screenshot --path /tmp/shot.png
-# → { screenshot:"/tmp/shot.png", dpr:2, viewport:{width:1280,height:800},
+CLI screenshot --path /tmp/shot.jpg
+# → { screenshot:"/tmp/shot.jpg", format:"jpeg", dpr:2, viewport:{width:1280,height:800},
 #     image:{width:2560,height:1600} }   # coords you give are in IMAGE pixels
 CLI click-xy --x 1840 --y 220          # [--double] [--button right|middle]
 CLI type-text --text "wireless mouse" --submit   # into whatever click-xy focused
@@ -245,6 +245,9 @@ inserts the whole text at once like a paste (fast for long text, immune to
 per-key handlers mangling input).
 `probe-xy` is read-only (works on ro sessions) — use it to confirm a click landed
 on the intended element, or to recover a `ref` for a ref-based follow-up.
+Screenshots are **JPEG by default** (a fraction of a retina PNG's size, so the
+model reads them far faster); pass a `--path` ending in `.png` for lossless PNG,
+and tune JPEG quality with `AGENT_ID_SCREENSHOT_QUALITY` (1–100, default 80).
 
 **Batch coordinate sequences** — `batch` runs any of these (incl. `click-xy` /
 `drag-xy` / `scroll-xy`) in ONE round trip; add `--delay MS` to pace steps for
