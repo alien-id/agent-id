@@ -20,7 +20,11 @@ import path from "node:path";
 
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
-import { refreshAccessToken, OAuthError } from "../plugins/agent-id-proxy/lib/oauth.mjs";
+import {
+  loadOauthSecretsFile,
+  refreshAccessToken,
+  OAuthError,
+} from "../plugins/agent-id-proxy/lib/oauth.mjs";
 
 // ── Fake upstream: records the Authorization header it received ────────────────
 function startUpstream() {
@@ -210,5 +214,127 @@ describe("oauth2 credential through the proxy", () => {
     assert.equal(r.status, 401);
     assert.equal(JSON.parse(r.body).error, "oauth_refresh_token_invalid");
     token.cfg.mode = "ok";
+  });
+});
+
+describe("loadOauthSecretsFile (unit)", () => {
+  let dir;
+  before(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-oauth-secrets-"));
+  });
+  after(async () => {
+    if (dir) await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  async function write(name, content, mode) {
+    const p = path.join(dir, name);
+    await fs.writeFile(p, content, { mode });
+    return p;
+  }
+
+  it("loads a 0600 JSON object keyed by clientId", async () => {
+    const p = await write("ok.json", '{"cid-1":"secret-1","cid-2":"secret-2"}', 0o600);
+    const secrets = await loadOauthSecretsFile(p);
+    assert.equal(secrets["cid-1"], "secret-1");
+    assert.equal(secrets["cid-2"], "secret-2");
+  });
+
+  it(
+    "refuses a group/world-accessible file",
+    { skip: process.platform === "win32" },
+    async () => {
+      const p = await write("loose.json", '{"cid":"s"}', 0o644);
+      await assert.rejects(() => loadOauthSecretsFile(p), /chmod 600/);
+    },
+  );
+
+  it("refuses non-object JSON and non-string values", async () => {
+    const arr = await write("arr.json", '["cid"]', 0o600);
+    await assert.rejects(() => loadOauthSecretsFile(arr), /JSON object/);
+    const bad = await write("bad.json", '{"cid":42}', 0o600);
+    await assert.rejects(() => loadOauthSecretsFile(bad), /non-empty string/);
+    const garbled = await write("garbled.json", "not json", 0o600);
+    await assert.rejects(() => loadOauthSecretsFile(garbled), /not valid JSON/);
+  });
+
+  it("does not resolve secrets through the prototype chain", async () => {
+    const p = await write("proto.json", '{"cid":"s"}', 0o600);
+    const secrets = await loadOauthSecretsFile(p);
+    assert.equal(secrets["toString"], undefined);
+    assert.equal(secrets["__proto__"], undefined);
+  });
+});
+
+describe("config-supplied client secret (platform connectors)", () => {
+  let stateDir, upstream, token, proxy, proxyPort;
+  const clock = 2_000_000_000_000;
+
+  before(async () => {
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-oauth2-cfg-"));
+    upstream = await startUpstream();
+    token = await startTokenEndpoint();
+
+    await initVault({ stateDir, passphrase: "test-pass" });
+    const vault = await openVault({ stateDir, passphrase: "test-pass" });
+    const base = {
+      type: "oauth2",
+      domains: [upstream.host.split(":")[0]],
+      upstreamScheme: "http",
+      tokenEndpoint: token.url,
+      refreshToken: "rt-1",
+    };
+    // Platform-seeded: no clientSecret on the cred — the config supplies it.
+    vault.add({ ...base, name: "platform", clientId: "cid-platform" });
+    // Personal: the cred's own secret must keep winning over the config.
+    vault.add({
+      ...base,
+      name: "personal",
+      clientId: "cid-personal",
+      clientSecret: "personal-secret",
+    });
+    // No secret anywhere: refresh proceeds without client_secret (public client).
+    vault.add({ ...base, name: "bare", clientId: "cid-bare" });
+    await vault.save();
+
+    proxy = createProxy({
+      vault,
+      stateDir,
+      logPath: path.join(stateDir, "proxy.log"),
+      now: () => clock,
+      oauthClientSecrets: {
+        "cid-platform": "config-secret",
+        "cid-personal": "config-should-lose",
+      },
+    });
+    const addr = await proxy.listen();
+    proxyPort = addr.port;
+  });
+
+  after(async () => {
+    await proxy?.close();
+    upstream?.server.close();
+    token?.server.close();
+    if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("a cred without clientSecret refreshes with the config-supplied secret", async () => {
+    const r = await callProxy({ port: proxyPort, path: `/platform/${upstream.host}/v1/a` });
+    assert.equal(r.status, 200);
+    assert.equal(token.stats.lastBody.get("client_id"), "cid-platform");
+    assert.equal(token.stats.lastBody.get("client_secret"), "config-secret");
+  });
+
+  it("a cred with its own clientSecret behaves exactly as today (cred wins)", async () => {
+    const r = await callProxy({ port: proxyPort, path: `/personal/${upstream.host}/v1/b` });
+    assert.equal(r.status, 200);
+    assert.equal(token.stats.lastBody.get("client_id"), "cid-personal");
+    assert.equal(token.stats.lastBody.get("client_secret"), "personal-secret");
+  });
+
+  it("no secret on the cred or in the config sends none (current behavior)", async () => {
+    const r = await callProxy({ port: proxyPort, path: `/bare/${upstream.host}/v1/c` });
+    assert.equal(r.status, 200);
+    assert.equal(token.stats.lastBody.get("client_id"), "cid-bare");
+    assert.equal(token.stats.lastBody.get("client_secret"), null);
   });
 });

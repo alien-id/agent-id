@@ -10,6 +10,7 @@
 // network call (RFC 6749 §6) and parses the response; the proxy owns caching,
 // expiry, and persistence of a rotated refresh token.
 
+import fs from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 
@@ -115,4 +116,47 @@ export async function refreshAccessToken({
     expiresInSec,
     refreshToken: typeof parsed.refresh_token === "string" ? parsed.refresh_token : null,
   };
+}
+
+/**
+ * Load the per-connector client-secret config a host passes at daemon spawn:
+ * a JSON object mapping clientId → clientSecret.
+ *
+ * These are PLATFORM secrets (the OAuth app's client_secret), which
+ * deliberately never enter the vault: a vault credential for a
+ * platform-managed connector carries only the user's refresh token, so N
+ * tenant vaults never hold N copies of a company secret and rotation means
+ * rewriting one file and respawning — not rewriting every vault.
+ *
+ * The file must be private (mode 0600 — no group/other bits); it is named by
+ * path (flag or env), so the secret itself never appears on argv.
+ */
+export async function loadOauthSecretsFile(filePath) {
+  const stat = await fs.stat(filePath);
+  if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+    throw new Error(
+      `oauth secrets file ${filePath} must not be group/world accessible (chmod 600 it)`,
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch (err) {
+    throw new Error(`oauth secrets file ${filePath} is not valid JSON: ${err.message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `oauth secrets file ${filePath} must be a JSON object mapping clientId to clientSecret`,
+    );
+  }
+  for (const [clientId, secret] of Object.entries(parsed)) {
+    if (typeof secret !== "string" || !secret) {
+      throw new Error(
+        `oauth secrets file ${filePath}: entry '${clientId}' must be a non-empty string`,
+      );
+    }
+  }
+  // Null prototype so a clientId like "__proto__" can never resolve to
+  // something inherited instead of a configured secret.
+  return Object.assign(Object.create(null), parsed);
 }
