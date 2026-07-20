@@ -148,6 +148,11 @@ export function createProxy({
   // How long an approved (credential, host) grant stays valid. Infinity = for
   // the life of the process.
   grantTtlMs = 60 * 60 * 1000,
+  // Per-connector OAuth client secrets: clientId → clientSecret, from the
+  // host's 0600 secrets file (see loadOauthSecretsFile). Consulted only when
+  // an oauth2 credential carries no clientSecret of its own, so
+  // personal/standalone creds behave exactly as before.
+  oauthClientSecrets = null,
 }) {
   const controlEnabled = !!control;
   if (controlEnabled && !stateDir) {
@@ -348,12 +353,20 @@ export function createProxy({
     if (!inFlight) {
       inFlight = (async () => {
         const refreshToken = cached?.refreshToken || cred.refreshToken;
+        // The cred's own secret wins (personal/standalone use); a
+        // platform-managed cred carries none and resolves via the host's
+        // per-connector config. Hard boundary: user secrets in the vault,
+        // platform secrets in host config — never both in one place.
+        const clientSecret =
+          cred.clientSecret ||
+          (oauthClientSecrets && cred.clientId ? oauthClientSecrets[cred.clientId] : null) ||
+          null;
         let res;
         try {
           res = await refreshAccessToken({
             tokenEndpoint: cred.tokenEndpoint,
             clientId: cred.clientId,
-            clientSecret: cred.clientSecret || null,
+            clientSecret,
             refreshToken,
             scope: cred.scope || null,
           });

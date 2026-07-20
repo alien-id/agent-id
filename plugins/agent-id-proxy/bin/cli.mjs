@@ -50,6 +50,7 @@ import {
 import { collectViaForm } from "@alien-id/agent-id-core/lib/secure-form.mjs";
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
+import { loadOauthSecretsFile } from "../lib/oauth.mjs";
 import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
 import { normalizeFingerprint } from "../lib/control-tls.mjs";
 
@@ -420,6 +421,20 @@ async function cmdStart(flags) {
   const grantTtlMs =
     flags["grant-ttl"] != null ? parseDuration(flags["grant-ttl"]) : 60 * 60_000;
 
+  // Per-connector OAuth client secrets (platform secrets — issue #72): a 0600
+  // JSON file mapping clientId → clientSecret, named by path so the secret
+  // itself never rides argv. Read once at spawn; the host respawns the proxy
+  // to pick up a rotation.
+  const oauthSecretsFile =
+    flags["oauth-secrets-file"] || process.env.AGENT_ID_OAUTH_SECRETS_FILE || null;
+  if (oauthSecretsFile === true) {
+    outputError("--oauth-secrets-file needs a path");
+    return;
+  }
+  const oauthClientSecrets = oauthSecretsFile
+    ? await loadOauthSecretsFile(String(oauthSecretsFile))
+    : null;
+
   const proxy = createProxy({
     vault,
     stateDir,
@@ -429,6 +444,7 @@ async function cmdStart(flags) {
     control,
     requireConsent,
     grantTtlMs,
+    oauthClientSecrets,
     blockPrivateHosts: !!flags["block-private-hosts"],
     onLock: (reason) => {
       if (controlEnabled) {
@@ -663,6 +679,9 @@ function printHelp() {
       "        [--await-mobile]",
       "        [--require-consent] [--approval-timeout 2m] [--grant-ttl 1h]",
       "        [--block-private-hosts]",
+      "        [--oauth-secrets-file F]   0600 JSON {clientId: clientSecret} consulted for",
+      "                          oauth2 creds that carry no clientSecret of their own",
+      "                          (platform-managed connectors; env: AGENT_ID_OAUTH_SECRETS_FILE)",
       "  pair [--control-host H]   show a QR for a phone to scan (control URL + token)",
       "  status",
       "  stop",
