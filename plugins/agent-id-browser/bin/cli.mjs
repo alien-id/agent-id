@@ -51,6 +51,8 @@ import {
 } from "../lib/profile-store.mjs";
 import { launchContext } from "../lib/launch.mjs";
 import { DEFAULT_PROFILE, loginHint, noProfileHint, profileName } from "../lib/hints.mjs";
+import { sessionReplyError } from "../lib/session-route.mjs";
+import { escalationFor } from "../lib/escalation.mjs";
 import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
 import { runSession, callSession } from "../lib/session-server.mjs";
@@ -456,23 +458,20 @@ async function cmdAutoLogin(flags) {
 
       if (!result || !result.ok) {
         const outcome = result ? result.outcome : "unknown";
-        // A bot-block wall (e.g. Reddit's "blocked by network security") can't be
-        // cleared by an automated credential submission — the login handshake is
-        // exactly where anti-automation bites. A human driving a headed login
-        // clears it and the session seals with the SAME access level.
-        const message =
-          outcome === "blocked"
-            ? `Auto-login for '${credName}' was blocked by an anti-automation wall (bot ` +
-              "challenge / network-security block). This hits the login handshake specifically; " +
-              `sign in yourself once with headed \`login --name ${targetProfile}` +
-              `${requestedAccess ? ` --access ${requestedAccess}` : ""}\` — it seals the same session.`
-            : `Auto-login for '${credName}' did not complete (${outcome}). ` +
-              "Verify the credentials / loginUrl, add a `recipe` to the credential, or bootstrap " +
-              `once with headed \`login --name ${targetProfile}\`.`;
+        // `action` is the contract: prose advice used to send the agent to
+        // headed `login`, which refuses on a host with no display and points
+        // straight back here. See lib/escalation.mjs.
+        const { action, reason, message } = escalationFor(outcome, {
+          credName,
+          profile: targetProfile,
+        });
         outputJson({
           ok: false,
           error: "AUTO_LOGIN_FAILED",
           outcome,
+          action,
+          reason,
+          profile: targetProfile,
           finalUrl: result ? result.finalUrl : null,
           message,
         });
@@ -521,14 +520,41 @@ async function cmdAutoLogin(flags) {
   }
 }
 
+/**
+ * Run a read-style action against the LIVE session when one is open, falling
+ * back to the one-shot profile copy when there is none.
+ *
+ * A one-shot unseals a *copy* of the sealed profile, and the live session's
+ * cookies only reach the vault on `close`. So while a session is open the copy
+ * is stale: reading a site the session is signed into reported `loggedOut` and
+ * a redirect to /logout, for a session that was perfectly healthy. That result
+ * feeds `sessionExpired`, so the stale copy could raise a "sign in again" card
+ * for a live login — the worst kind of false alarm, because it teaches the owner
+ * to ignore the real one.
+ */
+async function liveOrOneShot(flags, name, action, params, oneShot) {
+  const stateDir = resolveStateDir(flags);
+  let result;
+  try {
+    result = await callSession(stateDir, name, action, params);
+  } catch (err) {
+    // No session is the ordinary case; anything else is a real failure.
+    if (err && err.code === "NO_SESSION") return oneShot();
+    throw err;
+  }
+  const error = sessionReplyError(result, { name, action });
+  if (error) throw error;
+  return result;
+}
+
 async function cmdRead(flags) {
   const name = profileName(flags.name);
   if (!flags.url) return outputError("--url is required");
   const url = String(flags.url);
   const maxChars = Number(flags["max-chars"] || 4000);
 
-  try {
-    const out = await withProfile({
+  const oneShot = () =>
+    withProfile({
       flags,
       name,
       headless: resolveHeadless(flags),
@@ -554,6 +580,9 @@ async function cmdRead(flags) {
         };
       },
     });
+
+  try {
+    const out = await liveOrOneShot(flags, name, "read", { url, maxChars }, oneShot);
     if (out.loggedOut) {
       outputJson({
         ok: true,
@@ -576,8 +605,8 @@ async function cmdFetch(flags) {
   const url = String(flags.url);
   const maxChars = Number(flags["max-chars"] || 8000);
 
-  try {
-    const out = await withProfile({
+  const oneShot = () =>
+    withProfile({
       flags,
       name,
       headless: resolveHeadless(flags),
@@ -605,6 +634,9 @@ async function cmdFetch(flags) {
         };
       },
     });
+
+  try {
+    const out = await liveOrOneShot(flags, name, "fetch", { url, maxChars }, oneShot);
     if (out.loggedOut) {
       outputJson({
         ok: true,

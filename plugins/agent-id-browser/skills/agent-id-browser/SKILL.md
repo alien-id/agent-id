@@ -126,6 +126,25 @@ via whatever surface is registered (browser / mobile / hosted / CLI). For custom
 multi-step forms, drive it yourself with `snapshot` + `fill-secret` / `fill-otp`
 (§2) — the general, selector-free path the agent reasons through.
 
+A **device-approval** challenge ("tap Yes on your phone", "tap 42") is handled
+differently: nothing is typed on the page, so `auto-login` raises a card telling
+the owner to approve on their own device and then polls until the page advances.
+Tell the owner to approve and wait — do not re-run the login. It needs no stored
+secret at all, which makes it the cheapest 2FA to live with. A `confirm-timeout`
+outcome means the approval never arrived.
+
+When auto-login fails it returns an `action`, and that field — not the prose —
+decides what you do next. There are exactly three:
+
+| `action` | What it means | Do |
+|---|---|---|
+| `owner_must_drive` | No credential can finish this: a bot challenge, or an IdP that refuses automation (Google, Microsoft). | Ask the owner to sign in themselves in the browser view for the named profile, then stop. |
+| `owner_must_confirm` | Credentials are fine; an approval on another device never arrived. | Ask the owner to approve, then retry. Do **not** re-check the credentials. |
+| `fix_credential` | The stored credential is wrong or incomplete. | Correct it (`vault_add` with overwrite, or `set-totp`). Retrying the same values will not help. |
+
+Never answer `owner_must_drive` by asking for a password. An account created
+through "Sign in with Google" has none, so the owner cannot give you one.
+
 **Domain allowlist (security):** a `login` credential is only typed into hosts on
 its `domains` list (default-deny, the same control the proxy enforces); a foreign
 origin is **refused**, and a sealed in-vault-generated secret can never be typed

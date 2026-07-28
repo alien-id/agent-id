@@ -9,6 +9,8 @@
 //   "blocked"      — a bot-block / human-verification interstitial (a network
 //                    -security wall, CAPTCHA, "unusual traffic"). The form is
 //                    gone but we are NOT in — must not be mistaken for success.
+//   "confirm-on-device" — the owner must approve on another device (a push
+//                    prompt); nothing is typed here, so the caller waits
 //   "otp-required" — a second-factor affordance is present (a one-time-code input,
 //                    an OTP-ish field name, or body copy describing 2FA)
 //   "failed"       — a credential error is shown and there is no OTP affordance
@@ -34,6 +36,16 @@ const OTP_FIELD_RE =
 // Body copy that describes a 2FA / verification step.
 const OTP_BODY_RE =
   /(verification code|one[- ]?time (?:code|password|passcode)|two[- ]?factor|2-step|authenticator app|enter the code|security code|\b6[- ]?digit\b|check your phone|approve.*sign)/i;
+
+// Body copy for a challenge the owner answers on ANOTHER device: a push prompt
+// ("tap Yes on your phone"), a number match ("tap 42"), or an app notification.
+// Distinct from OTP because nothing is ever typed on this page — the sign-in
+// completes by itself once the owner approves, so the caller must WAIT rather
+// than hunt for a code that does not exist. Several of these phrases also live
+// in OTP_BODY_RE, which is why the classifier checks this first and only when
+// there is no code input on the page (an SMS step shows both).
+const CONFIRM_BODY_RE =
+  /(check your phone|tap (?:yes|\d{1,3})\b|approve (?:this |the )?sign[- ]?in|sent a (?:notification|prompt) to|open the .{0,24}app on your|confirm (?:it.?s|its) you on your|2-step verification.*(?:notification|prompt))/i;
 
 // Body / inline text that signals the credentials were rejected.
 const ERROR_RE =
@@ -61,7 +73,8 @@ const BLOCK_RE =
  *   bodyText         — visible page text
  *   errorText        — optional focused error text (role=alert etc.)
  *
- * Returns "otp-required" | "failed" | "logged-in" | "unknown".
+ * Returns "blocked" | "confirm-on-device" | "otp-required" | "failed"
+ *       | "logged-in" | "unknown".
  */
 export function classifyLogin({
   hasPasswordField = false,
@@ -73,16 +86,23 @@ export function classifyLogin({
 } = {}) {
   const isBlocked =
     blocked === true || BLOCK_RE.test(bodyText) || BLOCK_RE.test(String(errorText || ""));
-  const otpAffordance =
+  const codeInput =
     hasOtpField ||
-    (Array.isArray(otpFieldNames) && otpFieldNames.some((n) => OTP_FIELD_RE.test(String(n || "")))) ||
-    OTP_BODY_RE.test(bodyText);
+    (Array.isArray(otpFieldNames) && otpFieldNames.some((n) => OTP_FIELD_RE.test(String(n || ""))));
+  const otpAffordance = codeInput || OTP_BODY_RE.test(bodyText);
+  // Device approval only when there is nothing to type: an SMS step can show
+  // "check your phone" AND a code field, and that one is an ordinary OTP.
+  const confirmAffordance = !codeInput && CONFIRM_BODY_RE.test(bodyText);
   const hasError = ERROR_RE.test(String(errorText || "")) || ERROR_RE.test(bodyText);
 
   // A bot-block / human-verification wall: the form is gone but we are NOT in.
   // Checked FIRST — otherwise the missing password field reads as success and an
   // unauthenticated session gets sealed (the bug this outcome was added for).
   if (isBlocked) return "blocked";
+  // Device approval before OTP: both share body copy, but this one has no input,
+  // so treating it as "otp-required" sends the caller looking for a code that
+  // will never appear and the login stalls until it times out.
+  if (confirmAffordance) return "confirm-on-device";
   // An OTP affordance is the strongest signal the password step succeeded and a
   // second factor is now being requested — check it next.
   if (otpAffordance) return "otp-required";
@@ -94,4 +114,4 @@ export function classifyLogin({
   return "unknown";
 }
 
-export { OTP_FIELD_RE, OTP_BODY_RE, ERROR_RE, BLOCK_RE };
+export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, ERROR_RE, BLOCK_RE };

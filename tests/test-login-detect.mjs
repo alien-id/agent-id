@@ -124,3 +124,63 @@ test("blocked: Google's real 'unusual traffic from your network' wall is caught"
     "blocked",
   );
 });
+
+// ── Device approval ─────────────────────────────────────────────────────────
+//
+// A push prompt shares body copy with OTP ("check your phone", "approve … sign
+// in") but has no input: the sign-in completes when the owner taps Yes on their
+// own device. Classifying it as "otp-required" sent the caller hunting for a
+// code that never appears, so the login stalled until it timed out. It is also
+// the cheapest challenge to satisfy — no secret has to be stored anywhere.
+
+test("confirm-on-device: Google's push prompt is not mistaken for an OTP step", () => {
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      bodyText:
+        "2-Step Verification\nCheck your phone\nGoogle sent a notification to your iPhone. Tap Yes to sign in.",
+    }),
+    "confirm-on-device",
+  );
+});
+
+test("confirm-on-device: a number-match challenge", () => {
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      bodyText: "Open the Gmail app on your phone and tap 42 to sign in.",
+    }),
+    "confirm-on-device",
+  );
+});
+
+test("otp-required still wins when the page has a code field (SMS shows both)", () => {
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      hasOtpField: true,
+      bodyText: "Check your phone. Enter the 6-digit code we texted you.",
+    }),
+    "otp-required",
+  );
+});
+
+test("otp-required still wins for an authenticator code with no device prompt", () => {
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      bodyText: "Enter the verification code from your authenticator app",
+    }),
+    "otp-required",
+  );
+});
+
+test("blocked outranks a device prompt", () => {
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      bodyText: "Check your phone. But first, verify you are human.",
+    }),
+    "blocked",
+  );
+});
