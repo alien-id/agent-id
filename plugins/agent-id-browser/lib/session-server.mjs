@@ -79,8 +79,9 @@ export function sessionFilePath(stateDir, name) {
 // `prefix` namespaces refs per frame: "" for the main frame ("e1", "e2", …),
 // "f1" for the first iframe ("f1e1", …) — so a ref is self-describing about
 // which frame it lives in.
-export function snapshotInPage(prefix) {
-  const pre = prefix || "";
+export function snapshotInPage(arg) {
+  const { prefix, generation } = arg && typeof arg === "object" ? arg : { prefix: arg, generation: 0 };
+  const pre = `${generation ?? 0}:${prefix || ""}`;
   const SEL = [
     "a[href]", "button", "input:not([type=hidden])", "textarea", "select",
     "[role=button]", "[role=link]", "[role=textbox]", "[role=combobox]",
@@ -146,8 +147,9 @@ export function snapshotInPage(prefix) {
 // forms commonly render a styled label over the real control. Values from text
 // inputs are deliberately never returned; validation reports lengths/matches,
 // not the contents the user or vault supplied.
-export function formSnapshotInPage(prefix) {
-  const pre = prefix || "";
+export function formSnapshotInPage(arg) {
+  const { prefix, generation } = arg && typeof arg === "object" ? arg : { prefix: arg, generation: 0 };
+  const pre = `${generation ?? 0}:${prefix || ""}`;
   // Identical to snapshotInPage's selector and numbering loop — see the note
   // there. This mode reports only form controls, but it must NUMBER the same
   // union so a ref means the same element in both modes.
@@ -251,8 +253,22 @@ const MAX_FRAMES = 12; // iframes snapshotted per page (ad-heavy pages have doze
 const CONSOLE_CAP = 300; // ring-buffer size for captured console/pageerror entries
 
 // "f1e3" → "f1"; plain main-frame refs ("e3") → null. Exported for tests.
+// A ref carries the observation it came from: "3:e7", "3:f1e2". The generation
+// prefix makes staleness a *synchronous string check* instead of something we
+// discover by acting on whatever now happens to hold that number.
+//
+// Clearing every data-aibref on each scan is not enough on its own: the next
+// scan re-tags a possibly different element with the same "e7", so a ref held
+// across two observations still resolves — silently, to the wrong element. The
+// version prefix is what the agent copies back verbatim, so a ref from an older
+// observation is refused by name rather than executed.
+export function refGenerationOf(ref) {
+  const m = /^(\d+):/.exec(String(ref ?? ""));
+  return m ? Number(m[1]) : null;
+}
+
 export function frameRefId(ref) {
-  const m = /^(f\d+)e\d+$/.exec(String(ref ?? ""));
+  const m = /^(?:\d+:)?(f\d+)e\d+$/.exec(String(ref ?? ""));
   return m ? m[1] : null;
 }
 
@@ -344,6 +360,16 @@ function frameForRef(state, ref) {
       `ref '${ref}' is stale (${state.refsInvalidReason || "page changed"}) — run form-inspect or snapshot again`,
     );
   }
+  // Snapshot versioning: refuse a ref minted by an earlier observation instead
+  // of resolving it against the current tagging. Only meaningful when both
+  // sides carry a generation — an unversioned ref, or a caller driving fillForm
+  // directly against a hand-built state, is let through unchanged.
+  const generation = refGenerationOf(ref);
+  if (generation !== null && typeof state.refGeneration === "number" && generation !== state.refGeneration) {
+    throw new Error(
+      `ref '${ref}' is from observation ${generation}, but the page has been observed again since (now ${state.refGeneration}) — re-run form-inspect (or snapshot) and use the refs it returns`,
+    );
+  }
   const id = frameRefId(ref);
   if (!id) return state.current;
   const frame = state.frames.get(id);
@@ -359,11 +385,14 @@ function invalidateRefs(state, reason = "page changed") {
   state.frames.clear();
 }
 
-function activateRefs(state) {
-  state.refGeneration += 1;
+// Commit the generation the page was just tagged with. The number is chosen
+// *before* the scan (the page functions stamp it into every ref), so it is
+// passed in rather than incremented here.
+function activateRefs(state, generation) {
+  state.refGeneration = generation;
   state.refsValid = true;
   state.refsInvalidReason = null;
-  return state.refGeneration;
+  return generation;
 }
 
 // A field the vault typed a secret into is tagged with this attribute (see
@@ -812,7 +841,9 @@ async function dispatch(state, msg, policy = null) {
     }
     case "snapshot": {
       state.frames.clear();
-      const main = await page.evaluate(snapshotInPage, "");
+      // Chosen before the scan so the page can stamp it into every ref.
+      const generation = state.refGeneration + 1;
+      const main = await page.evaluate(snapshotInPage, { prefix: "", generation });
       const frames = [];
       let skipped = 0;
       let fCount = 0;
@@ -824,7 +855,7 @@ async function dispatch(state, msg, policy = null) {
         }
         let snap;
         try {
-          snap = await f.evaluate(snapshotInPage, `f${fCount + 1}`);
+          snap = await f.evaluate(snapshotInPage, { prefix: `f${fCount + 1}`, generation });
         } catch {
           continue; // detached / navigating frame — nothing was tagged
         }
@@ -836,7 +867,7 @@ async function dispatch(state, msg, policy = null) {
         }
       }
       const tabs = state.ctx.pages().length;
-      const generation = activateRefs(state);
+      activateRefs(state, generation);
       return {
         ...main,
         generation,
@@ -847,7 +878,8 @@ async function dispatch(state, msg, policy = null) {
     }
     case "form-inspect": {
       state.frames.clear();
-      const main = await page.evaluate(formSnapshotInPage, "");
+      const generation = state.refGeneration + 1;
+      const main = await page.evaluate(formSnapshotInPage, { prefix: "", generation });
       const frames = [];
       let skipped = 0;
       let fCount = 0;
@@ -859,7 +891,7 @@ async function dispatch(state, msg, policy = null) {
         }
         let snap;
         try {
-          snap = await frame.evaluate(formSnapshotInPage, `f${fCount + 1}`);
+          snap = await frame.evaluate(formSnapshotInPage, { prefix: `f${fCount + 1}`, generation });
         } catch {
           continue;
         }
@@ -870,7 +902,7 @@ async function dispatch(state, msg, policy = null) {
           main.controls.push(...snap.controls);
         }
       }
-      const generation = activateRefs(state);
+      activateRefs(state, generation);
       return {
         ...main,
         generation,

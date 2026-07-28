@@ -72,7 +72,7 @@ after(async () => {
 const skip = patchrightAvailable ? false : "patchright/Chrome not installed";
 
 test("snapshot never surfaces a text field's value, but keeps a submit's label", { skip }, async () => {
-  const snap = await page.evaluate(snapshotInPage, "");
+  const snap = await page.evaluate(snapshotInPage, { prefix: "", generation: 1 });
   const names = snap.elements.map((e) => e.name);
 
   // Leak path 1 is closed: neither the OTP value nor the benign text value
@@ -89,7 +89,7 @@ test("snapshot never surfaces a text field's value, but keeps a submit's label",
 });
 
 test("form snapshot is compact, labelled, and includes hidden native controls", { skip }, async () => {
-  const snap = await page.evaluate(formSnapshotInPage, "");
+  const snap = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
   assert.ok(Array.isArray(snap.controls));
   assert.ok(!JSON.stringify(snap).includes("hunter2"), "password value must never appear");
   assert.ok(!JSON.stringify(snap).includes("alice@example.com"), "text value must never appear");
@@ -114,7 +114,7 @@ test("form snapshot is compact, labelled, and includes hidden native controls", 
 });
 
 test("atomic form fill handles text, hidden checks, selects, and verifies each", { skip }, async () => {
-  const snap = await page.evaluate(formSnapshotInPage, "");
+  const snap = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
   const text = snap.controls.find((control) => control.name === "full_name");
   const checkbox = snap.controls.find((control) => control.type === "checkbox");
   const degree = snap.controls.find((control) => control.name === "degree");
@@ -144,7 +144,7 @@ test("atomic form fill handles text, hidden checks, selects, and verifies each",
 });
 
 test("ordinary form fill refuses password fields without echoing the value", { skip }, async () => {
-  const snap = await page.evaluate(formSnapshotInPage, "");
+  const snap = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
   const password = snap.controls.find((control) => control.type === "password");
   const result = await fillForm(
     { current: page, frames: new Map(), refsValid: true, refsInvalidReason: null },
@@ -178,7 +178,7 @@ test("taint survives a re-snapshot and keeps suppressing the value", { skip }, a
   // vault filled stays protected across the re-snapshots the agent does between
   // steps of a login flow.
   await markSecretField(page, "#otp");
-  const snap = await page.evaluate(snapshotInPage, "");
+  const snap = await page.evaluate(snapshotInPage, { prefix: "", generation: 1 });
   const stillTainted = await page.$eval("#otp", (el, attr) => el.hasAttribute(attr), SECRET_TAINT_ATTR);
   assert.equal(stillTainted, true, "re-snapshot must not strip the taint attribute");
   assert.ok(
