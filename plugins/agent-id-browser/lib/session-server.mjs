@@ -56,17 +56,37 @@ export function sessionFilePath(stateDir, name) {
   return path.join(sessionsDir(stateDir), `${name}.json`);
 }
 
-// Runs in the page (once per frame). Tags visible interactive elements and
-// returns a flat list. `prefix` namespaces refs per frame: "" for the main
-// frame ("e1", "e2", …), "f1" for the first iframe ("f1e1", …) — so a ref is
-// self-describing about which frame it lives in.
+// THE SHARED REF SPACE — keep this selector, and the numbering loop that walks
+// it, byte-identical in snapshotInPage and formSnapshotInPage.
+//
+// Both observation modes tag the DOM, and both clear every existing tag first.
+// When they numbered over *different* element sets (snapshot: links/buttons/
+// inputs; form-inspect: form controls only) the same string meant different
+// elements in each: after a form-inspect "e7" was the First Name input, after a
+// snapshot it was a toolbar button. Nothing detected the difference, so a
+// form-fill using form-inspect refs silently drove the wrong elements — or, if
+// the page had also navigated, bounced off a "ref is stale" error whose advice
+// ("run form-inspect or snapshot again") pointed at two tools that disagreed.
+//
+// The fix is to number over the UNION of both selectors, in document order,
+// independently of what each mode chooses to report. Numbering therefore does
+// NOT skip invisible elements — reporting still does — so ref numbers are
+// sparse in the returned list, and stable across modes. These two functions
+// cannot share a module constant: page functions are serialised into the page
+// and cannot close over module scope. tests/test-browser-ref-space.mjs asserts
+// they stay in agreement.
+//
+// `prefix` namespaces refs per frame: "" for the main frame ("e1", "e2", …),
+// "f1" for the first iframe ("f1e1", …) — so a ref is self-describing about
+// which frame it lives in.
 export function snapshotInPage(prefix) {
   const pre = prefix || "";
   const SEL = [
     "a[href]", "button", "input:not([type=hidden])", "textarea", "select",
-    "[role=button]", "[role=link]", "[role=textbox]", "[role=checkbox]",
-    "[role=radio]", "[role=tab]", "[role=menuitem]", "[role=option]",
-    "[contenteditable=true]", "summary", "[tabindex]:not([tabindex='-1'])",
+    "[role=button]", "[role=link]", "[role=textbox]", "[role=combobox]",
+    "[role=checkbox]", "[role=radio]", "[role=tab]", "[role=menuitem]",
+    "[role=option]", "[contenteditable=true]", "summary",
+    "[tabindex]:not([tabindex='-1'])",
   ].join(",");
   // Clear refs from a previous snapshot first: forms that swap in place (e.g.
   // multi-step IdP logins) leave stale data-aibref attributes, so a reused ref
@@ -79,13 +99,15 @@ export function snapshotInPage(prefix) {
   for (const el of document.querySelectorAll(SEL)) {
     if (seen.has(el)) continue;
     seen.add(el);
+    // Numbered before the visibility test so the counter tracks the shared ref
+    // space rather than this mode's reporting filter.
+    const ref = pre + "e" + ++i;
+    el.setAttribute("data-aibref", ref);
     const r = el.getBoundingClientRect();
     const st = window.getComputedStyle(el);
     if (r.width === 0 || r.height === 0 || st.visibility === "hidden" || st.display === "none") {
       continue;
     }
-    const ref = pre + "e" + ++i;
-    el.setAttribute("data-aibref", ref);
     // el.value is a useful *label* only for button-like inputs (submit/button/
     // reset), where the value IS the visible caption. For any text-entry field
     // el.value is user-entered content that could be a secret — OTP/2FA fields
@@ -126,7 +148,17 @@ export function snapshotInPage(prefix) {
 // not the contents the user or vault supplied.
 export function formSnapshotInPage(prefix) {
   const pre = prefix || "";
+  // Identical to snapshotInPage's selector and numbering loop — see the note
+  // there. This mode reports only form controls, but it must NUMBER the same
+  // union so a ref means the same element in both modes.
   const SEL = [
+    "a[href]", "button", "input:not([type=hidden])", "textarea", "select",
+    "[role=button]", "[role=link]", "[role=textbox]", "[role=combobox]",
+    "[role=checkbox]", "[role=radio]", "[role=tab]", "[role=menuitem]",
+    "[role=option]", "[contenteditable=true]", "summary",
+    "[tabindex]:not([tabindex='-1'])",
+  ].join(",");
+  const REPORTED = [
     "input:not([type=hidden])", "textarea", "select", "button",
     "[role=textbox]", "[role=combobox]", "[role=checkbox]", "[role=radio]",
     "[contenteditable=true]",
@@ -161,7 +193,15 @@ export function formSnapshotInPage(prefix) {
 
   const controls = [];
   let i = 0;
+  const seen = new Set();
   for (const el of document.querySelectorAll(SEL)) {
+    if (seen.has(el)) continue;
+    seen.add(el);
+    // Numbered over the shared union first; only then filtered down to what
+    // this mode reports. Numbering must not depend on the filter.
+    const ref = pre + "e" + ++i;
+    el.setAttribute("data-aibref", ref);
+    if (!el.matches(REPORTED)) continue;
     const tag = el.tagName.toLowerCase();
     const type = clip(
       el.getAttribute("type") || (tag === "input" ? el.type || "text" : tag === "select" ? "select" : tag),
@@ -170,8 +210,6 @@ export function formSnapshotInPage(prefix) {
     const visible = visibleOf(el);
     // Hidden native controls remain actionable through setChecked/setInputFiles.
     if (!visible && !["checkbox", "radio", "file"].includes(type)) continue;
-    const ref = pre + "e" + ++i;
-    el.setAttribute("data-aibref", ref);
     const form = el.closest("form");
     const role = el.getAttribute("role") || tag;
     const entry = {
@@ -524,6 +562,53 @@ async function validateTaggedControls(state) {
 // toggles styled controls, selects options, and attaches files. Every operation
 // is checked after it runs and failures are returned individually so one bad
 // field cannot discard the successful half of a long application form.
+// Drive an ARIA combobox (an <input> that opens a listbox) the way a person
+// does: focus it, type enough to filter, then click the matching option.
+//
+// Deliberately does NOT use `fill()` — autocompletes listen for keystrokes, and
+// a value set in one shot usually leaves the listbox closed and the site's
+// internal model empty, so the form submits blank. `pressSequentially` emits
+// real key events.
+//
+// Only one value is supported: multi-select comboboxes are a different widget
+// (chips/tags) and pretending otherwise would silently drop values.
+async function pickCombobox(target, ref, values) {
+  if (values.length !== 1) {
+    throw new Error("combobox takes exactly one value (multi-select comboboxes are not supported)");
+  }
+  const wanted = values[0];
+  const input = target.locator(sel(ref));
+  await input.click({ timeout: ACTION_TIMEOUT });
+  await input.fill("", { timeout: ACTION_TIMEOUT }).catch(() => {});
+  await input.pressSequentially(wanted, { delay: 25, timeout: ACTION_TIMEOUT });
+
+  // The listbox is usually a sibling/portal rather than a descendant, so look
+  // page-wide for visible options and match on text.
+  const options = target.locator('[role=option]:visible, li[role=option], [role=listbox] li');
+  const exact = options.filter({ hasText: new RegExp(`^\\s*${escapeForRegex(wanted)}\\s*$`, "i") });
+  const chosen = (await exact.count().catch(() => 0)) > 0 ? exact.first() : options.first();
+  try {
+    await chosen.waitFor({ state: "visible", timeout: ACTION_TIMEOUT });
+  } catch {
+    throw new Error(
+      `combobox '${ref}' opened no option list for "${wanted}" — the site may need a different value spelling, or the widget is not a listbox combobox`,
+    );
+  }
+  const label = ((await chosen.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim().slice(0, 160);
+  await chosen.click({ timeout: ACTION_TIMEOUT });
+
+  // Verify against the control's own value, not against what we clicked: a
+  // combobox that rejects the pick leaves the field empty or reverted, and that
+  // must surface as a failure rather than a cheerful ok:true.
+  const settled = ((await input.inputValue().catch(() => "")) || "").trim();
+  if (!settled) throw new Error(`combobox '${ref}' did not retain a value after picking "${label || wanted}"`);
+  return { value: settled, ...(label && label !== settled ? { option: label } : {}) };
+}
+
+function escapeForRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export async function fillForm(state, p) {
   const fields = Array.isArray(p.fields) ? p.fields : [];
   const checks = Array.isArray(p.checks) ? p.checks : [];
@@ -598,10 +683,32 @@ export async function fillForm(state, p) {
     const ref = String(select?.ref || "");
     const values = (Array.isArray(select?.values) ? select.values : [select?.value]).filter((v) => v != null).map(String);
     try {
-      const selected = await frameForRef(state, ref).selectOption(sel(ref), values, { timeout: ACTION_TIMEOUT });
-      const matches = values.every((value) => selected.includes(value));
-      if (!matches) throw new Error("page did not retain the selected option(s)");
-      results.push({ ref, kind: "select", ok: true, selected });
+      const target = frameForRef(state, ref);
+      // Dispatch on what the control actually IS. `selectOption` only works on
+      // a native <select>; driving an ARIA combobox with it fails every time
+      // with "Element is not a <select> element", which no amount of retrying
+      // fixes — and enterprise forms (Oracle/Taleo/Workday) render their
+      // country/nationality pickers as <input role="combobox"> autocompletes.
+      const kind = await target.locator(sel(ref)).evaluate((el) =>
+        el.tagName.toLowerCase() === "select"
+          ? "select"
+          : el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")
+            ? "combobox"
+            : el.tagName.toLowerCase(),
+      );
+      if (kind === "select") {
+        const selected = await target.selectOption(sel(ref), values, { timeout: ACTION_TIMEOUT });
+        const matches = values.every((value) => selected.includes(value));
+        if (!matches) throw new Error("page did not retain the selected option(s)");
+        results.push({ ref, kind: "select", ok: true, selected });
+      } else if (kind === "combobox") {
+        const selected = await pickCombobox(target, ref, values);
+        results.push({ ref, kind: "select", ok: true, control: "combobox", selected });
+      } else {
+        throw new Error(
+          `ref '${ref}' is a <${kind}>, not a select or combobox — use fields for text input, or act/click for a custom widget`,
+        );
+      }
     } catch (error) {
       results.push({ ref, kind: "select", ok: false, error: safeFormError(error) });
     }
@@ -891,9 +998,24 @@ async function dispatch(state, msg, policy = null) {
         state.stream?.resume();
       }
     }
-    case "select":
-      await frameForRef(state, p.ref).selectOption(sel(p.ref), p.values, { timeout: ACTION_TIMEOUT });
+    case "select": {
+      // Same dispatch as form-fill's selects — a bare `select` on an ARIA
+      // combobox would otherwise fail identically here.
+      const target = frameForRef(state, p.ref);
+      const values = (Array.isArray(p.values) ? p.values : [p.values]).filter((v) => v != null).map(String);
+      const kind = await target.locator(sel(p.ref)).evaluate((el) =>
+        el.tagName.toLowerCase() === "select"
+          ? "select"
+          : el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")
+            ? "combobox"
+            : el.tagName.toLowerCase(),
+      );
+      if (kind === "combobox") {
+        return { selected: p.ref, control: "combobox", ...(await pickCombobox(target, p.ref, values)) };
+      }
+      await target.selectOption(sel(p.ref), values, { timeout: ACTION_TIMEOUT });
       return { selected: p.ref };
+    }
     case "hover":
       await humanHover(page, sel(p.ref), { timeout: ACTION_TIMEOUT, root: frameForRef(state, p.ref) });
       return { hovered: p.ref };
