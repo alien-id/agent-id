@@ -25,6 +25,7 @@
 
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
+import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
 import { classifyLogin } from "./login-detect.mjs";
 import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
@@ -363,6 +364,63 @@ async function heuristicLogin(page, { username, password }) {
 }
 
 /**
+ * Surface a "confirm on your phone" card once, then wait for the page to move
+ * on by itself. Returns true when the challenge cleared, false on timeout.
+ *
+ * The prompt text is lifted from the page so the card can echo a number-match
+ * challenge ("tap 42"), which is useless to the owner if we paraphrase it.
+ */
+async function awaitDeviceConfirmation(page, cred, { log, settleMs, budgetMs }) {
+  const hint = await page
+    .evaluate(() => (document.body ? document.body.innerText : ""))
+    .catch(() => "");
+  const prompt = String(hint)
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => /tap (?:yes|\d{1,3})\b|check your phone|sent a (?:notification|prompt)/i.test(line));
+
+  log("auto-login: awaiting device confirmation");
+  await notifyHost("browser.confirmation_required", {
+    profile: cred.profile || cred.name || null,
+    cred: cred.name || null,
+    url: page.url(),
+    prompt: prompt || null,
+    message:
+      "Approve the sign-in on your phone to continue. Nothing needs to be typed here.",
+  });
+
+  // The card has no natural end: the owner approves on a device the harness
+  // cannot see, so without this the "approve on your phone" prompt would sit
+  // there after they already did. Mirrors `secure_input.resolved`.
+  const resolve = async (outcome) => {
+    await notifyHost("browser.confirmation_resolved", {
+      profile: cred.profile || cred.name || null,
+      cred: cred.name || null,
+      outcome,
+    });
+  };
+
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(settleMs);
+    const state = classifyLogin(await detectPageState(page));
+    // Anything other than "still asking" ends the wait — including a block or a
+    // denial, which the main loop then classifies on its own terms.
+    if (state !== "confirm-on-device" && state !== "unknown") {
+      await resolve("approved");
+      return true;
+    }
+    if (!stillOnLoginPage(page.url(), cred.loginUrl)) {
+      await resolve("approved");
+      return true;
+    }
+  }
+  log("auto-login: device confirmation timed out");
+  await resolve("timeout");
+  return false;
+}
+
+/**
  * Drive a full auto-login against `cred` (a `login` record). Returns
  * { ok, outcome, finalUrl }. Does NOT seal the profile — the caller does that
  * after closing the context. `page` is a patchright Page.
@@ -374,6 +432,11 @@ export async function autoLogin({
   log = () => {},
   maxRounds = 6,
   settleMs = 1500,
+  // A device-approval prompt is answered by a human reaching for their phone,
+  // so it gets its own budget: the ordinary rounds are far too short, and
+  // spending them here would report a timeout while the owner is still walking
+  // to the desk.
+  confirmWaitMs = 180000,
 }) {
   if (!cred.loginUrl) throw new Error(`login '${cred.name}': loginUrl is required for auto-login`);
   const getOtp = () => resolveOtp(cred, { env, log });
@@ -427,6 +490,20 @@ export async function autoLogin({
       log("auto-login: form cleared but still on the login page — awaiting redirect");
     } else if (outcome === "failed") {
       return { ok: false, outcome, finalUrl: page.url() };
+    } else if (outcome === "confirm-on-device") {
+      // Nothing to type: the owner approves on their own device and the page
+      // advances by itself. Tell them once, then poll until it does. This is
+      // the cheapest challenge to satisfy — unlike a password or a TOTP seed it
+      // needs no secret stored anywhere, so it is a good outcome, not a failure.
+      const confirmed = await awaitDeviceConfirmation(page, cred, {
+        log,
+        settleMs,
+        budgetMs: confirmWaitMs,
+      });
+      if (!confirmed) {
+        return { ok: false, outcome: "confirm-timeout", finalUrl: page.url() };
+      }
+      continue;
     } else if (outcome === "otp-required") {
       if (cred.otp === "none") {
         return { ok: false, outcome: "otp-unexpected", finalUrl: page.url() };

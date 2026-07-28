@@ -37,7 +37,9 @@ import {
   applyAccessGuard,
   assertActionAllowed,
   contextOptionsForAccess,
+  guardDecision,
 } from "./access-guard.mjs";
+import { looksLoggedOut } from "./session.mjs";
 import {
   humanClick,
   humanHover,
@@ -649,6 +651,58 @@ async function dispatch(state, msg, policy = null) {
     case "back":
       await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
       return { url: page.url() };
+    // `read` / `fetch` also exist as one-shot CLI commands that unseal a COPY of
+    // the profile. That copy is stale while a session is open — the live cookies
+    // only reach the vault on `close` — so a one-shot reports "logged out" for a
+    // session that is signed in. The CLI routes to these when a session exists.
+    case "read": {
+      const resp = p.url
+        ? await page.goto(String(p.url), { waitUntil: "domcontentloaded", timeout: 30000 })
+        : null;
+      const finalUrl = page.url();
+      const title = await page.title().catch(() => "");
+      let text = "";
+      try {
+        text = await page.evaluate(() => (document.body ? document.body.innerText : ""));
+      } catch {
+        /* page navigated/destroyed mid-read — leave text empty */
+      }
+      const httpStatus = resp ? resp.status() : null;
+      return {
+        httpStatus,
+        finalUrl,
+        title,
+        loggedOut: looksLoggedOut({ finalUrl, bodyText: text, httpStatus }),
+        text: String(text).slice(0, Number(p.maxChars || 8000)),
+      };
+    }
+    case "fetch": {
+      const url = String(p.url);
+      // ctx.request bypasses route interception, so the policy is checked here
+      // the same way the one-shot path checks it. A null policy means the
+      // profile carries no restriction at all — the same convention the action
+      // allowlist above follows.
+      const decision = policy
+        ? guardDecision(policy, { method: "GET", url, postData: null })
+        : { allowed: true };
+      if (!decision.allowed) {
+        throw new Error(`access level blocks GET ${url} (${decision.reason})`);
+      }
+      const resp = await state.ctx.request.get(url, { timeout: 30000 });
+      const httpStatus = resp.status();
+      let body = "";
+      try {
+        body = await resp.text();
+      } catch {
+        /* binary or empty body */
+      }
+      return {
+        httpStatus,
+        finalUrl: resp.url(),
+        loggedOut: looksLoggedOut({ finalUrl: resp.url(), bodyText: body, httpStatus }),
+        body: String(body).slice(0, Number(p.maxChars || 8000)),
+      };
+    }
     case "snapshot": {
       state.frames.clear();
       const main = await page.evaluate(snapshotInPage, "");
