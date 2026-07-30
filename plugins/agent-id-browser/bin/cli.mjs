@@ -69,6 +69,15 @@ import {
   guardDecision,
 } from "../lib/access-guard.mjs";
 
+// A long-lived `open` daemon outlives its parent's interest in the std pipes:
+// once the host has read the ready line it may close them, and the next
+// diagnostic write (e.g. the access-guard logging a blocked request) would
+// otherwise raise an unhandled EPIPE and kill the live session. Swallow pipe
+// errors instead — losing diagnostics must never cost the session.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", () => {});
+}
+
 // Bridge the plugin path vars into the environment. Claude Code SUBSTITUTES
 // ${CLAUDE_PLUGIN_DATA}/${CLAUDE_PLUGIN_ROOT} into skill text but only EXPORTS
 // them to hook/MCP processes — not to ordinary skill Bash commands. So the skill
