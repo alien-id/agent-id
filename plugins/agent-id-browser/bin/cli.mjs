@@ -860,8 +860,19 @@ runCli({
     "move-xy": actionCmd("move-xy", (f) => ({ x: f.x, y: f.y, css: f.css === true })),
     "drag-xy": actionCmd("drag-xy", (f) => ({ x: f.x, y: f.y, tox: f.tox, toy: f.toy, css: f.css === true })),
     "scroll-xy": actionCmd("scroll-xy", (f) => ({ x: f.x, y: f.y, dx: f.dx, dy: f.dy, css: f.css === true })),
-    "type-text": actionCmd("type-text", (f) => ({ text: f.text ?? "", submit: f.submit === true })),
-    "fill-text": actionCmd("fill-text", (f) => ({ text: f.text ?? "", submit: f.submit === true })),
+    // `ref` rides along ONLY so the session server can refuse it by name —
+    // these type into whatever is focused. Dropping it here instead would put
+    // the text somewhere the caller did not ask for and report success.
+    "type-text": actionCmd("type-text", (f) => ({
+      text: f.text ?? "",
+      submit: f.submit === true,
+      ref: f.ref,
+    })),
+    "fill-text": actionCmd("fill-text", (f) => ({
+      text: f.text ?? "",
+      submit: f.submit === true,
+      ref: f.ref,
+    })),
     "probe-xy": actionCmd("probe-xy", (f) => ({ x: f.x, y: f.y, css: f.css === true })),
     resize: actionCmd("resize", (f) => ({ width: f.width, height: f.height })),
     screenshot: actionCmd("screenshot", (f) => ({ path: f.path, fullPage: f.full === true || f.fullPage === true, region: region(f.region) })),
@@ -937,10 +948,11 @@ runCli({
         "  move-xy  --name N --x N --y N [--css]        drag-xy --x N --y N --tox N --toy N\n" +
         "  scroll-xy --name N --x N --y N [--dy N] [--dx N]   wheel at a pixel\n" +
         "          (zoom-toward-point on maps; scroll an inner pane). dy>0 = down.\n" +
-        "  type-text --name N --text T [--submit]       type into the focused element\n" +
-        "          (plaintext only — secrets stay ref-based via fill-secret/fill-otp)\n" +
-        "  fill-text --name N --text T [--submit]       paste into the focused element\n" +
-        "          (one-shot insert, no per-key events — fast for long text)\n" +
+        "  type-text --name N --text T [--submit]       type into the FOCUSED element\n" +
+        "          (no --ref — use `type` for that; plaintext only, secrets stay\n" +
+        "          ref-based via fill-secret/fill-otp)\n" +
+        "  fill-text --name N --text T [--submit]       paste into the FOCUSED element\n" +
+        "          (no --ref — use `fill`; one-shot insert, no per-key events)\n" +
         "  probe-xy --name N --x N --y N                what element is at a pixel\n" +
         "          (tag/role/name/ref — vision→DOM bridge; read-only, ro-safe)\n" +
         "  zoom    --name N --region x0,y0,x1,y1 [--path P]   cropped closer view of\n" +
