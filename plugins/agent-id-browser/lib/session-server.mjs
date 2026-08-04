@@ -294,6 +294,22 @@ async function liveDpr(page, css) {
   return page.evaluate(() => window.devicePixelRatio || 1).catch(() => 1);
 }
 
+// The focus-typing actions (`type-text`/`fill-text`) type into whatever is
+// focused — they have no ref parameter. Passing one reads as targeting that
+// element, so accepting it silently sends the text wherever focus happened to
+// be and reports success: observed on an SAP careers form, where "Switzerland"
+// typed at a country combobox by ref never reached the filter and the widget
+// answered "There were no results". Name the ref-taking tool instead of
+// dropping the argument.
+export function refuseRef(action, p, alternative) {
+  if (p.ref === undefined || p.ref === null || p.ref === "") return;
+  throw new Error(
+    `${action} types into the FOCUSED element and takes no --ref (got "${p.ref}"). ` +
+      `Use \`${alternative}\` to drive an element by ref, or focus it first ` +
+      `(click/click-xy) and re-run ${action} without --ref.`,
+  );
+}
+
 // Convert an agent-supplied screenshot pixel to a viewport CSS point, rejecting
 // non-numeric coords with an action-specific message.
 function toXY(x, y, dpr, label) {
@@ -1124,6 +1140,7 @@ async function dispatch(state, msg, policy = null) {
       // first if replacing. Only the length leaves the session, never the text.
       // Cadence comes from humanTypeFocused — the same jittered per-key delays as
       // ref-based `type`; a fixed inter-key interval is itself a bot fingerprint.
+      refuseRef("type-text", p, "type --ref eN --text T");
       const text = String(p.text ?? "");
       await humanTypeFocused(page, text, { submit: !!p.submit });
       return { typed: text.length, submit: !!p.submit };
@@ -1137,6 +1154,7 @@ async function dispatch(state, msg, policy = null) {
       // autocomplete). Same contract otherwise: PLAINTEXT ONLY (secrets stay
       // ref-based via fill-secret/fill-otp), APPENDS at the caret (no clear),
       // and only the length leaves the session, never the text.
+      refuseRef("fill-text", p, "fill --fields '[{\"ref\":\"eN\",\"value\":\"V\"}]'");
       const text = String(p.text ?? "");
       await page.keyboard.insertText(text);
       if (p.submit) await page.keyboard.press("Enter");
