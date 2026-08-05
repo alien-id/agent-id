@@ -31,7 +31,7 @@ locked VM."
 MCP connectors are exactly how Cowork wires in tools. Instead of shipping bash-CLI
 plugins, ship an **MCP server** that Cowork adds as a **remote connector** over
 HTTPS. The server is a **thin adapter over the existing `agent-id-*` CLIs** — the
-same pattern Lethe already uses (shell out, return JSON) — so there is no
+same pattern the desktop agent runtime already uses (shell out, return JSON) — so there is no
 re-implementation of command logic.
 
 ```
@@ -45,7 +45,7 @@ Cowork VM ── HTTPS (Streamable-HTTP MCP, per-user bearer) ──▶  agent-i
 Running the server **hosted** (not in the VM) sidesteps every VM limitation — no
 hooks, no plugin env vars, no npm-in-VM, no Chrome-in-VM. The VM just opens one
 allowed HTTPS connection. The **vault-sealed browser runs server-side**, exactly
-as `lethe-hosted` already does, so the "agent never sees the credential" seal is
+as the hosted agent runtime already does, so the "agent never sees the credential" seal is
 preserved (a host-Chrome path would break it — secrets would flow through Cowork's
 own browser). Vault + identity state persist on the service, not the ephemeral VM.
 
@@ -54,14 +54,14 @@ own browser). Vault + identity state persist on the service, not the ephemeral V
 1. **`plugins/agent-id-mcp/`** (new, private) — an MCP server (`@modelcontextprotocol/sdk`).
    - Maps MCP tools → the existing CLIs via subprocess, returning their JSON.
    - Resolves each CLI by `AGENT_ID_{CORE,VAULT,BROWSER}_BIN` env or PATH (mirrors
-     lethe's `find_bin`).
+     the host runtime's binary lookup).
    - Two transports from one tool registry: **stdio** (local dev / in-VM option)
      and **Streamable HTTP** (hosted connector).
-   - Tool surface = the current lethe surface: `agent_id_status/sign/bind`,
+   - Tool surface = the host runtime's current surface: `agent_id_status/sign/bind`,
      `vault_list/add/remove/set_totp`, `browser_open/act/close/login/auto_login/fill_secret/fill_otp`.
-2. **Hosting** — reuse the `lethe-hosted` runtime image (Chrome + CLIs baked, the
+2. **Hosting** — reuse the hosted runtime image (Chrome + CLIs baked, the
    `AGENT_ID_BROWSER_NO_SANDBOX`/`--shm-size` work already done). Expose the MCP
-   server on an HTTPS route with per-user auth (lethe-hosted already issues
+   server on an HTTPS route with per-user auth (the hosted runtime already issues
    per-user tokens). Per-user state dir → per-user vault/identity.
 3. **Cowork plugin** — a thin bundle (a `.claude-plugin` + a connector manifest
    declaring the MCP server + optional `/`-skills that call it) so it appears in
@@ -77,16 +77,16 @@ own browser). Vault + identity state persist on the service, not the ephemeral V
   already runs server-side; the MCP server just relays `open/act/close/fill_*`).
 - [ ] **3. HTTP transport + auth** — Streamable-HTTP with a per-user bearer; map
   the bearer → per-user `AGENT_ID_STATE_DIR`.
-- [ ] **4. Hosting** — add the MCP route to lethe-hosted (or a sibling service);
+- [ ] **4. Hosting** — add the MCP route to the hosted runtime (or a sibling service);
   bake `agent-id-mcp` into the runtime image; nginx route + TLS.
 - [ ] **5. Cowork plugin** — connector manifest + skills; validate install via the
   Cowork setup flow.
 
 ### Open decisions
 
-- **Where hosted**: fold into the lethe-hosted control plane vs a standalone
+- **Where hosted**: fold into the hosted runtime's control plane vs a standalone
   `agent-id-mcp` service. Leaning fold-in (reuses per-user containers + Chrome).
-- **Auth**: reuse lethe-hosted per-user tokens vs a dedicated OAuth for the
+- **Auth**: reuse the hosted runtime's per-user tokens vs a dedicated OAuth for the
   connector. Cowork connectors support both bearer and OAuth.
 - **Multi-tenant browser**: one sealed-browser daemon per user (as today) keyed by
   the per-user state dir.
