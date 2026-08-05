@@ -413,6 +413,14 @@ export async function startStreamServer(state, { log = () => {}, h264Config = nu
       });
       annexB = enc;
       encoderSinks.add(enc);
+      // Prime a fresh encoder on a static page: the screencast is damage-
+      // driven, so without this an h264 viewer joining a quiet page decodes
+      // nothing (black) until the next repaint. Arming the refinement pass
+      // feeds one captureScreenshot within ~250ms.
+      if (lastMetadata) {
+        refined = false;
+        lastFrameAt = 0;
+      }
     } catch (err) {
       log(`stream: h264 unavailable (${err.message || err}) — falling back to jpeg`);
       for (const client of clients) {
@@ -497,12 +505,29 @@ export async function startStreamServer(state, { log = () => {}, h264Config = nu
     if (Date.now() - lastFrameAt < REFINE_AFTER_MS) return;
     refined = true;
     try {
+      // clip.scale=1 pins the output to CSS-viewport pixels so it matches the
+      // screencast frame size exactly — the encoders choke on dimension flips.
+      const vp = state.current?.viewportSize?.() ?? null;
       const shot = await session.send("Page.captureScreenshot", {
         format: "jpeg",
         quality: REFINE_QUALITY,
+        ...(vp ? { clip: { x: 0, y: 0, width: vp.width, height: vp.height, scale: 1 } } : {}),
       });
       if (closed || suspended > 0 || session !== cdp) return;
       deliverFrame({ data: shot.data, metadata: lastMetadata, refinement: true });
+      // The encoder gets refinements too — on a damage-driven screencast this
+      // is what keeps an h264 viewer's picture alive across idle stretches.
+      // Written TWICE: raw MJPEG only delimits frame N when frame N+1's SOI
+      // arrives, so a single write would sit in ffmpeg's parser until the
+      // next repaint. Copy #1 flushes whatever was stuck AND gets encoded
+      // (flushed by copy #2); the stuck copy #2 is identical, so no loss.
+      if (encoderSinks.size > 0) {
+        const jpeg = Buffer.from(shot.data, "base64");
+        for (const sink of encoderSinks) {
+          sink.write(jpeg);
+          sink.write(jpeg);
+        }
+      }
     } catch { /* navigating/closed — the next screencast frame rearms */ }
   }, REFINE_POLL_MS);
   refine.unref?.();

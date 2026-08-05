@@ -28,7 +28,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 
-function makeFakeSession() {
+function makeFakeSession(screenshotData = REFINE_B64) {
   const handlers = new Map();
   const session = {
     sent: [],
@@ -36,7 +36,7 @@ function makeFakeSession() {
     on: (event, fn) => handlers.set(event, fn),
     async send(method, params) {
       session.sent.push({ method, params });
-      if (method === "Page.captureScreenshot") return { data: REFINE_B64 };
+      if (method === "Page.captureScreenshot") return { data: screenshotData };
       return {};
     },
     async detach() { session.detached = true; },
@@ -47,8 +47,8 @@ function makeFakeSession() {
   return session;
 }
 
-function makeFakeState() {
-  let session = makeFakeSession();
+function makeFakeState({ screenshot } = {}) {
+  let session = makeFakeSession(screenshot);
   const page = {
     isClosed: () => false,
     viewportSize: () => ({ width: 640, height: 480 }),
@@ -62,7 +62,7 @@ function makeFakeState() {
     ctx: {
       // resume() detaches and re-attaches; hand out a fresh fake each time
       newCDPSession: async () => {
-        if (session.detached) session = makeFakeSession();
+        if (session.detached) session = makeFakeSession(screenshot);
         return session;
       },
     },
@@ -155,8 +155,8 @@ async function connectStream(port, token, params = "") {
   };
 }
 
-async function startServer(opts = {}) {
-  const state = makeFakeState();
+async function startServer(opts = {}, stateOpts = {}) {
+  const state = makeFakeState(stateOpts);
   const server = await startStreamServer(state, { log: () => {}, ...opts });
   // Let the async startScreencast settle once a client connects
   return { state, server };
@@ -450,6 +450,43 @@ test("codec=h264 end-to-end: Annex-B chunks with AUD/SPS/IDR arrive", async (t) 
   assert.ok(nalTypes.has(7), "SPS present");
   assert.ok(nalTypes.has(8), "PPS present");
   assert.ok(nalTypes.has(5), "IDR slice present");
+  c.close();
+  server.close();
+  fsSync.rmSync(dir, { recursive: true, force: true });
+});
+
+test("codec=h264 on a STATIC page: refinement primes the encoder", async (t) => {
+  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { execFileSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fsSync = await import("node:fs");
+  const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-static-"));
+  execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
+    "-hide_banner", "-loglevel", "error",
+    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=1",
+    "-frames:v", "1", "-q:v", "5", path.join(dir, "shot.jpg"),
+  ]);
+  const shot = fsSync.readFileSync(path.join(dir, "shot.jpg")).toString("base64");
+
+  // The screenshot fake returns a REAL jpeg — it is what feeds the encoder.
+  const { state, server } = await startServer({}, { screenshot: shot });
+  const c = await connectStream(server.port, server.token, "&codec=h264");
+  await c.nextJson();
+  await sleep(150); // encoder spawn settles
+  // ONE frame (the join burst), then total screencast silence — the page is
+  // static. The refinement pass must keep the h264 feed alive regardless.
+  state.session.emitFrame(shot);
+  let h264Bytes = 0;
+  const deadline = Date.now() + 6000;
+  while (Date.now() < deadline && h264Bytes < 500) {
+    try {
+      const { header, payload } = await c.nextBinary(2500);
+      if (header.codec === "h264") h264Bytes += payload.length;
+    } catch { break; }
+  }
+  assert.ok(h264Bytes >= 500, `h264 output on a static page (got ${h264Bytes} bytes)`);
   c.close();
   server.close();
   fsSync.rmSync(dir, { recursive: true, force: true });

@@ -172,6 +172,10 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
     ffmpeg,
     [
       "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer",
+      // Without these, find_stream_info sits on the default 5MB probe window
+      // and the first frames never reach the encoder (measured: 3 frames in,
+      // 0 bytes out). Dimensions come from the first JPEG's SOF either way.
+      "-analyzeduration", "0", "-probesize", "32",
       "-f", "mjpeg", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
       "-an", ...codecArgs(encoder), ...output,
     ],
