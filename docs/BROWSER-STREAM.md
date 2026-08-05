@@ -42,7 +42,7 @@ both browser stacks.
 |---|---|---|
 | `token` | hex | required, per-session gate |
 | `binary` | `1` | `frame` messages become WS **binary** messages (layout below); everything else stays JSON text |
-| `codec` | `jpeg` (default) \| `h264` \| `auto` | `h264`/`auto` imply `binary=1`. `auto` resolves at join time: h264 on a provisioned host (see *Provisioning*), else jpeg |
+| `codec` | `jpeg` \| `h264` \| `auto` | `h264`/`auto` imply `binary=1`. `auto` resolves at join time: h264 on a provisioned host (see *Provisioning*), else jpeg. Omitting the param means `jpeg` — that is a compatibility floor, not a recommendation: a client that never asked can't be assumed to decode video. **New clients should always send `codec=auto`** (the bundled viewer does), which is how h264 becomes the effective default wherever the owner ran `install-codecs` |
 | `pacing` | `push` (default) \| `ack` | `ack`: at most one frame in flight; the client releases the next with an `ack` message |
 | `maxFps` | 0–120 | per-client delivery cap (0 = uncapped) |
 
