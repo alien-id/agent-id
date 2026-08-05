@@ -1,0 +1,290 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>alien stream viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; }
+  #bar { display: flex; gap: 8px; align-items: center; padding: 6px 10px; background: #1c1c1c; flex-wrap: wrap; }
+  #hud { font-variant-numeric: tabular-nums; color: #9c9; white-space: pre; }
+  #warn { color: #fa5; }
+  #stage { position: relative; }
+  canvas, video { display: block; max-width: 100vw; max-height: calc(100vh - 40px); outline: none; }
+  select, button { background: #2a2a2a; color: #ddd; border: 1px solid #444; padding: 3px 6px; }
+</style>
+<div id="bar">
+  <select id="mode">
+    <option value="legacy">legacy (json+base64)</option>
+    <option value="binary" selected>binary jpeg</option>
+    <option value="binary-ack">binary jpeg + ack pacing</option>
+    <option value="h264">h264 (WebCodecs)</option>
+    <option value="h264-mse">h264 (MSE/jmuxer, CDN)</option>
+    <option value="webrtc">webrtc (experimental)</option>
+  </select>
+  <button id="reconnect">reconnect</button>
+  <span id="hud"></span>
+  <span id="warn"></span>
+</div>
+<div id="stage">
+  <canvas id="cv" tabindex="0"></canvas>
+  <video id="vid" autoplay playsinline muted tabindex="0" style="display:none"></video>
+</div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const token = q.get("token");
+  const modeSel = document.getElementById("mode");
+  const hud = document.getElementById("hud");
+  const warn = document.getElementById("warn");
+  const cv = document.getElementById("cv");
+  const ctx2d = cv.getContext("2d");
+  const vid = document.getElementById("vid");
+  if (q.get("mode")) modeSel.value = q.get("mode");
+
+  let ws = null, pc = null, decoder = null, jmuxer = null;
+  let meta = null; // last frame metadata — input coordinate mapping
+  const stats = { bytes: 0, frames: 0, lat: [], t0: performance.now() };
+
+  function hudTick() {
+    const dt = (performance.now() - stats.t0) / 1000 || 1;
+    const lat = stats.lat.length
+      ? ` lat ${Math.round(stats.lat.reduce((a, b) => a + b) / stats.lat.length)}ms`
+      : "";
+    hud.textContent =
+      `${(stats.bytes / dt / 1024).toFixed(0)} kB/s  ${(stats.frames / dt).toFixed(1)} fps${lat}`;
+    if (stats.lat.length > 120) stats.lat.splice(0, 60);
+    if (dt > 5) { stats.bytes = 0; stats.frames = 0; stats.t0 = performance.now(); }
+  }
+  setInterval(hudTick, 500);
+
+  function frameLatency(m) {
+    if (!m || typeof m.timestamp !== "number") return;
+    const ts = m.timestamp > 1e12 ? m.timestamp : m.timestamp * 1000; // CDP: epoch s
+    const d = Date.now() - ts;
+    if (d >= 0 && d < 30000) stats.lat.push(d);
+  }
+
+  async function drawJpeg(bytesOrB64, m) {
+    meta = m || meta;
+    stats.frames++;
+    frameLatency(m);
+    const blob =
+      typeof bytesOrB64 === "string"
+        ? await (await fetch("data:image/jpeg;base64," + bytesOrB64)).blob()
+        : new Blob([bytesOrB64], { type: "image/jpeg" });
+    const img = await createImageBitmap(blob);
+    if (cv.width !== img.width || cv.height !== img.height) {
+      cv.width = img.width;
+      cv.height = img.height;
+    }
+    ctx2d.drawImage(img, 0, 0);
+    img.close();
+  }
+
+  // ── h264 helpers ──────────────────────────────────────────────────────────
+  // The server inserts AUD NALs (h264_metadata=aud=insert): one access unit
+  // per AUD-to-AUD span. Buffer the byte stream, split on AUDs, feed complete
+  // AUs to WebCodecs.
+  let h264buf = new Uint8Array(0);
+  function* splitAUs(chunk) {
+    const merged = new Uint8Array(h264buf.length + chunk.length);
+    merged.set(h264buf); merged.set(chunk, h264buf.length);
+    let auds = [];
+    for (let i = 0; i + 4 < merged.length; i++) {
+      if (merged[i] === 0 && merged[i + 1] === 0 &&
+          ((merged[i + 2] === 1 && (merged[i + 3] & 0x1f) === 9) ||
+           (merged[i + 2] === 0 && merged[i + 3] === 1 && (merged[i + 4] & 0x1f) === 9))) {
+        auds.push(i);
+        i += 4;
+      }
+    }
+    for (let k = 0; k + 1 < auds.length; k++) yield merged.subarray(auds[k], auds[k + 1]);
+    h264buf = auds.length ? merged.subarray(auds[auds.length - 1]) : merged;
+  }
+  const hasIdr = (au) => {
+    for (let i = 0; i + 4 < au.length; i++)
+      if (au[i] === 0 && au[i + 1] === 0 &&
+          ((au[i + 2] === 1 && (au[i + 3] & 0x1f) === 5) ||
+           (au[i + 2] === 0 && au[i + 3] === 1 && (au[i + 4] & 0x1f) === 5))) return true;
+    return false;
+  };
+
+  async function ensureDecoder() {
+    if (decoder) return true;
+    if (!("VideoDecoder" in window)) return false;
+    // Probe with a real configure — isConfigSupported lies on some Firefox
+    // builds; a configure error surfaces via the error callback below.
+    decoder = new VideoDecoder({
+      output: (f) => {
+        stats.frames++;
+        if (cv.width !== f.displayWidth || cv.height !== f.displayHeight) {
+          cv.width = f.displayWidth;
+          cv.height = f.displayHeight;
+        }
+        ctx2d.drawImage(f, 0, 0);
+        f.close();
+      },
+      error: (e) => { warn.textContent = "WebCodecs failed: " + e.message + " — try h264-mse"; },
+    });
+    // No description → Annex B mode, SPS/PPS inline.
+    decoder.configure({ codec: "avc1.42E01F", optimizeForLatency: true });
+    return true;
+  }
+
+  let sawKey = false;
+  async function feedH264(bytes) {
+    const m = modeSel.value;
+    if (m === "h264-mse") {
+      jmuxer?.feed({ video: bytes });
+      stats.frames++; // approximation: jmuxer counts internally
+      return;
+    }
+    if (!(await ensureDecoder())) {
+      warn.textContent = "No WebCodecs in this browser — switch to h264-mse or binary";
+      return;
+    }
+    for (const au of splitAUs(bytes)) {
+      const key = hasIdr(au);
+      if (!sawKey && !key) continue; // decoder must start on an IDR
+      sawKey = true;
+      decoder.decode(new EncodedVideoChunk({
+        type: key ? "key" : "delta",
+        timestamp: performance.now() * 1000,
+        data: au,
+      }));
+    }
+  }
+
+  async function startMse() {
+    if (!window.JMuxer) {
+      await new Promise((res, rej) => {
+        const s = document.createElement("script");
+        s.src = "https://cdn.jsdelivr.net/npm/jmuxer@2.0.5/dist/jmuxer.min.js";
+        s.onload = res; s.onerror = () => rej(new Error("jmuxer CDN unreachable"));
+        document.head.appendChild(s);
+      });
+    }
+    jmuxer = new JMuxer({ node: vid, mode: "video", flushingTime: 50, fps: 30 });
+  }
+
+  // ── WebRTC ────────────────────────────────────────────────────────────────
+  async function startWebRtc() {
+    pc = new RTCPeerConnection();
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.ontrack = (e) => { vid.srcObject = e.streams[0] ?? new MediaStream([e.track]); };
+    pc.onicecandidate = (e) => {
+      if (e.candidate) ws.send(JSON.stringify({ type: "webrtc_ice", candidate: e.candidate.toJSON() }));
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({ type: "webrtc_offer", sdp: offer.sdp }));
+    // Traffic HUD via getStats
+    const statTimer = setInterval(async () => {
+      if (!pc) return clearInterval(statTimer);
+      for (const r of (await pc.getStats()).values()) {
+        if (r.type === "inbound-rtp" && r.kind === "video") {
+          stats.bytes = r.bytesReceived; stats.frames = r.framesDecoded;
+          stats.t0 = performance.now() - 1000 * ((r.timestamp - (startWebRtc.epoch ??= r.timestamp)) / 1000 + 1);
+        }
+      }
+    }, 1000);
+  }
+
+  // ── connection ────────────────────────────────────────────────────────────
+  function wsUrl() {
+    const extra = {
+      legacy: "",
+      binary: "&binary=1",
+      "binary-ack": "&binary=1&pacing=ack",
+      h264: "&codec=h264",
+      "h264-mse": "&codec=h264",
+      webrtc: "",
+    }[modeSel.value];
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    return `${proto}://${location.host}/?token=${token}${extra}`;
+  }
+
+  async function connect() {
+    ws?.close(); pc?.close(); decoder?.close?.(); jmuxer?.destroy?.();
+    ws = null; pc = null; decoder = null; jmuxer = null; meta = null;
+    sawKey = false; h264buf = new Uint8Array(0);
+    warn.textContent = "";
+    Object.assign(stats, { bytes: 0, frames: 0, lat: [], t0: performance.now() });
+    const useVideo = ["webrtc", "h264-mse"].includes(modeSel.value);
+    vid.style.display = useVideo ? "block" : "none";
+    cv.style.display = useVideo ? "none" : "block";
+    if (modeSel.value === "h264-mse") {
+      try { await startMse(); } catch (e) { warn.textContent = e.message; return; }
+    }
+
+    ws = new WebSocket(wsUrl());
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => { if (modeSel.value === "webrtc") startWebRtc(); };
+    ws.onclose = () => { warn.textContent += " [disconnected]"; };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        stats.bytes += ev.data.length;
+        const m = JSON.parse(ev.data);
+        if (m.type === "frame") {
+          drawJpeg(m.data, m.metadata);
+          if (m.seq != null) ws.send(JSON.stringify({ type: "ack", seq: m.seq }));
+        } else if (m.type === "status") {
+          if (m.suspended) warn.textContent = "feed suspended (credential fill)";
+          else if (warn.textContent.startsWith("feed suspended")) warn.textContent = "";
+        } else if (m.type === "webrtc_answer") {
+          pc?.setRemoteDescription({ type: "answer", sdp: m.sdp });
+        } else if (m.type === "webrtc_ice") {
+          pc?.addIceCandidate(m.candidate).catch(() => {});
+        } else if (m.type === "webrtc_error") {
+          warn.textContent = "webrtc: " + m.error;
+        }
+        return;
+      }
+      stats.bytes += ev.data.byteLength;
+      const view = new DataView(ev.data);
+      const hlen = view.getUint32(0, true);
+      const header = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 4, hlen)));
+      const payload = new Uint8Array(ev.data, 4 + hlen);
+      if (header.metadata) meta = header.metadata;
+      if (header.codec === "h264") feedH264(payload);
+      else {
+        drawJpeg(payload, header.metadata);
+        if (header.seq != null) ws.send(JSON.stringify({ type: "ack", seq: header.seq }));
+      }
+    };
+  }
+
+  // ── input forwarding ──────────────────────────────────────────────────────
+  function coords(e, el) {
+    const r = el.getBoundingClientRect();
+    const w = meta?.deviceWidth ?? el.width ?? r.width;
+    const h = meta?.deviceHeight ?? el.height ?? r.height;
+    return { x: ((e.clientX - r.left) / r.width) * w, y: ((e.clientY - r.top) / r.height) * h };
+  }
+  function sendInput(obj) {
+    if (ws?.readyState === 1) ws.send(JSON.stringify(obj));
+  }
+  for (const el of [cv, vid]) {
+    el.addEventListener("mousemove", (e) =>
+      sendInput({ type: "input_mouse", eventType: "mouseMoved", ...coords(e, el) }));
+    el.addEventListener("mousedown", (e) =>
+      sendInput({ type: "input_mouse", eventType: "mousePressed", button: ["left", "middle", "right"][e.button] ?? "left", ...coords(e, el) }));
+    el.addEventListener("mouseup", (e) =>
+      sendInput({ type: "input_mouse", eventType: "mouseReleased", button: ["left", "middle", "right"][e.button] ?? "left", ...coords(e, el) }));
+    el.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      sendInput({ type: "input_mouse", eventType: "mouseWheel", deltaX: e.deltaX, deltaY: e.deltaY, ...coords(e, el) });
+    }, { passive: false });
+    el.addEventListener("keydown", (e) => {
+      e.preventDefault();
+      sendInput({ type: "input_keyboard", eventType: "keyDown", key: e.key });
+    });
+    el.addEventListener("keyup", (e) =>
+      sendInput({ type: "input_keyboard", eventType: "keyUp", key: e.key }));
+    el.addEventListener("click", () => el.focus());
+  }
+
+  modeSel.onchange = connect;
+  document.getElementById("reconnect").onclick = connect;
+  if (!token) warn.textContent = "missing ?token=";
+  else connect();
+</script>
