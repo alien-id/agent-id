@@ -1,7 +1,7 @@
 # Browser viewport stream
 
-Every open `agent-id-browser` session runs a live viewport stream — the "watch
-Lethe browse" / pair-browsing feed. A viewer (the bundled test page, the host
+Every open `agent-id-browser` session runs a live viewport stream — the
+pair-browsing feed. A viewer (the bundled test page, the host
 runtime's relay to the owner's client, or any agent-browser-compatible client)
 connects over WebSocket, sees what the sealed browser sees, and can optionally
 drive it with mouse/keyboard input.

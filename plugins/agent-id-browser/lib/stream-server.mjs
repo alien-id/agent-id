@@ -1,4 +1,4 @@
-// Live viewport stream for an open session — the "watch Lethe browse" feed.
+// Live viewport stream for an open session — the pair-browsing feed.
 //
 // A minimal WebSocket server (hand-rolled, no dependency — same ethos as the
 // line-JSON TCP protocol in session-server.mjs) on 127.0.0.1, gated by a

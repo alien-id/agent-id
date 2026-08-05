@@ -1522,7 +1522,7 @@ export async function runSession({
   for (const pg of ctx.pages()) attachPage(state, pg);
   ctx.on("page", (pg) => attachPage(state, pg));
 
-  // Live viewport stream ("watch Lethe browse" / pair browsing). Its port +
+  // Live viewport stream (pair browsing). Its port +
   // token ride in the session file so the host runtime can relay it to the
   // owner's client; the feed and viewer input are suspended while fill-secret
   // / fill-otp inject credential values (see those dispatch cases).
