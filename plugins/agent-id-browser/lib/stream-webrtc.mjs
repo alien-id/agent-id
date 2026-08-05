@@ -22,7 +22,7 @@ import { createH264Encoder } from "./stream-encoder.mjs";
 const H264_FMTP =
   "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 
-export async function createWebRtcStreamer({ addSink, removeSink, send, log = () => {} }) {
+export async function createWebRtcStreamer({ addSink, removeSink, send, log = () => {}, ffmpegPath = null }) {
   const werift = await import("werift");
   const peers = new Map(); // client → {pc, udp, enc}
 
@@ -70,6 +70,7 @@ export async function createWebRtcStreamer({ addSink, removeSink, send, log = ()
     peers.set(client, peer);
     peer.enc = await createH264Encoder({
       log,
+      ffmpegPath,
       rtp: { port: udp.address().port, payloadType: 96 },
       onExit: () => {
         if (peers.get(client) !== peer || !peer.enc) return;

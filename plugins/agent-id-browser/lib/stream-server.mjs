@@ -167,11 +167,14 @@ export function makeFrameParser(onFrame) {
 // ── Per-client negotiation ───────────────────────────────────────────────────
 
 export function parseStreamParams(url) {
-  const codec = url.searchParams.get("codec") === "h264" ? "h264" : "jpeg";
+  const raw = url.searchParams.get("codec");
+  // "auto" = h264 when the host provisioned codecs (install-codecs), else
+  // jpeg — resolved at join time. v1 clients that send nothing get jpeg.
+  const codec = raw === "h264" || raw === "auto" ? raw : "jpeg";
   const rawFps = Number(url.searchParams.get("maxFps"));
   return {
-    // h264 payloads are raw bytes — the codec choice implies binary framing.
-    binary: url.searchParams.get("binary") === "1" || codec === "h264",
+    // h264/auto payloads are raw bytes — the codec choice implies binary framing.
+    binary: url.searchParams.get("binary") === "1" || codec !== "jpeg",
     codec,
     pacing: url.searchParams.get("pacing") === "ack" ? "ack" : "push",
     maxFps: Number.isFinite(rawFps) ? Math.min(120, Math.max(0, Math.floor(rawFps))) : 0,
@@ -236,7 +239,7 @@ function mutatesPage(msg) {
  * so tab-new / tab-switch / tab-close all retarget without hooks).
  * Returns { port, token, suspend, resume, close }.
  */
-export async function startStreamServer(state, { log = () => {} } = {}) {
+export async function startStreamServer(state, { log = () => {}, h264Config = null } = {}) {
   const token = crypto.randomBytes(24).toString("hex");
   const clients = new Set();
   let cdp = null; // active CDPSession for the screencast
@@ -278,6 +281,7 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
       suspended: suspended > 0,
       binary: client.binary,
       codec: client.codec,
+      h264Available: Boolean(h264Config),
       pacing: client.pacing,
       maxFps: client.maxFps,
       ...(vp ? { viewportWidth: vp.width, viewportHeight: vp.height } : {}),
@@ -395,6 +399,7 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
       const enc = await createH264Encoder({
         onChunk: sendH264Chunk,
         log,
+        ffmpegPath: h264Config?.ffmpegPath ?? null,
         onExit: () => {
           if (annexB !== enc) return; // already replaced/closed deliberately
           encoderSinks.delete(enc);
@@ -511,6 +516,7 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
           removeSink: (s) => encoderSinks.delete(s),
           send: (c, obj) => sendText(c, obj),
           log,
+          ffmpegPath: h264Config?.ffmpegPath ?? null,
         });
       }
       await webrtc.signal(client, msg);
@@ -561,6 +567,9 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
       timer: null,
       congested: false,
     };
+    // auto resolves against provisioning: h264 only on an install-codecs'd
+    // host. The join status tells the viewer which one it got.
+    if (client.codec === "auto") client.codec = h264Config ? "h264" : "jpeg";
     clients.add(client);
     sendText(client, statusFor(client));
     if (client.codec === "h264") void ensureAnnexBEncoder();

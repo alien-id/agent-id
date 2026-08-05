@@ -155,9 +155,9 @@ async function connectStream(port, token, params = "") {
   };
 }
 
-async function startServer() {
+async function startServer(opts = {}) {
   const state = makeFakeState();
-  const server = await startStreamServer(state, { log: () => {} });
+  const server = await startStreamServer(state, { log: () => {}, ...opts });
   // Let the async startScreencast settle once a client connects
   return { state, server };
 }
@@ -179,6 +179,13 @@ test("parseStreamParams: codec=h264 implies binary framing", () => {
   const p = parseStreamParams(new URL("http://x/?codec=h264"));
   assert.equal(p.binary, true);
   assert.equal(p.codec, "h264");
+});
+
+test("parseStreamParams: codec=auto is kept for join-time resolution, binary", () => {
+  const p = parseStreamParams(new URL("http://x/?codec=auto"));
+  assert.equal(p.binary, true);
+  assert.equal(p.codec, "auto");
+  assert.equal(parseStreamParams(new URL("http://x/?codec=vp9")).codec, "jpeg");
 });
 
 test("binary frame message roundtrips", () => {
@@ -347,6 +354,53 @@ test("viewer input still applies and mutating input invalidates refs", async () 
   assert.equal(state.invalidated.length, 1);
   c.close();
   server.close();
+});
+
+test("codec=auto on an unprovisioned host resolves to jpeg", async () => {
+  const { state, server } = await startServer(); // no h264Config
+  const c = await connectStream(server.port, server.token, "&codec=auto");
+  const st = await c.nextJson();
+  assert.equal(st.codec, "jpeg");
+  assert.equal(st.h264Available, false);
+  await sleep(20);
+  state.session.emitFrame(FRAME_B64);
+  const { header } = await c.nextBinary(); // binary framing still applies
+  assert.equal(header.codec, "jpeg");
+  c.close();
+  server.close();
+});
+
+test("codec=auto on a provisioned host resolves to h264", async (t) => {
+  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  const encoder = await detectH264Encoder();
+  if (!encoder) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { server } = await startServer({ h264Config: { ffmpegPath: "ffmpeg", encoder } });
+  const c = await connectStream(server.port, server.token, "&codec=auto");
+  const st = await c.nextJson();
+  assert.equal(st.codec, "h264");
+  assert.equal(st.h264Available, true);
+  c.close();
+  server.close();
+});
+
+test("install-codecs records a probed system ffmpeg", async (t) => {
+  const { detectH264Encoder, installCodecs, loadCodecConfig } =
+    await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fsSync = await import("node:fs");
+  const stateDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "codecs-"));
+  const cfg = await installCodecs({ stateDir, allowDownload: false });
+  assert.equal(cfg.source, "probed");
+  assert.ok(cfg.encoder);
+  const loaded = await loadCodecConfig(stateDir);
+  assert.equal(loaded.ffmpegPath, cfg.ffmpegPath);
+  // A bogus recorded binary must NOT validate (stale config self-heals)
+  fsSync.writeFileSync(path.join(stateDir, "browser-codecs.json"),
+    JSON.stringify({ ffmpegPath: "/nonexistent/ffmpeg", encoder: "libx264" }));
+  assert.equal(await loadCodecConfig(stateDir), null);
+  fsSync.rmSync(stateDir, { recursive: true, force: true });
 });
 
 test("codec=h264 end-to-end: Annex-B chunks with AUD/SPS/IDR arrive", async (t) => {

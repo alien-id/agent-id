@@ -30,6 +30,7 @@ import crypto from "node:crypto";
 import { launchContext } from "./launch.mjs";
 import { sealProfile } from "./profile-store.mjs";
 import { startStreamServer } from "./stream-server.mjs";
+import { loadCodecConfig } from "./stream-encoder.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
 import { SECRET_FIELDS, hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { resolveOtp } from "./auto-login.mjs";
@@ -1527,6 +1528,9 @@ export async function runSession({
   // / fill-otp inject credential values (see those dispatch cases).
   const stream = await startStreamServer(state, {
     log: (m) => process.stderr.write(`${m}\n`),
+    // h264 becomes the default for codec=auto viewers ONLY on a host the
+    // owner provisioned via `agent-id-browser install-codecs`.
+    h264Config: await loadCodecConfig(stateDir),
   });
   state.stream = stream;
 

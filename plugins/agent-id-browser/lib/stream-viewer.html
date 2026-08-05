@@ -14,8 +14,9 @@
 </style>
 <div id="bar">
   <select id="mode">
+    <option value="auto" selected>auto (h264 if provisioned)</option>
     <option value="legacy">legacy (json+base64)</option>
-    <option value="binary" selected>binary jpeg</option>
+    <option value="binary">binary jpeg</option>
     <option value="binary-ack">binary jpeg + ack pacing</option>
     <option value="h264">h264 (WebCodecs)</option>
     <option value="h264-mse">h264 (MSE/jmuxer, CDN)</option>
@@ -123,7 +124,7 @@
         ctx2d.drawImage(f, 0, 0);
         f.close();
       },
-      error: (e) => { warn.textContent = "WebCodecs failed: " + e.message + " — try h264-mse"; },
+      error: (e) => { fallback("h264-mse", "WebCodecs failed: " + e.message); },
     });
     // No description → Annex B mode, SPS/PPS inline.
     decoder.configure({ codec: "avc1.42E01F", optimizeForLatency: true });
@@ -131,15 +132,30 @@
   }
 
   let sawKey = false;
+  // Best-effort decode chain: auto/h264 (WebCodecs) → h264-mse → binary jpeg.
+  // A programmatic modeSel change does not fire onchange, so fallbacks don't
+  // reset the counter — only a manual pick or the reconnect button does.
+  let fallbacks = 0;
+  function fallback(mode, why) {
+    if (++fallbacks > 2) { warn.textContent = why + " — switch modes manually"; return; }
+    warn.textContent = why + " — falling back to " + mode;
+    modeSel.value = mode;
+    connect();
+  }
+
   async function feedH264(bytes) {
     const m = modeSel.value;
     if (m === "h264-mse") {
-      jmuxer?.feed({ video: bytes });
-      stats.frames++; // approximation: jmuxer counts internally
+      // jmuxer does NOT reassemble NAL units split across feed() calls —
+      // always hand it complete access units.
+      for (const au of splitAUs(bytes)) {
+        jmuxer?.feed({ video: au });
+        stats.frames++;
+      }
       return;
     }
     if (!(await ensureDecoder())) {
-      warn.textContent = "No WebCodecs in this browser — switch to h264-mse or binary";
+      fallback("h264-mse", "No WebCodecs in this browser");
       return;
     }
     for (const au of splitAUs(bytes)) {
@@ -192,6 +208,7 @@
   // ── connection ────────────────────────────────────────────────────────────
   function wsUrl() {
     const extra = {
+      auto: "&codec=auto",
       legacy: "",
       binary: "&binary=1",
       "binary-ack": "&binary=1&pacing=ack",
@@ -213,7 +230,7 @@
     vid.style.display = useVideo ? "block" : "none";
     cv.style.display = useVideo ? "none" : "block";
     if (modeSel.value === "h264-mse") {
-      try { await startMse(); } catch (e) { warn.textContent = e.message; return; }
+      try { await startMse(); } catch (e) { fallback("binary", e.message); return; }
     }
 
     ws = new WebSocket(wsUrl());
@@ -283,8 +300,8 @@
     el.addEventListener("click", () => el.focus());
   }
 
-  modeSel.onchange = connect;
-  document.getElementById("reconnect").onclick = connect;
+  modeSel.onchange = () => { fallbacks = 0; connect(); };
+  document.getElementById("reconnect").onclick = () => { fallbacks = 0; connect(); };
   if (!token) warn.textContent = "missing ?token=";
   else connect();
 </script>

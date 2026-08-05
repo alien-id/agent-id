@@ -17,16 +17,89 @@
 // Dropping INPUT frames is safe (the encoder just sees a lower fps) — it is
 // the output that must never gap mid-GOP.
 
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+
+const execFileP = promisify(execFile);
 
 const FFMPEG = () => process.env.AGENT_ID_FFMPEG || "ffmpeg";
 const GOP = 30;
 
+// ── codec provisioning ───────────────────────────────────────────────────────
+// H.264 is the DEFAULT stream codec only after the owner explicitly
+// provisioned it (`agent-id-browser install-codecs`) — the record below is
+// what flips `codec=auto` clients from jpeg to h264. An un-provisioned host
+// never spawns ffmpeg implicitly; explicit `?codec=h264` still probes PATH.
+
+export const codecConfigPath = (stateDir) => path.join(stateDir, "browser-codecs.json");
+
+/** The provisioned codec record, re-verified against the binary, or null. */
+export async function loadCodecConfig(stateDir) {
+  try {
+    const cfg = JSON.parse(await fsp.readFile(codecConfigPath(stateDir), "utf8"));
+    if (cfg?.ffmpegPath && (await detectH264Encoder(cfg.ffmpegPath))) return cfg;
+  } catch { /* absent or stale */ }
+  return null;
+}
+
+/**
+ * Probe for a usable ffmpeg (env override → PATH → previously downloaded),
+ * downloading a static build into <stateDir>/tools as a last resort (Linux
+ * only — BtbN's gpl build, the ffmpeg-project-recommended static binaries,
+ * which include libx264). Records the result in browser-codecs.json.
+ */
+export async function installCodecs({ stateDir, allowDownload = true, log = () => {} }) {
+  const candidates = [
+    process.env.AGENT_ID_FFMPEG,
+    "ffmpeg",
+    path.join(stateDir, "tools", "ffmpeg"),
+  ].filter(Boolean);
+  for (const cand of candidates) {
+    const encoder = await detectH264Encoder(cand);
+    if (encoder) return record(stateDir, cand, encoder, "probed");
+  }
+  if (!allowDownload) {
+    throw new Error("no usable ffmpeg found (install one: dnf/apt/brew install ffmpeg) — or rerun without --no-download");
+  }
+  if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)) {
+    throw new Error(`no usable ffmpeg found and static download is Linux-only — install ffmpeg with your package manager (${process.platform}/${process.arch})`);
+  }
+  const flavor = process.arch === "arm64" ? "linuxarm64" : "linux64";
+  const url = `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${flavor}-gpl.tar.xz`;
+  log(`downloading static ffmpeg: ${url}`);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`ffmpeg download failed: HTTP ${res.status}`);
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "aid-ffmpeg-"));
+  const archive = path.join(tmp, "ffmpeg.tar.xz");
+  await fsp.writeFile(archive, Buffer.from(await res.arrayBuffer()));
+  await execFileP("tar", ["-xJf", archive, "-C", tmp]);
+  const [root] = (await fsp.readdir(tmp)).filter((f) => f.startsWith("ffmpeg-"));
+  const extracted = path.join(tmp, root, "bin", "ffmpeg");
+  const dest = path.join(stateDir, "tools", "ffmpeg");
+  await fsp.mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
+  await fsp.copyFile(extracted, dest);
+  await fsp.chmod(dest, 0o755);
+  await fsp.rm(tmp, { recursive: true, force: true });
+  const encoder = await detectH264Encoder(dest);
+  if (!encoder) throw new Error("downloaded ffmpeg has no usable h264 encoder (unexpected)");
+  return record(stateDir, dest, encoder, "downloaded");
+}
+
+async function record(stateDir, ffmpegPath, encoder, source) {
+  const cfg = { ffmpegPath, encoder, source, installedAt: new Date().toISOString() };
+  await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
+  await fsp.writeFile(codecConfigPath(stateDir), JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+  return cfg;
+}
+
 const detected = new Map(); // ffmpeg path → cached probe promise
 
 /** Resolve the usable H.264 encoder in this ffmpeg build, or null. */
-export function detectH264Encoder() {
-  const path = FFMPEG();
+export function detectH264Encoder(ffmpegPath) {
+  const path = ffmpegPath || FFMPEG();
   if (!detected.has(path)) {
     detected.set(path, new Promise((resolve) => {
       const forced = process.env.AGENT_ID_STREAM_H264_ENCODER;
@@ -82,8 +155,9 @@ function codecArgs(encoder) {
  * once when the process dies for any reason. Throws when ffmpeg or an H.264
  * encoder is unavailable.
  */
-export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp = null }) {
-  const encoder = await detectH264Encoder();
+export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp = null, ffmpegPath = null }) {
+  const ffmpeg = ffmpegPath || FFMPEG();
+  const encoder = await detectH264Encoder(ffmpeg);
   if (!encoder) throw new Error("ffmpeg with libx264/libopenh264 not found");
 
   // Annex-B gets AUD NALs inserted so WebCodecs viewers can split the byte
@@ -95,7 +169,7 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
     : ["-bsf:v", "h264_metadata=aud=insert", "-f", "h264", "pipe:1"];
 
   const proc = spawn(
-    FFMPEG(),
+    ffmpeg,
     [
       "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer",
       "-f", "mjpeg", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",

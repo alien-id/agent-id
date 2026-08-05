@@ -52,6 +52,7 @@ import {
 import { launchContext } from "../lib/launch.mjs";
 import { DEFAULT_PROFILE, loginHint, noProfileHint, profileName } from "../lib/hints.mjs";
 import { sessionReplyError } from "../lib/session-route.mjs";
+import { installCodecs, loadCodecConfig } from "../lib/stream-encoder.mjs";
 import { escalationFor } from "../lib/escalation.mjs";
 import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
@@ -763,6 +764,33 @@ async function cmdOpen(flags) {
   }
 }
 
+// Provision H.264 for the viewport stream: probe (env → PATH → prior
+// download), else fetch a static ffmpeg (Linux), and record the result in
+// <stateDir>/browser-codecs.json. Only after this does a `codec=auto` viewer
+// get h264 by default — an unprovisioned host streams jpeg and never spawns
+// ffmpeg implicitly. Re-run any time; it re-verifies the recorded binary.
+async function cmdInstallCodecs(flags) {
+  const stateDir = resolveStateDir(flags);
+  try {
+    const existing = await loadCodecConfig(stateDir);
+    if (existing && flags.force !== true) {
+      return outputJson({ ok: true, ...existing, note: "already provisioned (use --force to re-probe)" });
+    }
+    const cfg = await installCodecs({
+      stateDir,
+      allowDownload: flags["no-download"] !== true,
+      log: (m) => stderr(m),
+    });
+    outputJson({
+      ok: true,
+      ...cfg,
+      note: "h264 is now the default stream codec for codec=auto viewers (open sessions pick it up on restart)",
+    });
+  } catch (err) {
+    outputError(err.message || String(err));
+  }
+}
+
 async function cmdClose(flags) {
   const stateDir = resolveStateDir(flags);
   const name = profileName(flags.name);
@@ -830,6 +858,7 @@ runCli({
     read: cmdRead,
     fetch: cmdFetch,
     status: cmdStatus,
+    "install-codecs": cmdInstallCodecs,
     open: cmdOpen,
     close: cmdClose,
     sessions: cmdSessions,
@@ -916,7 +945,12 @@ runCli({
         "          one-shot: navigate (headless) → page text + final URL + sessionExpired\n" +
         "  fetch   [--name N] --url URL [--max-chars K]\n" +
         "          one-shot authenticated HTTP GET via the session (API / feed)\n" +
-        "  status  [--name N]      list sealed sessions\n\n" +
+        "  status  [--name N]      list sealed sessions\n" +
+        "  install-codecs [--no-download] [--force]\n" +
+        "          provision ffmpeg/H.264 for the viewport stream (probe, else\n" +
+        "          download a static build on Linux). Once provisioned, viewers\n" +
+        "          connecting with codec=auto stream h264 (≈10× less traffic)\n" +
+        "          instead of jpeg; without it the stream stays jpeg-only.\n\n" +
         "Interactive session (--name optional; defaults to 'main'):\n" +
         "  open    --name N [--headed] [--url START]   start a persistent session (run in\n" +
         "          background); navigates to START before reporting ready;\n" +
