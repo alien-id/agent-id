@@ -55,7 +55,7 @@ import { sessionReplyError } from "../lib/session-route.mjs";
 import { escalationFor } from "../lib/escalation.mjs";
 import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
-import { runSession, callSession } from "../lib/session-server.mjs";
+import { runSession, callSession, pruneDeadSessions } from "../lib/session-server.mjs";
 import { hasOwnerApproval, unlockViaOwnerApproval } from "../lib/unlock.mjs";
 import {
   ACCESS_LEVELS,
@@ -665,6 +665,9 @@ async function cmdFetch(flags) {
 async function cmdStatus(flags) {
   const stateDir = resolveStateDir(flags);
   const only = flags.name ? profileName(flags.name) : null;
+  // Report on sessions that exist: an orphaned file otherwise shows as an open
+  // session nobody can talk to.
+  await pruneDeadSessions(stateDir).catch(() => []);
   let vault;
   try {
     // Don't drive an Alien-app prompt just to report status — agent-key/passphrase only.
@@ -709,6 +712,10 @@ async function cmdStatus(flags) {
 async function cmdOpen(flags) {
   const name = profileName(flags.name);
   const stateDir = resolveStateDir(flags);
+  // Orphaned session files (killed container, crashed daemon) still advertise a
+  // streamPort, so a viewer picking "the newest session" can dial a dead port.
+  // Clear them before we add ours.
+  await pruneDeadSessions(stateDir).catch(() => []);
   let vault;
   try {
     vault = await openVaultUnlocked(flags);
@@ -720,7 +727,15 @@ async function cmdOpen(flags) {
   let headlessDefault;
   let policy = null;
   try {
-    const cred = await ensureAnonymousDefaultProfile({ vault, stateDir, name });
+    const cred = await ensureAnonymousDefaultProfile({
+      vault,
+      stateDir,
+      name,
+      // Opt-in minting of an empty jar for a named profile: the owner-driven
+      // sign-in path needs somewhere to sign in. Without the flag, a named
+      // profile still refuses to auto-create.
+      allowCreate: flags["bootstrap-profile"] === true,
+    });
     if (!cred || cred.type !== "browser-profile") {
       const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
       e.code = "NO_PROFILE";
@@ -918,9 +933,12 @@ runCli({
         "          one-shot authenticated HTTP GET via the session (API / feed)\n" +
         "  status  [--name N]      list sealed sessions\n\n" +
         "Interactive session (--name optional; defaults to 'main'):\n" +
-        "  open    --name N [--headed] [--url START]   start a persistent session (run in\n" +
-        "          background); navigates to START before reporting ready;\n" +
-        "          missing default 'main' auto-creates as an anonymous L0 profile\n" +
+        "  open    --name N [--headed] [--url START] [--bootstrap-profile]\n" +
+        "          start a persistent session (run in background); navigates to START\n" +
+        "          before reporting ready; missing default 'main' auto-creates as an\n" +
+        "          anonymous L0 profile. --bootstrap-profile mints an EMPTY jar for a\n" +
+        "          named profile so the owner can sign in themselves (then `close`\n" +
+        "          seals it); without it a named profile never auto-creates\n" +
         "  snapshot --name N             accessibility tree with element refs; iframe\n" +
         "          elements get frame-prefixed refs (f1e3); reports open tabs when >1\n" +
         "  form-inspect --name N           compact form controls + labels/types/requirements\n" +

@@ -56,6 +56,78 @@ export function sessionFilePath(stateDir, name) {
   return path.join(sessionsDir(stateDir), `${name}.json`);
 }
 
+// Is the daemon that wrote a session file still running? Signal 0 delivers
+// nothing and only asks the question, and it answers it on every platform we
+// run on (a /proc probe does not — desktop is macOS). EPERM means the pid
+// exists and belongs to someone else, which still counts as alive.
+export function sessionAlive(info) {
+  const pid = Number(info?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+// Drop session files whose daemon is gone. A clean `close` reseals and removes
+// its own file (see finalize), but a killed container — or any abrupt death —
+// leaves the file behind while /home/lethe persists. Those orphans still
+// advertise a streamPort, so a viewer that picks "the newest session" can dial
+// a dead port and show nothing, and `status` reports sessions that do not
+// exist. Best effort by design: a file we cannot read or unlink is skipped
+// rather than failing the caller's real work. Returns the pruned names.
+export async function pruneDeadSessions(stateDir) {
+  const pruned = [];
+  const live = new Set();
+  let entries;
+  try {
+    entries = await fs.readdir(sessionsDir(stateDir));
+  } catch {
+    return pruned; // no sessions dir yet
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) continue;
+    const name = entry.replace(/\.json$/, "");
+    const file = path.join(sessionsDir(stateDir), entry);
+    try {
+      const info = JSON.parse(await fs.readFile(file, "utf8"));
+      if (sessionAlive(info)) {
+        live.add(name);
+        continue;
+      }
+      await fs.rm(file, { force: true });
+      pruned.push(name);
+    } catch {
+      /* unreadable or already gone — leave it alone */
+    }
+  }
+  // `<name>.work` is the UNSEALED profile — cookies in plaintext, outside the
+  // vault. A clean close wipes it; an abrupt death leaves it on disk
+  // indefinitely (found weeks-old copies for sessions long gone). Remove the
+  // ones whose session is gone, but only once they are old enough that they
+  // cannot belong to an open still unsealing into them: the session file is
+  // written after the unseal, so a young dir with no session file may be a
+  // live launch, not an orphan.
+  const STALE_WORK_MS = 60 * 60 * 1000;
+  for (const entry of entries) {
+    if (!entry.endsWith(".work")) continue;
+    const name = entry.replace(/\.work$/, "");
+    if (live.has(name)) continue;
+    const dir = path.join(sessionsDir(stateDir), entry);
+    try {
+      const st = await fs.stat(dir);
+      if (Date.now() - st.mtimeMs < STALE_WORK_MS) continue;
+      await fs.rm(dir, { recursive: true, force: true });
+      pruned.push(entry);
+    } catch {
+      /* gone or unreadable — nothing to do */
+    }
+  }
+  return pruned;
+}
+
 // THE SHARED REF SPACE — keep this selector, and the numbering loop that walks
 // it, byte-identical in snapshotInPage and formSnapshotInPage.
 //
