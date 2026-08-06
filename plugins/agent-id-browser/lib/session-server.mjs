@@ -128,6 +128,14 @@ export async function pruneDeadSessions(stateDir) {
   return pruned;
 }
 
+// Body of <name>.json. The profile name must ride IN the body, not just the
+// filename: viewers discover a session by scanning these files for stream
+// coordinates, and a body without `profile` left them picking blind (newest
+// startedAt wins) — attaching the watch feed to the wrong profile.
+export function sessionRecord(name, fields) {
+  return { profile: name, ...fields };
+}
+
 // THE SHARED REF SPACE — keep this selector, and the numbering loop that walks
 // it, byte-identical in snapshotInPage and formSnapshotInPage.
 //
@@ -858,6 +866,68 @@ export async function fillForm(state, p) {
   };
 }
 
+// One CDP window-bounds resize; returns the achieved INNER viewport (null on a
+// JS-hostile page). Shared by the `resize` action (outer-size semantics) and
+// the stream's viewer resize (viewport semantics, via resizeToViewport).
+async function resizeWindow(state, page, width, height) {
+  const before = await page
+    .evaluate(() => [window.innerWidth, window.innerHeight])
+    .catch(() => null);
+  const cdp = await state.ctx.newCDPSession(page);
+  try {
+    const { windowId } = await cdp.send("Browser.getWindowForTarget");
+    // Two steps: exit maximized/fullscreen FIRST, else Chrome applies the
+    // state change and ignores the bounds in the same call.
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }).catch(() => {});
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { width, height } });
+  } catch (err) {
+    throw new Error(`resize failed (CDP window bounds unavailable — needs a headed/cloud Chrome): ${err.message || err}`);
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+  // setWindowBounds acks before the renderer re-lays-out — wait for the inner
+  // size to actually change (best-effort) so the returned viewport isn't stale.
+  if (before) {
+    await page
+      .waitForFunction(
+        (b) => window.innerWidth !== b[0] || window.innerHeight !== b[1],
+        before,
+        { timeout: 3000 },
+      )
+      .catch(() => {});
+  }
+  return page
+    .evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+    .catch(() => null);
+}
+
+// Second-pass OUTER size that should land the INNER viewport on `want`, given
+// what a straight outer resize to `want` actually yielded (`got`) — the delta
+// between the two is the window chrome. null when the first pass already
+// landed, or when the page could not be measured. Exported for tests.
+export function chromeCompensatedBounds(want, got) {
+  if (!got) return null;
+  const width = want.width + Math.max(0, want.width - got.width);
+  const height = want.height + Math.max(0, want.height - got.height);
+  if (width === want.width && height === want.height) return null;
+  return { width, height };
+}
+
+// Viewer-driven resize (stream protocol `resize` message): width/height are
+// the viewer's SCREEN — i.e. the desired page VIEWPORT, not the outer window
+// size the `resize` action takes. A phone watching the stream sends its own
+// dimensions and the page reflows into its mobile layout instead of staying a
+// shrunken desktop. One compensation pass converts viewport → outer: resize to
+// the requested size, measure the chrome the window ate, grow by that delta.
+async function resizeToViewport(state, width, height) {
+  const page = state.current;
+  if (!page || page.isClosed?.()) return null;
+  const first = await resizeWindow(state, page, width, height);
+  const second = chromeCompensatedBounds({ width, height }, first);
+  if (!second) return first;
+  return (await resizeWindow(state, page, second.width, second.height)) ?? first;
+}
+
 // Exported for tests: the suspend/resume contract around credential fills is
 // only observable here.
 export async function dispatch(state, msg, policy = null) {
@@ -1281,35 +1351,7 @@ export async function dispatch(state, msg, policy = null) {
       if (![width, height].every(Number.isFinite) || width < 200 || height < 200) {
         throw new Error("resize needs numeric --width and --height (min 200 each)");
       }
-      const before = await page
-        .evaluate(() => [window.innerWidth, window.innerHeight])
-        .catch(() => null);
-      const cdp = await state.ctx.newCDPSession(page);
-      try {
-        const { windowId } = await cdp.send("Browser.getWindowForTarget");
-        // Two steps: exit maximized/fullscreen FIRST, else Chrome applies the
-        // state change and ignores the bounds in the same call.
-        await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }).catch(() => {});
-        await cdp.send("Browser.setWindowBounds", { windowId, bounds: { width, height } });
-      } catch (err) {
-        throw new Error(`resize failed (CDP window bounds unavailable — needs a headed/cloud Chrome): ${err.message || err}`);
-      } finally {
-        await cdp.detach().catch(() => {});
-      }
-      // setWindowBounds acks before the renderer re-lays-out — wait for the inner
-      // size to actually change (best-effort) so the returned viewport isn't stale.
-      if (before) {
-        await page
-          .waitForFunction(
-            (b) => window.innerWidth !== b[0] || window.innerHeight !== b[1],
-            before,
-            { timeout: 3000 },
-          )
-          .catch(() => {});
-      }
-      const viewport = await page
-        .evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
-        .catch(() => null);
+      const viewport = await resizeWindow(state, page, width, height);
       return { resized: { width, height }, ...(viewport ? { viewport } : {}) };
     }
     case "zoom":
@@ -1611,6 +1653,7 @@ export async function runSession({
   // / fill-otp inject credential values (see those dispatch cases).
   const stream = await startStreamServer(state, {
     log: (m) => process.stderr.write(`${m}\n`),
+    resize: (width, height) => resizeToViewport(state, width, height),
   });
   state.stream = stream;
 
@@ -1663,7 +1706,7 @@ export async function runSession({
   await fs.mkdir(sessionsDir(stateDir), { recursive: true, mode: 0o700 });
   await fs.writeFile(
     sessionFilePath(stateDir, name),
-    JSON.stringify({
+    JSON.stringify(sessionRecord(name, {
       port,
       token,
       pid: process.pid,
@@ -1671,7 +1714,7 @@ export async function runSession({
       startedAt: Date.now(),
       streamPort: stream.port,
       streamToken: stream.token,
-    }),
+    })),
     { mode: 0o600 },
   );
   // Optional start page: navigate BEFORE the ready line so "ready" means "up
