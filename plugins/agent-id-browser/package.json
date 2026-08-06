@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-browser",
-  "version": "7.9.0",
+  "version": "7.10.0",
   "publishConfig": {
     "access": "public"
   },
