@@ -244,7 +244,19 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
         `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
     );
     clients.add(socket);
-    socket.write(encodeTextFrame(JSON.stringify({ type: "status", source: "alien", screencasting: true })));
+    // Tell a joining client the CURRENT state, not just "screencasting". A
+    // blacked-out feed (credential fill in flight) looks exactly like a broken
+    // one from the outside — the viewer needs to know which it is.
+    socket.write(
+      encodeTextFrame(
+        JSON.stringify({
+          type: "status",
+          source: "alien",
+          screencasting: true,
+          suspended: suspended > 0,
+        }),
+      ),
+    );
 
     const parse = makeFrameParser(({ opcode, payload }) => {
       if (opcode === 0x8) {
@@ -283,7 +295,14 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
     socket.on("close", drop);
     socket.on("error", drop);
 
-    void startScreencast(); // first watcher starts the feed
+    // Frames are CHANGE-driven, so a client that joins an already-running cast
+    // gets nothing at all until the page happens to move — on a sign-in form
+    // that is forever, and a blank canvas reads as "the browser view is
+    // broken". Restart the cast so Chrome emits a fresh first frame for it
+    // (the same trick `resume` uses); otherwise this is the first watcher and
+    // starting the feed produces that frame anyway.
+    if (cdp) void stopScreencast().then(() => startScreencast());
+    else void startScreencast();
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
