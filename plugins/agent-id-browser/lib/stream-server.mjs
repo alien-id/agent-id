@@ -1,17 +1,45 @@
-// Live viewport stream for an open session — the "watch Lethe browse" feed.
+// Live viewport stream for an open session — the pair-browsing feed.
 //
 // A minimal WebSocket server (hand-rolled, no dependency — same ethos as the
 // line-JSON TCP protocol in session-server.mjs) on 127.0.0.1, gated by a
 // per-session random token (`?token=` on the upgrade URL). It pushes CDP
-// screencast frames of the CURRENT tab as JSON text frames and accepts input
-// events back, using the same message shapes as agent-browser's stream so one
-// viewer client works against both browser stacks:
+// screencast frames of the CURRENT tab and accepts input events back, using
+// agent-browser's message shapes (frame/status/ack/config/input_*) so one
+// viewer client works against both browser stacks.
 //
-//   server → client   {"type":"frame","data":"<base64 jpeg>","metadata":{...}}
-//                     {"type":"status", ...}
-//   client → server   {"type":"input_mouse","eventType":"mousePressed",...}
-//                     {"type":"input_keyboard","eventType":"keyDown",...}
+// Wire protocol v2, negotiated per client via upgrade-URL query params. Every
+// mode degrades to the v1 default, so an agent-browser viewer that knows none
+// of them keeps working:
+//
+//   ?token=<hex>      required, per-session gate
+//   ?binary=1         type:"frame" messages arrive as WS binary messages:
+//                     [u32 LE header length][JSON header][payload bytes]
+//                     (everything else stays a JSON text frame)
+//   ?codec=h264       payload is an H.264 Annex-B chunk from an ffmpeg
+//                     subprocess (implies binary=1; falls back to jpeg with a
+//                     status notice when no usable ffmpeg/encoder exists)
+//   ?pacing=ack|push  ack: at most one frame in flight — the client releases
+//                     the next with {"type":"ack","seq":N}
+//   ?maxFps=<0-120>   per-client delivery cap (0 = uncapped)
+//
+//   server → client   {"type":"frame","seq":N,"data":"<base64 jpeg>","metadata":{...}}
+//                     {"type":"status", ...}      (negotiated caps on join)
+//   client → server   {"type":"input_mouse"|"input_keyboard", ...}
+//                     {"type":"ack","seq":N}
+//                     {"type":"config","maxFps":N,"pacing":"ack"|"push"}
+//                     {"type":"status_request"}
 //                     {"type":"resize","width":W,"height":H}
+//                     {"type":"webrtc_offer"|"webrtc_ice", ...}  (experimental)
+//
+// Delivery is latest-frame-wins: each JPEG client has ONE pending slot that
+// newer frames overwrite whenever the client is slower than the feed (socket
+// backpressure, outstanding ack, fps cap), so a viewer always resumes at live
+// and the server never queues stale frames. H.264 is a temporally-dependent
+// byte stream, so chunks can't be dropped mid-GOP — a client whose socket
+// buffer exceeds a bound is disconnected instead (it reconnects at a fresh
+// keyframe). After ~600ms without a screencast frame the page has settled and
+// one high-quality Page.captureScreenshot "refinement" frame is pushed, so
+// text is sharp at rest while motion runs at aggressive JPEG quality.
 //
 // `resize` is our one extension beyond agent-browser's shapes (harmless there —
 // unknown types are ignored). width/height are the VIEWER's dimensions — the
@@ -22,40 +50,75 @@
 // SEAL PRESERVED: this never opens a CDP debug port — frames come from a
 // patchright CDPSession over the existing pipe, input goes through
 // page.mouse/page.keyboard. fill-secret / fill-otp SUSPEND the feed while a
-// credential value is being injected (session-server calls suspend/resume),
-// so a watcher never sees more than the existing `screenshot` verb could show
-// outside those windows.
+// credential value is being injected (session-server calls suspend/resume).
+// Suspend drops every pending frame, gates encoder input and the refinement
+// capture, and re-checks after each await, so a watcher never sees more than
+// the existing `screenshot` verb could show outside those windows.
 
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import http from "node:http";
+
+import { createH264Encoder } from "./stream-encoder.mjs";
 
 const WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const RETARGET_POLL_MS = 500;
-const JPEG_QUALITY = 70;
+const REFINE_AFTER_MS = 600;
+const REFINE_POLL_MS = 250;
+const H264_MAX_BUFFERED = 4 * 1024 * 1024;
+
+function envInt(name, fallback, min, max) {
+  const n = Number(process.env[name]);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+// Motion frames run lean; the idle refinement frame carries the visual quality
+// (0 disables refinement). Bind is overridable ONLY for LAN viewer testing.
+const STREAM_QUALITY = envInt("AGENT_ID_STREAM_QUALITY", 55, 1, 100);
+const REFINE_QUALITY = envInt("AGENT_ID_STREAM_REFINE_QUALITY", 90, 0, 100);
+const BIND_HOST = process.env.AGENT_ID_STREAM_BIND || "127.0.0.1";
 
 // ── WS wire helpers (server side: outgoing unmasked, incoming masked) ────────
 
-function encodeTextFrame(payload) {
-  const data = Buffer.from(payload, "utf8");
+function wsFrame(opcode, data) {
   let header;
   if (data.length < 126) {
-    header = Buffer.from([0x81, data.length]);
+    header = Buffer.from([0x80 | opcode, data.length]);
   } else if (data.length < 65536) {
     header = Buffer.alloc(4);
-    header[0] = 0x81;
+    header[0] = 0x80 | opcode;
     header[1] = 126;
     header.writeUInt16BE(data.length, 2);
   } else {
     header = Buffer.alloc(10);
-    header[0] = 0x81;
+    header[0] = 0x80 | opcode;
     header[1] = 127;
     header.writeBigUInt64BE(BigInt(data.length), 2);
   }
   return Buffer.concat([header, data]);
 }
 
+const encodeTextFrame = (payload) => wsFrame(0x1, Buffer.from(payload, "utf8"));
+
 function encodeControlFrame(opcode, payload = Buffer.alloc(0)) {
   return Buffer.concat([Buffer.from([0x80 | opcode, payload.length]), payload]);
+}
+
+/** Binary frame-message body: [u32 LE header length][JSON header][payload]. */
+export function encodeFrameBinary(header, payload) {
+  const headerBuf = Buffer.from(JSON.stringify(header), "utf8");
+  const len = Buffer.alloc(4);
+  len.writeUInt32LE(headerBuf.length, 0);
+  return Buffer.concat([len, headerBuf, payload]);
+}
+
+export function decodeFrameBinary(buf) {
+  const headerLen = buf.readUInt32LE(0);
+  return {
+    header: JSON.parse(buf.subarray(4, 4 + headerLen).toString("utf8")),
+    payload: buf.subarray(4 + headerLen),
+  };
 }
 
 // Incremental parser for client frames. Client→server frames are always
@@ -105,6 +168,23 @@ export function makeFrameParser(onFrame) {
         onFrame({ opcode, payload });
       }
     }
+  };
+}
+
+// ── Per-client negotiation ───────────────────────────────────────────────────
+
+export function parseStreamParams(url) {
+  const raw = url.searchParams.get("codec");
+  // "auto" = h264 when the host provisioned codecs (install-codecs), else
+  // jpeg — resolved at join time. v1 clients that send nothing get jpeg.
+  const codec = raw === "h264" || raw === "auto" ? raw : "jpeg";
+  const rawFps = Number(url.searchParams.get("maxFps"));
+  return {
+    // h264/auto payloads are raw bytes — the codec choice implies binary framing.
+    binary: url.searchParams.get("binary") === "1" || codec !== "jpeg",
+    codec,
+    pacing: url.searchParams.get("pacing") === "ack" ? "ack" : "push",
+    maxFps: Number.isFinite(rawFps) ? Math.min(120, Math.max(0, Math.floor(rawFps))) : 0,
   };
 }
 
@@ -173,7 +253,7 @@ const RESIZE_MAX = 4096;
 
 export async function startStreamServer(
   state,
-  { log = () => {}, resize = null, onActivity = () => {} } = {},
+  { log = () => {}, h264Config = null, resize = null, onActivity = () => {} } = {},
 ) {
   const token = crypto.randomBytes(24).toString("hex");
   const clients = new Set();
@@ -181,15 +261,189 @@ export async function startStreamServer(
   let cdpPage = null;
   let suspended = 0; // depth-counted: nested fills keep it suspended
   let closed = false;
+  let frameSeq = 0;
+  let lastFrameAt = 0;
+  let lastMetadata = null;
+  let refined = true; // no refinement until at least one screencast frame
   // Input events apply strictly in arrival order. page.mouse/keyboard calls are
   // async; firing them unawaited lets a press overtake the move before it (or a
   // release overtake the press), which drops clicks sent in a burst.
   let inputChain = Promise.resolve();
 
-  function broadcast(obj) {
+  // Encoder sinks eat the decoded JPEG of every live screencast frame: the
+  // shared Annex-B encoder for WS h264 clients, plus one RTP encoder per
+  // WebRTC peer (stream-webrtc.mjs registers those).
+  const encoderSinks = new Set();
+  let annexB = null;
+  let webrtc = null;
+
+  function sendText(client, obj) {
+    client.sock.write(encodeTextFrame(JSON.stringify(obj)));
+  }
+
+  function broadcastStatus(obj) {
     if (clients.size === 0) return;
     const frame = encodeTextFrame(JSON.stringify(obj));
-    for (const sock of clients) sock.write(frame);
+    for (const c of clients) c.sock.write(frame);
+  }
+
+  function statusFor(client) {
+    const vp = state.current?.viewportSize?.() ?? null;
+    return {
+      type: "status",
+      source: "alien",
+      screencasting: true, // v1 shape: the join itself starts the feed
+      suspended: suspended > 0,
+      binary: client.binary,
+      codec: client.codec,
+      h264Available: Boolean(h264Config),
+      pacing: client.pacing,
+      maxFps: client.maxFps,
+      ...(vp ? { viewportWidth: vp.width, viewportHeight: vp.height } : {}),
+    };
+  }
+
+  // Lazily-cached per-frame encodings, shared across clients.
+  function frameText(f) {
+    f._text ??= encodeTextFrame(
+      JSON.stringify({
+        type: "frame",
+        seq: f.seq,
+        data: f.data,
+        metadata: f.metadata,
+        ...(f.refinement ? { refinement: true } : {}),
+      }),
+    );
+    return f._text;
+  }
+
+  function frameBinary(f) {
+    f._bin ??= wsFrame(
+      0x2,
+      encodeFrameBinary(
+        {
+          type: "frame",
+          seq: f.seq,
+          codec: "jpeg",
+          metadata: f.metadata,
+          ...(f.refinement ? { refinement: true } : {}),
+        },
+        Buffer.from(f.data, "base64"),
+      ),
+    );
+    return f._bin;
+  }
+
+  // The one send gate. A frame leaves only when the client has a pending
+  // frame AND isn't congested, awaiting an ack, or inside its fps interval.
+  // Everything that unblocks a client (drain, ack, config, timer) re-enters
+  // here; the pending slot was possibly overwritten in the meantime — that IS
+  // the latest-frame-wins behavior.
+  function pump(client) {
+    if (closed || !client.pending || client.congested) return;
+    if (client.pacing === "ack" && client.awaitingAck !== null) return;
+    if (client.maxFps > 0) {
+      const wait = client.lastSentAt + 1000 / client.maxFps - Date.now();
+      if (wait > 0) {
+        client.timer ??= setTimeout(() => {
+          client.timer = null;
+          pump(client);
+        }, wait);
+        return;
+      }
+    }
+    const frame = client.pending;
+    client.pending = null;
+    const ok = client.sock.write(client.binary ? frameBinary(frame) : frameText(frame));
+    client.lastSentAt = Date.now();
+    if (client.pacing === "ack") client.awaitingAck = frame.seq;
+    if (!ok) client.congested = true; // drain listener clears and re-pumps
+  }
+
+  function deliverFrame({ data, metadata, refinement = false }) {
+    const frame = { seq: ++frameSeq, data, metadata, refinement };
+    for (const client of clients) {
+      if (client.codec !== "jpeg") continue;
+      client.pending = frame;
+      pump(client);
+    }
+  }
+
+  function sendH264Chunk(chunk) {
+    let msg = null;
+    for (const client of clients) {
+      if (client.codec !== "h264") continue;
+      msg ??= wsFrame(
+        0x2,
+        encodeFrameBinary(
+          { type: "frame", seq: ++frameSeq, codec: "h264", metadata: lastMetadata },
+          chunk,
+        ),
+      );
+      client.sock.write(msg);
+      // A temporally-dependent stream can't drop chunks; a viewer that can't
+      // keep up is cut instead of buffering without bound. It reconnects and
+      // the encoder restart gives it a fresh keyframe.
+      if (client.sock.writableLength > H264_MAX_BUFFERED) {
+        log("stream: h264 viewer too slow — disconnecting");
+        client.sock.destroy();
+      }
+    }
+  }
+
+  // Serialized: join/leave/restart events can interleave, and two concurrent
+  // ensures must not double-spawn ffmpeg.
+  let annexBChain = Promise.resolve();
+  function ensureAnnexBEncoder(opts) {
+    annexBChain = annexBChain.then(() => ensureAnnexBEncoderNow(opts)).catch(() => {});
+    return annexBChain;
+  }
+
+  async function ensureAnnexBEncoderNow({ restart = false } = {}) {
+    const wanted = !closed && [...clients].some((c) => c.codec === "h264");
+    if (!wanted || restart) {
+      if (annexB) {
+        encoderSinks.delete(annexB);
+        annexB.close();
+        annexB = null;
+      }
+      if (!wanted) return;
+    }
+    if (annexB) return;
+    try {
+      const enc = await createH264Encoder({
+        onChunk: sendH264Chunk,
+        log,
+        ffmpegPath: h264Config?.ffmpegPath ?? null,
+        onExit: () => {
+          if (annexB !== enc) return; // already replaced/closed deliberately
+          encoderSinks.delete(enc);
+          annexB = null;
+          // Died mid-stream (e.g. a viewport resize changed the input frame
+          // size). Rate-limited restart resumes the feed for h264 viewers.
+          setTimeout(() => {
+            if (!closed) void ensureAnnexBEncoder();
+          }, 500).unref?.();
+        },
+      });
+      annexB = enc;
+      encoderSinks.add(enc);
+      // Prime a fresh encoder on a static page: the screencast is damage-
+      // driven, so without this an h264 viewer joining a quiet page decodes
+      // nothing (black) until the next repaint. Arming the refinement pass
+      // feeds one captureScreenshot within ~250ms.
+      if (lastMetadata) {
+        refined = false;
+        lastFrameAt = 0;
+      }
+    } catch (err) {
+      log(`stream: h264 unavailable (${err.message || err}) — falling back to jpeg`);
+      for (const client of clients) {
+        if (client.codec !== "h264") continue;
+        client.codec = "jpeg";
+        sendText(client, statusFor(client));
+      }
+    }
   }
 
   async function stopScreencast() {
@@ -219,19 +473,33 @@ export async function startStreamServer(
       // Ack ALWAYS (even suspended/stale) or Chrome stops sending frames.
       session.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
       if (suspended > 0 || session !== cdp) return;
-      broadcast({ type: "frame", data: ev.data, metadata: ev.metadata });
+      lastFrameAt = Date.now();
+      lastMetadata = ev.metadata;
+      refined = false;
+      deliverFrame({ data: ev.data, metadata: ev.metadata });
+      if (encoderSinks.size > 0) {
+        const jpeg = Buffer.from(ev.data, "base64");
+        for (const sink of encoderSinks) sink.write(jpeg);
+      }
     });
+    // Capture is clamped to the CSS viewport so HiDPI doesn't ship 2× pixels
+    // that the viewer scales straight back down (input mapping is 1:1 too).
+    const vp = page.viewportSize?.() ?? null;
     try {
       await session.send("Page.startScreencast", {
         format: "jpeg",
-        quality: JPEG_QUALITY,
-        maxWidth: 1600,
-        maxHeight: 1200,
+        quality: STREAM_QUALITY,
+        maxWidth: vp?.width ?? 1600,
+        maxHeight: vp?.height ?? 1200,
       });
     } catch (err) {
       log(`stream: screencast start failed: ${err.message || err}`);
       await stopScreencast();
+      return;
     }
+    // New capture epoch (join/tab-switch/resume): restart the shared encoder
+    // so h264 viewers get fresh SPS/PPS + IDR and any dimension change lands.
+    void ensureAnnexBEncoder({ restart: true });
   }
 
   // Follow the current tab; also (re)starts after a resume-forced restart.
@@ -241,8 +509,79 @@ export async function startStreamServer(
   }, RETARGET_POLL_MS);
   retarget.unref?.();
 
-  const server = http.createServer((req, res) => {
-    res.writeHead(426).end(); // this port only speaks WebSocket
+  // Idle refinement: once the screencast has gone quiet the page has settled —
+  // push ONE sharp captureScreenshot so static text isn't stuck at motion
+  // quality. Rearmed by the next screencast frame. Never fires suspended, and
+  // re-checks after the await in case a fill started mid-capture.
+  const refine = setInterval(async () => {
+    if (closed || suspended > 0 || refined || REFINE_QUALITY <= 0) return;
+    const session = cdp;
+    if (!session || !lastMetadata || clients.size === 0) return;
+    if (Date.now() - lastFrameAt < REFINE_AFTER_MS) return;
+    refined = true;
+    try {
+      // clip.scale=1 pins the output to CSS-viewport pixels so it matches the
+      // screencast frame size exactly — the encoders choke on dimension flips.
+      const vp = state.current?.viewportSize?.() ?? null;
+      const shot = await session.send("Page.captureScreenshot", {
+        format: "jpeg",
+        quality: REFINE_QUALITY,
+        ...(vp ? { clip: { x: 0, y: 0, width: vp.width, height: vp.height, scale: 1 } } : {}),
+      });
+      if (closed || suspended > 0 || session !== cdp) return;
+      deliverFrame({ data: shot.data, metadata: lastMetadata, refinement: true });
+      // The encoder gets refinements too — on a damage-driven screencast this
+      // is what keeps an h264 viewer's picture alive across idle stretches.
+      // Written TWICE: raw MJPEG only delimits frame N when frame N+1's SOI
+      // arrives, so a single write would sit in ffmpeg's parser until the
+      // next repaint. Copy #1 flushes whatever was stuck AND gets encoded
+      // (flushed by copy #2); the stuck copy #2 is identical, so no loss.
+      if (encoderSinks.size > 0) {
+        const jpeg = Buffer.from(shot.data, "base64");
+        for (const sink of encoderSinks) {
+          sink.write(jpeg);
+          sink.write(jpeg);
+        }
+      }
+    } catch { /* navigating/closed — the next screencast frame rearms */ }
+  }, REFINE_POLL_MS);
+  refine.unref?.();
+
+  async function handleWebRtcSignal(client, msg) {
+    try {
+      if (!webrtc) {
+        const { createWebRtcStreamer } = await import("./stream-webrtc.mjs");
+        webrtc = await createWebRtcStreamer({
+          addSink: (s) => encoderSinks.add(s),
+          removeSink: (s) => encoderSinks.delete(s),
+          send: (c, obj) => sendText(c, obj),
+          log,
+          ffmpegPath: h264Config?.ffmpegPath ?? null,
+        });
+      }
+      await webrtc.signal(client, msg);
+    } catch (err) {
+      sendText(client, { type: "webrtc_error", error: String(err?.message || err) });
+    }
+  }
+
+  let viewerHtml = null;
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (req.method === "GET" && url.pathname === "/viewer") {
+      if (url.searchParams.get("token") !== token) {
+        res.writeHead(403).end();
+        return;
+      }
+      try {
+        viewerHtml ??= await fs.readFile(new URL("./stream-viewer.html", import.meta.url));
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(viewerHtml);
+      } catch {
+        res.writeHead(404).end();
+      }
+      return;
+    }
+    res.writeHead(426).end(); // otherwise this port only speaks WebSocket
   });
 
   server.on("upgrade", (req, socket) => {
@@ -258,20 +597,22 @@ export async function startStreamServer(
         "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
         `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
     );
-    clients.add(socket);
-    // Tell a joining client the CURRENT state, not just "screencasting". A
-    // blacked-out feed (credential fill in flight) looks exactly like a broken
-    // one from the outside — the viewer needs to know which it is.
-    socket.write(
-      encodeTextFrame(
-        JSON.stringify({
-          type: "status",
-          source: "alien",
-          screencasting: true,
-          suspended: suspended > 0,
-        }),
-      ),
-    );
+
+    const client = {
+      sock: socket,
+      ...parseStreamParams(url),
+      pending: null, // the ONE latest-frame-wins slot
+      awaitingAck: null,
+      lastSentAt: 0,
+      timer: null,
+      congested: false,
+    };
+    // auto resolves against provisioning: h264 only on an install-codecs'd
+    // host. The join status tells the viewer which one it got.
+    if (client.codec === "auto") client.codec = h264Config ? "h264" : "jpeg";
+    clients.add(client);
+    sendText(client, statusFor(client));
+    if (client.codec === "h264") void ensureAnnexBEncoder();
 
     const parse = makeFrameParser(({ opcode, payload }) => {
       if (opcode === 0x8) {
@@ -286,6 +627,35 @@ export async function startStreamServer(
       if (opcode !== 0x1) return;
       let msg;
       try { msg = JSON.parse(payload.toString("utf8")); } catch { return; }
+      // Flow-control messages stay live even during a suspend blackout — an
+      // ack for a pre-suspend frame must still release the pipeline.
+      if (msg.type === "ack") {
+        if (client.awaitingAck !== null && Number(msg.seq) >= client.awaitingAck) {
+          client.awaitingAck = null;
+          pump(client);
+        }
+        return;
+      }
+      if (msg.type === "config") {
+        if (msg.pacing === "ack" || msg.pacing === "push") {
+          client.pacing = msg.pacing;
+          if (msg.pacing === "push") client.awaitingAck = null;
+        }
+        if (msg.maxFps !== undefined) {
+          const n = Number(msg.maxFps);
+          if (Number.isFinite(n)) client.maxFps = Math.min(120, Math.max(0, Math.floor(n)));
+        }
+        pump(client);
+        return;
+      }
+      if (msg.type === "status_request") {
+        sendText(client, statusFor(client));
+        return;
+      }
+      if (msg.type === "webrtc_offer" || msg.type === "webrtc_ice") {
+        void handleWebRtcSignal(client, msg);
+        return;
+      }
       // Input is disabled while a credential fill is in flight — the viewer
       // must not be able to interact with a form mid-injection.
       if (suspended > 0) return;
@@ -303,7 +673,7 @@ export async function startStreamServer(
           .then(async () => {
             if (suspended > 0) return;
             const viewport = await resize(clamp(width), clamp(height));
-            broadcast({
+            broadcastStatus({
               type: "status",
               source: "alien",
               resized: { width: clamp(width), height: clamp(height) },
@@ -326,9 +696,16 @@ export async function startStreamServer(
         .catch(() => {});
     });
     socket.on("data", parse);
+    socket.on("drain", () => {
+      client.congested = false;
+      pump(client);
+    });
 
     const drop = () => {
-      clients.delete(socket);
+      clients.delete(client);
+      if (client.timer) clearTimeout(client.timer);
+      webrtc?.drop(client);
+      void ensureAnnexBEncoder(); // tears down when the last h264 viewer left
       if (clients.size === 0) void stopScreencast(); // save CPU when unwatched
     };
     socket.on("close", drop);
@@ -344,7 +721,7 @@ export async function startStreamServer(
     else void startScreencast();
   });
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => server.listen(0, BIND_HOST, resolve));
 
   return {
     port: server.address().port,
@@ -354,12 +731,15 @@ export async function startStreamServer(
     /** Hide the feed while a secret is typed into the page. Depth-counted. */
     suspend() {
       suspended++;
-      broadcast({ type: "status", source: "alien", suspended: true });
+      // Drop staged frames: nothing captured before the blackout may deliver
+      // during it (a drain/ack arriving mid-fill would otherwise flush one).
+      for (const client of clients) client.pending = null;
+      broadcastStatus({ type: "status", source: "alien", suspended: true });
     },
     resume() {
       suspended = Math.max(0, suspended - 1);
       if (suspended === 0) {
-        broadcast({ type: "status", source: "alien", suspended: false });
+        broadcastStatus({ type: "status", source: "alien", suspended: false });
         // Restart to force a fresh keyframe — otherwise a static page after the
         // fill would leave the viewer on the pre-fill frame indefinitely.
         void stopScreencast().then(() => startScreencast());
@@ -368,8 +748,18 @@ export async function startStreamServer(
     close() {
       closed = true;
       clearInterval(retarget);
+      clearInterval(refine);
       void stopScreencast();
-      for (const sock of clients) sock.destroy();
+      if (annexB) {
+        encoderSinks.delete(annexB);
+        annexB.close();
+        annexB = null;
+      }
+      webrtc?.close();
+      for (const client of clients) {
+        if (client.timer) clearTimeout(client.timer);
+        client.sock.destroy();
+      }
       clients.clear();
       server.close();
     },

@@ -9,3 +9,4 @@ skills-lock.json
 node_modules/
 # npm pack artifacts (publish-topological.ts packs into plugins/*/)
 *.tgz
+!plugins/agent-id-browser/lib/stream-viewer.html
