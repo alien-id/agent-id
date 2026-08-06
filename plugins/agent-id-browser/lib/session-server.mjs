@@ -858,7 +858,9 @@ export async function fillForm(state, p) {
   };
 }
 
-async function dispatch(state, msg, policy = null) {
+// Exported for tests: the suspend/resume contract around credential fills is
+// only observable here.
+export async function dispatch(state, msg, policy = null) {
   const p = msg.params || {};
   const page = state.current;
   // Read-only sessions refuse the un-auditable/secret-bearing actions here;
@@ -1040,35 +1042,45 @@ async function dispatch(state, msg, policy = null) {
       // Viewport-stream blackout while the value is on its way into the page —
       // watchers see nothing and viewer input is ignored until resume.
       state.stream?.suspend();
-      const vault = await openVaultAgentKey(msg._stateDir);
+      // Everything after the suspend must be inside this try: unlocking the
+      // vault can fail (locked, no agent-key slot, timeout), and when that
+      // throw escaped the blackout was never lifted — the feed stayed
+      // suspended for the rest of the session, so every later viewer got
+      // "screencasting" and not one frame. Seen in the wild after a failed
+      // auto-login: the owner opened the browser view to sign in and watched a
+      // blank canvas. `fill-otp` below already had this shape.
       try {
-        const rec = vault.get(credName);
-        if (!rec) throw new Error(`no credential "${credName}"`);
-        // Refuse a sealed field, and refuse a page whose host isn't on the
-        // credential's allowlist — BEFORE reading the value into memory. When
-        // the field lives in an iframe, the frame's origin is where the value
-        // actually goes, so BOTH the top page and the frame must pass.
-        assertFillAllowed(rec, hostOfUrl(page.url()), field);
-        if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()), field);
-        const value = rec[field];
-        if (typeof value !== "string" || !value) {
-          throw new Error(`"${credName}.${field}" is not a usable string field`);
-        }
-        // CRITICAL: a fill/keyboard error can echo the value being typed, so
-        // never let the raw error escape — it would leak the secret to the agent.
+        const vault = await openVaultAgentKey(msg._stateDir);
         try {
-          await humanType(page, sel(p.ref), value, {
-            timeout: ACTION_TIMEOUT,
-            submit: !!p.submit,
-            root: target,
-          });
-        } catch {
-          throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+          const rec = vault.get(credName);
+          if (!rec) throw new Error(`no credential "${credName}"`);
+          // Refuse a sealed field, and refuse a page whose host isn't on the
+          // credential's allowlist — BEFORE reading the value into memory. When
+          // the field lives in an iframe, the frame's origin is where the value
+          // actually goes, so BOTH the top page and the frame must pass.
+          assertFillAllowed(rec, hostOfUrl(page.url()), field);
+          if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()), field);
+          const value = rec[field];
+          if (typeof value !== "string" || !value) {
+            throw new Error(`"${credName}.${field}" is not a usable string field`);
+          }
+          // CRITICAL: a fill/keyboard error can echo the value being typed, so
+          // never let the raw error escape — it would leak the secret to the agent.
+          try {
+            await humanType(page, sel(p.ref), value, {
+              timeout: ACTION_TIMEOUT,
+              submit: !!p.submit,
+              root: target,
+            });
+          } catch {
+            throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+          }
+          // Tag the field so a later read-back is refused whatever its input type.
+          await markSecretField(target, sel(p.ref));
+        } finally {
+          vault.lock();
         }
-        // Tag the field so a later read-back is refused whatever its input type.
-        await markSecretField(target, sel(p.ref));
       } finally {
-        vault.lock();
         state.stream?.resume();
       }
       return { filled: p.ref, cred: p.cred };
