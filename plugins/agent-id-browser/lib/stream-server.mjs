@@ -11,6 +11,13 @@
 //                     {"type":"status", ...}
 //   client → server   {"type":"input_mouse","eventType":"mousePressed",...}
 //                     {"type":"input_keyboard","eventType":"keyDown",...}
+//                     {"type":"resize","width":W,"height":H}
+//
+// `resize` is our one extension beyond agent-browser's shapes (harmless there —
+// unknown types are ignored). width/height are the VIEWER's dimensions — the
+// desired page viewport — so a phone-sized viewer gets the page's mobile
+// layout, not a shrunken desktop one. The resulting viewport is broadcast to
+// every watcher as {"type":"status","resized":{...},"viewport":{...}}.
 //
 // SEAL PRESERVED: this never opens a CDP debug port — frames come from a
 // patchright CDPSession over the existing pipe, input goes through
@@ -53,8 +60,8 @@ function encodeControlFrame(opcode, payload = Buffer.alloc(0)) {
 
 // Incremental parser for client frames. Client→server frames are always
 // masked (RFC 6455 §5.1). Yields {opcode, payload} per complete frame;
-// fragmented text is reassembled.
-function makeFrameParser(onFrame) {
+// fragmented text is reassembled. Exported for tests.
+export function makeFrameParser(onFrame) {
   let buf = Buffer.alloc(0);
   let fragments = null;
   return (chunk) => {
@@ -159,7 +166,12 @@ function mutatesPage(msg) {
  * so tab-new / tab-switch / tab-close all retarget without hooks).
  * Returns { port, token, suspend, resume, close }.
  */
-export async function startStreamServer(state, { log = () => {} } = {}) {
+// Viewer resize requests are clamped to sane page dimensions: below 200 the
+// page is unusable, above 4096 a typo'd request could balloon the framebuffer.
+const RESIZE_MIN = 200;
+const RESIZE_MAX = 4096;
+
+export async function startStreamServer(state, { log = () => {}, resize = null } = {}) {
   const token = crypto.randomBytes(24).toString("hex");
   const clients = new Set();
   let cdp = null; // active CDPSession for the screencast
@@ -274,6 +286,29 @@ export async function startStreamServer(state, { log = () => {} } = {}) {
       // Input is disabled while a credential fill is in flight — the viewer
       // must not be able to interact with a form mid-injection.
       if (suspended > 0) return;
+      if (msg.type === "resize") {
+        // Reshape the page viewport to the viewer's screen (mobile-sized
+        // viewports for phone watchers). Serialized behind pending input and
+        // suspend-checked at apply time like every other viewer event; the
+        // achieved viewport is broadcast so ALL watchers learn the new shape.
+        const width = Math.round(Number(msg.width));
+        const height = Math.round(Number(msg.height));
+        if (!resize || ![width, height].every(Number.isFinite)) return;
+        const clamp = (n) => Math.min(Math.max(n, RESIZE_MIN), RESIZE_MAX);
+        inputChain = inputChain
+          .then(async () => {
+            if (suspended > 0) return;
+            const viewport = await resize(clamp(width), clamp(height));
+            broadcast({
+              type: "status",
+              source: "alien",
+              resized: { width: clamp(width), height: clamp(height) },
+              ...(viewport ? { viewport } : {}),
+            });
+          })
+          .catch(() => {});
+        return;
+      }
       if (mutatesPage(msg)) state.invalidateRefs?.("owner used live browser control");
       // Queue, don't fire-and-forget: the suspend/page checks re-run at apply
       // time so a fill starting mid-queue still blacks out the queued tail.

@@ -2,8 +2,11 @@
 
 // Tests for the pure session-server helpers behind the iframe/tab/download
 // additions: frameRefId (ref → frame prefix parsing, the contract every
-// ref-based action resolves through) and safeFilename (download names must be
-// joinable under the sessions dir without traversal). Pure — no browser.
+// ref-based action resolves through), safeFilename (download names must be
+// joinable under the sessions dir without traversal), sessionRecord (the
+// session file body a viewer discovers a stream by), and
+// chromeCompensatedBounds (the viewport→outer-window conversion behind the
+// stream's viewer resize). Pure — no browser.
 //
 // Run: node --test tests/test-browser-session-helpers.mjs
 
@@ -14,11 +17,13 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  chromeCompensatedBounds,
   frameRefId,
   pruneDeadSessions,
   refuseRef,
   safeFilename,
   sessionAlive,
+  sessionRecord,
 } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 test("refuseRef: a ref on a focus-typing action is refused, not dropped", () => {
@@ -70,6 +75,53 @@ test("safeFilename: separators and traversal are neutralized", () => {
   assert.ok(!safeFilename("..\\..\\x").includes("\\"));
   assert.notEqual(safeFilename("..")[0], ".");
   assert.equal(safeFilename("a b:c*d.png"), "a_b_c_d.png");
+});
+
+test("sessionRecord: the body names its profile — discovery must not guess", () => {
+  // The failure this guards: the session file carried streamPort/streamToken/
+  // startedAt but not the profile, so a viewer scanning the sessions dir could
+  // only take the newest file and could attach to the wrong profile.
+  const rec = sessionRecord("work", {
+    port: 4001,
+    token: "t0k",
+    pid: 123,
+    headless: true,
+    startedAt: 1754300000000,
+    streamPort: 4002,
+    streamToken: "s3cret",
+  });
+  assert.equal(rec.profile, "work");
+  // The coordinates the viewer connects with ride along untouched.
+  assert.equal(rec.streamPort, 4002);
+  assert.equal(rec.streamToken, "s3cret");
+  assert.equal(rec.startedAt, 1754300000000);
+});
+
+test("chromeCompensatedBounds: grows the outer size by the chrome the window ate", () => {
+  // A viewer asked for a 390×844 viewport; the straight outer resize yielded
+  // 390×757 — the window chrome ate 87px of height. The second pass must ask
+  // for exactly that much more.
+  assert.deepEqual(
+    chromeCompensatedBounds({ width: 390, height: 844 }, { width: 390, height: 757 }),
+    { width: 390, height: 931 },
+  );
+});
+
+test("chromeCompensatedBounds: no second pass when the first one landed", () => {
+  assert.equal(chromeCompensatedBounds({ width: 390, height: 844 }, { width: 390, height: 844 }), null);
+  // Unmeasurable page (JS-hostile): nothing to compensate against.
+  assert.equal(chromeCompensatedBounds({ width: 390, height: 844 }, null), null);
+});
+
+test("chromeCompensatedBounds: an OVERSHOOT never shrinks the request", () => {
+  // A window-manager minimum can hand back MORE than asked (got > want).
+  // Compensating downward would fight the WM forever — the delta clamps at 0,
+  // and if both axes overshot there is no second pass at all.
+  assert.deepEqual(
+    chromeCompensatedBounds({ width: 200, height: 844 }, { width: 500, height: 757 }),
+    { width: 200, height: 931 },
+  );
+  assert.equal(chromeCompensatedBounds({ width: 200, height: 200 }, { width: 500, height: 400 }), null);
 });
 
 test("safeFilename: empty / dot-only names fall back, long names are bounded", () => {
