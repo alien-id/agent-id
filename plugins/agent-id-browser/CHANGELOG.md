@@ -1,5 +1,40 @@
 # @alien-id/agent-id-browser
 
+## 7.9.0
+
+### Minor Changes
+
+- [#92](https://github.com/alien-id/agent-id/pull/92) [`193a0f8`](https://github.com/alien-id/agent-id/commit/193a0f8761c533f11f663f8873e45448c6032e61) Thanks [@atemerev](https://github.com/atemerev)! - Unused sessions close themselves
+
+  A session holds a Chrome and a node process for as long as it lives, and nothing
+  ended one: an agent that opened a browser and moved on — or failed a login and
+  gave up — left it running until the container stopped. Sessions accumulated,
+  holding memory and making "which browser is this?" genuinely ambiguous, since
+  every host-side pick that falls back to "whichever started last" was choosing
+  between browsers nobody was using.
+
+  A session now closes itself after 20 minutes with no agent action, no viewer
+  input, and nobody watching. Closing is the safe direction: the existing shutdown
+  path reseals the profile into the vault first, so a signed-in session that times
+  out keeps its cookies and simply reopens next time.
+
+  A session with a viewer attached is never idle, however quiet it is — the owner
+  may be reading a page or part-way through a sign-in they were handed. Set
+  `AGENT_ID_BROWSER_IDLE_MS` to change the window, or `0` to disable it.
+
+- [#86](https://github.com/alien-id/agent-id/pull/86) [`2847f48`](https://github.com/alien-id/agent-id/commit/2847f48971da2dac415aee37f03badcca3b0ed5e) Thanks [@atemerev](https://github.com/atemerev)! - Viewer `resize` in the stream protocol + profile name in the session file.
+
+  - The viewport stream now accepts `{"type":"resize","width":W,"height":H}`
+    from viewers: the session reshapes the page viewport to the viewer's own
+    dimensions (window-chrome-compensated, lands the exact size), so a phone
+    watching the stream gets the page's mobile layout instead of a shrunken
+    desktop one. The achieved viewport is broadcast to every watcher as a
+    `status` message; requests are clamped to 200–4096 per axis and ignored
+    while a credential fill has the stream suspended.
+  - Session files now name their `profile` in the body, so viewers scanning the
+    sessions directory can attach to the right profile's stream instead of
+    guessing by newest `startedAt`.
+
 ## 7.8.1
 
 ### Patch Changes
