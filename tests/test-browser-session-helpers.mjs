@@ -9,11 +9,16 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   frameRefId,
+  pruneDeadSessions,
   refuseRef,
   safeFilename,
+  sessionAlive,
 } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 test("refuseRef: a ref on a focus-typing action is refused, not dropped", () => {
@@ -72,4 +77,44 @@ test("safeFilename: empty / dot-only names fall back, long names are bounded", (
   assert.equal(safeFilename(null), "file");
   assert.equal(safeFilename("..."), "file");
   assert.ok(safeFilename("x".repeat(500)).length <= 80);
+});
+
+// --- session liveness + orphan pruning ---------------------------------------
+
+test("sessionAlive: this process is alive, an absurd pid is not", () => {
+  assert.equal(sessionAlive({ pid: process.pid }), true);
+  assert.equal(sessionAlive({ pid: 0x7ffffff }), false);
+  assert.equal(sessionAlive({ pid: 0 }), false);
+  assert.equal(sessionAlive({}), false);
+  assert.equal(sessionAlive(null), false);
+});
+
+test("pruneDeadSessions: drops orphans, keeps live sessions and young work dirs", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aid-prune-"));
+  const sessions = path.join(dir, "browser-sessions");
+  await fs.mkdir(sessions, { recursive: true });
+
+  const write = (name, info) =>
+    fs.writeFile(path.join(sessions, `${name}.json`), JSON.stringify(info));
+  // A dead daemon with the NEWEST startedAt — the shape that hijacks a viewer
+  // picking "the newest session advertising a stream".
+  await write("dead", { pid: 0x7ffffff, startedAt: Date.now() + 1e6, streamPort: 1 });
+  await write("live", { pid: process.pid, startedAt: 1, streamPort: 2 });
+  await fs.writeFile(path.join(sessions, "junk.json"), "not json");
+  // Work dirs: one orphaned and old, one orphaned but fresh (a launch in
+  // flight), one belonging to the live session.
+  const old = path.join(sessions, "dead.work");
+  await fs.mkdir(old, { recursive: true });
+  const past = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  await fs.utimes(old, past, past);
+  await fs.mkdir(path.join(sessions, "fresh.work"), { recursive: true });
+  await fs.mkdir(path.join(sessions, "live.work"), { recursive: true });
+
+  const pruned = await pruneDeadSessions(dir);
+
+  const left = (await fs.readdir(sessions)).sort();
+  assert.deepEqual(left, ["fresh.work", "junk.json", "live.json", "live.work"]);
+  assert.ok(pruned.includes("dead"));
+  assert.ok(pruned.includes("dead.work"));
+  await fs.rm(dir, { recursive: true, force: true });
 });
