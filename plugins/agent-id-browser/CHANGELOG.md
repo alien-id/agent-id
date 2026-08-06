@@ -1,5 +1,99 @@
 # @alien-id/agent-id-browser
 
+## 7.9.0
+
+### Minor Changes
+
+- [#92](https://github.com/alien-id/agent-id/pull/92) [`193a0f8`](https://github.com/alien-id/agent-id/commit/193a0f8761c533f11f663f8873e45448c6032e61) Thanks [@atemerev](https://github.com/atemerev)! - Unused sessions close themselves
+
+  A session holds a Chrome and a node process for as long as it lives, and nothing
+  ended one: an agent that opened a browser and moved on — or failed a login and
+  gave up — left it running until the container stopped. Sessions accumulated,
+  holding memory and making "which browser is this?" genuinely ambiguous, since
+  every host-side pick that falls back to "whichever started last" was choosing
+  between browsers nobody was using.
+
+  A session now closes itself after 20 minutes with no agent action, no viewer
+  input, and nobody watching. Closing is the safe direction: the existing shutdown
+  path reseals the profile into the vault first, so a signed-in session that times
+  out keeps its cookies and simply reopens next time.
+
+  A session with a viewer attached is never idle, however quiet it is — the owner
+  may be reading a page or part-way through a sign-in they were handed. Set
+  `AGENT_ID_BROWSER_IDLE_MS` to change the window, or `0` to disable it.
+
+- [#86](https://github.com/alien-id/agent-id/pull/86) [`2847f48`](https://github.com/alien-id/agent-id/commit/2847f48971da2dac415aee37f03badcca3b0ed5e) Thanks [@atemerev](https://github.com/atemerev)! - Viewer `resize` in the stream protocol + profile name in the session file.
+
+  - The viewport stream now accepts `{"type":"resize","width":W,"height":H}`
+    from viewers: the session reshapes the page viewport to the viewer's own
+    dimensions (window-chrome-compensated, lands the exact size), so a phone
+    watching the stream gets the page's mobile layout instead of a shrunken
+    desktop one. The achieved viewport is broadcast to every watcher as a
+    `status` message; requests are clamped to 200–4096 per axis and ignored
+    while a credential fill has the stream suspended.
+  - Session files now name their `profile` in the body, so viewers scanning the
+    sessions directory can attach to the right profile's stream instead of
+    guessing by newest `startedAt`.
+
+## 7.8.1
+
+### Patch Changes
+
+- [#89](https://github.com/alien-id/agent-id/pull/89) [`a0c5273`](https://github.com/alien-id/agent-id/commit/a0c527388cb12fd880993f7668b0ef30324a7ac8) Thanks [@atemerev](https://github.com/atemerev)! - The viewport blackout is always lifted, and a joining viewer always gets a frame
+
+  Three faults that together made the live browser view look dead. An owner asked
+  to finish a sign-in opened the view and watched a blank canvas — the relay said
+  it was streaming, and not one frame ever arrived.
+
+  **A failed credential fill blacked out the feed forever.** `fill-secret`
+  suspends the stream, then unlocks the vault — but the unlock ran _outside_ the
+  `try` whose `finally` resumes. Any failure there (locked vault, no agent-key
+  slot, timeout) left the suspend depth stuck above zero for the rest of the
+  session: frames were acked and dropped, so every later viewer saw
+  `screencasting` and nothing else. That is exactly what a failed auto-login leaves
+  behind, minutes before the owner is asked to take over. `fill-otp` already had
+  the right shape; `fill-secret` now matches it.
+
+  **A viewer joining an already-running screencast got no frame.** Frames are
+  change-driven, and Chrome emits its first one when the cast starts — so a client
+  that arrives afterwards has nothing to draw until the page happens to move. On a
+  sign-in form that is never. A joining client now restarts the cast to force a
+  fresh keyframe, the same trick `resume` uses.
+
+  **A blacked-out feed was indistinguishable from a broken one.** The status sent
+  on connect claimed `screencasting: true` and said nothing about the blackout, so
+  a suspended feed and a dead one looked identical from the outside. The connect
+  status now reports `suspended`.
+
+## 7.8.0
+
+### Minor Changes
+
+- [#87](https://github.com/alien-id/agent-id/pull/87) [`5ba6ef2`](https://github.com/alien-id/agent-id/commit/5ba6ef274c83fcf9267788153929a5d63150e8eb) Thanks [@atemerev](https://github.com/atemerev)! - An owner can be handed a browser to sign into, and dead sessions stop haunting the viewer
+
+  **A named profile can be created for the owner to sign into.** When a sign-in
+  cannot be automated — a bot challenge, an IdP that refuses agents, no display for
+  a headed `login` — the answer is to hand the browser to the owner. That was
+  impossible for any site not already set up: `login` needs a GUI, `auto-login` had
+  just failed, and `open` refuses to auto-create a named profile, so there was
+  nowhere to sign in. `open --bootstrap-profile` mints an empty jar for a named
+  profile; the owner signs in, and `close` seals it like any other. Without the
+  flag a named profile still never auto-creates — the account boundary is
+  unchanged, the opt-in is explicit.
+
+  **Orphaned sessions are pruned.** A clean `close` reseals and removes its own
+  session file, but an abrupt death (a recreated container, a killed daemon) leaves
+  it behind, and the state dir usually outlives the process. Those orphans still
+  advertise a `streamPort`, so a viewer picking "the newest session with a stream"
+  can dial a dead port and show nothing, and `status` lists sessions that do not
+  exist. `open` and `status` now drop session files whose pid is gone.
+
+  **Stale plaintext profile copies are removed too.** `<name>.work` is the
+  UNSEALED profile — cookies on disk, outside the vault. A clean close wipes it;
+  an abrupt death left it there indefinitely (weeks-old copies were found for
+  sessions long gone). Orphaned work dirs are now removed once they are old enough
+  that they cannot belong to a launch still in flight.
+
 ## 7.7.0
 
 ### Minor Changes

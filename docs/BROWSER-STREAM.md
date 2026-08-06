@@ -79,6 +79,7 @@ Client → server (always JSON text):
   "deltaX": 0, "deltaY": 120 }
 { "type": "input_keyboard", "eventType": "keyDown" | "keyUp" | "char",
   "key": "Enter", "text": "a" }
+{ "type": "resize", "width": 390, "height": 844 }  // viewport, see below
 { "type": "webrtc_offer", "sdp": "…" }             // experimental, see below
 { "type": "webrtc_ice", "candidate": { … } }
 ```
@@ -220,3 +221,38 @@ Benchmark (synthetic 720 p screencast, 15 fps; v1 baseline measured from
 | v2 compat (default) | 609 | 42.6 |
 | v2 binary | 457 | 32.0 |
 | v2 h264 | 61 | 5.7/chunk |
+
+## The `resize` message
+
+`width`/`height` are the **viewer's** dimensions — the desired page
+**viewport**, not the outer window size the session-protocol `resize` action
+takes. This is how a phone-sized viewer gets the page's mobile layout instead
+of a shrunken desktop one: send your own screen size and the page reflows.
+
+The session converts viewport → outer window with one chrome-compensation
+pass: resize the window to the requested size, measure how much the window
+chrome ate, grow the window by that delta. The result lands on the exact
+requested viewport (verified against headless Chrome: requesting 390×844
+yields a 390×844 viewport).
+
+Rules:
+
+- Dimensions clamp to **200–4096** per axis. Non-numeric dimensions are
+  ignored entirely (not resized-to-minimum).
+- Requests are serialized behind pending viewer input, so a resize lands in
+  arrival order relative to queued clicks and keys.
+- The achieved viewport is broadcast to **every** watcher as the `status`
+  message above — the request mirror in `resized`, the authoritative result
+  in `viewport`. Do coordinate math against `viewport`.
+- A resize does not invalidate element refs (the DOM is untouched; refs are
+  sparse and stable) — but screenshot coordinates taken before the resize are
+  stale, as after any reflow.
+
+## Suspend (credential blackout)
+
+While `fill-secret` / `fill-otp` inject a credential value, the session
+suspends the feed: frames stop, and **all** viewer messages — input and
+`resize` alike — are dropped at apply time, so a watcher can neither see nor
+touch a form mid-injection. Suspension is depth-counted and announced with
+`{"type":"status","suspended":true|false}`; on resume the screencast restarts
+to force a fresh keyframe.

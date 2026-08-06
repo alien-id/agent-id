@@ -57,6 +57,86 @@ export function sessionFilePath(stateDir, name) {
   return path.join(sessionsDir(stateDir), `${name}.json`);
 }
 
+// Is the daemon that wrote a session file still running? Signal 0 delivers
+// nothing and only asks the question, and it answers it on every platform we
+// run on (a /proc probe does not — desktop is macOS). EPERM means the pid
+// exists and belongs to someone else, which still counts as alive.
+export function sessionAlive(info) {
+  const pid = Number(info?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+// Drop session files whose daemon is gone. A clean `close` reseals and removes
+// its own file (see finalize), but a killed container — or any abrupt death —
+// leaves the file behind while /home/lethe persists. Those orphans still
+// advertise a streamPort, so a viewer that picks "the newest session" can dial
+// a dead port and show nothing, and `status` reports sessions that do not
+// exist. Best effort by design: a file we cannot read or unlink is skipped
+// rather than failing the caller's real work. Returns the pruned names.
+export async function pruneDeadSessions(stateDir) {
+  const pruned = [];
+  const live = new Set();
+  let entries;
+  try {
+    entries = await fs.readdir(sessionsDir(stateDir));
+  } catch {
+    return pruned; // no sessions dir yet
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) continue;
+    const name = entry.replace(/\.json$/, "");
+    const file = path.join(sessionsDir(stateDir), entry);
+    try {
+      const info = JSON.parse(await fs.readFile(file, "utf8"));
+      if (sessionAlive(info)) {
+        live.add(name);
+        continue;
+      }
+      await fs.rm(file, { force: true });
+      pruned.push(name);
+    } catch {
+      /* unreadable or already gone — leave it alone */
+    }
+  }
+  // `<name>.work` is the UNSEALED profile — cookies in plaintext, outside the
+  // vault. A clean close wipes it; an abrupt death leaves it on disk
+  // indefinitely (found weeks-old copies for sessions long gone). Remove the
+  // ones whose session is gone, but only once they are old enough that they
+  // cannot belong to an open still unsealing into them: the session file is
+  // written after the unseal, so a young dir with no session file may be a
+  // live launch, not an orphan.
+  const STALE_WORK_MS = 60 * 60 * 1000;
+  for (const entry of entries) {
+    if (!entry.endsWith(".work")) continue;
+    const name = entry.replace(/\.work$/, "");
+    if (live.has(name)) continue;
+    const dir = path.join(sessionsDir(stateDir), entry);
+    try {
+      const st = await fs.stat(dir);
+      if (Date.now() - st.mtimeMs < STALE_WORK_MS) continue;
+      await fs.rm(dir, { recursive: true, force: true });
+      pruned.push(entry);
+    } catch {
+      /* gone or unreadable — nothing to do */
+    }
+  }
+  return pruned;
+}
+
+// Body of <name>.json. The profile name must ride IN the body, not just the
+// filename: viewers discover a session by scanning these files for stream
+// coordinates, and a body without `profile` left them picking blind (newest
+// startedAt wins) — attaching the watch feed to the wrong profile.
+export function sessionRecord(name, fields) {
+  return { profile: name, ...fields };
+}
+
 // THE SHARED REF SPACE — keep this selector, and the numbering loop that walks
 // it, byte-identical in snapshotInPage and formSnapshotInPage.
 //
@@ -250,6 +330,14 @@ export function formSnapshotInPage(arg) {
 
 const sel = (ref) => `[data-aibref="${String(ref).replace(/["\\]/g, "")}"]`;
 const ACTION_TIMEOUT = 15000;
+
+// How long a session may sit unused (no agent action, no viewer input, nobody
+// watching) before it closes itself. Long enough that an owner reading a page
+// or stepping away mid-task is not cut off, short enough that a forgotten
+// session does not hold a browser for the life of the container. Override with
+// AGENT_ID_BROWSER_IDLE_MS; 0 disables.
+const DEFAULT_IDLE_MS = 20 * 60_000;
+const IDLE_POLL_MS = 30_000;
 const MAX_FRAMES = 12; // iframes snapshotted per page (ad-heavy pages have dozens)
 const CONSOLE_CAP = 300; // ring-buffer size for captured console/pageerror entries
 
@@ -787,7 +875,71 @@ export async function fillForm(state, p) {
   };
 }
 
-async function dispatch(state, msg, policy = null) {
+// One CDP window-bounds resize; returns the achieved INNER viewport (null on a
+// JS-hostile page). Shared by the `resize` action (outer-size semantics) and
+// the stream's viewer resize (viewport semantics, via resizeToViewport).
+async function resizeWindow(state, page, width, height) {
+  const before = await page
+    .evaluate(() => [window.innerWidth, window.innerHeight])
+    .catch(() => null);
+  const cdp = await state.ctx.newCDPSession(page);
+  try {
+    const { windowId } = await cdp.send("Browser.getWindowForTarget");
+    // Two steps: exit maximized/fullscreen FIRST, else Chrome applies the
+    // state change and ignores the bounds in the same call.
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }).catch(() => {});
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { width, height } });
+  } catch (err) {
+    throw new Error(`resize failed (CDP window bounds unavailable — needs a headed/cloud Chrome): ${err.message || err}`);
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+  // setWindowBounds acks before the renderer re-lays-out — wait for the inner
+  // size to actually change (best-effort) so the returned viewport isn't stale.
+  if (before) {
+    await page
+      .waitForFunction(
+        (b) => window.innerWidth !== b[0] || window.innerHeight !== b[1],
+        before,
+        { timeout: 3000 },
+      )
+      .catch(() => {});
+  }
+  return page
+    .evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+    .catch(() => null);
+}
+
+// Second-pass OUTER size that should land the INNER viewport on `want`, given
+// what a straight outer resize to `want` actually yielded (`got`) — the delta
+// between the two is the window chrome. null when the first pass already
+// landed, or when the page could not be measured. Exported for tests.
+export function chromeCompensatedBounds(want, got) {
+  if (!got) return null;
+  const width = want.width + Math.max(0, want.width - got.width);
+  const height = want.height + Math.max(0, want.height - got.height);
+  if (width === want.width && height === want.height) return null;
+  return { width, height };
+}
+
+// Viewer-driven resize (stream protocol `resize` message): width/height are
+// the viewer's SCREEN — i.e. the desired page VIEWPORT, not the outer window
+// size the `resize` action takes. A phone watching the stream sends its own
+// dimensions and the page reflows into its mobile layout instead of staying a
+// shrunken desktop. One compensation pass converts viewport → outer: resize to
+// the requested size, measure the chrome the window ate, grow by that delta.
+async function resizeToViewport(state, width, height) {
+  const page = state.current;
+  if (!page || page.isClosed?.()) return null;
+  const first = await resizeWindow(state, page, width, height);
+  const second = chromeCompensatedBounds({ width, height }, first);
+  if (!second) return first;
+  return (await resizeWindow(state, page, second.width, second.height)) ?? first;
+}
+
+// Exported for tests: the suspend/resume contract around credential fills is
+// only observable here.
+export async function dispatch(state, msg, policy = null) {
   const p = msg.params || {};
   const page = state.current;
   // Read-only sessions refuse the un-auditable/secret-bearing actions here;
@@ -969,35 +1121,45 @@ async function dispatch(state, msg, policy = null) {
       // Viewport-stream blackout while the value is on its way into the page —
       // watchers see nothing and viewer input is ignored until resume.
       state.stream?.suspend();
-      const vault = await openVaultAgentKey(msg._stateDir);
+      // Everything after the suspend must be inside this try: unlocking the
+      // vault can fail (locked, no agent-key slot, timeout), and when that
+      // throw escaped the blackout was never lifted — the feed stayed
+      // suspended for the rest of the session, so every later viewer got
+      // "screencasting" and not one frame. Seen in the wild after a failed
+      // auto-login: the owner opened the browser view to sign in and watched a
+      // blank canvas. `fill-otp` below already had this shape.
       try {
-        const rec = vault.get(credName);
-        if (!rec) throw new Error(`no credential "${credName}"`);
-        // Refuse a sealed field, and refuse a page whose host isn't on the
-        // credential's allowlist — BEFORE reading the value into memory. When
-        // the field lives in an iframe, the frame's origin is where the value
-        // actually goes, so BOTH the top page and the frame must pass.
-        assertFillAllowed(rec, hostOfUrl(page.url()), field);
-        if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()), field);
-        const value = rec[field];
-        if (typeof value !== "string" || !value) {
-          throw new Error(`"${credName}.${field}" is not a usable string field`);
-        }
-        // CRITICAL: a fill/keyboard error can echo the value being typed, so
-        // never let the raw error escape — it would leak the secret to the agent.
+        const vault = await openVaultAgentKey(msg._stateDir);
         try {
-          await humanType(page, sel(p.ref), value, {
-            timeout: ACTION_TIMEOUT,
-            submit: !!p.submit,
-            root: target,
-          });
-        } catch {
-          throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+          const rec = vault.get(credName);
+          if (!rec) throw new Error(`no credential "${credName}"`);
+          // Refuse a sealed field, and refuse a page whose host isn't on the
+          // credential's allowlist — BEFORE reading the value into memory. When
+          // the field lives in an iframe, the frame's origin is where the value
+          // actually goes, so BOTH the top page and the frame must pass.
+          assertFillAllowed(rec, hostOfUrl(page.url()), field);
+          if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()), field);
+          const value = rec[field];
+          if (typeof value !== "string" || !value) {
+            throw new Error(`"${credName}.${field}" is not a usable string field`);
+          }
+          // CRITICAL: a fill/keyboard error can echo the value being typed, so
+          // never let the raw error escape — it would leak the secret to the agent.
+          try {
+            await humanType(page, sel(p.ref), value, {
+              timeout: ACTION_TIMEOUT,
+              submit: !!p.submit,
+              root: target,
+            });
+          } catch {
+            throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+          }
+          // Tag the field so a later read-back is refused whatever its input type.
+          await markSecretField(target, sel(p.ref));
+        } finally {
+          vault.lock();
         }
-        // Tag the field so a later read-back is refused whatever its input type.
-        await markSecretField(target, sel(p.ref));
       } finally {
-        vault.lock();
         state.stream?.resume();
       }
       return { filled: p.ref, cred: p.cred };
@@ -1198,35 +1360,7 @@ async function dispatch(state, msg, policy = null) {
       if (![width, height].every(Number.isFinite) || width < 200 || height < 200) {
         throw new Error("resize needs numeric --width and --height (min 200 each)");
       }
-      const before = await page
-        .evaluate(() => [window.innerWidth, window.innerHeight])
-        .catch(() => null);
-      const cdp = await state.ctx.newCDPSession(page);
-      try {
-        const { windowId } = await cdp.send("Browser.getWindowForTarget");
-        // Two steps: exit maximized/fullscreen FIRST, else Chrome applies the
-        // state change and ignores the bounds in the same call.
-        await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }).catch(() => {});
-        await cdp.send("Browser.setWindowBounds", { windowId, bounds: { width, height } });
-      } catch (err) {
-        throw new Error(`resize failed (CDP window bounds unavailable — needs a headed/cloud Chrome): ${err.message || err}`);
-      } finally {
-        await cdp.detach().catch(() => {});
-      }
-      // setWindowBounds acks before the renderer re-lays-out — wait for the inner
-      // size to actually change (best-effort) so the returned viewport isn't stale.
-      if (before) {
-        await page
-          .waitForFunction(
-            (b) => window.innerWidth !== b[0] || window.innerHeight !== b[1],
-            before,
-            { timeout: 3000 },
-          )
-          .catch(() => {});
-      }
-      const viewport = await page
-        .evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
-        .catch(() => null);
+      const viewport = await resizeWindow(state, page, width, height);
       return { resized: { width, height }, ...(viewport ? { viewport } : {}) };
     }
     case "zoom":
@@ -1526,11 +1660,24 @@ export async function runSession({
   // token ride in the session file so the host runtime can relay it to the
   // owner's client; the feed and viewer input are suspended while fill-secret
   // / fill-otp inject credential values (see those dispatch cases).
+  // Idle shutdown. A session holds a Chrome and a node process for as long as
+  // it lives, and nothing used to end one: an agent that opened a browser and
+  // moved on (or failed a login and gave up) left it running until the
+  // container did, so profiles piled up holding memory and muddying "which
+  // browser is this?". Any agent action or viewer input counts as use, and a
+  // session with someone watching is never idle however quiet it is — the
+  // owner may be reading a page or part-way through a sign-in.
+  let lastActivityAt = Date.now();
+  const touch = () => {
+    lastActivityAt = Date.now();
+  };
   const stream = await startStreamServer(state, {
     log: (m) => process.stderr.write(`${m}\n`),
     // h264 becomes the default for codec=auto viewers ONLY on a host the
     // owner provisioned via `agent-id-browser install-codecs`.
     h264Config: await loadCodecConfig(stateDir),
+    resize: (width, height) => resizeToViewport(state, width, height),
+    onActivity: touch,
   });
   state.stream = stream;
 
@@ -1551,6 +1698,33 @@ export async function runSession({
     process.exit(0);
   }
 
+  // Closing on idle is the SAFE direction: finalize reseals the profile into
+  // the vault first, so a signed-in session that times out keeps its cookies
+  // and simply reopens next time. Set AGENT_ID_BROWSER_IDLE_MS=0 to disable.
+  const idleMs = (() => {
+    const raw = Number(process.env.AGENT_ID_BROWSER_IDLE_MS);
+    if (Number.isFinite(raw)) return Math.max(0, raw);
+    return DEFAULT_IDLE_MS;
+  })();
+  if (idleMs > 0) {
+    const reaper = setInterval(() => {
+      if (finalizing) return;
+      if (stream.viewers() > 0) {
+        touch(); // being watched is being used
+        return;
+      }
+      if (Date.now() - lastActivityAt < idleMs) return;
+      const forHuman =
+        idleMs >= 60_000 ? `${Math.round(idleMs / 60_000)} min` : `${Math.round(idleMs / 1000)}s`;
+      process.stderr.write(
+        `Session '${name}' idle for ${forHuman} with no viewer — closing ` +
+          `(profile is resealed; reopen with \`open --name ${name}\`).\n`,
+      );
+      void finalize();
+    }, IDLE_POLL_MS);
+    reaper.unref?.();
+  }
+
   const token = crypto.randomBytes(24).toString("hex");
   const server = net.createServer((sock) => {
     let buf = "";
@@ -1568,6 +1742,7 @@ export async function runSession({
         return;
       }
       msg._stateDir = stateDir;
+      touch();
       try {
         const result = await dispatch(state, msg, policy);
         sock.end(JSON.stringify({ ok: true, ...result }) + "\n");
@@ -1583,7 +1758,7 @@ export async function runSession({
   await fs.mkdir(sessionsDir(stateDir), { recursive: true, mode: 0o700 });
   await fs.writeFile(
     sessionFilePath(stateDir, name),
-    JSON.stringify({
+    JSON.stringify(sessionRecord(name, {
       port,
       token,
       pid: process.pid,
@@ -1591,7 +1766,7 @@ export async function runSession({
       startedAt: Date.now(),
       streamPort: stream.port,
       streamToken: stream.token,
-    }),
+    })),
     { mode: 0o600 },
   );
   // Optional start page: navigate BEFORE the ready line so "ready" means "up

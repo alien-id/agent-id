@@ -28,6 +28,7 @@
 //                     {"type":"ack","seq":N}
 //                     {"type":"config","maxFps":N,"pacing":"ack"|"push"}
 //                     {"type":"status_request"}
+//                     {"type":"resize","width":W,"height":H}
 //                     {"type":"webrtc_offer"|"webrtc_ice", ...}  (experimental)
 //
 // Delivery is latest-frame-wins: each JPEG client has ONE pending slot that
@@ -39,6 +40,12 @@
 // keyframe). After ~600ms without a screencast frame the page has settled and
 // one high-quality Page.captureScreenshot "refinement" frame is pushed, so
 // text is sharp at rest while motion runs at aggressive JPEG quality.
+//
+// `resize` is our one extension beyond agent-browser's shapes (harmless there —
+// unknown types are ignored). width/height are the VIEWER's dimensions — the
+// desired page viewport — so a phone-sized viewer gets the page's mobile
+// layout, not a shrunken desktop one. The resulting viewport is broadcast to
+// every watcher as {"type":"status","resized":{...},"viewport":{...}}.
 //
 // SEAL PRESERVED: this never opens a CDP debug port — frames come from a
 // patchright CDPSession over the existing pipe, input goes through
@@ -116,7 +123,7 @@ export function decodeFrameBinary(buf) {
 
 // Incremental parser for client frames. Client→server frames are always
 // masked (RFC 6455 §5.1). Yields {opcode, payload} per complete frame;
-// fragmented text is reassembled.
+// fragmented text is reassembled. Exported for tests.
 export function makeFrameParser(onFrame) {
   let buf = Buffer.alloc(0);
   let fragments = null;
@@ -239,7 +246,15 @@ function mutatesPage(msg) {
  * so tab-new / tab-switch / tab-close all retarget without hooks).
  * Returns { port, token, suspend, resume, close }.
  */
-export async function startStreamServer(state, { log = () => {}, h264Config = null } = {}) {
+// Viewer resize requests are clamped to sane page dimensions: below 200 the
+// page is unusable, above 4096 a typo'd request could balloon the framebuffer.
+const RESIZE_MIN = 200;
+const RESIZE_MAX = 4096;
+
+export async function startStreamServer(
+  state,
+  { log = () => {}, h264Config = null, resize = null, onActivity = () => {} } = {},
+) {
   const token = crypto.randomBytes(24).toString("hex");
   const clients = new Set();
   let cdp = null; // active CDPSession for the screencast
@@ -644,6 +659,30 @@ export async function startStreamServer(state, { log = () => {}, h264Config = nu
       // Input is disabled while a credential fill is in flight — the viewer
       // must not be able to interact with a form mid-injection.
       if (suspended > 0) return;
+      onActivity();
+      if (msg.type === "resize") {
+        // Reshape the page viewport to the viewer's screen (mobile-sized
+        // viewports for phone watchers). Serialized behind pending input and
+        // suspend-checked at apply time like every other viewer event; the
+        // achieved viewport is broadcast so ALL watchers learn the new shape.
+        const width = Math.round(Number(msg.width));
+        const height = Math.round(Number(msg.height));
+        if (!resize || ![width, height].every(Number.isFinite)) return;
+        const clamp = (n) => Math.min(Math.max(n, RESIZE_MIN), RESIZE_MAX);
+        inputChain = inputChain
+          .then(async () => {
+            if (suspended > 0) return;
+            const viewport = await resize(clamp(width), clamp(height));
+            broadcastStatus({
+              type: "status",
+              source: "alien",
+              resized: { width: clamp(width), height: clamp(height) },
+              ...(viewport ? { viewport } : {}),
+            });
+          })
+          .catch(() => {});
+        return;
+      }
       if (mutatesPage(msg)) state.invalidateRefs?.("owner used live browser control");
       // Queue, don't fire-and-forget: the suspend/page checks re-run at apply
       // time so a fill starting mid-queue still blacks out the queued tail.
@@ -672,7 +711,14 @@ export async function startStreamServer(state, { log = () => {}, h264Config = nu
     socket.on("close", drop);
     socket.on("error", drop);
 
-    void startScreencast(); // first watcher starts the feed
+    // Frames are CHANGE-driven, so a client that joins an already-running cast
+    // gets nothing at all until the page happens to move — on a sign-in form
+    // that is forever, and a blank canvas reads as "the browser view is
+    // broken". Restart the cast so Chrome emits a fresh first frame for it
+    // (the same trick `resume` uses); otherwise this is the first watcher and
+    // starting the feed produces that frame anyway.
+    if (cdp) void stopScreencast().then(() => startScreencast());
+    else void startScreencast();
   });
 
   await new Promise((resolve) => server.listen(0, BIND_HOST, resolve));
@@ -680,6 +726,8 @@ export async function startStreamServer(state, { log = () => {}, h264Config = nu
   return {
     port: server.address().port,
     token,
+    /** How many viewers are attached — a watched session is never idle. */
+    viewers: () => clients.size,
     /** Hide the feed while a secret is typed into the page. Depth-counted. */
     suspend() {
       suspended++;
