@@ -329,6 +329,14 @@ export function formSnapshotInPage(arg) {
 
 const sel = (ref) => `[data-aibref="${String(ref).replace(/["\\]/g, "")}"]`;
 const ACTION_TIMEOUT = 15000;
+
+// How long a session may sit unused (no agent action, no viewer input, nobody
+// watching) before it closes itself. Long enough that an owner reading a page
+// or stepping away mid-task is not cut off, short enough that a forgotten
+// session does not hold a browser for the life of the container. Override with
+// AGENT_ID_BROWSER_IDLE_MS; 0 disables.
+const DEFAULT_IDLE_MS = 20 * 60_000;
+const IDLE_POLL_MS = 30_000;
 const MAX_FRAMES = 12; // iframes snapshotted per page (ad-heavy pages have dozens)
 const CONSOLE_CAP = 300; // ring-buffer size for captured console/pageerror entries
 
@@ -1651,9 +1659,21 @@ export async function runSession({
   // token ride in the session file so the host runtime can relay it to the
   // owner's client; the feed and viewer input are suspended while fill-secret
   // / fill-otp inject credential values (see those dispatch cases).
+  // Idle shutdown. A session holds a Chrome and a node process for as long as
+  // it lives, and nothing used to end one: an agent that opened a browser and
+  // moved on (or failed a login and gave up) left it running until the
+  // container did, so profiles piled up holding memory and muddying "which
+  // browser is this?". Any agent action or viewer input counts as use, and a
+  // session with someone watching is never idle however quiet it is — the
+  // owner may be reading a page or part-way through a sign-in.
+  let lastActivityAt = Date.now();
+  const touch = () => {
+    lastActivityAt = Date.now();
+  };
   const stream = await startStreamServer(state, {
     log: (m) => process.stderr.write(`${m}\n`),
     resize: (width, height) => resizeToViewport(state, width, height),
+    onActivity: touch,
   });
   state.stream = stream;
 
@@ -1674,6 +1694,33 @@ export async function runSession({
     process.exit(0);
   }
 
+  // Closing on idle is the SAFE direction: finalize reseals the profile into
+  // the vault first, so a signed-in session that times out keeps its cookies
+  // and simply reopens next time. Set AGENT_ID_BROWSER_IDLE_MS=0 to disable.
+  const idleMs = (() => {
+    const raw = Number(process.env.AGENT_ID_BROWSER_IDLE_MS);
+    if (Number.isFinite(raw)) return Math.max(0, raw);
+    return DEFAULT_IDLE_MS;
+  })();
+  if (idleMs > 0) {
+    const reaper = setInterval(() => {
+      if (finalizing) return;
+      if (stream.viewers() > 0) {
+        touch(); // being watched is being used
+        return;
+      }
+      if (Date.now() - lastActivityAt < idleMs) return;
+      const forHuman =
+        idleMs >= 60_000 ? `${Math.round(idleMs / 60_000)} min` : `${Math.round(idleMs / 1000)}s`;
+      process.stderr.write(
+        `Session '${name}' idle for ${forHuman} with no viewer — closing ` +
+          `(profile is resealed; reopen with \`open --name ${name}\`).\n`,
+      );
+      void finalize();
+    }, IDLE_POLL_MS);
+    reaper.unref?.();
+  }
+
   const token = crypto.randomBytes(24).toString("hex");
   const server = net.createServer((sock) => {
     let buf = "";
@@ -1691,6 +1738,7 @@ export async function runSession({
         return;
       }
       msg._stateDir = stateDir;
+      touch();
       try {
         const result = await dispatch(state, msg, policy);
         sock.end(JSON.stringify({ ok: true, ...result }) + "\n");

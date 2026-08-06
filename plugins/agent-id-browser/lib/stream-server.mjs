@@ -171,7 +171,10 @@ function mutatesPage(msg) {
 const RESIZE_MIN = 200;
 const RESIZE_MAX = 4096;
 
-export async function startStreamServer(state, { log = () => {}, resize = null } = {}) {
+export async function startStreamServer(
+  state,
+  { log = () => {}, resize = null, onActivity = () => {} } = {},
+) {
   const token = crypto.randomBytes(24).toString("hex");
   const clients = new Set();
   let cdp = null; // active CDPSession for the screencast
@@ -286,6 +289,7 @@ export async function startStreamServer(state, { log = () => {}, resize = null }
       // Input is disabled while a credential fill is in flight — the viewer
       // must not be able to interact with a form mid-injection.
       if (suspended > 0) return;
+      onActivity();
       if (msg.type === "resize") {
         // Reshape the page viewport to the viewer's screen (mobile-sized
         // viewports for phone watchers). Serialized behind pending input and
@@ -345,6 +349,8 @@ export async function startStreamServer(state, { log = () => {}, resize = null }
   return {
     port: server.address().port,
     token,
+    /** How many viewers are attached — a watched session is never idle. */
+    viewers: () => clients.size,
     /** Hide the feed while a secret is typed into the page. Depth-counted. */
     suspend() {
       suspended++;
