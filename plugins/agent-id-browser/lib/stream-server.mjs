@@ -77,6 +77,15 @@ function envInt(name, fallback, min, max) {
 // (0 disables refinement). Bind is overridable ONLY for LAN viewer testing.
 const STREAM_QUALITY = envInt("AGENT_ID_STREAM_QUALITY", 55, 1, 100);
 const REFINE_QUALITY = envInt("AGENT_ID_STREAM_REFINE_QUALITY", 90, 0, 100);
+// Watchdog: with a viewer attached and nothing arriving for this long, restart
+// the screencast (0 disables). Refinement is NOT a substitute — it is armed by
+// a screencast frame (`refined` starts true and `lastMetadata` starts null), so
+// a cast that dies before or between frames never triggers it, and the retarget
+// poll only fires when `state.current` CHANGES, which a silently-detached CDP
+// session does not do. On a genuinely static page this restarts every interval:
+// two CDP calls and one keyframe, which also proves the pipe is alive and is
+// far cheaper than a viewer staring at a frozen picture.
+const WATCHDOG_MS = envInt("AGENT_ID_STREAM_WATCHDOG_MS", 15000, 0, 600000);
 const BIND_HOST = process.env.AGENT_ID_STREAM_BIND || "127.0.0.1";
 
 // ── WS wire helpers (server side: outgoing unmasked, incoming masked) ────────
@@ -104,6 +113,11 @@ const encodeTextFrame = (payload) => wsFrame(0x1, Buffer.from(payload, "utf8"));
 function encodeControlFrame(opcode, payload = Buffer.alloc(0)) {
   return Buffer.concat([Buffer.from([0x80 | opcode, payload.length]), payload]);
 }
+
+// Application close code (4000-4999 is the private-use range) for "you asked
+// for a codec I cannot serve". Typed so a strict client can distinguish it
+// from a network drop and stop retrying, instead of reconnecting forever.
+export const CLOSE_CODEC_UNAVAILABLE = 4002;
 
 /** Binary frame-message body: [u32 LE header length][JSON header][payload]. */
 export function encodeFrameBinary(header, payload) {
@@ -180,6 +194,13 @@ export function parseStreamParams(url) {
   const codec = raw === "h264" || raw === "auto" ? raw : "jpeg";
   const rawFps = Number(url.searchParams.get("maxFps"));
   return {
+    // `strict=1` turns the codec request into a requirement. A silent fall
+    // back to jpeg hides broken provisioning and quietly costs ~10x the
+    // traffic, so a client that cannot use jpeg wants the refusal instead —
+    // immediately, and typed, rather than as a surprise in the bandwidth bill.
+    // Only meaningful with an explicit codec: `auto` ASKS for the best
+    // available and jpeg is a valid answer.
+    strict: url.searchParams.get("strict") === "1" && raw === "h264",
     // h264/auto payloads are raw bytes — the codec choice implies binary framing.
     binary: url.searchParams.get("binary") === "1" || codec !== "jpeg",
     codec,
@@ -192,7 +213,8 @@ export function parseStreamParams(url) {
 
 const KEY_ALIASES = { " ": "Space" };
 
-async function applyInput(page, msg) {
+// Exported for tests: the input contract is only observable here.
+export async function applyInput(page, msg) {
   if (msg.type === "input_mouse") {
     const x = Number(msg.x) || 0;
     const y = Number(msg.y) || 0;
@@ -214,14 +236,26 @@ async function applyInput(page, msg) {
   }
   if (msg.type === "input_keyboard") {
     const key = KEY_ALIASES[msg.key] ?? msg.key;
-    if (!key || typeof key !== "string") return;
+    // `char` is the text-insertion event: what it needs is `text`, and `key`
+    // is only ever a fallback for it. Requiring `key` here dropped a
+    // perfectly well-formed {eventType:"char", text:"…"} on the floor without
+    // a word — silently losing the character. keyDown/keyUp genuinely need a
+    // key, since there is no such thing as pressing "nothing".
+    if (msg.eventType === "char") {
+      const text = typeof msg.text === "string" && msg.text !== "" ? msg.text : key;
+      if (typeof text !== "string" || text === "") {
+        throw new Error("input_keyboard char needs `text` (or a `key` to fall back to)");
+      }
+      return page.keyboard.insertText(text);
+    }
+    if (!key || typeof key !== "string") {
+      throw new Error(`input_keyboard ${msg.eventType || "?"} needs \`key\``);
+    }
     switch (msg.eventType) {
       case "keyDown":
         return page.keyboard.down(key);
       case "keyUp":
         return page.keyboard.up(key);
-      case "char":
-        return page.keyboard.insertText(String(msg.text ?? key));
       default:
         return;
     }
@@ -279,6 +313,22 @@ export async function startStreamServer(
 
   function sendText(client, obj) {
     client.sock.write(encodeTextFrame(JSON.stringify(obj)));
+  }
+
+  // Refuse a client with a close code it can act on. The status frame goes
+  // first so a viewer that logs text has the reason in words, not just a
+  // number; then a proper WS close (2-byte big-endian code + UTF-8 reason).
+  function closeClient(client, code, reason) {
+    try {
+      sendText(client, { type: "status", source: "alien", error: reason, code });
+      const body = Buffer.from(reason, "utf8").subarray(0, 123);
+      const payload = Buffer.alloc(2 + body.length);
+      payload.writeUInt16BE(code, 0);
+      body.copy(payload, 2);
+      client.sock.write(encodeControlFrame(0x8, payload));
+    } catch { /* socket already gone */ }
+    clients.delete(client);
+    try { client.sock.end(); } catch { /* already closed */ }
   }
 
   function broadcastStatus(obj) {
@@ -437,9 +487,16 @@ export async function startStreamServer(
         lastFrameAt = 0;
       }
     } catch (err) {
-      log(`stream: h264 unavailable (${err.message || err}) — falling back to jpeg`);
+      const why = err.message || String(err);
+      log(`stream: h264 unavailable (${why})`);
       for (const client of clients) {
         if (client.codec !== "h264") continue;
+        if (client.strict) {
+          // Asked for h264 and nothing else: say so and close, rather than
+          // serve a format the client did not agree to.
+          closeClient(client, CLOSE_CODEC_UNAVAILABLE, `h264 unavailable: ${why}`);
+          continue;
+        }
         client.codec = "jpeg";
         sendText(client, statusFor(client));
       }
@@ -547,6 +604,23 @@ export async function startStreamServer(
   }, REFINE_POLL_MS);
   refine.unref?.();
 
+  // "A viewer is watching and no frames are coming" — the one condition that
+  // always means the picture is wrong, whatever the cause (dead CDP session,
+  // a screencast Chrome stopped feeding, an encoder that never started).
+  const watchdog = setInterval(() => {
+    if (closed || WATCHDOG_MS <= 0 || suspended > 0 || clients.size === 0) return;
+    const page = state.current;
+    if (!page || page.isClosed?.()) return;
+    if (cdp && Date.now() - lastFrameAt < WATCHDOG_MS) return;
+    if (!cdp) {
+      void startScreencast();
+      return;
+    }
+    log(`stream: no frames for ${WATCHDOG_MS}ms with ${clients.size} viewer(s) — restarting screencast`);
+    void stopScreencast().then(() => startScreencast());
+  }, Math.max(1000, Math.floor(WATCHDOG_MS / 3)));
+  watchdog.unref?.();
+
   async function handleWebRtcSignal(client, msg) {
     try {
       if (!webrtc) {
@@ -610,6 +684,18 @@ export async function startStreamServer(
     // auto resolves against provisioning: h264 only on an install-codecs'd
     // host. The join status tells the viewer which one it got.
     if (client.codec === "auto") client.codec = h264Config ? "h264" : "jpeg";
+    // Strict + unprovisioned host: refuse now. Waiting for the encoder to
+    // fail would answer a handshake question minutes later, and only after
+    // the viewer had already been served jpeg it never agreed to.
+    if (client.strict && !h264Config) {
+      clients.add(client);
+      closeClient(
+        client,
+        CLOSE_CODEC_UNAVAILABLE,
+        "h264 requested with strict=1 but this host has no encoder — run `agent-id-browser install-codecs`",
+      );
+      return;
+    }
     clients.add(client);
     sendText(client, statusFor(client));
     if (client.codec === "h264") void ensureAnnexBEncoder();
@@ -693,7 +779,18 @@ export async function startStreamServer(
           if (!page || page.isClosed?.()) return;
           return applyInput(page, msg);
         })
-        .catch(() => {});
+        // Malformed input used to disappear here: the viewer sent something
+        // the server could not act on and heard nothing back, so a client bug
+        // looked like a dead feed. Report it to the sender (only — it is their
+        // message) and keep the queue running.
+        .catch((err) => {
+          sendText(client, {
+            type: "status",
+            source: "alien",
+            error: err?.message || String(err),
+            for: msg.type,
+          });
+        });
     });
     socket.on("data", parse);
     socket.on("drain", () => {
@@ -748,6 +845,7 @@ export async function startStreamServer(
     close() {
       closed = true;
       clearInterval(retarget);
+      clearInterval(watchdog);
       clearInterval(refine);
       void stopScreencast();
       if (annexB) {

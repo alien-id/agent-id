@@ -166,12 +166,12 @@ async function startServer(opts = {}, stateOpts = {}) {
 
 test("parseStreamParams: defaults match the v1 wire protocol", () => {
   const p = parseStreamParams(new URL("http://x/?token=t"));
-  assert.deepEqual(p, { binary: false, codec: "jpeg", pacing: "push", maxFps: 0 });
+  assert.deepEqual(p, { strict: false, binary: false, codec: "jpeg", pacing: "push", maxFps: 0 });
 });
 
 test("parseStreamParams: clamps and coerces", () => {
   const p = parseStreamParams(new URL("http://x/?binary=1&pacing=ack&maxFps=500"));
-  assert.deepEqual(p, { binary: true, codec: "jpeg", pacing: "ack", maxFps: 120 });
+  assert.deepEqual(p, { strict: false, binary: true, codec: "jpeg", pacing: "ack", maxFps: 120 });
   assert.equal(parseStreamParams(new URL("http://x/?maxFps=junk")).maxFps, 0);
 });
 

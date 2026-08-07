@@ -44,6 +44,7 @@ both browser stacks.
 | `binary` | `1` | `frame` messages become WS **binary** messages (layout below); everything else stays JSON text |
 | `codec` | `jpeg` \| `h264` \| `auto` | `h264`/`auto` imply `binary=1`. `auto` resolves at join time: h264 on a provisioned host (see *Provisioning*), else jpeg. Omitting the param means `jpeg` — that is a compatibility floor, not a recommendation: a client that never asked can't be assumed to decode video. **New clients should always send `codec=auto`** (the bundled viewer does), which is how h264 becomes the effective default wherever the owner ran `install-codecs` |
 | `pacing` | `push` (default) \| `ack` | `ack`: at most one frame in flight; the client releases the next with an `ack` message |
+| `strict` | `1` | Only with an explicit `codec=h264`: make it a **requirement**. An unprovisioned host (or an encoder that fails to start) refuses with close code **4002** instead of quietly serving jpeg — broken provisioning is otherwise invisible and jpeg costs roughly 10× the traffic. `codec=auto` ignores it: `auto` asks for the best available, and jpeg is a valid answer |
 | `maxFps` | 0–120 | per-client delivery cap (0 = uncapped) |
 
 ### Messages
@@ -79,6 +80,10 @@ Client → server (always JSON text):
   "deltaX": 0, "deltaY": 120 }
 { "type": "input_keyboard", "eventType": "keyDown" | "keyUp" | "char",
   "key": "Enter", "text": "a" }
+// `char` carries its payload in `text`; `key` is only a fallback for it, so a
+// text-only char is valid. `keyDown`/`keyUp` require `key`. Input the server
+// cannot act on comes back to the SENDER as
+// {"type":"status","error":"…","for":"input_keyboard"} rather than vanishing.
 { "type": "resize", "width": 390, "height": 844 }  // viewport, see below
 { "type": "webrtc_offer", "sdp": "…" }             // experimental, see below
 { "type": "webrtc_ice", "candidate": { … } }
@@ -88,6 +93,12 @@ Input coordinates are in `metadata.deviceWidth/Height` space (CSS viewport
 pixels — capture is clamped to the CSS viewport, so the mapping is 1:1).
 Mutating input (click, wheel, keydown, char) invalidates the agent's element
 refs, exactly like any page mutation.
+
+### Close codes
+
+| Code | Meaning |
+|---|---|
+| `4002` | The requested codec cannot be served and the client sent `strict=1`. Typed on purpose: a strict client can tell this from a network drop and stop reconnecting. A `status` frame carrying `error` and `code` precedes the close, so a text-logging viewer sees the reason in words |
 
 ### Binary frame layout
 
