@@ -403,6 +403,53 @@ test("install-codecs records a probed system ffmpeg", async (t) => {
   fsSync.rmSync(stateDir, { recursive: true, force: true });
 });
 
+test("loadCodecConfig falls back to AGENT_ID_FFMPEG when no record exists", async (t) => {
+  const { detectH264Encoder, loadCodecConfig } =
+    await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fsSync = await import("node:fs");
+  const stateDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "codecs-env-"));
+  const prevEnv = process.env.AGENT_ID_FFMPEG;
+  process.env.AGENT_ID_FFMPEG = prevEnv || "ffmpeg";
+  try {
+    const cfg = await loadCodecConfig(stateDir);
+    assert.ok(cfg, "an env-provisioned host must load a codec config");
+    assert.equal(cfg.source, "env");
+    assert.ok(cfg.encoder);
+    // The env override is per-process truth — it must NOT be written back as
+    // a per-tenant record that would outlive an image whose ffmpeg moved.
+    assert.equal(fsSync.existsSync(path.join(stateDir, "browser-codecs.json")), false);
+  } finally {
+    if (prevEnv === undefined) delete process.env.AGENT_ID_FFMPEG;
+    else process.env.AGENT_ID_FFMPEG = prevEnv;
+    fsSync.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("loadCodecConfig stays null when neither record nor env provisions", async () => {
+  const { loadCodecConfig } =
+    await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fsSync = await import("node:fs");
+  const stateDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "codecs-none-"));
+  const prevEnv = process.env.AGENT_ID_FFMPEG;
+  try {
+    delete process.env.AGENT_ID_FFMPEG;
+    assert.equal(await loadCodecConfig(stateDir), null);
+    // A broken override is not provisioning: the probe re-verifies the
+    // binary exactly like a stale record, and degrades to unprovisioned.
+    process.env.AGENT_ID_FFMPEG = path.join(stateDir, "no-such-ffmpeg");
+    assert.equal(await loadCodecConfig(stateDir), null);
+  } finally {
+    if (prevEnv === undefined) delete process.env.AGENT_ID_FFMPEG;
+    else process.env.AGENT_ID_FFMPEG = prevEnv;
+    fsSync.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("codec=h264 end-to-end: Annex-B chunks with AUD/SPS/IDR arrive", async (t) => {
   const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
   if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
