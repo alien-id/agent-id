@@ -18,7 +18,6 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
-import { createRequire } from "node:module";
 
 import {
   outputError,
@@ -48,14 +47,13 @@ import {
   promptSecret,
 } from "@alien-id/agent-id-vault/lib/trusted-input.mjs";
 import { collectViaForm } from "@alien-id/agent-id-core/lib/secure-form.mjs";
+// Static, not createRequire: the compiled binary has no node_modules to resolve against.
+import qrcode from "@alien-id/agent-id-core/bin/qrcode.cjs";
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
 import { loadOauthSecretsFile } from "../lib/oauth.mjs";
 import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
 import { normalizeFingerprint } from "../lib/control-tls.mjs";
-
-// The QR renderer is a CommonJS module vendored in agent-id-core.
-const qrcode = createRequire(import.meta.url)("@alien-id/agent-id-core/bin/qrcode.cjs");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
