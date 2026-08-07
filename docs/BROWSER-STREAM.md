@@ -163,10 +163,16 @@ probes for a usable ffmpeg (`AGENT_ID_FFMPEG` → `PATH` → a previously
 downloaded copy), on Linux falls back to downloading a static build (BtbN's
 gpl build, into `<stateDir>/tools/ffmpeg`), verifies an H.264 encoder exists,
 and records `<stateDir>/browser-codecs.json`. Sessions load that record at
-startup; only then does `codec=auto` resolve to h264 (`h264Available: true`
-in status). An unprovisioned host never spawns ffmpeg implicitly — explicit
-`?codec=h264` still probes `PATH`, and a failed probe falls back to jpeg with
-a status notice.
+startup — **or, when no record exists, the `AGENT_ID_FFMPEG` env override,
+probed live**: setting the env var is the same explicit host-level opt-in the
+record represents, and it is the only provisioning channel an immutable
+container image has (`install-codecs` writes per-tenant state an image cannot
+pre-write). Either form makes `codec=auto` resolve to h264
+(`h264Available: true` in status) and lets a `strict=1` handshake succeed. A
+host with neither never spawns ffmpeg implicitly; a broken override is
+re-verified like a stale record and degrades to unprovisioned — non-strict
+h264 viewers then fall back to jpeg with a status notice, strict ones are
+refused with close 4002.
 
 Encoder selection: `libx264` when the ffmpeg build has it (typical container
 images; `-preset ultrafast -tune zerolatency`), else `libopenh264` (Cisco's

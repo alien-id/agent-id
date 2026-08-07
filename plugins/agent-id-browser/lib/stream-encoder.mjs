@@ -36,12 +36,33 @@ const GOP = 30;
 
 export const codecConfigPath = (stateDir) => path.join(stateDir, "browser-codecs.json");
 
-/** The provisioned codec record, re-verified against the binary, or null. */
+/**
+ * The codec provisioning for this host: the `install-codecs` record from
+ * stateDir, re-verified against the binary — or, when no record exists, the
+ * host-level `AGENT_ID_FFMPEG` override, probed live. Null only when neither
+ * provisions the host.
+ *
+ * The env fallback is what makes an immutable-image host provisionable at
+ * all: `install-codecs` writes into a per-tenant stateDir, but a container
+ * image is shared across every tenant and cannot pre-write per-tenant files —
+ * the one host-level channel an image has is an env var. Setting
+ * AGENT_ID_FFMPEG is the same explicit operator opt-in the record represents
+ * (nothing is probed on a host that set neither), and the probe re-verifies
+ * the binary the same way a record is re-verified, so a stale override
+ * degrades to unprovisioned rather than to a broken encoder. Deliberately
+ * NOT persisted back into stateDir: the env is authoritative per-process,
+ * and a written record would outlive an image whose ffmpeg moved.
+ */
 export async function loadCodecConfig(stateDir) {
   try {
     const cfg = JSON.parse(await fsp.readFile(codecConfigPath(stateDir), "utf8"));
     if (cfg?.ffmpegPath && (await detectH264Encoder(cfg.ffmpegPath))) return cfg;
   } catch { /* absent or stale */ }
+  const envPath = process.env.AGENT_ID_FFMPEG;
+  if (envPath) {
+    const encoder = await detectH264Encoder(envPath);
+    if (encoder) return { ffmpegPath: envPath, encoder, source: "env" };
+  }
   return null;
 }
 
