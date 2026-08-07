@@ -1,9 +1,5 @@
 name: Release binaries
 
-# Standalone linux/amd64 binaries for the microVM rootfs, which has no Node and
-# no node_modules. Consumers pin a tag and verify the .sha256 next to each file,
-# so asset names must stay exactly as they are here.
-
 on:
   push:
     tags: ['v*']
@@ -19,8 +15,6 @@ jobs:
 
     steps:
       - name: Harden runner
-        # audit, not block: this job holds no id-token, and `bun build --compile`
-        # fetches the target runtime from bun.sh on a version mismatch.
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
@@ -44,8 +38,6 @@ jobs:
           done
 
       - name: Smoke test
-        # Catches a bundler regression that only shows up in the binary, e.g. a
-        # module resolved at runtime instead of at bundle time.
         run: |
           for plugin in agent-id-core agent-id-vault agent-id-proxy; do
             "./$plugin" --help > /dev/null
