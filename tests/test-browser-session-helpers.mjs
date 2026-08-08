@@ -14,11 +14,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
+import net from "node:net";
 import path from "node:path";
 
 import {
   chromeCompensatedBounds,
   frameRefId,
+  probeSession,
   pruneDeadSessions,
   refuseRef,
   safeFilename,
@@ -141,17 +143,80 @@ test("sessionAlive: this process is alive, an absurd pid is not", () => {
   assert.equal(sessionAlive(null), false);
 });
 
-test("pruneDeadSessions: drops orphans, keeps live sessions and young work dirs", async () => {
+// A stand-in for the daemon's control server: reads one line per connection
+// and answers with the daemon's own token rule — ok:true for a match, "bad
+// token" otherwise. Returns { port, close }.
+function daemonStub(expectedToken) {
+  const server = net.createServer((sock) => {
+    let buf = "";
+    sock.on("data", (d) => {
+      buf += d.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      let msg;
+      try {
+        msg = JSON.parse(buf.slice(0, nl));
+      } catch {
+        sock.end(JSON.stringify({ ok: false, error: "bad json" }) + "\n");
+        return;
+      }
+      const reply =
+        msg.token === expectedToken
+          ? { ok: true, url: "about:blank", title: "", tabs: 1 }
+          : { ok: false, error: "bad token" };
+      sock.end(JSON.stringify(reply) + "\n");
+    });
+    sock.on("error", () => {});
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({ port: server.address().port, close: () => server.close() });
+    });
+  });
+}
+
+test("probeSession: token identity, not connectability, decides the verdict", async (t) => {
+  const stub = await daemonStub("right-token");
+  t.after(() => stub.close());
+  assert.equal(await probeSession({ port: stub.port, token: "right-token" }), "ours");
+  // The incident shape: the port answers, but it is not this session's
+  // daemon — a recycled port after a container restart.
+  assert.equal(await probeSession({ port: stub.port, token: "stale-token" }), "gone");
+  // Nothing listening at all.
+  const vacated = await daemonStub("x");
+  vacated.close();
+  assert.equal(await probeSession({ port: vacated.port, token: "x" }), "gone");
+  // No control coordinates: nothing to disprove with.
+  assert.equal(await probeSession({ pid: process.pid }), "unsure");
+  // A listener that never answers is not proof of death.
+  const silent = net.createServer(() => {});
+  await new Promise((r) => silent.listen(0, "127.0.0.1", r));
+  t.after(() => silent.close());
+  assert.equal(
+    await probeSession({ port: silent.address().port, token: "x" }, 200),
+    "unsure",
+  );
+});
+
+test("pruneDeadSessions: drops orphans, keeps live sessions and young work dirs", async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aid-prune-"));
   const sessions = path.join(dir, "browser-sessions");
   await fs.mkdir(sessions, { recursive: true });
+  const stub = await daemonStub("live-token");
+  t.after(() => stub.close());
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
   const write = (name, info) =>
     fs.writeFile(path.join(sessions, `${name}.json`), JSON.stringify(info));
   // A dead daemon with the NEWEST startedAt — the shape that hijacks a viewer
   // picking "the newest session advertising a stream".
   await write("dead", { pid: 0x7ffffff, startedAt: Date.now() + 1e6, streamPort: 1 });
-  await write("live", { pid: process.pid, startedAt: 1, streamPort: 2 });
+  await write("live", { pid: process.pid, startedAt: 1, streamPort: 2, port: stub.port, token: "live-token" });
+  // A live pid whose port is answered by a STRANGER (recycled port after a
+  // container restart): the token handshake is what unmasks it.
+  await write("impostor", { pid: process.pid, startedAt: 2, streamPort: 3, port: stub.port, token: "someone-elses-token" });
+  // No control coordinates at all: the pid answer is all there is — kept.
+  await write("legacy", { pid: process.pid, startedAt: 3, streamPort: 4 });
   await fs.writeFile(path.join(sessions, "junk.json"), "not json");
   // Work dirs: one orphaned and old, one orphaned but fresh (a launch in
   // flight), one belonging to the live session.
@@ -165,8 +230,8 @@ test("pruneDeadSessions: drops orphans, keeps live sessions and young work dirs"
   const pruned = await pruneDeadSessions(dir);
 
   const left = (await fs.readdir(sessions)).sort();
-  assert.deepEqual(left, ["fresh.work", "junk.json", "live.json", "live.work"]);
+  assert.deepEqual(left, ["fresh.work", "junk.json", "legacy.json", "live.json", "live.work"]);
   assert.ok(pruned.includes("dead"));
+  assert.ok(pruned.includes("impostor"));
   assert.ok(pruned.includes("dead.work"));
-  await fs.rm(dir, { recursive: true, force: true });
 });
