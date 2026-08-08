@@ -61,6 +61,11 @@ export function sessionFilePath(stateDir, name) {
 // nothing and only asks the question, and it answers it on every platform we
 // run on (a /proc probe does not — desktop is macOS). EPERM means the pid
 // exists and belongs to someone else, which still counts as alive.
+//
+// This is only the cheap first gate. On hosts where the state dir outlives the
+// container, a leftover file's pid routinely collides with some unrelated live
+// process in the fresh PID namespace — the pid answer alone then calls a dead
+// session alive. Callers that must be sure follow up with probeSession().
 export function sessionAlive(info) {
   const pid = Number(info?.pid);
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -70,6 +75,53 @@ export function sessionAlive(info) {
   } catch (err) {
     return err?.code === "EPERM";
   }
+}
+
+// Does the daemon that wrote this session file ANSWER for it? Speaks one line
+// of the control protocol — `{token, action: "info"}` — and classifies the
+// outcome. Only the daemon that wrote the file holds this token, so `ok: true`
+// proves identity where a pid or a connectable port cannot: both are recycled
+// by the OS and can belong to a stranger.
+//
+//   "ours"   — replied ok:true: the session's own daemon.
+//   "gone"   — nothing listening, connection dropped, or the token was
+//              rejected (a stranger on a recycled port).
+//   "unsure" — could not disprove: connected but no reply line in time (a
+//              daemon mid-action answers late), or the file predates the
+//              control server and carries nothing to speak to.
+export function probeSession(info, timeoutMs = 450) {
+  return new Promise((resolve) => {
+    const port = Number(info?.port);
+    if (!Number.isInteger(port) || port <= 0 || !info?.token) return resolve("unsure");
+    const sock = net.connect(port, "127.0.0.1");
+    let buf = "";
+    let settled = false;
+    const finish = (verdict) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(verdict);
+    };
+    const timer = setTimeout(() => finish("unsure"), timeoutMs);
+    sock.on("connect", () => {
+      sock.write(JSON.stringify({ token: info.token, action: "info" }) + "\n");
+    });
+    sock.on("data", (d) => {
+      buf += d.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      let reply;
+      try {
+        reply = JSON.parse(buf.slice(0, nl));
+      } catch {
+        return finish("gone");
+      }
+      finish(reply?.ok === true ? "ours" : "gone");
+    });
+    sock.on("error", () => finish("gone"));
+    sock.on("close", () => finish("gone"));
+  });
 }
 
 // Drop session files whose daemon is gone. A clean `close` reseals and removes
@@ -94,7 +146,11 @@ export async function pruneDeadSessions(stateDir) {
     const file = path.join(sessionsDir(stateDir), entry);
     try {
       const info = JSON.parse(await fs.readFile(file, "utf8"));
-      if (sessionAlive(info)) {
+      // The pid gate alone false-positives on recycled pids (see
+      // sessionAlive); only a token handshake proves the daemon behind the
+      // file is the one answering. "unsure" keeps the file: pruning a LIVE
+      // session's registration would orphan its unsealed profile.
+      if (sessionAlive(info) && (await probeSession(info)) !== "gone") {
         live.add(name);
         continue;
       }
