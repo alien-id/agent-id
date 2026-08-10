@@ -303,7 +303,7 @@ New code should prefer Mode 1. Mode 2 stays for backward compatibility.
 
 ### CONNECT handling
 
-`CONNECT <host>:<port>` tunnels are forwarded transparently — no MITM, no injection. Stubs left inside an HTTPS CONNECT tunnel will be sent to upstream untouched.
+`CONNECT <host>:<port>` tunnels are forwarded transparently — no MITM, no injection. Stubs left inside an HTTPS CONNECT tunnel will be sent to upstream untouched. The tunnel is not a way around the perimeter, though: the SSRF guard below runs on the CONNECT target too (by literal address and by resolved name), and with `--auth-token-file` the tunnel needs the same token every request needs.
 
 ---
 
@@ -417,7 +417,7 @@ Two practical notes:
 | On-path network attacker between proxy and upstream | Bounded by upstream's TLS — the proxy verifies the upstream cert against the system CA bundle. |
 | On-path attacker between agent and proxy | Plain HTTP on `127.0.0.1` loopback. Same-host non-root user processes are the realistic concern; mitigation is OS file/socket perms. |
 | Reach the control plane (local process or LAN host) | Loopback-bound by default; mutating routes require the bearer token. The master key on `/approve` is always sealed to the proxy's pinned key. A network-exposed plane runs over TLS (self-signed, fingerprint pinned via the QR), so the token isn't sniffable either. Residual: the pin trusts the QR's out-of-band channel, and a stolen token is replayable until the proxy restarts (new token). |
-| Drive the agent to hit an internal/metadata host | SSRF guard refuses link-local (incl. `169.254.169.254`), unspecified, and multicast upstreams; `--block-private-hosts` adds loopback/RFC1918. Independent of the per-credential allowlist. |
+| Drive the agent to hit an internal/metadata host | SSRF guard refuses link-local (incl. `169.254.169.254`), unspecified, and multicast upstreams; `--block-private-hosts` adds loopback/RFC1918. Applies to forwarded requests and CONNECT tunnels alike. Independent of the per-credential allowlist. |
 | Get the wallet key to sign an arbitrary tx | Bounded by the credential's RPC-host allowlist, plus optional `chainIdAllowlist` / `toAllowlist` (EVM) and `programAllowlist` (Solana) enforced before signing. |
 | Steal proxy CA private key | Not applicable. **There is no CA**, because we use URL-rewrite instead of TLS interception. |
 

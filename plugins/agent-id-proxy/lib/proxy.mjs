@@ -133,6 +133,9 @@ function structuredError(res, status, body) {
 export const DEFAULT_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const IDLE_TICK_MS = 60 * 1000;
 
+// Coalescing window for rejected-request logging (see logAuthFailure).
+const AUTH_FAIL_LOG_WINDOW_MS = 60 * 1000;
+
 export function createProxy({
   vault = null,
   logPath,
@@ -680,6 +683,24 @@ export function createProxy({
     }
   }
 
+  // An unauthenticated caller must not be able to grow the access log at will —
+  // the refusal is written before any other check, so anything that can reach
+  // the port could otherwise fill the disk one line per request. Policy: log
+  // the first failure of a window verbatim, count the rest, and let the first
+  // failure after the window carry that count as `suppressed`. Never silent:
+  // there is always a record, only its resolution degrades under a flood.
+  const authFailLog = { windowStartedAt: -Infinity, suppressed: 0 };
+  function logAuthFailure(entry) {
+    if (now() - authFailLog.windowStartedAt < AUTH_FAIL_LOG_WINDOW_MS) {
+      authFailLog.suppressed += 1;
+      return;
+    }
+    const suppressed = authFailLog.suppressed;
+    authFailLog.windowStartedAt = now();
+    authFailLog.suppressed = 0;
+    logAccess({ event: "auth_failed", ...entry, suppressed });
+  }
+
   // Stream the agent's request through to the configured upstream. Shared
   // by both URL-rewrite and stub-injection paths.
   function forwardUpstream({
@@ -1078,11 +1099,7 @@ export function createProxy({
     // or any upstream socket. An unauthenticated caller must not be able to
     // observe or drive proxy state, only to be refused.
     if (!authOk(req)) {
-      logAccess({
-        event: "auth_failed",
-        method: req.method,
-        path: (req.url || "").split("?")[0],
-      });
+      logAuthFailure({ method: req.method, path: (req.url || "").split("?")[0] });
       return structuredError(res, 401, {
         error: "unauthorized",
         message: `Missing or invalid ${PROXY_AUTH_HEADER} header.`,
@@ -1159,43 +1176,73 @@ export function createProxy({
     }
   });
 
+  // Every CONNECT refusal shares one wire shape — status line, a machine-
+  // readable error header, explicit zero-length body — so a tunnel client can
+  // tell the refusals apart without parsing prose.
+  function refuseConnect(clientSocket, statusLine, error) {
+    // The refusal can land after an await (the reopen attempt) or after the
+    // tunnel broke, so the client may already be gone — writing to it must not
+    // surface as an unhandled socket error.
+    clientSocket.on("error", () => {});
+    if (clientSocket.destroyed) return;
+    clientSocket.write(
+      `HTTP/1.1 ${statusLine}\r\n` +
+        `X-AgentVault-Proxy-Error: ${error}\r\n` +
+        "Content-Length: 0\r\n\r\n",
+    );
+    clientSocket.destroy();
+  }
+
   // CONNECT tunneling for HTTPS. No MITM in v1.
-  server.on("connect", (req, clientSocket, head) => {
+  server.on("connect", async (req, clientSocket, head) => {
     const start = Date.now();
     const [host, portStr] = (req.url || "").split(":");
     const port = parseInt(portStr || "443", 10);
 
     if (!authOk(req)) {
-      logAccess({ event: "auth_failed", method: "CONNECT" });
-      clientSocket.write(
-        "HTTP/1.1 401 Unauthorized\r\n" +
-          "X-AgentVault-Proxy-Error: unauthorized\r\n" +
-          "Content-Length: 0\r\n\r\n",
-      );
-      clientSocket.destroy();
+      logAuthFailure({ method: "CONNECT" });
+      refuseConnect(clientSocket, "401 Unauthorized", "unauthorized");
       return;
     }
     delete req.headers[PROXY_AUTH_HEADER];
 
-    if (state.locked) {
-      clientSocket.write(
-        "HTTP/1.1 401 Vault Locked\r\n" +
-          "X-AgentVault-Proxy-Error: vault_locked\r\n" +
-          "Content-Length: 0\r\n\r\n",
-      );
-      clientSocket.destroy();
+    // Same self-heal the request handler gets on an idle lock: on the
+    // auto-unlock path a reopen needs no human. A tunnel has no parked-request
+    // path to fall through to, so a failed reopen is still a refusal.
+    if (state.locked && !(await tryReopenVault("idle_lock"))) {
+      refuseConnect(clientSocket, "401 Vault Locked", "vault_locked");
       return;
     }
 
     if (!host) {
-      clientSocket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-      clientSocket.destroy();
+      refuseConnect(clientSocket, "400 Bad Request", "bad_request");
+      return;
+    }
+
+    // SSRF guard, same two layers as forwardUpstream: a literal-IP target is
+    // checked here (node skips `lookup` for literals), a hostname at connect
+    // time via the shared lookup below — so a tunnel can no more reach
+    // 169.254.169.254 (or, under --block-private-hosts, a loopback/RFC1918
+    // target) than a forwarded request can.
+    const literalBlock = blockedAddressReason(host, { blockPrivate: blockPrivateHosts });
+    if (literalBlock) {
+      refuseConnect(clientSocket, "403 Forbidden", "upstream_blocked");
+      logAccess({
+        method: "CONNECT",
+        host,
+        path: null,
+        status: 403,
+        credentials: [],
+        durationMs: Date.now() - start,
+        error: "upstream_blocked",
+        reason: literalBlock,
+      });
       return;
     }
 
     touchActivity();
 
-    const upstream = net.connect(port, host, () => {
+    const upstream = net.connect({ host, port, lookup: upstreamLookup }, () => {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length) upstream.write(head);
       upstream.pipe(clientSocket);
@@ -1214,13 +1261,19 @@ export function createProxy({
     });
 
     upstream.on("error", (err) => {
-      clientSocket.write(`HTTP/1.1 502 Bad Gateway\r\n\r\n`);
-      clientSocket.destroy();
+      // The connect-time lookup rejected a resolved address → the same 403 the
+      // literal check gives, not a generic 502.
+      const blocked = err.code === "ESSRFBLOCKED";
+      refuseConnect(
+        clientSocket,
+        blocked ? "403 Forbidden" : "502 Bad Gateway",
+        blocked ? "upstream_blocked" : "upstream_error",
+      );
       logAccess({
         method: "CONNECT",
         host,
         path: null,
-        status: 502,
+        status: blocked ? 403 : 502,
         credentials: [],
         bytesIn: 0,
         bytesOut: 0,

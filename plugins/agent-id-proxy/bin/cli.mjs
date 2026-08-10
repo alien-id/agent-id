@@ -429,15 +429,34 @@ async function cmdStart(flags) {
   }
   let authToken = null;
   if (authTokenFile) {
+    const tokenPath = String(authTokenFile);
     try {
-      authToken = (await fs.readFile(String(authTokenFile), "utf8")).trim();
+      // Same bar as the oauth secrets file: a shared secret readable by every
+      // account on the box is not a boundary at all.
+      const stat = await fs.stat(tokenPath);
+      if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+        outputError(
+          `--auth-token-file ${tokenPath} must not be group/world accessible (chmod 600 it)`,
+        );
+        return;
+      }
+      authToken = (await fs.readFile(tokenPath, "utf8")).trim();
     } catch (err) {
-      outputError(`Cannot read --auth-token-file ${authTokenFile}: ${err.message}`);
+      outputError(`Cannot read --auth-token-file ${tokenPath}: ${err.message}`);
       return;
     }
     if (!authToken) {
+      outputError(`--auth-token-file ${tokenPath} is empty — refusing to start unauthenticated.`);
+      return;
+    }
+    // The file is read as utf8 but the token travels as an HTTP header value,
+    // which is latin1 on the wire — a multi-byte character would arrive as
+    // different bytes and 401 every request with no diagnostic. Refuse loudly
+    // at startup instead.
+    if (!/^[\x21-\x7e]+$/.test(authToken)) {
       outputError(
-        `--auth-token-file ${authTokenFile} is empty — refusing to start unauthenticated.`,
+        `--auth-token-file ${tokenPath} must contain printable ASCII only ` +
+          "(no spaces, no non-ASCII characters) — an HTTP header cannot carry it otherwise.",
       );
       return;
     }
@@ -755,9 +774,10 @@ function printHelp() {
       "        [--block-private-hosts]",
       "        [--auth-token-file F]   opt-in shared secret for the data plane: the proxy",
       "                          then requires `X-Agent-Id-Proxy-Token: <file contents>` on",
-      "                          every request and CONNECT. Keep the file 0600; the token",
-      "                          never rides argv. Omitted, the data plane stays open to",
-      "                          anything that can reach the port.",
+      "                          every request and CONNECT. The file must be 0600 and hold",
+      "                          printable ASCII (an HTTP header carries nothing else); the",
+      "                          token never rides argv. Omitted, the data plane stays open",
+      "                          to anything that can reach the port.",
       "        [--oauth-secrets-file F]   0600 JSON {clientId: clientSecret} consulted for",
       "                          oauth2 creds that carry no clientSecret of their own",
       "                          (platform-managed connectors; env: AGENT_ID_OAUTH_SECRETS_FILE)",
@@ -790,11 +810,13 @@ function printHelp() {
       "    `agent-id-vault rekey add-mobile --device-pubkey HEX`, or add an SSO",
       "    owner-approval slot with `agent-id-vault rekey add-owner-approval`",
       "    (the proxy then drives owner approvals itself — no phone app needed).",
-      "CORS: browser preflights (OPTIONS + Access-Control-Request-Method) are always",
-      "  refused locally (403 cross_origin_refused) and never relayed upstream.",
+      "CORS: a browser preflight (OPTIONS + Access-Control-Request-Method) is never",
+      "  relayed upstream — it is answered locally with 403 cross_origin_refused (or,",
+      "  with --auth-token-file on and no token presented, 401 like any other request).",
       "SSRF guard: link-local (incl. 169.254.169.254 cloud metadata), unspecified,",
       "  and multicast upstreams are always refused (403 upstream_blocked).",
       "  --block-private-hosts also refuses loopback/RFC1918/ULA targets.",
+      "  Applies to CONNECT tunnels too, by literal address and by resolved name.",
       "v1: HTTP only. HTTPS is CONNECT-tunneled without injection — TLS MITM is the next spike.",
     ].join("\n"),
   );

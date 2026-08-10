@@ -174,7 +174,27 @@ describe("data-plane auth: stub-injection mode", () => {
     assert.equal(seen.headers[PROXY_AUTH_HEADER], undefined);
   });
 
-  it("refuses a CORS preflight locally", async () => {
+  // Auth runs first, so with a token configured an unauthenticated preflight is
+  // an auth failure, not a CORS one — the refusal must not tell an unauthorized
+  // caller anything more specific than "unauthorized".
+  it("answers an unauthenticated preflight with 401, not the CORS refusal", async () => {
+    const before = upstream.requests.length;
+    const r = await proxyRequest({
+      port: proxyPort,
+      target: `${upstream.url}/c`,
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://evil.example",
+        "Access-Control-Request-Method": "GET",
+      },
+    });
+    assert.equal(r.status, 401);
+    assert.equal(JSON.parse(r.body).error, "unauthorized");
+    assert.equal(r.headers["access-control-allow-origin"], undefined);
+    assert.equal(upstream.requests.length, before);
+  });
+
+  it("refuses an authenticated CORS preflight locally", async () => {
     const before = upstream.requests.length;
     const r = await proxyRequest({
       port: proxyPort,
@@ -295,6 +315,81 @@ describe("data-plane auth precedes vault state", () => {
     });
     assert.equal(r.status, 200);
     assert.equal(reopenCalls, 1);
+  });
+});
+
+describe("auth_failed logging is bounded", () => {
+  let stateDir;
+  let upstream;
+  let proxy;
+  let proxyPort;
+  let logFile;
+  let clock;
+
+  const BURST = 30;
+
+  async function flood(tag) {
+    for (let i = 0; i < BURST; i++) {
+      const r = await proxyRequest({ port: proxyPort, target: `${upstream.url}/${tag}${i}` });
+      assert.equal(r.status, 401);
+    }
+    // logAccess is fire-and-forget on the request path — let the writes settle.
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  async function authFailedLines() {
+    return (await fs.readFile(logFile, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.event === "auth_failed");
+  }
+
+  before(async () => {
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-auth-flood-"));
+    upstream = await startUpstream();
+    logFile = path.join(stateDir, "proxy.log");
+    clock = Date.now();
+    proxy = createProxy({
+      vault: await setupVault(stateDir, new URL(upstream.url).hostname),
+      logPath: logFile,
+      authToken: TOKEN,
+      now: () => clock,
+    });
+    proxyPort = (await proxy.listen()).port;
+  });
+
+  after(async () => {
+    await proxy?.close();
+    upstream?.server.close();
+    if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("coalesces a flood of rejected requests instead of a line per request", async () => {
+    await flood("flood");
+    const lines = await authFailedLines();
+    assert.ok(lines.length >= 1, "the refusals must leave at least one record");
+    assert.ok(
+      lines.length <= 3,
+      `expected the ${BURST} refusals to coalesce, got ${lines.length} lines`,
+    );
+  });
+
+  it("reports how many refusals were suppressed once the window rolls over", async () => {
+    const before = (await authFailedLines()).length;
+    clock += 10 * 60 * 1000;
+    await flood("flood2");
+    const lines = await authFailedLines();
+    assert.ok(
+      lines.length <= before + 3,
+      `expected the second burst to coalesce, got ${lines.length - before} new lines`,
+    );
+    const rolled = lines[before];
+    assert.ok(rolled, "the rolled-over window must emit a line");
+    assert.ok(
+      rolled.suppressed >= BURST - 2,
+      `expected the suppressed count of the first burst, got ${rolled.suppressed}`,
+    );
   });
 });
 
