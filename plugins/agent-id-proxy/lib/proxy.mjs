@@ -153,6 +153,12 @@ export function createProxy({
   // an oauth2 credential carries no clientSecret of its own, so
   // personal/standalone creds behave exactly as before.
   oauthClientSecrets = null,
+  // Self-reopen: an optional async () => Vault, supplied only when the vault
+  // can be unsealed without a human (the agent-key auto-unlock path). Lets an
+  // unattended proxy (e.g. a supervisor spawning one proxy per principal)
+  // recover from a credential written after spawn or from its own idle lock
+  // instead of requiring a restart. Omitted, behavior is unchanged.
+  reopenVault = null,
 }) {
   const controlEnabled = !!control;
   if (controlEnabled && !stateDir) {
@@ -251,12 +257,56 @@ export function createProxy({
     if (onLock) onLock(reason);
   }
 
-  function applyUnlock(openedVault) {
+  // Shared by every path that hands the proxy a freshly opened vault (control-
+  // plane unlock, self-reopen): swap it in and clear the locked state. Idle
+  // tracking is timestamp-based (see the ticker below), so touching activity
+  // here is what "restarts" the idle window.
+  function adoptVault(openedVault) {
     state.vault = openedVault;
     state.locked = false;
     state.lockedAt = null;
     state.lockedReason = null;
     touchActivity();
+  }
+
+  // Self-reopen (agent-key auto-unlock only): a single in-flight reopen shared
+  // by every concurrent caller, so a burst of requests hitting a lock/miss at
+  // once triggers one `reopenVault()`, not one per request.
+  let reopenInFlight = null;
+  async function tryReopenVault(reason) {
+    if (!reopenVault) return false;
+    if (!reopenInFlight) {
+      reopenInFlight = (async () => {
+        try {
+          const opened = await reopenVault();
+          if (!opened) return false;
+          adoptVault(opened);
+          logAccess({ event: "vault_reopened", reason }).catch(() => {});
+          return true;
+        } catch {
+          return false;
+        } finally {
+          reopenInFlight = null;
+        }
+      })();
+    }
+    return reopenInFlight;
+  }
+
+  // Shared retry for the data-plane lookup helpers: a `credential_not_found`
+  // gets one vault-reopen attempt, then one retry of the same lookup, before
+  // the caller's usual not-found handling applies — covers a credential
+  // written to `vault.enc` by another process after this proxy unlocked (e.g.
+  // a vault CLI run following an out-of-band OAuth flow).
+  async function withCredMissRetry(run) {
+    try {
+      return run();
+    } catch (err) {
+      if (err && err.code === "credential_not_found" && (await tryReopenVault("cred_miss"))) {
+        return run();
+      }
+      throw err;
+    }
   }
 
   // ── Unlock-on-demand (control plane) ──────────────────────────────────────
@@ -441,7 +491,7 @@ export function createProxy({
       } finally {
         mk.fill(0);
       }
-      applyUnlock(opened);
+      adoptVault(opened);
       registry.resolve(id, { unlocked: true });
       logAccess({ event: "vault_unlocked", via: "control_plane", requestId: id }).catch(() => {});
       if (onUnlock) onUnlock(entry);
@@ -655,11 +705,13 @@ export function createProxy({
 
     let cred;
     try {
-      cred = resolveCredential({
-        credname: parsed.credname,
-        host: parsed.host,
-        lookup,
-      });
+      cred = await withCredMissRetry(() =>
+        resolveCredential({
+          credname: parsed.credname,
+          host: parsed.host,
+          lookup,
+        }),
+      );
     } catch (err) {
       if (err instanceof RewriteError) {
         const status = err.code === "credential_not_found" ? 400 : 403;
@@ -827,7 +879,9 @@ export function createProxy({
 
     let injectedUrl;
     try {
-      const rewrittenUrl = rewriteUrl(target, { lookup, host: parsed.hostname });
+      const rewrittenUrl = await withCredMissRetry(() =>
+        rewriteUrl(target, { lookup, host: parsed.hostname }),
+      );
       injectedUrl = new URL(rewrittenUrl.url);
       credentialsUsed = credentialsUsed.concat(rewrittenUrl.used);
     } catch (err) {
@@ -836,10 +890,12 @@ export function createProxy({
 
     let injectedHeaders;
     try {
-      const headerRewrite = rewriteHeaders(req.headers, {
-        lookup,
-        host: parsed.hostname,
-      });
+      const headerRewrite = await withCredMissRetry(() =>
+        rewriteHeaders(req.headers, {
+          lookup,
+          host: parsed.hostname,
+        }),
+      );
       injectedHeaders = stripHopByHop(headerRewrite.headers);
       credentialsUsed = credentialsUsed.concat(headerRewrite.used);
     } catch (err) {
@@ -909,14 +965,17 @@ export function createProxy({
     // control plane is enabled the handlers park the request and ask the phone
     // to unlock, so we fall through.
     if (state.locked && !controlEnabled) {
-      return structuredError(res, 401, {
-        error: "vault_locked",
-        reason: state.lockedReason,
-        lockedAt: state.lockedAt,
-        message:
-          "Vault auto-locked after idle timeout. " +
-          "Restart the proxy (`agent-id-proxy stop && start`) to re-unlock.",
-      });
+      const reopened = await tryReopenVault("idle_lock");
+      if (!reopened) {
+        return structuredError(res, 401, {
+          error: "vault_locked",
+          reason: state.lockedReason,
+          lockedAt: state.lockedAt,
+          message:
+            "Vault auto-locked after idle timeout. " +
+            "Restart the proxy (`agent-id-proxy stop && start`) to re-unlock.",
+        });
+      }
     }
 
     if (!state.locked) touchActivity();

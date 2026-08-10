@@ -107,6 +107,10 @@ async function resolvePassphrase(flags) {
   return null;
 }
 
+// Returns { vault, viaAgentKey }. `viaAgentKey` is true only when the vault
+// was unlocked through the agent-key slot — the one unlock method that needs
+// no human, so it's also the only one a self-reopen (see `reopenVault` in
+// cmdStart) can safely repeat later without prompting anyone.
 async function loadVaultForProxy(stateDir, flags) {
   if (!(await vaultFileExists(stateDir))) {
     throw new Error(
@@ -121,11 +125,12 @@ async function loadVaultForProxy(stateDir, flags) {
     const passkeys = await readPasskeyChallenges(stateDir);
     if (passkeys.length) {
       const prfSecret = await authenticatePasskey(passkeys[0]);
-      return openVault({ stateDir, passkeyPrfSecret: prfSecret });
+      return { vault: await openVault({ stateDir, passkeyPrfSecret: prfSecret }), viaAgentKey: false };
     }
     const passphrase = await resolvePassphrase(flags);
     if (!passphrase) throw new Error("Unlock form was cancelled or returned no passphrase");
-    return openVault({ stateDir, passphrase }); // no privateKeyPem → passphrase slot only
+    // no privateKeyPem → passphrase slot only
+    return { vault: await openVault({ stateDir, passphrase }), viaAgentKey: false };
   }
 
   const useAgentKey = flags["agent-key"] !== false;
@@ -133,7 +138,7 @@ async function loadVaultForProxy(stateDir, flags) {
 
   if (privateKeyPem) {
     try {
-      return await openVault({ stateDir, privateKeyPem });
+      return { vault: await openVault({ stateDir, privateKeyPem }), viaAgentKey: true, privateKeyPem };
     } catch (err) {
       if (err.code !== "VAULT_UNLOCK_FAILED") throw err;
       // fall through
@@ -142,7 +147,7 @@ async function loadVaultForProxy(stateDir, flags) {
 
   const passphrase = await resolvePassphrase(flags);
   if (!passphrase) throw new Error("No passphrase available to unlock vault");
-  return openVault({ stateDir, privateKeyPem, passphrase });
+  return { vault: await openVault({ stateDir, privateKeyPem, passphrase }), viaAgentKey: false };
 }
 
 async function writeProxyState(paths, info) {
@@ -382,7 +387,17 @@ async function cmdStart(flags) {
     return;
   }
 
-  const vault = awaitMobile ? null : await loadVaultForProxy(stateDir, flags);
+  const loaded = awaitMobile ? null : await loadVaultForProxy(stateDir, flags);
+  const vault = loaded ? loaded.vault : null;
+  // Self-reopen is wired only for the agent-key path — the one unlock method
+  // that needs no human, so repeating it later (on a credential miss or after
+  // the idle lock) still needs nobody. Every other path (passphrase, passkey,
+  // --unlock-form) leaves this undefined and the proxy behaves exactly as
+  // before: a miss stays a miss, an idle lock stays a restart-to-recover.
+  const reopenVault =
+    loaded && loaded.viaAgentKey
+      ? async () => openVault({ stateDir, privateKeyPem: loaded.privateKeyPem })
+      : undefined;
   await ensureDir(path.dirname(paths.proxyLog));
 
   const idleTimeoutMs =
@@ -439,6 +454,7 @@ async function cmdStart(flags) {
     logPath: paths.proxyLog,
     listen: { port, host },
     idleTimeoutMs,
+    reopenVault,
     control,
     requireConsent,
     grantTtlMs,
@@ -691,6 +707,11 @@ function printHelp() {
       "Idle lock: master key zeroed after `--idle-timeout` (default 12h). With the",
       "  control plane on (default), the next request re-unlocks via a phone approval;",
       "  otherwise restart the proxy. Use --idle-timeout never to disable.",
+      "Self-reopen: when unlocked via the agent key (default; not --unlock-form or",
+      "  --no-agent-key), the proxy can re-open its own vault without a human — a",
+      "  credential added after start is picked up on next use, and (without the",
+      "  control plane) an idle lock recovers on the next request instead of needing",
+      "  a restart.",
       "Control plane (default 127.0.0.1:48772, loopback only — NOT the data-plane",
       "  --host): the phone polls /pending and POSTs /approve | /deny. Those routes",
       "  (and /register) require a bearer token (auto-generated, written to the 0600",
