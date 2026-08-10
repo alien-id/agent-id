@@ -419,6 +419,30 @@ async function cmdStart(flags) {
     return;
   }
 
+  // Data-plane shared secret (issue #104), read from a file because argv is
+  // world-readable. Read before the vault is opened so a bad flag fails the
+  // startup without ever unsealing anything.
+  const authTokenFile = flags["auth-token-file"];
+  if (authTokenFile === true) {
+    outputError("--auth-token-file needs a path");
+    return;
+  }
+  let authToken = null;
+  if (authTokenFile) {
+    try {
+      authToken = (await fs.readFile(String(authTokenFile), "utf8")).trim();
+    } catch (err) {
+      outputError(`Cannot read --auth-token-file ${authTokenFile}: ${err.message}`);
+      return;
+    }
+    if (!authToken) {
+      outputError(
+        `--auth-token-file ${authTokenFile} is empty — refusing to start unauthenticated.`,
+      );
+      return;
+    }
+  }
+
   const loaded = awaitMobile ? null : await loadVaultForProxy(stateDir, flags);
   const vault = loaded ? loaded.vault : null;
   // Self-reopen is wired only for the agent-key path — the one unlock method
@@ -491,6 +515,7 @@ async function cmdStart(flags) {
     requireConsent,
     grantTtlMs,
     oauthClientSecrets,
+    authToken,
     blockPrivateHosts: !!flags["block-private-hosts"],
     onLock: (reason) => {
       lockNotice({
@@ -728,6 +753,11 @@ function printHelp() {
       "        [--await-mobile]",
       "        [--require-consent] [--approval-timeout 2m] [--grant-ttl 1h]",
       "        [--block-private-hosts]",
+      "        [--auth-token-file F]   opt-in shared secret for the data plane: the proxy",
+      "                          then requires `X-Agent-Id-Proxy-Token: <file contents>` on",
+      "                          every request and CONNECT. Keep the file 0600; the token",
+      "                          never rides argv. Omitted, the data plane stays open to",
+      "                          anything that can reach the port.",
       "        [--oauth-secrets-file F]   0600 JSON {clientId: clientSecret} consulted for",
       "                          oauth2 creds that carry no clientSecret of their own",
       "                          (platform-managed connectors; env: AGENT_ID_OAUTH_SECRETS_FILE)",
@@ -760,6 +790,8 @@ function printHelp() {
       "    `agent-id-vault rekey add-mobile --device-pubkey HEX`, or add an SSO",
       "    owner-approval slot with `agent-id-vault rekey add-owner-approval`",
       "    (the proxy then drives owner approvals itself — no phone app needed).",
+      "CORS: browser preflights (OPTIONS + Access-Control-Request-Method) are always",
+      "  refused locally (403 cross_origin_refused) and never relayed upstream.",
       "SSRF guard: link-local (incl. 169.254.169.254 cloud metadata), unspecified,",
       "  and multicast upstreams are always refused (403 upstream_blocked).",
       "  --block-private-hosts also refuses loopback/RFC1918/ULA targets.",

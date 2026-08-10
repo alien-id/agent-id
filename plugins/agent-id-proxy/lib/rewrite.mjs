@@ -18,6 +18,11 @@
 import { generateTotp } from "./totp.mjs";
 import { hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 
+// Shared-secret header for the opt-in data-plane auth. It lives here rather
+// than in proxy.mjs because proxy.mjs imports this module — the reverse edge
+// would be an import cycle — and this is the module that strips it.
+export const PROXY_AUTH_HEADER = "x-agent-id-proxy-token";
+
 const CREDNAME_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 const HOST_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9.-]{0,253}[a-zA-Z0-9])?(?::\d{1,5})?$/;
 
@@ -160,6 +165,7 @@ function appendCookie(existing, addition) {
  *
  *   - Host: will be set to the upstream's host below.
  *   - Origin / Referer: leak the proxy's localhost URL; strip.
+ *   - The proxy auth token: a proxy-hop secret, never an upstream's business.
  *   - Connection-class hop-by-hop headers: per RFC 9110 §7.6.1.
  *   - Authorization: only when the credential doesn't itself materialize
  *     into Authorization — otherwise the inject step replaces it anyway.
@@ -182,6 +188,7 @@ export function prepareUpstreamHeaders({ incoming, upstreamHost }) {
     if (HOP_BY_HOP.has(lk)) continue;
     if (lk === "host") continue;
     if (lk === "origin" || lk === "referer") continue;
+    if (lk === PROXY_AUTH_HEADER) continue;
     out[lk] = v;
   }
   out.host = upstreamHost;

@@ -20,7 +20,7 @@
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
-import { createECDH, randomBytes } from "node:crypto";
+import { createECDH, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { URL } from "node:url";
 
 import { rewriteHeaders, rewriteUrl, StubError } from "./stub.mjs";
@@ -28,6 +28,7 @@ import {
   injectCredential,
   parseRewritePath,
   prepareUpstreamHeaders,
+  PROXY_AUTH_HEADER,
   resolveCredential,
   RewriteError,
 } from "./rewrite.mjs";
@@ -50,6 +51,8 @@ import { unsealFromPublicKey } from "@alien-id/agent-id-vault/lib/format.mjs";
 import { fingerprintOfCertPem, generateControlCert } from "./control-tls.mjs";
 import { appendJsonl } from "@alien-id/agent-id-core/lib/state.mjs";
 
+export { PROXY_AUTH_HEADER };
+
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "keep-alive",
@@ -59,6 +62,9 @@ const HOP_BY_HOP_HEADERS = new Set([
   "trailer",
   "transfer-encoding",
   "upgrade",
+  // Terminates at this proxy by definition — the legacy stub path forwards
+  // whatever the agent sent, so the strip has to be explicit here too.
+  PROXY_AUTH_HEADER,
 ]);
 
 function stripHopByHop(headers) {
@@ -159,6 +165,12 @@ export function createProxy({
   // recover from a credential written after spawn or from its own idle lock
   // instead of requiring a restart. Omitted, behavior is unchanged.
   reopenVault = null,
+  // Opt-in shared secret for the DATA plane (the control plane has its own
+  // bearer token). Set, every data-plane request and CONNECT must present it
+  // in the PROXY_AUTH_HEADER; unset, behavior is unchanged. Loopback alone is
+  // a weak boundary wherever the network namespace is shared — a container,
+  // or a machine also running a browser that renders untrusted pages.
+  authToken = null,
 }) {
   const controlEnabled = !!control;
   if (controlEnabled && !stateDir) {
@@ -243,6 +255,19 @@ export function createProxy({
 
   function touchActivity() {
     state.lastRequestAt = now();
+  }
+
+  // Constant-time token check. Both sides are hashed first so the digests are
+  // always 32 bytes and timingSafeEqual can never throw on a length mismatch
+  // (which would also leak the expected length).
+  function authOk(req) {
+    if (authToken === null) return true;
+    const presented = req.headers[PROXY_AUTH_HEADER];
+    if (typeof presented !== "string" || presented.length === 0) return false;
+    return timingSafeEqual(
+      createHash("sha256").update(presented).digest(),
+      createHash("sha256").update(authToken).digest(),
+    );
   }
 
   function doLock(reason) {
@@ -1048,6 +1073,41 @@ export function createProxy({
   const server = http.createServer(async (req, res) => {
     const start = Date.now();
 
+    // Auth runs before EVERYTHING — before the lock check and its self-reopen,
+    // before activity is touched, before routing, the vault, the approval flow
+    // or any upstream socket. An unauthenticated caller must not be able to
+    // observe or drive proxy state, only to be refused.
+    if (!authOk(req)) {
+      logAccess({
+        event: "auth_failed",
+        method: req.method,
+        path: (req.url || "").split("?")[0],
+      });
+      return structuredError(res, 401, {
+        error: "unauthorized",
+        message: `Missing or invalid ${PROXY_AUTH_HEADER} header.`,
+      });
+    }
+    // Defense in depth: the strip lists in prepareUpstreamHeaders and
+    // stripHopByHop are the guarantee, this makes the token unreachable from
+    // every downstream path regardless.
+    delete req.headers[PROXY_AUTH_HEADER];
+
+    // A browser cannot attach a custom header on a simple request, so a
+    // preflight is the only way it could reach an authenticated data plane —
+    // and relaying one upstream would hand a page the upstream's CORS answer.
+    // Refuse locally, with no Access-Control-Allow-* of our own, in both modes.
+    if (req.method === "OPTIONS" && req.headers["access-control-request-method"]) {
+      logAccess({
+        event: "preflight_refused",
+        path: (req.url || "").split("?")[0],
+      });
+      return structuredError(res, 403, {
+        error: "cross_origin_refused",
+        message: "The proxy data plane is not a browser-reachable origin; preflights are refused.",
+      });
+    }
+
     // Locked with no control plane to re-unlock → refuse immediately. When the
     // control plane is enabled the handlers park the request and ask the phone
     // to unlock, so we fall through.
@@ -1104,6 +1164,14 @@ export function createProxy({
     const start = Date.now();
     const [host, portStr] = (req.url || "").split(":");
     const port = parseInt(portStr || "443", 10);
+
+    if (!authOk(req)) {
+      logAccess({ event: "auth_failed", method: "CONNECT" });
+      clientSocket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      clientSocket.destroy();
+      return;
+    }
+    delete req.headers[PROXY_AUTH_HEADER];
 
     if (state.locked) {
       clientSocket.write(
