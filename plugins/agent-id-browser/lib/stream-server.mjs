@@ -67,6 +67,10 @@ const REFINE_AFTER_MS = 600;
 const REFINE_POLL_MS = 250;
 const H264_MAX_BUFFERED = 4 * 1024 * 1024;
 
+// Keyboard-open latency budget: the viewer's IME pops within a quarter second
+// of the page focusing a field — imperceptible next to the tap round-trip.
+const FOCUS_POLL_MS = 250;
+
 function envInt(name, fallback, min, max) {
   const n = Number(process.env[name]);
   if (!Number.isFinite(n)) return fallback;
@@ -340,6 +344,91 @@ export async function startStreamServer(
     for (const c of clients) c.sock.write(frame);
   }
 
+  // The page's focus truth, pushed by the session's init script. Deduped so a
+  // page that re-reports the same element (focus bouncing inside an editor)
+  // doesn't spam viewers, remembered so statusFor can hand the current state
+  // to a viewer that joins with a field already focused, and suppressed during
+  // a credential fill — the owner's keyboard must not pop over a blackout.
+  let lastInputFocus = null;
+
+  function inputFocus(payload) {
+    if (suspended > 0) return;
+    const next = payload && typeof payload === "object" ? payload : { editable: false };
+    if (lastInputFocus && JSON.stringify(lastInputFocus) === JSON.stringify(next)) return;
+    lastInputFocus = next;
+    broadcastStatus({ type: "status", source: "alien", input_focus: next });
+  }
+
+  // Focus is POLLED, not event-driven: the stealth patching deliberately keeps
+  // the CDP Runtime domain off, which is exactly what exposeBinding/initScript
+  // reporting rides on — and a page-side beacon would die on strict CSPs. An
+  // isolated-world evaluate sees the DOM without touching either. Frames are
+  // walked because a field inside an iframe focuses ITS document, not the
+  // main one; document.hasFocus() is true for the whole ancestor chain, but
+  // only the actually-focused document holds an editable activeElement, so at
+  // most one frame answers. Runs only while someone is watching, like the
+  // screencast itself.
+  let focusPoller = null;
+
+  async function readInputFocus() {
+    const page = state.current;
+    if (!page || page.isClosed?.() || typeof page.frames !== "function") return null;
+    for (const frame of page.frames()) {
+      try {
+        const found = await frame.evaluate(() => {
+          if (!document.hasFocus()) return null;
+          const NON_TEXT = new Set([
+            "button", "submit", "reset", "image", "checkbox", "radio",
+            "range", "color", "file", "hidden",
+          ]);
+          let el = document.activeElement;
+          while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+          if (!el || el === document.body || el === document.documentElement) return null;
+          const tag = (el.tagName || "").toLowerCase();
+          const type = tag === "input" ? (el.getAttribute("type") || "text").toLowerCase() : null;
+          const editable =
+            tag === "textarea" ||
+            el.isContentEditable === true ||
+            (tag === "input" && !NON_TEXT.has(type));
+          if (!editable) return null;
+          const inputmode = (el.getAttribute && el.getAttribute("inputmode")) || null;
+          return {
+            editable: true,
+            ...(type ? { type } : {}),
+            ...(inputmode ? { inputmode } : {}),
+          };
+        });
+        if (found) return found;
+      } catch {
+        /* frame detached mid-poll */
+      }
+    }
+    return { editable: false };
+  }
+
+  function ensureFocusPoller() {
+    if (focusPoller) return;
+    let inFlight = false;
+    focusPoller = setInterval(async () => {
+      if (inFlight || suspended > 0 || clients.size === 0) return;
+      inFlight = true;
+      try {
+        const focus = await readInputFocus();
+        if (focus) inputFocus(focus);
+      } finally {
+        inFlight = false;
+      }
+    }, FOCUS_POLL_MS);
+    if (typeof focusPoller.unref === "function") focusPoller.unref();
+  }
+
+  function stopFocusPoller() {
+    if (!focusPoller) return;
+    clearInterval(focusPoller);
+    focusPoller = null;
+    lastInputFocus = null;
+  }
+
   function statusFor(client) {
     const vp = state.current?.viewportSize?.() ?? null;
     return {
@@ -353,6 +442,7 @@ export async function startStreamServer(
       pacing: client.pacing,
       maxFps: client.maxFps,
       ...(vp ? { viewportWidth: vp.width, viewportHeight: vp.height } : {}),
+      ...(lastInputFocus ? { input_focus: lastInputFocus } : {}),
     };
   }
 
@@ -806,7 +896,10 @@ export async function startStreamServer(
       if (client.timer) clearTimeout(client.timer);
       webrtc?.drop(client);
       void ensureAnnexBEncoder(); // tears down when the last h264 viewer left
-      if (clients.size === 0) void stopScreencast(); // save CPU when unwatched
+      if (clients.size === 0) {
+        void stopScreencast(); // save CPU when unwatched
+        stopFocusPoller();
+      }
     };
     socket.on("close", drop);
     socket.on("error", drop);
@@ -819,6 +912,7 @@ export async function startStreamServer(
     // starting the feed produces that frame anyway.
     if (cdp) void stopScreencast().then(() => startScreencast());
     else void startScreencast();
+    ensureFocusPoller();
   });
 
   await new Promise((resolve) => server.listen(0, BIND_HOST, resolve));
@@ -828,6 +922,8 @@ export async function startStreamServer(
     token,
     /** How many viewers are attached — a watched session is never idle. */
     viewers: () => clients.size,
+    /** Report the page's input-focus state (see the session init script). */
+    inputFocus,
     /** Hide the feed while a secret is typed into the page. Depth-counted. */
     suspend() {
       suspended++;
@@ -846,6 +942,7 @@ export async function startStreamServer(
       }
     },
     close() {
+      stopFocusPoller();
       closed = true;
       clearInterval(retarget);
       clearInterval(watchdog);
