@@ -313,7 +313,9 @@ async function cmdLogin(flags) {
       const headlessDefault =
         flags["headed-default"] === true ? false : reuse ? reuse.headless !== false : true;
 
-      const ctx = await launchContext({ profileDir: work, headless: false });
+      // The owner sits at this window — a real platform authenticator (Touch
+      // ID, a security key) may exist and complete, so WebAuthn stays native.
+      const ctx = await launchContext({ profileDir: work, headless: false, nativeWebAuthn: true });
       stderr(
         resuming
           ? `A browser opened with your '${name}' session loaded${flags.url ? " at " + startUrl : ""}. ` +
