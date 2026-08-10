@@ -1167,7 +1167,11 @@ export function createProxy({
 
     if (!authOk(req)) {
       logAccess({ event: "auth_failed", method: "CONNECT" });
-      clientSocket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      clientSocket.write(
+        "HTTP/1.1 401 Unauthorized\r\n" +
+          "X-AgentVault-Proxy-Error: unauthorized\r\n" +
+          "Content-Length: 0\r\n\r\n",
+      );
       clientSocket.destroy();
       return;
     }
