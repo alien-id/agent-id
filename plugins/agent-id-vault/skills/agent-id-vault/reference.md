@@ -37,3 +37,24 @@ node CLI migrate --passphrase-file /tmp/pass    # automation
 ```
 
 One-shot: the old `~/.agent-id/vault/` directory is renamed to `vault.bak/`. Migrated records get the placeholder allowlist `["UNCONFIGURED.invalid"]` — the proxy refuses to inject them until you attach real domains via `agent-id-vault add --name <N> --domains <H,…> --value-env <V>`.
+
+## sync — p2p synchronization between the owner's devices
+
+    agent-id-vault sync [--peer HOST:PORT] [--label LABEL] [--timeout-ms N]
+    agent-id-vault sync --listen [--port N] [--host H] [--label LABEL]
+    agent-id-vault sync status
+    agent-id-vault sync devices
+    agent-id-vault sync devices add --jkt THUMBPRINT [--label LABEL]
+    agent-id-vault sync revoke --jkt THUMBPRINT
+    agent-id-vault sync resolve --name CREDENTIAL [--restore]
+
+- One-shot `sync` discovers LAN peers via UDP beacon (or dials `--peer`),
+  exchanges signed op-log entries over TLS 1.3, applies atomically, exits.
+- `--listen` stays resident: announces a beacon and serves incoming syncs.
+- Requires an owner binding (L1+) on both devices, bound to the same owner.
+- First contact per device pair triggers a one-time trust prompt; headless
+  hosts log the peer's jkt and expect `sync devices add --jkt <jkt>` instead.
+- `resolve --restore` reinstates a conflict-journaled version as a new edit.
+- Never synced: `browser-profile` records (+ sealed profile sidecars), the
+  agent identity/key, the trust list, the conflict journal.
+- Env: `AGENT_ID_SYNC_AUTOAPPROVE=1` skips the trust prompt (tests only).

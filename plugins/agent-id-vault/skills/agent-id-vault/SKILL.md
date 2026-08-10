@@ -264,6 +264,23 @@ path, never the contents — ideal for the `secret` type (SSH/RSA keys, PEMs).
   the vault — use the proxy to exercise those.
 - Unlock + `--state-dir` flags work as for any other subcommand.
 
+## Sync between devices (p2p)
+
+Both devices need an owner binding (`agent-id-core auth`) to the SAME owner.
+
+1. On device A: `agent-id-vault sync --listen`
+2. On device B: `agent-id-vault sync` (same LAN) or `agent-id-vault sync --peer <hostA>:<port>`
+3. First contact prompts on both sides to trust the peer (one-time). Headless
+   side: approve later with `agent-id-vault sync devices add --jkt <jkt>` using
+   the thumbprint from its log.
+4. Afterwards sync is automatic between pinned devices — no prompts, no SSO.
+
+Conflicts (same credential edited on two devices while apart) resolve
+deterministically; the losing version is journaled — inspect with
+`sync status`, restore with `sync resolve --name <N> --restore`.
+Revoke a device with `sync revoke --jkt <jkt>` (repeat on each device).
+Note: `browser-profile` records and the agent identity never sync.
+
 ## Slot management, portability & migration
 
 Less-common admin operations — adding/removing unlock slots (`rekey`), moving the vault between machines (`export`/`import`), and migrating a legacy v4 vault (`migrate`) — are documented in [reference.md](reference.md).

@@ -68,6 +68,7 @@ import {
   hasTty,
   promptNewPassphrase,
   promptSecret,
+  promptText,
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
 import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../lib/store.mjs";
@@ -81,6 +82,14 @@ import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { normalizeTotpInput } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { generateSolanaKeypair } from "@alien-id/agent-id-core/lib/solana.mjs";
 import { generateEvmKeypair } from "@alien-id/agent-id-core/lib/evm.mjs";
+
+import { verifyIdTokenSignatureOnly } from "@alien-id/agent-id-core/lib/oidc.mjs";
+import { connectToPeer, startSyncServer } from "../lib/sync/channel.mjs";
+import { announceBeacon, listenForBeacons } from "../lib/sync/discovery.mjs";
+import { withVaultLock } from "../lib/sync/lock.mjs";
+import { runSyncSession } from "../lib/sync/protocol.mjs";
+import { ensureSyncMeta, loadSyncIdentity, pinDevice, revokeDevice } from "../lib/sync/trust.mjs";
+import { redactSecretFields, parseListenPort } from "../lib/sync/cli-helpers.mjs";
 
 // ─── Input helpers ──────────────────────────────────────────────────────────────
 
@@ -1217,6 +1226,227 @@ async function cmdExec() {
   });
 }
 
+// ─── sync ───────────────────────────────────────────────────────────────────────
+
+function promptApproval(peer) {
+  if (process.env.AGENT_ID_SYNC_AUTOAPPROVE === "1") {
+    // Escape hatch for automated e2e (Docker) — never silent: surface a loud
+    // warning naming the peer so it is auditable in the driving process's logs.
+    stderr(
+      `⚠ AGENT_ID_SYNC_AUTOAPPROVE: auto-trusting sync peer ${peer.jkt} without human review`,
+    );
+    return Promise.resolve(true);
+  }
+  if (!hasTty()) return Promise.resolve(false); // headless → approval-required path
+  // Read the y/N answer from the trusted /dev/tty channel — NOT process.stdin —
+  // so an agent driving this CLI over its stdin pipe cannot answer its own
+  // security prompt.
+  const q =
+    `\nNew sync peer:\n` +
+    `  device : ${peer.label || "(unlabelled)"}\n` +
+    `  agent  : ${peer.jkt}\n` +
+    `  owner  : verified — same as this device (L${peer.level ?? "?"})\n` +
+    `Trust this device and sync credentials with it? [y/N] `;
+  let answer;
+  try {
+    answer = promptText(q);
+  } catch (err) {
+    if (err instanceof TrustedInputUnavailable) return Promise.resolve(false);
+    throw err;
+  }
+  return Promise.resolve(/^y(es)?$/i.test(answer.trim()));
+}
+
+async function syncWith(stateDir, vault, identity, session) {
+  return withVaultLock(stateDir, () =>
+    runSyncSession({
+      session,
+      vault,
+      identity,
+      approvePeer: promptApproval,
+      verifyIdToken: verifyIdTokenSignatureOnly,
+    }),
+  );
+}
+
+function describeSummary(summary) {
+  return {
+    peer: summary.peer,
+    sent: summary.sent,
+    received: summary.received,
+    conflicts: summary.conflicts.map((c) => ({ name: c.name, winnerHash: c.winnerHash })),
+  };
+}
+
+async function cmdSyncRun(flags) {
+  const stateDir = resolveStateDir(flags);
+  const identity = await loadSyncIdentity(stateDir, flags.label ? { label: String(flags.label) } : {});
+
+  if (flags.listen) {
+    // parseFlags yields boolean `true` for a bare flag, so validate coercions
+    // up-front rather than binding a bogus host/port silently.
+    let port;
+    try {
+      port = parseListenPort(flags);
+    } catch (err) {
+      return outputError(err.message);
+    }
+    if (flags.host != null && typeof flags.host !== "string") {
+      return outputError("--host must be a hostname/address string");
+    }
+    const host = flags.host ? String(flags.host) : "0.0.0.0";
+
+    const srv = await startSyncServer({
+      host,
+      port,
+      // Each incoming session gets its OWN short-lived vault handle: opened
+      // inside the process-level withVaultLock, then locked in a finally. This
+      // keeps the master key + plaintext secrets out of memory between sessions
+      // and re-reads the pinned-device set from disk each time (so an out-of-band
+      // `sync devices add` from another process takes effect without a restart).
+      onSession: async (session) => {
+        try {
+          const summary = await withVaultLock(stateDir, async () => {
+            const vault = await openWithFlags(flags);
+            try {
+              return await runSyncSession({
+                session,
+                vault,
+                identity,
+                approvePeer: promptApproval,
+                verifyIdToken: verifyIdTokenSignatureOnly,
+              });
+            } finally {
+              vault.lock();
+            }
+          });
+          stderr(`✓ synced with ${summary.peer.label || summary.peer.jkt}: +${summary.received} / -${summary.sent} ops` +
+            (summary.conflicts.length ? `, ${summary.conflicts.length} conflict(s) journaled` : ""));
+        } catch (err) {
+          stderr(`✗ sync refused: ${err.message}`);
+        }
+      },
+    });
+    const beacon = announceBeacon({ deviceJkt: identity.jkt, tcpPort: srv.port });
+    stderr(`Sync listener on port ${srv.port} (device ${identity.jkt}, label "${identity.label}"). Ctrl-C to stop.`);
+    await new Promise((resolve) => {
+      process.once("SIGINT", resolve);
+      process.once("SIGTERM", resolve);
+    });
+    beacon.stop();
+    await srv.close();
+    return;
+  }
+
+  // One-shot: explicit --peer wins; otherwise listen for beacons briefly.
+  let peers = [];
+  if (flags.peer) {
+    if (typeof flags.peer !== "string") return outputError("--peer must be host:port");
+    const [host, port] = flags.peer.split(":");
+    if (!host || !port) return outputError("--peer must be host:port");
+    peers = [{ host, port: Number(port) }];
+  } else {
+    stderr("Discovering peers on the local network…");
+    peers = await listenForBeacons({
+      timeoutMs: flags["timeout-ms"] ? Number(flags["timeout-ms"]) : 2500,
+      ownJkt: identity.jkt,
+    });
+    if (peers.length === 0) {
+      return outputError("no sync peers found — is the other device running `agent-id-vault sync --listen`? (or pass --peer host:port)");
+    }
+  }
+
+  // Short-lived: open the vault once, sync each peer, lock in a finally.
+  const vault = await openWithFlags(flags);
+  const results = [];
+  try {
+    for (const peer of peers) {
+      try {
+        const session = await connectToPeer({ host: peer.host, port: peer.port });
+        const summary = await syncWith(stateDir, vault, identity, session);
+        results.push({ ok: true, ...describeSummary(summary) });
+      } catch (err) {
+        results.push({ ok: false, peer: `${peer.host}:${peer.port}`, error: err.message, code: err.code || null });
+      }
+    }
+  } finally {
+    vault.lock();
+  }
+  outputJson({ ok: results.every((r) => r.ok), results });
+}
+
+async function cmdSyncStatus(flags) {
+  const vault = await openWithFlags(flags);
+  const sync = ensureSyncMeta(vault.payload());
+  outputJson({
+    ok: true,
+    ops: sync.oplog.length,
+    devices: sync.devices.map((d) => ({ jkt: d.deviceJkt, label: d.label, ownerSub: d.ownerSub, addedAt: d.addedAt, complete: Boolean(d.agentJwk) })),
+    conflicts: sync.conflicts.map((c) => ({ name: c.name, winnerHash: c.winnerHash, decidedAt: c.decidedAt })),
+  });
+}
+
+async function cmdSyncDevices(flags) {
+  const vault = await openWithFlags(flags);
+  const sync = ensureSyncMeta(vault.payload());
+  if (flags._sub2 === "add") {
+    if (!flags.jkt) return outputError("sync devices add requires --jkt <thumbprint> (from the other device's approval-required log)");
+    pinDevice(sync, { deviceJkt: String(flags.jkt), label: flags.label ? String(flags.label) : null });
+    await vault.save();
+    stderr(`Preapproved device ${flags.jkt} — its key is pinned on first verified contact.`);
+    return outputJson({ ok: true, jkt: String(flags.jkt) });
+  }
+  outputJson({ ok: true, devices: sync.devices.map((d) => ({ jkt: d.deviceJkt, label: d.label, complete: Boolean(d.agentJwk) })) });
+}
+
+async function cmdSyncRevoke(flags) {
+  if (!flags.jkt) return outputError("sync revoke requires --jkt <thumbprint>");
+  const vault = await openWithFlags(flags);
+  const sync = ensureSyncMeta(vault.payload());
+  const removed = revokeDevice(sync, String(flags.jkt));
+  if (removed) await vault.save();
+  outputJson({ ok: removed, ...(removed ? {} : { error: "device not found" }) });
+}
+
+async function cmdSyncResolve(flags) {
+  if (!flags.name) return outputError("sync resolve requires --name <credential>");
+  const vault = await openWithFlags(flags);
+  const sync = ensureSyncMeta(vault.payload());
+  const entries = sync.conflicts.filter((c) => c.name === flags.name);
+  if (entries.length === 0) return outputError(`no journaled conflicts for "${flags.name}"`);
+  const latest = entries[entries.length - 1];
+  if (!flags.restore) {
+    return outputJson({
+      ok: true, name: latest.name, winnerHash: latest.winnerHash,
+      current: vault.get(String(flags.name)) ? "present" : "removed",
+      losingRecord: redactSecretFields(latest.losingRecord),
+      hint: "re-run with --restore to reinstate the losing version as a new edit",
+    });
+  }
+  // Reinstating = a NEW causally-later edit; it wins everywhere on next sync.
+  vault.add({ ...latest.losingRecord });
+  sync.conflicts = sync.conflicts.filter((c) => c !== latest);
+  await vault.save();
+  stderr(`Restored the journaled version of "${flags.name}". It will propagate on the next sync.`);
+  outputJson({ ok: true, restored: flags.name });
+}
+
+// `sync` takes an optional sub-verb as its first positional arg (like rekey).
+function makeSyncHandler() {
+  return async (flags) => {
+    const argv = process.argv.slice(2);
+    const idx = argv.indexOf("sync");
+    const sub = idx >= 0 && argv[idx + 1] && !argv[idx + 1].startsWith("--") ? argv[idx + 1] : null;
+    const sub2 = sub && argv[idx + 2] && !argv[idx + 2].startsWith("--") ? argv[idx + 2] : null;
+    if (sub === "status") return cmdSyncStatus(flags);
+    if (sub === "devices") return cmdSyncDevices({ ...flags, _sub2: sub2 });
+    if (sub === "revoke") return cmdSyncRevoke(flags);
+    if (sub === "resolve") return cmdSyncResolve(flags);
+    if (sub) return outputError(`Unknown sync subcommand: ${sub}`);
+    return cmdSyncRun(flags);
+  };
+}
+
 // ─── Dispatch ───────────────────────────────────────────────────────────────────
 
 function printHelp() {
@@ -1269,6 +1499,8 @@ function printHelp() {
       "  export --out PATH",
       "  import --in PATH [--overwrite]",
       "  migrate [--default-domains H[,H…]] [--force]",
+      "  sync [--peer H:P] [--listen [--port N] [--host H]] [--label L]",
+      "  sync status | devices [add --jkt J] | revoke --jkt J | resolve --name N [--restore]",
       "",
       "Types: " + CREDENTIAL_TYPES.join(", "),
       "Unlock: --passphrase-file F | --passphrase-env V | auto via agent-key | /dev/tty prompt",
@@ -1301,6 +1533,7 @@ const commands = {
   export: cmdExport,
   import: cmdImport,
   migrate: cmdMigrate,
+  sync: makeSyncHandler(),
 };
 
 // Wrap runCli to catch trusted-input + vault-not-found errors with friendlier

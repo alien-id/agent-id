@@ -382,22 +382,33 @@ export const SECRET_FIELDS = Object.freeze([
 // achievable guarantee is to drop every reference (Buffers are zero-filled) so
 // the values become GC-eligible immediately instead of lingering in the live
 // object graph (and any later heap dump / core file) until the next GC.
+//
+// Drop the vault's reference to the secret (string or nested object) so it
+// becomes GC-eligible. We deliberately do NOT recurse into nested objects
+// to delete their keys: a record's object fields (e.g. a cookie-jar's
+// `cookies`) may be aliased by the caller that supplied them via
+// vault.add(), and the vault must not destroy objects it doesn't
+// exclusively own. Releasing the reference is the achievable guarantee.
+function scrubRecordSecrets(cred) {
+  if (!cred || typeof cred !== "object") return;
+  for (const f of SECRET_FIELDS) {
+    const v = cred[f];
+    if (Buffer.isBuffer(v)) v.fill(0);
+    if (f in cred) delete cred[f];
+  }
+}
+
 export function wipePayload(payload) {
   if (!payload || !Array.isArray(payload.credentials)) return;
-  for (const cred of payload.credentials) {
-    if (!cred || typeof cred !== "object") continue;
-    for (const f of SECRET_FIELDS) {
-      const v = cred[f];
-      if (Buffer.isBuffer(v)) v.fill(0);
-      // Drop the vault's reference to the secret (string or nested object) so it
-      // becomes GC-eligible. We deliberately do NOT recurse into nested objects
-      // to delete their keys: a record's object fields (e.g. a cookie-jar's
-      // `cookies`) may be aliased by the caller that supplied them via
-      // vault.add(), and the vault must not destroy objects it doesn't
-      // exclusively own. Releasing the reference is the achievable guarantee.
-      if (f in cred) delete cred[f];
-    }
-  }
+  for (const cred of payload.credentials) scrubRecordSecrets(cred);
   payload.credentials.length = 0;
+  // The sync section embeds full credential records too (op-log entries and
+  // journaled conflict losers) — same scrub, same reason.
+  if (payload.sync) {
+    for (const op of payload.sync.oplog || []) scrubRecordSecrets(op?.op?.record);
+    for (const c of payload.sync.conflicts || []) scrubRecordSecrets(c?.losingRecord);
+    if (Array.isArray(payload.sync.oplog)) payload.sync.oplog.length = 0;
+    if (Array.isArray(payload.sync.conflicts)) payload.sync.conflicts.length = 0;
+  }
 }
 

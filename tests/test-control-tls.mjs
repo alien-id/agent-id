@@ -19,7 +19,7 @@ import {
   generateControlCert,
   fingerprintOfCertPem,
   normalizeFingerprint,
-} from "../plugins/agent-id-proxy/lib/control-tls.mjs";
+} from "../plugins/agent-id-core/lib/tls-cert.mjs";
 import { deviceUnsealMasterKey, sealToPublicKey } from "../plugins/agent-id-vault/lib/format.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
@@ -60,6 +60,15 @@ describe("self-signed cert generation", () => {
       // Throws on illegal padding — the exact failure we're regressing against.
       assert.doesNotThrow(() => new X509Certificate(certPem), `strict parse: ${label}`);
       assert.equal(fingerprintOfCertPem(certPem), fingerprint, `fingerprint stable: ${label}`);
+    }
+  });
+
+  it("PEM never contains a blank line and always loads into a TLS context", async () => {
+    const tls = await import("node:tls");
+    for (let i = 0; i < 100; i++) {
+      const { certPem, keyPem } = generateControlCert();
+      assert.ok(!certPem.includes("\n\n"), "blank line inside PEM");
+      tls.createSecureContext({ cert: certPem, key: keyPem }); // throws on malformed PEM
     }
   });
 });
