@@ -152,6 +152,18 @@ into a page. SSO redirects credential entry to the identity provider, so set
 `domains` to cover it — a wildcard works: `--domains '*.acme.com'` allows
 `idp.acme.com`. The refusal error names the blocked host.
 
+**Passkeys (WebAuthn):** a driven session reports WebAuthn as **unsupported** —
+the browser has no authenticator, so a passkey ceremony could only hang (and
+while one is pending, the page's own "Try another way" links are inert). Sites
+with a passkey enrolled therefore skip the passkey prompt and offer their
+password/OTP path directly; expect that path, don't look for a passkey prompt.
+The exception is headed `login` (path A): the owner sits at a real Chrome
+window there, so WebAuthn stays native and a platform passkey can complete. If
+a site offers **only** a passkey (no fallback), it is unreachable in a driven
+session; `AGENT_ID_BROWSER_KEEP_WEBAUTHN=1` restores native WebAuthn — a
+ceremony will then hang as before; send `Escape` to cancel it and revive the
+fallback links.
+
 ## Read-only sessions (access levels)
 
 A session can be sealed **read-only**: the owner grants "the agent may read my

@@ -29,6 +29,8 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+import { suppressWebAuthn } from "./webauthn-off.mjs";
+
 const require = createRequire(import.meta.url);
 const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -171,7 +173,15 @@ async function resolveHeadlessUserAgent() {
 // headless defaults to true; pass false for the one-time headed login.
 // `contextOptions` merges extra Playwright context options (e.g. the access
 // guard's serviceWorkers:"block" for read-only profiles).
-export async function launchContext({ profileDir, headless = true, contextOptions = {} }) {
+// `nativeWebAuthn: true` keeps the WebAuthn surface (headed owner login only —
+// see webauthn-off.mjs); by default a driven session reports it unsupported so
+// a passkey-enrolled sign-in falls back to password/OTP instead of hanging.
+export async function launchContext({
+  profileDir,
+  headless = true,
+  contextOptions = {},
+  nativeWebAuthn = false,
+}) {
   const chromium = await loadChromium();
   const opts = { ...launchOptions(headless), ...contextOptions };
   // Headless only: normalize the "HeadlessChrome" UA to match a headed browser.
@@ -180,5 +190,7 @@ export async function launchContext({ profileDir, headless = true, contextOption
     const ua = await resolveHeadlessUserAgent();
     if (ua) opts.userAgent = ua;
   }
-  return chromium.launchPersistentContext(profileDir, opts);
+  const ctx = await chromium.launchPersistentContext(profileDir, opts);
+  if (!nativeWebAuthn) await suppressWebAuthn(ctx);
+  return ctx;
 }
