@@ -145,12 +145,22 @@ function codecArgs(encoder) {
   // yuv420p needs even dimensions; screencast frames can be odd-sized.
   const scale = ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"];
   if (encoder === "libx264") {
+    // veryfast/CRF over ultrafast/defaults: roughly 2x the quality per bit,
+    // still comfortably realtime for a viewport-sized feed. zerolatency keeps
+    // lookahead off so latency is unchanged; CRF spends bits only when the
+    // picture moves and the maxrate cap bounds worst-case bursts. The profile
+    // stays constrained-baseline on purpose — the WebCodecs viewer and the
+    // WebRTC path both pin avc1.42E01F, and that contract is what guarantees
+    // every consumer decodes the feed.
     return [
       ...scale,
       "-c:v", "libx264",
-      "-preset", "ultrafast",
+      "-preset", "veryfast",
       "-tune", "zerolatency",
       "-profile:v", "baseline",
+      "-crf", "20",
+      "-maxrate", "4M",
+      "-bufsize", "8M",
       "-pix_fmt", "yuv420p",
       "-g", String(GOP),
       "-bf", "0",
@@ -164,8 +174,8 @@ function codecArgs(encoder) {
     "-profile:v", "constrained_baseline",
     "-pix_fmt", "yuv420p",
     "-g", String(GOP),
-    "-b:v", "1500k",
-    "-maxrate", "2500k",
+    "-b:v", "4000k",
+    "-maxrate", "6000k",
   ];
 }
 

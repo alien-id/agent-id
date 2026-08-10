@@ -73,9 +73,12 @@ function envInt(name, fallback, min, max) {
   return Math.min(max, Math.max(min, Math.floor(n)));
 }
 
-// Motion frames run lean; the idle refinement frame carries the visual quality
-// (0 disables refinement). Bind is overridable ONLY for LAN viewer testing.
-const STREAM_QUALITY = envInt("AGENT_ID_STREAM_QUALITY", 55, 1, 100);
+// Motion frames at 80: at >=80 the JPEG artifacts sit below what the H.264
+// stage preserves anyway, so the double compression stops being visible — 55
+// produced ringing around text that the encoder then spent bits reproducing.
+// The idle refinement frame still carries the top visual quality (0 disables
+// refinement). Bind is overridable ONLY for LAN viewer testing.
+const STREAM_QUALITY = envInt("AGENT_ID_STREAM_QUALITY", 80, 1, 100);
 const REFINE_QUALITY = envInt("AGENT_ID_STREAM_REFINE_QUALITY", 90, 0, 100);
 // Watchdog: with a viewer attached and nothing arriving for this long, restart
 // the screencast (0 disables). Refinement is NOT a substitute — it is armed by
