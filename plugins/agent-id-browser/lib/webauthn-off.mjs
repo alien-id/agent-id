@@ -10,17 +10,28 @@
 // declares itself passkey-INCAPABLE — the exact surface of a legacy browser,
 // which every passkey site already handles with a password/OTP path:
 //
-//   1. `delete window.PublicKeyCredential` before any page script runs. Sites
-//      feature-detect it (and its statics — isUserVerifyingPlatformAuthenticator-
-//      Available, isConditionalMediationAvailable — go with it) before pushing
-//      a ceremony or the conditional-UI autofill, so they offer the fallback
-//      path up front and no prompt ever appears.
+//   1. Delete the WebAuthn interface globals before any page script runs —
+//      PublicKeyCredential AND its response types (AuthenticatorAttestation-
+//      Response, AuthenticatorAssertionResponse, AuthenticatorResponse). Sites
+//      feature-detect PublicKeyCredential (and its statics — isUserVerifying-
+//      PlatformAuthenticatorAvailable, isConditionalMediationAvailable — go
+//      with it) before pushing a ceremony or the conditional-UI autofill, so
+//      they offer the fallback path up front and no prompt ever appears. The
+//      response types go too so the surface stays consistent: a real browser
+//      never has AuthenticatorAttestationResponse without PublicKeyCredential,
+//      and that mismatch would be its own automation tell.
 //   2. CredentialsContainer.get/create with a `publicKey` argument reject
 //      immediately with NotAllowedError — the cancellation outcome every
 //      WebAuthn call site handles — covering sites that skip feature
-//      detection. Deleting the interface object alone would NOT stop the
-//      ceremony: the get/create implementation behind it still runs. Other
-//      credential types (password, federated) pass through untouched.
+//      detection. Deleting the interface globals alone would NOT stop the
+//      ceremony: the get/create implementation behind them still runs. Other
+//      credential types (password, federated) pass through untouched. The
+//      override is a Proxy over the native function, not a plain replacement,
+//      so `credentials.get.toString()` (and Function.prototype.toString) still
+//      report [native code] and `.name` stays "get" — the patch keeps the
+//      byte-for-byte-native JS surface the rest of launch.mjs invests in
+//      (UA normalization, patchright driver), rather than leaving a hand-
+//      written function an anti-bot IdP can read back.
 //
 // This is a UX measure, not a security boundary: the page could restore the
 // natives from a fresh realm, but a sign-in page has no motive to — sites
@@ -43,27 +54,40 @@ export function webauthnKept(env = process.env) {
 export async function suppressWebAuthn(ctx, env = process.env) {
   if (webauthnKept(env)) return false;
   await ctx.addInitScript(() => {
-    try {
-      delete window.PublicKeyCredential;
-    } catch {
-      /* locked down — the reject path below still prevents the hang */
+    for (const name of [
+      "PublicKeyCredential",
+      "AuthenticatorAttestationResponse",
+      "AuthenticatorAssertionResponse",
+      "AuthenticatorResponse",
+    ]) {
+      try {
+        delete window[name];
+      } catch {
+        /* locked down — the reject path below still prevents the hang */
+      }
     }
     const proto = window.CredentialsContainer && window.CredentialsContainer.prototype;
     if (!proto) return;
     for (const name of ["get", "create"]) {
       const native = proto[name];
       if (typeof native !== "function") continue;
-      proto[name] = function (options) {
-        if (options && typeof options === "object" && "publicKey" in options) {
-          return Promise.reject(
-            new DOMException(
-              "The operation either timed out or was not allowed.",
-              "NotAllowedError",
-            ),
-          );
-        }
-        return native.apply(this, arguments);
-      };
+      // A Proxy over the native function forwards toString/name/length to the
+      // target, so the override is indistinguishable from native to a page —
+      // unlike a replacement function, whose source a script can read back.
+      proto[name] = new Proxy(native, {
+        apply(target, thisArg, argList) {
+          const options = argList[0];
+          if (options && typeof options === "object" && "publicKey" in options) {
+            return Promise.reject(
+              new DOMException(
+                "The operation either timed out or was not allowed.",
+                "NotAllowedError",
+              ),
+            );
+          }
+          return Reflect.apply(target, thisArg, argList);
+        },
+      });
     }
   });
   return true;

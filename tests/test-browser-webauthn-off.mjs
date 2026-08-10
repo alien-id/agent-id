@@ -92,7 +92,21 @@ async function probeWebAuthn(launchExtras = {}) {
     const page = ctx.pages()[0] || (await ctx.newPage());
     await page.goto(`${base}/`, { waitUntil: "domcontentloaded" });
     return await page.evaluate(async () => {
-      const out = { pkc: typeof window.PublicKeyCredential };
+      const out = {
+        pkc: typeof window.PublicKeyCredential,
+        attestationResponse: typeof window.AuthenticatorAttestationResponse,
+        assertionResponse: typeof window.AuthenticatorAssertionResponse,
+        authenticatorResponse: typeof window.AuthenticatorResponse,
+        getNative: navigator.credentials.get.toString().includes("[native code]"),
+        createNative: navigator.credentials.create.toString().includes("[native code]"),
+        // Function.prototype.toString is the reflection path an anti-bot script
+        // uses to defeat a per-function toString override — the Proxy must
+        // forward it to the native target too.
+        getNativeViaFnProto: Function.prototype.toString
+          .call(navigator.credentials.get)
+          .includes("[native code]"),
+        getName: navigator.credentials.get.name,
+      };
       const timing = async (label, run) => {
         const t0 = Date.now();
         try {
@@ -134,6 +148,17 @@ test(
     const s = await probeWebAuthn();
 
     assert.equal(s.pkc, "undefined", "PublicKeyCredential must be gone (feature detection)");
+    // The response types must go with it — a real browser never exposes them
+    // without PublicKeyCredential, and that mismatch is its own automation tell.
+    assert.equal(s.attestationResponse, "undefined", "AuthenticatorAttestationResponse must be gone");
+    assert.equal(s.assertionResponse, "undefined", "AuthenticatorAssertionResponse must be gone");
+    assert.equal(s.authenticatorResponse, "undefined", "AuthenticatorResponse must be gone");
+    // The override must read as native, or it is itself a detectable JS patch —
+    // defeating the byte-for-byte-native surface the rest of launch.mjs builds.
+    assert.equal(s.getNative, true, "credentials.get must report [native code]");
+    assert.equal(s.createNative, true, "credentials.create must report [native code]");
+    assert.equal(s.getNativeViaFnProto, true, "Function.prototype.toString must also see native");
+    assert.equal(s.getName, "get", "the override must keep the native function name");
     assert.equal(s.get.outcome, "rejected");
     assert.equal(s.get.name, "NotAllowedError", "a publicKey get must look like a cancelled ceremony");
     assert.ok(s.get.ms < 2000, `the rejection must be immediate, not a hang (took ${s.get.ms}ms)`);
@@ -145,6 +170,32 @@ test(
       { outcome: "resolved", value: null },
       "non-publicKey credential calls must reach the native implementation",
     );
+  },
+);
+
+test(
+  "the off-switch also covers a no-network document (data: URL)",
+  { skip: patchrightAvailable ? false : "patchright/Chrome not installed" },
+  async () => {
+    // patchright delivers init scripts partly by injecting a <script> into
+    // http(s) HTML responses; a data: document has no such response, so this
+    // proves the CDP addScriptToEvaluateOnNewDocument path covers it too — a
+    // page reached via a client-side redirect to a data:/blank document is not
+    // a hole in the off-switch.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "webauthn-off-data-"));
+    let ctx;
+    try {
+      ctx = await launchContext({ profileDir: dir, headless: true });
+      const page = ctx.pages()[0] || (await ctx.newPage());
+      await page.goto("data:text/html,<title>t</title><h1>x</h1>", {
+        waitUntil: "domcontentloaded",
+      });
+      const pkc = await page.evaluate(() => typeof window.PublicKeyCredential, undefined, false);
+      assert.equal(pkc, "undefined", "the off-switch must cover a no-network document");
+    } finally {
+      if (ctx) await ctx.close().catch(() => {});
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
   },
 );
 
