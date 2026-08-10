@@ -463,6 +463,8 @@ async function cmdStart(flags) {
     onLock: (reason) => {
       if (controlEnabled) {
         stderr(`Vault locked (${reason}). Next request will ask for an unlock approval.`);
+      } else if (reopenVault) {
+        stderr(`Vault locked (${reason}). Next request re-opens it via the agent key.`);
       } else {
         stderr(`Vault locked (${reason}). Restart the proxy to re-unlock.`);
       }

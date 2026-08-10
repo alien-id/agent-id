@@ -262,10 +262,20 @@ export function createProxy({
   // tracking is timestamp-based (see the ticker below), so touching activity
   // here is what "restarts" the idle window.
   function adoptVault(openedVault) {
+    const displaced = state.vault;
     state.vault = openedVault;
     state.locked = false;
     state.lockedAt = null;
     state.lockedReason = null;
+    // The cached oauth2 tokens belong to the handle being replaced. An owner
+    // who re-authorizes out of band lands a NEW refresh token in `vault.enc`,
+    // and a cached older one would keep winning over it (see
+    // resolveOauth2Bearer) until it expired — invalid_grant, 401, forever.
+    // Same reason doLock drops them.
+    state.oauthTokens.clear();
+    // Zero the handle we just replaced instead of leaving a second decrypted
+    // copy of the vault in the heap for the life of the process.
+    if (displaced && displaced !== openedVault) displaced.lock();
     touchActivity();
   }
 
@@ -273,6 +283,9 @@ export function createProxy({
   // by every concurrent caller, so a burst of requests hitting a lock/miss at
   // once triggers one `reopenVault()`, not one per request.
   let reopenInFlight = null;
+  // `reason` describes the reopen, not the caller: callers that join an
+  // in-flight attempt are served by the one that triggered it, and that
+  // trigger is what the single `vault_reopened` entry records.
   async function tryReopenVault(reason) {
     if (!reopenVault) return false;
     if (!reopenInFlight) {
@@ -306,6 +319,30 @@ export function createProxy({
         return run();
       }
       throw err;
+    }
+  }
+
+  // Write a rotated refresh token back to `vault.enc`. `save()` re-encrypts this
+  // process's WHOLE in-memory payload, so writing from the handle opened at
+  // startup would erase every credential another process has added since — the
+  // exact out-of-band-OAuth workflow self-reopen exists for. Re-read the vault
+  // from disk first and rotate on that handle. Without a reopen callback there
+  // is no way to re-read: the write-through still happens (dropping a rotated
+  // token bricks the credential on its next refresh), logged as made from a
+  // possibly-stale snapshot rather than done silently.
+  async function persistRotatedRefreshToken(name, refreshToken) {
+    const reread = await tryReopenVault("oauth_rotate");
+    if (!state.vault) return;
+    try {
+      const live = state.vault.get(name);
+      if (!live) return;
+      live.refreshToken = refreshToken;
+      await state.vault.save();
+      if (!reread) {
+        logAccess({ event: "oauth_rotate_persisted_stale", credential: name }).catch(() => {});
+      }
+    } catch {
+      // best effort — the in-memory cache already carries the new token
     }
   }
 
@@ -442,20 +479,14 @@ export function createProxy({
           expiresAt: now() + res.expiresInSec * 1000,
           refreshToken: res.refreshToken || refreshToken,
         };
-        state.oauthTokens.set(cred.name, entry);
 
-        // Persist a rotated refresh token so it survives proxy restart / re-unlock.
-        if (res.refreshToken && res.refreshToken !== cred.refreshToken && state.vault) {
-          try {
-            const live = state.vault.get(cred.name);
-            if (live) {
-              live.refreshToken = res.refreshToken;
-              await state.vault.save();
-            }
-          } catch {
-            // best effort — the in-memory cache already carries the new token
-          }
+        // Persist a rotated refresh token so it survives proxy restart /
+        // re-unlock. Runs BEFORE the cache write: the persist may swap in a
+        // re-read vault handle, which clears the token cache.
+        if (res.refreshToken && res.refreshToken !== cred.refreshToken) {
+          await persistRotatedRefreshToken(cred.name, res.refreshToken);
         }
+        state.oauthTokens.set(cred.name, entry);
         logAccess({ event: "oauth_refreshed", credential: cred.name }).catch(() => {});
         return entry.accessToken;
       })().finally(() => state.oauthInFlight.delete(cred.name));
@@ -725,6 +756,10 @@ export function createProxy({
       }
       throw err;
     }
+    // Detach from the vault's payload: adopting a re-read vault locks the
+    // displaced handle, which scrubs its records in place — and this request
+    // still holds one across awaits (consent, token refresh, body buffering).
+    cred = { ...cred };
 
     // Host is on the credential allowlist (resolveCredential enforced it).
     // First use of this (credential, host) pair? Ask for human consent.
