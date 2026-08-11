@@ -20,7 +20,8 @@
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
-import { createECDH, randomBytes } from "node:crypto";
+import { createECDH, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import fsp from "node:fs/promises";
 import { URL } from "node:url";
 
 import { rewriteHeaders, rewriteUrl, StubError } from "./stub.mjs";
@@ -28,6 +29,7 @@ import {
   injectCredential,
   parseRewritePath,
   prepareUpstreamHeaders,
+  PROXY_AUTH_HEADER,
   resolveCredential,
   RewriteError,
 } from "./rewrite.mjs";
@@ -48,7 +50,9 @@ import {
 import { effectiveAccess, evaluateAccess } from "@alien-id/agent-id-vault/lib/access.mjs";
 import { unsealFromPublicKey } from "@alien-id/agent-id-vault/lib/format.mjs";
 import { fingerprintOfCertPem, generateControlCert } from "./control-tls.mjs";
-import { appendJsonl } from "@alien-id/agent-id-core/lib/state.mjs";
+import { appendJsonl, statePaths } from "@alien-id/agent-id-core/lib/state.mjs";
+
+export { PROXY_AUTH_HEADER };
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -59,6 +63,9 @@ const HOP_BY_HOP_HEADERS = new Set([
   "trailer",
   "transfer-encoding",
   "upgrade",
+  // Terminates at this proxy by definition — the legacy stub path forwards
+  // whatever the agent sent, so the strip has to be explicit here too.
+  PROXY_AUTH_HEADER,
 ]);
 
 function stripHopByHop(headers) {
@@ -127,6 +134,9 @@ function structuredError(res, status, body) {
 export const DEFAULT_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const IDLE_TICK_MS = 60 * 1000;
 
+// Coalescing window for rejected-request logging (see logAuthFailure).
+const AUTH_FAIL_LOG_WINDOW_MS = 60 * 1000;
+
 export function createProxy({
   vault = null,
   logPath,
@@ -159,6 +169,12 @@ export function createProxy({
   // recover from a credential written after spawn or from its own idle lock
   // instead of requiring a restart. Omitted, behavior is unchanged.
   reopenVault = null,
+  // Opt-in shared secret for the DATA plane (the control plane has its own
+  // bearer token). Set, every data-plane request and CONNECT must present it
+  // in the PROXY_AUTH_HEADER; unset, behavior is unchanged. Loopback alone is
+  // a weak boundary wherever the network namespace is shared — a container,
+  // or a machine also running a browser that renders untrusted pages.
+  authToken = null,
 }) {
   const controlEnabled = !!control;
   if (controlEnabled && !stateDir) {
@@ -243,6 +259,19 @@ export function createProxy({
 
   function touchActivity() {
     state.lastRequestAt = now();
+  }
+
+  // Constant-time token check. Both sides are hashed first so the digests are
+  // always 32 bytes and timingSafeEqual can never throw on a length mismatch
+  // (which would also leak the expected length).
+  function authOk(req) {
+    if (authToken === null) return true;
+    const presented = req.headers[PROXY_AUTH_HEADER];
+    if (typeof presented !== "string" || presented.length === 0) return false;
+    return timingSafeEqual(
+      createHash("sha256").update(presented).digest(),
+      createHash("sha256").update(authToken).digest(),
+    );
   }
 
   function doLock(reason) {
@@ -342,12 +371,52 @@ export function createProxy({
   // reopen failed) refuse to write at all. Losing a rotated token is
   // recoverable — it stays in this process's cache and the owner can re-mint —
   // destroying another writer's credential is not.
+  // `save()` re-encrypts the WHOLE in-memory payload over `vault.enc`, so a
+  // handle that predates another writer's change would erase it. Re-reading
+  // first is the sound fix, but it needs an unlock method we may not have
+  // (passphrase/passkey starts wire no reopen). The fallback is a
+  // compare-and-swap: remember the raw file as we last saw it, and allow a
+  // stale-handle save only while the file is byte-identical — nobody else
+  // wrote, so our snapshot IS current. That keeps a rotated refresh token
+  // persisted for those starts (losing it bricks the credential on the next
+  // restart, since the provider has already retired the one on disk) while
+  // still refusing the one case that can destroy another writer's data.
+  async function readVaultFileText() {
+    if (!stateDir) return null;
+    try {
+      return await fsp.readFile(statePaths(stateDir).vaultFile, "utf8");
+    } catch {
+      return null;
+    }
+  }
+  /// Whether `vault.enc` is still byte-for-byte the envelope THIS handle was
+  /// built from — i.e. nobody else has written since we opened it.
+  ///
+  /// `save()` re-encrypts the whole in-memory payload over the file, so a
+  /// handle that predates another writer's change would erase it. Re-reading
+  /// first is the sound fix, but it needs an unlock method a passphrase/passkey
+  /// start does not have. This is the fallback: allow such a save only while
+  /// the comparison holds. The baseline is the handle's OWN envelope (`raw()`),
+  /// not a snapshot taken later — a snapshot could already include the other
+  /// writer's change and would wave the erasure through. Serialization matches
+  /// the vault's writer exactly (`JSON.stringify(file, null, 2)` + newline);
+  /// any drift there makes this read "changed" and fails closed.
+  async function vaultFileMatchesHandle() {
+    const onDisk = await readVaultFileText();
+    if (onDisk === null || !state.vault) return false;
+    try {
+      return onDisk === JSON.stringify(state.vault.raw(), null, 2) + "\n";
+    } catch {
+      return false;
+    }
+  }
+
   async function persistRotatedRefreshToken(name, refreshToken) {
-    if (!(await tryReopenVault("oauth_rotate"))) {
+    if (!(await tryReopenVault("oauth_rotate")) && !(await vaultFileMatchesHandle())) {
       logAccess({
         event: "oauth_rotate_persist_skipped",
         credential: name,
-        reason: "vault_not_rereadable",
+        reason: "vault_changed_and_not_rereadable",
       }).catch(() => {});
       return false;
     }
@@ -600,12 +669,12 @@ export function createProxy({
       return { ok: false, error: "vault_locked", status: 409 };
     }
     // Pairing writes `vault.enc`, and `save()` re-encrypts this process's whole
-    // in-memory payload — see persistRotatedRefreshToken. Add the slot to a
-    // freshly re-read handle, and when the vault cannot be re-read refuse: a
-    // pairing the owner can retry is cheaper than erasing a credential another
-    // process wrote after this proxy started.
-    if (!(await tryReopenVault("pairing"))) {
-      logAccess({ event: "mobile_register_refused", reason: "vault_not_rereadable" }).catch(
+    // in-memory payload — see persistRotatedRefreshToken. Prefer a freshly
+    // re-read handle; failing that, the compare-and-swap lets the write through
+    // only while nobody else has touched the file, so a pairing still works on
+    // a passphrase/passkey start without risking another writer's data.
+    if (!(await tryReopenVault("pairing")) && !(await vaultFileMatchesHandle())) {
+      logAccess({ event: "mobile_register_refused", reason: "vault_changed_and_not_rereadable" }).catch(
         () => {},
       );
       return { ok: false, error: "vault_reread_unavailable", status: 409 };
@@ -647,12 +716,61 @@ export function createProxy({
 
   const lookup = (name) => (state.vault ? state.vault.get(name) : null);
 
+  // Every access-log write in flight. Callers fire these and forget, so
+  // close() is the only place that can promise the log is on disk — an
+  // operator reading it after a stop, and every test tearing a state dir down,
+  // relies on that.
+  const pendingLogWrites = new Set();
+
   async function logAccess(entry) {
+    const write = (async () => {
+      try {
+        const owed = entry.event === "auth_failed" ? 0 : takeSuppressedAuthFailures();
+        if (owed > 0) {
+          await appendJsonl(logPath, {
+            ts: new Date().toISOString(),
+            event: "auth_failed_suppressed",
+            suppressed: owed,
+          });
+        }
+        await appendJsonl(logPath, { ts: new Date().toISOString(), ...entry });
+      } catch {
+        // never let logging break a request
+      }
+    })();
+    pendingLogWrites.add(write);
     try {
-      await appendJsonl(logPath, { ts: new Date().toISOString(), ...entry });
-    } catch {
-      // never let logging break a request
+      await write;
+    } finally {
+      pendingLogWrites.delete(write);
     }
+  }
+
+  // An unauthenticated caller must not be able to grow the access log at will —
+  // the refusal is written before any other check, so anything that can reach
+  // the port could otherwise fill the disk one line per request. Policy: log
+  // the first failure of a window verbatim, count the rest, and let the first
+  // failure after the window carry that count as `suppressed`. Never silent:
+  // there is always a record, only its resolution degrades under a flood.
+  const authFailLog = { windowStartedAt: -Infinity, suppressed: 0 };
+
+  // The counter must not die with its window: a flood that simply stops leaves
+  // its tail owed a record. Any later log pays the debt, and close() pays
+  // whatever is left, so a suppressed count is never merely forgotten.
+  function takeSuppressedAuthFailures() {
+    const suppressed = authFailLog.suppressed;
+    authFailLog.suppressed = 0;
+    return suppressed;
+  }
+
+  function logAuthFailure(entry) {
+    if (now() - authFailLog.windowStartedAt < AUTH_FAIL_LOG_WINDOW_MS) {
+      authFailLog.suppressed += 1;
+      return;
+    }
+    const suppressed = takeSuppressedAuthFailures();
+    authFailLog.windowStartedAt = now();
+    logAccess({ event: "auth_failed", ...entry, suppressed });
   }
 
   // Stream the agent's request through to the configured upstream. Shared
@@ -1048,6 +1166,37 @@ export function createProxy({
   const server = http.createServer(async (req, res) => {
     const start = Date.now();
 
+    // Auth runs before EVERYTHING — before the lock check and its self-reopen,
+    // before activity is touched, before routing, the vault, the approval flow
+    // or any upstream socket. An unauthenticated caller must not be able to
+    // observe or drive proxy state, only to be refused.
+    if (!authOk(req)) {
+      logAuthFailure({ method: req.method, path: (req.url || "").split("?")[0] });
+      return structuredError(res, 401, {
+        error: "unauthorized",
+        message: `Missing or invalid ${PROXY_AUTH_HEADER} header.`,
+      });
+    }
+    // Defense in depth: the strip lists in prepareUpstreamHeaders and
+    // stripHopByHop are the guarantee, this makes the token unreachable from
+    // every downstream path regardless.
+    delete req.headers[PROXY_AUTH_HEADER];
+
+    // A browser cannot attach a custom header on a simple request, so a
+    // preflight is the only way it could reach an authenticated data plane —
+    // and relaying one upstream would hand a page the upstream's CORS answer.
+    // Refuse locally, with no Access-Control-Allow-* of our own, in both modes.
+    if (req.method === "OPTIONS" && req.headers["access-control-request-method"]) {
+      logAccess({
+        event: "preflight_refused",
+        path: (req.url || "").split("?")[0],
+      });
+      return structuredError(res, 403, {
+        error: "cross_origin_refused",
+        message: "The proxy data plane is not a browser-reachable origin; preflights are refused.",
+      });
+    }
+
     // Locked with no control plane to re-unlock → refuse immediately. When the
     // control plane is enabled the handlers park the request and ask the phone
     // to unlock, so we fall through.
@@ -1099,31 +1248,121 @@ export function createProxy({
     }
   });
 
+  // Every CONNECT refusal shares one wire shape — status line, a machine-
+  // readable error header, explicit zero-length body — so a tunnel client can
+  // tell the refusals apart without parsing prose.
+  function refuseConnect(clientSocket, statusLine, error) {
+    // The refusal can land after an await (the reopen attempt) or after the
+    // tunnel broke, so the client may already be gone — writing to it must not
+    // surface as an unhandled socket error.
+    clientSocket.on("error", () => {});
+    if (clientSocket.destroyed) return;
+    clientSocket.write(
+      `HTTP/1.1 ${statusLine}\r\n` +
+        `X-AgentVault-Proxy-Error: ${error}\r\n` +
+        "Content-Length: 0\r\n\r\n",
+    );
+    clientSocket.destroy();
+  }
+
+  // A CONNECT request-target is authority-form — `host:port`, port mandatory
+  // (RFC 9110 §9.3.6). Returns null for anything else, including a port that
+  // isn't a number in range: `net.connect` THROWS on such a port
+  // (ERR_SOCKET_BAD_PORT), and one malformed line must not be able to take the
+  // proxy down.
+  function parseConnectTarget(target) {
+    const m = /^(\[[0-9A-Fa-f:.]+\]|[^:[\]]+):(\d{1,5})$/.exec(target || "");
+    if (!m) return null;
+    const port = Number(m[2]);
+    if (port < 1 || port > 65535) return null;
+    // An IPv6 literal arrives bracketed; the SSRF guard and net.connect both
+    // want it bare.
+    return { host: m[1].replace(/^\[|\]$/g, ""), port };
+  }
+
   // CONNECT tunneling for HTTPS. No MITM in v1.
   server.on("connect", (req, clientSocket, head) => {
-    const start = Date.now();
-    const [host, portStr] = (req.url || "").split(":");
-    const port = parseInt(portStr || "443", 10);
+    // The handler is async, so anything it throws would surface as an
+    // unhandled rejection — process death for a proxy that is supposed to
+    // answer a bad request, not die of it.
+    handleConnect(req, clientSocket, head).catch((err) => {
+      refuseConnect(clientSocket, "500 Internal Server Error", "proxy_internal");
+      logAccess({
+        method: "CONNECT",
+        host: null,
+        path: null,
+        status: 500,
+        credentials: [],
+        error: (err && (err.code || err.message)) || "proxy_internal",
+      });
+    });
+  });
 
-    if (state.locked) {
-      clientSocket.write(
-        "HTTP/1.1 401 Vault Locked\r\n" +
-          "X-AgentVault-Proxy-Error: vault_locked\r\n" +
-          "Content-Length: 0\r\n\r\n",
-      );
-      clientSocket.destroy();
+  async function handleConnect(req, clientSocket, head) {
+    const start = Date.now();
+
+    if (!authOk(req)) {
+      logAuthFailure({ method: "CONNECT" });
+      refuseConnect(clientSocket, "401 Unauthorized", "unauthorized");
       return;
     }
+    delete req.headers[PROXY_AUTH_HEADER];
 
-    if (!host) {
-      clientSocket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-      clientSocket.destroy();
+    // Before the lock check: a malformed target is refused on its own terms,
+    // never a reason to reopen a vault.
+    const target = parseConnectTarget(req.url);
+    if (!target) {
+      refuseConnect(clientSocket, "400 Bad Request", "bad_request");
+      logAccess({
+        method: "CONNECT",
+        host: null,
+        path: null,
+        status: 400,
+        credentials: [],
+        durationMs: Date.now() - start,
+        error: "bad_request",
+      });
+      return;
+    }
+    const { host, port } = target;
+
+    // Same self-heal the request handler gets on an idle lock, under the same
+    // gate: on the unattended auto-unlock path (no control plane) a reopen
+    // needs no human. With the control plane on, the unlock is the owner's
+    // decision — and a tunnel has no parked-request path to fall through to,
+    // so there it stays a refusal.
+    if (state.locked) {
+      const reopened = !controlEnabled && (await tryReopenVault("idle_lock"));
+      if (!reopened) {
+        refuseConnect(clientSocket, "401 Vault Locked", "vault_locked");
+        return;
+      }
+    }
+
+    // SSRF guard, same two layers as forwardUpstream: a literal-IP target is
+    // checked here (node skips `lookup` for literals), a hostname at connect
+    // time via the shared lookup below — so a tunnel can no more reach
+    // 169.254.169.254 (or, under --block-private-hosts, a loopback/RFC1918
+    // target) than a forwarded request can.
+    const literalBlock = blockedAddressReason(host, { blockPrivate: blockPrivateHosts });
+    if (literalBlock) {
+      refuseConnect(clientSocket, "403 Forbidden", "upstream_blocked");
+      logAccess({
+        method: "CONNECT",
+        host,
+        path: null,
+        status: 403,
+        credentials: [],
+        durationMs: Date.now() - start,
+        error: "upstream_blocked",
+        reason: literalBlock,
+      });
       return;
     }
 
     touchActivity();
 
-    const upstream = net.connect(port, host, () => {
+    const upstream = net.connect({ host, port, lookup: upstreamLookup }, () => {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length) upstream.write(head);
       upstream.pipe(clientSocket);
@@ -1142,13 +1381,19 @@ export function createProxy({
     });
 
     upstream.on("error", (err) => {
-      clientSocket.write(`HTTP/1.1 502 Bad Gateway\r\n\r\n`);
-      clientSocket.destroy();
+      // The connect-time lookup rejected a resolved address → the same 403 the
+      // literal check gives, not a generic 502.
+      const blocked = err.code === "ESSRFBLOCKED";
+      refuseConnect(
+        clientSocket,
+        blocked ? "403 Forbidden" : "502 Bad Gateway",
+        blocked ? "upstream_blocked" : "upstream_error",
+      );
       logAccess({
         method: "CONNECT",
         host,
         path: null,
-        status: 502,
+        status: blocked ? 403 : 502,
         credentials: [],
         bytesIn: 0,
         bytesOut: 0,
@@ -1158,7 +1403,7 @@ export function createProxy({
     });
 
     clientSocket.on("error", () => upstream.destroy());
-  });
+  }
 
   function handleStubError(res, err) {
     if (err instanceof StubError) {
@@ -1211,9 +1456,15 @@ export function createProxy({
     async close() {
       if (ticker) clearInterval(ticker);
       if (registry) registry.cancelAll("proxy_shutdown");
+      const owed = takeSuppressedAuthFailures();
+      if (owed > 0) await logAccess({ event: "auth_failed_suppressed", suppressed: owed });
       doLock("proxy_shutdown");
       if (controlServer) await controlServer.close();
       await new Promise((resolve) => server.close(() => resolve()));
+      // The log is written fire-and-forget everywhere else; a closed proxy owes
+      // the caller a settled log (nothing still writing into a state dir that
+      // is about to go).
+      await Promise.allSettled([...pendingLogWrites]);
     },
     get locked() {
       return state.locked;

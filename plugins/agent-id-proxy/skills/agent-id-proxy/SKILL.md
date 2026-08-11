@@ -37,7 +37,21 @@ node CLI start --passphrase-file ~/.agent-id-pass
 
 # Idle auto-lock window (default 12h; "never" disables for unattended agents):
 node CLI start --idle-timeout 30m
+
+# Authenticate the data plane (loopback alone is a weak boundary in a shared
+# network namespace). The file must be 0600 and hold printable ASCII; the token
+# never rides argv:
+node CLI start --auth-token-file ~/.agent-id-proxy-token
 ```
+
+With `--auth-token-file`, every proxy call — including `CONNECT` tunnels — must present the token, or the answer is `401 {error: "unauthorized"}`:
+
+```bash
+curl -H "X-Agent-Id-Proxy-Token: $(cat ~/.agent-id-proxy-token)" \
+  http://localhost:48771/github-pat/api.github.com/user
+```
+
+The header is stripped before anything is forwarded upstream, and the check runs before the vault is touched at all. The control plane is unaffected — it has its own bearer token.
 
 The CLI prints the suggested env exports. Set them in any shell that should route through the proxy:
 
@@ -176,8 +190,8 @@ Prefer Mode 1 for new code.
 
 After `--idle-timeout` of no traffic (default **12h**, 1Password parity), the proxy zeroes the master key + drops decrypted credential records. What the next request gets depends on how the vault was unlocked at start:
 
-- **Agent-key auto-unlock** (the default — not `--unlock-form`, not `--no-agent-key`) **with `--no-control`:** the proxy re-opens the vault itself and the request proceeds. No human, no restart.
-- **Control plane on** (the default) with a phone or owner-approval slot: the request parks until the unlock is approved — unchanged, unlock stays an owner action there.
+- **Agent-key auto-unlock** (the default — not `--unlock-form`, not `--no-agent-key`) **with `--no-control`:** the proxy re-opens the vault itself and the request proceeds. No human, no restart. A `CONNECT` tunnel is re-opened the same way.
+- **Control plane on** (the default) with a phone or owner-approval slot: the request parks until the unlock is approved — unchanged, unlock stays an owner action there. A `CONNECT` tunnel has nowhere to park, so it is refused with `401 vault_locked` rather than re-unlocking itself.
 - **Control plane on with nothing to ask** (no paired device, no owner-approval slot): `401 {error: "no_unlock_method"}` on every request, agent key or not — self-reopen is reached only with `--no-control`. Pair a device before the lock, or restart the proxy.
 - **Anything else** (passphrase, passkey, `--unlock-form`): `401 {error: "vault_locked"}`; restart to re-unlock:
 
@@ -206,9 +220,10 @@ With agent-key auto-unlock (any control-plane setting), a `credential_not_found`
 { "ok": false, "error": "vault_locked", "reason": "idle_timeout" }
 { "ok": false, "error": "access_denied", "credential": "mail-ro", "access": "ro", "reason": "write_blocked" }
 { "ok": false, "error": "bad_request", "message": "..." }
+{ "ok": false, "error": "unauthorized", "message": "..." }
 ```
 
-The `X-AgentVault-Proxy-Error` response header carries the same code.
+The `X-AgentVault-Proxy-Error` response header carries the same code. A `CONNECT` refusal has no JSON body — it is a status line plus that header (`unauthorized`, `vault_locked`, `bad_request` for a target that is not `host:port`, `upstream_blocked`, `upstream_error`).
 
 ## Status + stop
 
@@ -219,7 +234,7 @@ node CLI stop
 
 ## Limitations
 
-- **HTTPS only at the upstream leg** in URL-rewrite mode. The agent-to-proxy leg is plain HTTP loopback by design.
+- **HTTPS only at the upstream leg** in URL-rewrite mode. The agent-to-proxy leg is plain HTTP loopback by design; `--auth-token-file` gates who may use it, but does not encrypt it.
 - Authorization gates: per-credential **host allowlist**, **access level**
   (`ro`/`rw` + rules), and — when started with `--require-consent` — a
   per-(credential, host) human consent grant.
