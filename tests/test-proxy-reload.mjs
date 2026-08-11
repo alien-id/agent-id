@@ -13,6 +13,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createECDH } from "node:crypto";
 
 import { generateEd25519PemPair } from "../plugins/agent-id-core/lib/crypto.mjs";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
@@ -35,10 +36,12 @@ function startUpstream() {
 }
 
 // Fake oauth2 token endpoint: mints incrementing access tokens and records the
-// refresh token each exchange presented. `cfg.rotateTo` makes it rotate.
+// refresh token each exchange presented. `cfg.rotateTo` makes it rotate;
+// `cfg.rotateEvery` mints a NEW refresh token on every exchange (what a
+// rotating authorization server does).
 function startTokenEndpoint() {
   const stats = { count: 0, refreshTokens: [] };
-  const cfg = { rotateTo: null };
+  const cfg = { rotateTo: null, rotateEvery: false };
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       const chunks = [];
@@ -52,7 +55,8 @@ function startTokenEndpoint() {
           expires_in: 3600,
           token_type: "Bearer",
         };
-        if (cfg.rotateTo) body.refresh_token = cfg.rotateTo;
+        if (cfg.rotateEvery) body.refresh_token = `rot-${stats.count}`;
+        else if (cfg.rotateTo) body.refresh_token = cfg.rotateTo;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(body));
       });
@@ -90,6 +94,29 @@ function proxyRequest({ port, target, headers = {} }) {
     req.on("error", reject);
     req.end();
   });
+}
+
+async function readAccessLog(logPath) {
+  const raw = await fs.readFile(logPath, "utf8").catch(() => "");
+  return raw
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+}
+
+// The proxy appends to its access log without awaiting the write, so a request
+// can be answered before its entry lands — poll rather than read once.
+async function waitForLogEvent(logPath, event, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  let seen = [];
+  for (;;) {
+    seen = (await readAccessLog(logPath)).map((e) => e.event);
+    if (seen.includes(event)) return true;
+    if (Date.now() > deadline) {
+      throw new Error(`no '${event}' in the access log (saw: ${seen.join(",") || "nothing"})`);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
 }
 
 // URL-rewrite mode: /<credname>/<host>/<path>.
@@ -586,6 +613,255 @@ describe("proxy self-reopen: the displaced vault handle is locked", () => {
   });
 });
 
+describe("proxy without a reopen: a rotation must not write the startup snapshot", () => {
+  let stateDir;
+  let upstream;
+  let token;
+  let proxy;
+  let proxyPort;
+  let upstreamAuthority;
+  let logPath;
+  const clock = 1_700_000_000_000;
+
+  before(async () => {
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-noreopen-"));
+    logPath = path.join(stateDir, "proxy.log");
+    await initVault({ stateDir, passphrase: "p" });
+
+    upstream = await startUpstream();
+    token = await startTokenEndpoint();
+    upstreamAuthority = new URL(upstream.url).host;
+
+    const seed = await openVault({ stateDir, passphrase: "p" });
+    seed.add({
+      name: "api",
+      type: "oauth2",
+      domains: [new URL(upstream.url).hostname],
+      upstreamScheme: "http",
+      tokenEndpoint: token.url,
+      clientId: "cid",
+      clientSecret: "cs",
+      refreshToken: "rt-1",
+    });
+    await seed.save();
+    seed.lock();
+
+    // The proxy's handle predates the out-of-band write below, and there is no
+    // reopen callback (passphrase / passkey / --unlock-form / --no-agent-key).
+    const vault = await openVault({ stateDir, passphrase: "p" });
+    proxy = createProxy({ vault, stateDir, logPath, now: () => clock });
+    const addr = await proxy.listen();
+    proxyPort = addr.port;
+  });
+
+  after(async () => {
+    await proxy?.close();
+    upstream?.server.close();
+    token?.server.close();
+    if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("serves the request but leaves another writer's credential on disk intact", async () => {
+    // "Another process" — e.g. the vault CLI generating a wallet whose private
+    // key exists nowhere else.
+    const writer = await openVault({ stateDir, passphrase: "p" });
+    writer.add({
+      name: "added-later",
+      type: "bearer",
+      domains: ["example.test"],
+      value: "SECRET-LATER",
+    });
+    await writer.save();
+    writer.lock();
+
+    token.cfg.rotateTo = "rt-2";
+    const r = await proxyPathRequest({ port: proxyPort, path: `/api/${upstreamAuthority}/v1/x` });
+    assert.equal(r.status, 200, "the rotated token is served from memory even when unpersistable");
+    assert.equal(upstream.requests.at(-1).authorization, "Bearer at-1");
+
+    const disk = await openVault({ stateDir, passphrase: "p" });
+    assert.ok(disk.get("added-later"), "the other process's credential survived");
+    assert.equal(disk.get("api").refreshToken, "rt-1", "no stale snapshot was written back");
+    disk.lock();
+
+    await waitForLogEvent(logPath, "oauth_rotate_persist_skipped");
+  });
+});
+
+describe("proxy self-reopen: a rotation the vault refused keeps working from memory", () => {
+  let stateDir;
+  let upstream;
+  let token;
+  let proxy;
+  let proxyPort;
+  let upstreamAuthority;
+  let logPath;
+  let clock = 1_700_000_000_000;
+
+  // A handle whose save() always fails — a rotation that cannot be persisted
+  // however hard the proxy tries (read-only vault file, full disk).
+  function withFailingSave(vault) {
+    return {
+      ...vault,
+      save: async () => {
+        const err = new Error("vault file is read-only");
+        err.code = "EROFS";
+        throw err;
+      },
+    };
+  }
+
+  before(async () => {
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-persistfail-"));
+    logPath = path.join(stateDir, "proxy.log");
+    await initVault({ stateDir, passphrase: "p" });
+
+    upstream = await startUpstream();
+    token = await startTokenEndpoint();
+    upstreamAuthority = new URL(upstream.url).host;
+
+    const seed = await openVault({ stateDir, passphrase: "p" });
+    seed.add({
+      name: "api",
+      type: "oauth2",
+      domains: [new URL(upstream.url).hostname],
+      upstreamScheme: "http",
+      tokenEndpoint: token.url,
+      clientId: "cid",
+      clientSecret: "cs",
+      refreshToken: "rt-1",
+    });
+    await seed.save();
+    seed.lock();
+
+    const vault = withFailingSave(await openVault({ stateDir, passphrase: "p" }));
+    proxy = createProxy({
+      vault,
+      stateDir,
+      logPath,
+      now: () => clock,
+      reopenVault: async () => withFailingSave(await openVault({ stateDir, passphrase: "p" })),
+    });
+    const addr = await proxy.listen();
+    proxyPort = addr.port;
+  });
+
+  after(async () => {
+    await proxy?.close();
+    upstream?.server.close();
+    token?.server.close();
+    if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("logs the failed persist and keeps the rotated token across a later reopen", async () => {
+    token.cfg.rotateEvery = true;
+    const first = await proxyPathRequest({ port: proxyPort, path: `/api/${upstreamAuthority}/a` });
+    assert.equal(first.status, 200);
+    assert.deepEqual(token.stats.refreshTokens, ["rt-1"]);
+
+    await waitForLogEvent(logPath, "oauth_rotate_persist_failed");
+
+    // Something else makes the proxy re-read the vault, and the access token
+    // expires — the only copy of the rotated refresh token is the cache.
+    const miss = await proxyPathRequest({ port: proxyPort, path: `/ghost/${upstreamAuthority}/x` });
+    assert.equal(miss.status, 400);
+    clock += 3600 * 1000 + 1;
+
+    const second = await proxyPathRequest({ port: proxyPort, path: `/api/${upstreamAuthority}/b` });
+    assert.equal(second.status, 200);
+    assert.equal(
+      token.stats.refreshTokens.at(-1),
+      "rot-1",
+      "the unpersisted rotated token must survive the reopen — the vault record is stale",
+    );
+  });
+});
+
+describe("proxy self-reopen: a reopen keeps still-valid access tokens", () => {
+  let stateDir;
+  let upstream;
+  let token;
+  let proxy;
+  let proxyPort;
+  let upstreamAuthority;
+  const clock = 1_700_000_000_000;
+
+  before(async () => {
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-amp-"));
+    await initVault({ stateDir, passphrase: "p" });
+
+    upstream = await startUpstream();
+    token = await startTokenEndpoint();
+    upstreamAuthority = new URL(upstream.url).host;
+    // Every exchange hands back a fresh refresh token, so each refresh rotates
+    // → persists → re-reads the vault. That re-read must not cost the OTHER
+    // credential its perfectly valid access token.
+    token.cfg.rotateEvery = true;
+
+    const seed = await openVault({ stateDir, passphrase: "p" });
+    for (const name of ["api1", "api2"]) {
+      seed.add({
+        name,
+        type: "oauth2",
+        domains: [new URL(upstream.url).hostname],
+        upstreamScheme: "http",
+        tokenEndpoint: token.url,
+        clientId: "cid",
+        clientSecret: "cs",
+        refreshToken: `rt-${name}`,
+      });
+    }
+    await seed.save();
+    seed.lock();
+
+    const vault = await openVault({ stateDir, passphrase: "p" });
+    proxy = createProxy({
+      vault,
+      stateDir,
+      logPath: path.join(stateDir, "proxy.log"),
+      now: () => clock,
+      reopenVault: async () => openVault({ stateDir, passphrase: "p" }),
+    });
+    const addr = await proxy.listen();
+    proxyPort = addr.port;
+  });
+
+  after(async () => {
+    await proxy?.close();
+    upstream?.server.close();
+    token?.server.close();
+    if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("exchanges once per credential across many rotating requests, not once per request", async () => {
+    for (let i = 0; i < 8; i += 1) {
+      const name = i % 2 === 0 ? "api1" : "api2";
+      const r = await proxyPathRequest({
+        port: proxyPort,
+        path: `/${name}/${upstreamAuthority}/v1/${i}`,
+      });
+      assert.equal(r.status, 200);
+    }
+    assert.equal(
+      token.stats.count,
+      2,
+      "one token exchange per credential — a reopen must not flush valid access tokens",
+    );
+    assert.equal(upstream.requests.at(-1).authorization, "Bearer at-2");
+  });
+
+  it("keeps the cached access token when a credential miss triggers a reopen", async () => {
+    const before = token.stats.count;
+    const miss = await proxyPathRequest({ port: proxyPort, path: `/ghost/${upstreamAuthority}/x` });
+    assert.equal(miss.status, 400);
+
+    const r = await proxyPathRequest({ port: proxyPort, path: `/api1/${upstreamAuthority}/v1/after` });
+    assert.equal(r.status, 200);
+    assert.equal(upstream.requests.at(-1).authorization, "Bearer at-1");
+    assert.equal(token.stats.count, before, "the cred-miss reopen evicted a valid access token");
+  });
+});
+
 describe("proxy self-reopen: an in-flight request keeps the credential it resolved", () => {
   let stateDir;
   let upstream;
@@ -658,6 +934,144 @@ describe("proxy self-reopen: an in-flight request keeps the credential it resolv
   });
 });
 
+describe("proxy pairing: /register must not write the startup snapshot", () => {
+  const dirs = [];
+
+  // A vault seeded with one credential, plus a SECOND credential written by
+  // another process after `openVault` returns the proxy's handle — so that
+  // handle's in-memory payload is a pre-write snapshot.
+  async function setup() {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-pair-"));
+    dirs.push(stateDir);
+    await initVault({ stateDir, passphrase: "p" });
+
+    const seed = await openVault({ stateDir, passphrase: "p" });
+    seed.add({ name: "tok", type: "bearer", domains: ["example.test"], value: "SECRET-SEED" });
+    await seed.save();
+    seed.lock();
+
+    const vault = await openVault({ stateDir, passphrase: "p" });
+
+    const writer = await openVault({ stateDir, passphrase: "p" });
+    writer.add({
+      name: "added-later",
+      type: "bearer",
+      domains: ["example.test"],
+      value: "SECRET-LATER",
+    });
+    await writer.save();
+    writer.lock();
+
+    return { stateDir, vault };
+  }
+
+  function devicePubKey() {
+    const device = createECDH("prime256v1");
+    device.generateKeys();
+    return device.getPublicKey().toString("hex");
+  }
+
+  function controlPost(port, p, body, token) {
+    return new Promise((resolve, reject) => {
+      const payload = JSON.stringify(body);
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port,
+          path: p,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(payload),
+            Authorization: `Bearer ${token}`,
+          },
+        },
+        (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () =>
+            resolve({
+              status: res.statusCode,
+              body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+            }),
+          );
+        },
+      );
+      req.on("error", reject);
+      req.end(payload);
+    });
+  }
+
+  after(async () => {
+    for (const d of dirs) await fs.rm(d, { recursive: true, force: true });
+  });
+
+  it("refuses to pair when the vault cannot be re-read, leaving the other writer's credential", async () => {
+    const { stateDir, vault } = await setup();
+    const proxy = createProxy({
+      vault,
+      stateDir,
+      logPath: path.join(stateDir, "proxy.log"),
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
+    });
+    await proxy.listen();
+
+    const reg = await controlPost(
+      proxy.controlAddress.port,
+      "/register",
+      { devicePubKey: devicePubKey(), deviceId: "ios-demo" },
+      proxy.controlToken,
+    );
+    assert.equal(reg.status, 409);
+    assert.equal(reg.body.error, "vault_reread_unavailable");
+
+    const disk = await openVault({ stateDir, passphrase: "p" });
+    assert.ok(disk.get("added-later"), "the other process's credential survived the pairing");
+    assert.equal(disk.slots.filter((s) => s.type === "mobile").length, 0);
+    disk.lock();
+
+    await proxy.close();
+  });
+
+  it("pairs from a re-read vault when a reopen is available, keeping that credential", async () => {
+    const { stateDir, vault } = await setup();
+    const proxy = createProxy({
+      vault,
+      stateDir,
+      logPath: path.join(stateDir, "proxy.log"),
+      reopenVault: async () => openVault({ stateDir, passphrase: "p" }),
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
+    });
+    await proxy.listen();
+
+    const pub = devicePubKey();
+    const reg = await controlPost(
+      proxy.controlAddress.port,
+      "/register",
+      { devicePubKey: pub, deviceId: "ios-demo" },
+      proxy.controlToken,
+    );
+    assert.equal(reg.status, 200);
+    assert.equal(reg.body.ok, true);
+
+    const disk = await openVault({ stateDir, passphrase: "p" });
+    assert.ok(disk.get("added-later"), "the other process's credential survived the pairing");
+    assert.equal(disk.slots.filter((s) => s.type === "mobile").length, 1);
+    disk.lock();
+
+    // Idempotent on a second call, now that the slot is on disk.
+    const again = await controlPost(
+      proxy.controlAddress.port,
+      "/register",
+      { devicePubKey: pub },
+      proxy.controlToken,
+    );
+    assert.equal(again.body.alreadyPaired, true);
+
+    await proxy.close();
+  });
+});
+
 describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault", () => {
   const CLI = new URL("../plugins/agent-id-proxy/bin/cli.mjs", import.meta.url).pathname;
   const dirs = [];
@@ -672,19 +1086,23 @@ describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault",
     });
   }
 
-  // Run a proxy until its idle lock fires, then return the lock line.
+  // Run a proxy until its idle lock fires, then return the lock line. The
+  // control plane is ON unless a caller passes --no-control, exactly like a
+  // bare `agent-id-proxy start`.
   async function lockNotice(extraArgs, stateDir) {
     const port = await freePort();
+    const controlPort = await freePort();
     const child = spawn(
       "node",
       [
         CLI,
         "start",
-        "--no-control",
         "--idle-timeout",
         "200ms",
         "--port",
         String(port),
+        "--control-port",
+        String(controlPort),
         "--state-dir",
         stateDir,
         ...extraArgs,
@@ -715,12 +1133,9 @@ describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault",
     }
   }
 
-  after(async () => {
-    for (const d of dirs) await fs.rm(d, { recursive: true, force: true });
-  });
-
-  it("says the proxy re-opens the vault itself when it unlocked via the agent key", async () => {
-    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-cli-key-"));
+  // An agent-key vault: the proxy unlocks itself at start and can self-reopen.
+  async function agentKeyStateDir(tag) {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `proxy-reload-cli-${tag}-`));
     dirs.push(stateDir);
     const { privateKeyPem, publicKeyPem } = generateEd25519PemPair();
     await fs.mkdir(path.join(stateDir, "keys"), { recursive: true });
@@ -730,8 +1145,17 @@ describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault",
       { mode: 0o600 },
     );
     await initVault({ stateDir, privateKeyPem });
+    return { stateDir, privateKeyPem };
+  }
 
-    const notice = await lockNotice([], stateDir);
+  after(async () => {
+    for (const d of dirs) await fs.rm(d, { recursive: true, force: true });
+  });
+
+  it("says the proxy re-opens the vault itself when it unlocked via the agent key", async () => {
+    const { stateDir } = await agentKeyStateDir("key");
+
+    const notice = await lockNotice(["--no-control"], stateDir);
     assert.match(notice, /agent key/i);
     assert.doesNotMatch(notice, /restart/i);
   });
@@ -743,7 +1167,34 @@ describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault",
     const passFile = path.join(stateDir, "pass.txt");
     await fs.writeFile(passFile, "p", { mode: 0o600 });
 
-    const notice = await lockNotice(["--passphrase-file", passFile], stateDir);
+    const notice = await lockNotice(["--no-control", "--passphrase-file", passFile], stateDir);
     assert.match(notice, /restart/i);
+  });
+
+  it("promises an approval only when the vault carries an approver slot", async () => {
+    const { stateDir, privateKeyPem } = await agentKeyStateDir("paired");
+    const device = createECDH("prime256v1");
+    device.generateKeys();
+    const vault = await openVault({ stateDir, privateKeyPem });
+    vault.addMobileSlot(device.getPublicKey().toString("hex"), "ios-demo");
+    await vault.save();
+    vault.lock();
+
+    const notice = await lockNotice([], stateDir);
+    assert.match(notice, /will ask a paired device for an unlock approval/i);
+    assert.doesNotMatch(notice, /no_unlock_method/);
+  });
+
+  it("warns that requests will fail when the control plane has no approver to ask", async () => {
+    // The DEFAULT start: control plane on, agent-key unlock, nothing paired.
+    // A locked request is answered `no_unlock_method` — the self-reopen path
+    // runs only with the control plane off — so the notice must not promise an
+    // approval that will never be asked for.
+    const { stateDir } = await agentKeyStateDir("noapprover");
+
+    const notice = await lockNotice([], stateDir);
+    assert.match(notice, /no_unlock_method/);
+    assert.doesNotMatch(notice, /will ask for an unlock approval/i);
+    assert.match(notice, /pair|restart/i);
   });
 });

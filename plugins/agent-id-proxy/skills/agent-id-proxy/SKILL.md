@@ -178,6 +178,7 @@ After `--idle-timeout` of no traffic (default **12h**, 1Password parity), the pr
 
 - **Agent-key auto-unlock** (the default — not `--unlock-form`, not `--no-agent-key`) **with `--no-control`:** the proxy re-opens the vault itself and the request proceeds. No human, no restart.
 - **Control plane on** (the default) with a phone or owner-approval slot: the request parks until the unlock is approved — unchanged, unlock stays an owner action there.
+- **Control plane on with nothing to ask** (no paired device, no owner-approval slot): `401 {error: "no_unlock_method"}` on every request, agent key or not — self-reopen is reached only with `--no-control`. Pair a device before the lock, or restart the proxy.
 - **Anything else** (passphrase, passkey, `--unlock-form`): `401 {error: "vault_locked"}`; restart to re-unlock:
 
 ```bash

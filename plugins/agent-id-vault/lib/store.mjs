@@ -395,6 +395,9 @@ export function wipePayload(payload) {
       // `cookies`) may be aliased by the caller that supplied them via
       // vault.add(), and the vault must not destroy objects it doesn't
       // exclusively own. Releasing the reference is the achievable guarantee.
+      // Callers depend on that shallowness: the proxy hands an in-flight request
+      // a SHALLOW copy of the record so a concurrent vault swap cannot empty it
+      // mid-request. Making this recurse means fixing that copy too.
       if (f in cred) delete cred[f];
     }
   }

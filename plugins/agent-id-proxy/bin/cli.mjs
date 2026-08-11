@@ -33,6 +33,7 @@ import {
 import {
   loadAgentPrivateKey,
   openVault,
+  readMobileSlotChallenges,
   readOwnerApprovalChallenge,
   readPasskeyChallenges,
   recoverMasterKeyViaOwnerApproval,
@@ -354,6 +355,37 @@ async function startOwnerApprovalApprover({
 
 // ─── Commands ───────────────────────────────────────────────────────────────────
 
+// What can re-unlock a locked proxy is decided by the configuration, NOT by
+// whatever unlocked it at start:
+//   • control plane ON  — a locked request parks until an approver releases the
+//     master key (a paired device, or the owner-approval slot). With neither
+//     slot present every request is answered `no_unlock_method`, agent key or
+//     not: the self-reopen path is reached only with the control plane off.
+//   • control plane OFF — the proxy re-opens the vault itself iff it unlocked
+//     via the agent key; otherwise only a restart brings it back.
+async function lockNotice({ reason, stateDir, controlEnabled, canSelfReopen }) {
+  const head = `Vault locked (${reason}).`;
+  if (controlEnabled) {
+    const [mobile, ownerApproval] = await Promise.all([
+      readMobileSlotChallenges(stateDir).catch(() => []),
+      readOwnerApprovalChallenge(stateDir).catch(() => null),
+    ]);
+    if (mobile.length && ownerApproval) {
+      return `${head} Next request will ask a paired device or the owner for an unlock approval.`;
+    }
+    if (mobile.length) return `${head} Next request will ask a paired device for an unlock approval.`;
+    if (ownerApproval) return `${head} Next request will ask the owner for an unlock approval.`;
+    return (
+      `${head} No paired device and no owner-approval slot — every request now fails with ` +
+      "no_unlock_method" +
+      (canSelfReopen ? " (self-reopen via the agent key needs --no-control)" : "") +
+      ". Pair a device (`agent-id-proxy pair`) before the next lock, or restart the proxy."
+    );
+  }
+  if (canSelfReopen) return `${head} Next request re-opens it via the agent key.`;
+  return `${head} Restart the proxy to re-unlock.`;
+}
+
 async function cmdStart(flags) {
   const stateDir = resolveStateDir(flags);
   const paths = statePaths(stateDir);
@@ -461,13 +493,14 @@ async function cmdStart(flags) {
     oauthClientSecrets,
     blockPrivateHosts: !!flags["block-private-hosts"],
     onLock: (reason) => {
-      if (controlEnabled) {
-        stderr(`Vault locked (${reason}). Next request will ask for an unlock approval.`);
-      } else if (reopenVault) {
-        stderr(`Vault locked (${reason}). Next request re-opens it via the agent key.`);
-      } else {
-        stderr(`Vault locked (${reason}). Restart the proxy to re-unlock.`);
-      }
+      lockNotice({
+        reason,
+        stateDir,
+        controlEnabled,
+        canSelfReopen: !!reopenVault,
+      })
+        .then(stderr)
+        .catch(() => {});
     },
     onUnlock: () => stderr("Vault unlocked via owner approval."),
   });

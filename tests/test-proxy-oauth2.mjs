@@ -159,6 +159,10 @@ describe("oauth2 credential through the proxy", () => {
       stateDir,
       logPath: path.join(stateDir, "proxy.log"),
       now: () => clock,
+      // Writing a rotated token back re-reads the vault first (a save()
+      // re-encrypts the whole payload, so a startup snapshot would erase what
+      // another process wrote since). That is the agent-key configuration.
+      reopenVault: async () => openVault({ stateDir, passphrase: "test-pass" }),
     });
     const addr = await proxy.listen();
     proxyPort = addr.port;
