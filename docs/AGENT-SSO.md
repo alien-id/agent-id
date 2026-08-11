@@ -245,7 +245,7 @@ flowchart LR
 
 ### Idle auto-lock
 
-After 12 h of no proxy traffic (configurable via `--idle-timeout`), the master key is zeroed in memory and the decrypted records are dropped. Subsequent requests return `401 vault_locked`; restart the proxy to re-unlock. Mirrors 1Password's default.
+After 12 h of no proxy traffic (configurable via `--idle-timeout`), the master key is zeroed in memory and the decrypted records are dropped. Mirrors 1Password's default. Recovery depends on how the vault was unlocked: an approval re-unlocks it through the control plane (when the vault carries a paired device or an owner-approval slot — with neither, requests get `401 no_unlock_method` until the proxy is restarted), an agent-key-unlocked proxy running with `--no-control` re-opens the vault itself on the next request, and a human-unlocked one returns `401 vault_locked` until the proxy is restarted.
 
 ## Service authentication
 

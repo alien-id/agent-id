@@ -15,6 +15,7 @@ import path from "node:path";
 
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
+import { readJsonl } from "../plugins/agent-id-core/lib/state.mjs";
 
 function startUpstream() {
   return new Promise((resolve) => {
@@ -193,5 +194,98 @@ describe("proxy idle ticker", () => {
     clock = 10_000;
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(proxy.locked, true);
+  });
+});
+
+describe("proxy idle auto-lock — self-reopen (agent-key mode)", () => {
+  let stateDir;
+  let logPath;
+  let upstream;
+  let proxy;
+  let proxyPort;
+  let clock = 0;
+  let reopenCalls;
+
+  before(async () => {
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-idle-reopen-"));
+    logPath = path.join(stateDir, "proxy.log");
+    await initVault({ stateDir, passphrase: "p" });
+    let vault = await openVault({ stateDir, passphrase: "p" });
+
+    upstream = await startUpstream();
+    vault.add({
+      name: "tok",
+      type: "bearer",
+      domains: [new URL(upstream.url).hostname],
+      value: "SECRET",
+    });
+    await vault.save();
+    vault.lock();
+    vault = await openVault({ stateDir, passphrase: "p" });
+
+    clock = 1_000_000;
+    reopenCalls = 0;
+    proxy = createProxy({
+      vault,
+      logPath,
+      idleTimeoutMs: 50,
+      now: () => clock,
+      // Mirrors the CLI's agent-key path: a fresh open, no human involved.
+      reopenVault: async () => {
+        reopenCalls += 1;
+        return openVault({ stateDir, passphrase: "p" });
+      },
+    });
+    const addr = await proxy.listen();
+    proxyPort = addr.port;
+  });
+
+  after(async () => {
+    await proxy?.close();
+    upstream?.server.close();
+    if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("idle-locks the same as without a reopenVault callback", async () => {
+    proxy.forceLock("test");
+    assert.equal(proxy.locked, true);
+  });
+
+  it("recovers on the next request instead of staying locked", async () => {
+    const r = await proxyRequest({
+      port: proxyPort,
+      target: `${upstream.url}/after-reopen`,
+      headers: { Authorization: "AgentVault tok" },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(proxy.locked, false);
+    assert.equal(reopenCalls, 1);
+
+    // logAccess is fire-and-forget (see doLock's vault_locked write for the
+    // same pattern), so the response can land slightly before the append
+    // finishes — poll briefly instead of asserting on the first read.
+    let reopened;
+    for (let i = 0; i < 20 && !reopened; i++) {
+      const entries = await readJsonl(logPath);
+      reopened = entries.find((e) => e.event === "vault_reopened");
+      if (!reopened) await new Promise((res) => setTimeout(res, 25));
+    }
+    assert.ok(reopened, "expected a vault_reopened log entry");
+    assert.equal(reopened.reason, "idle_lock");
+  });
+
+  it("locks again on the next idle period and reopens again on the next request", async () => {
+    clock += 1000; // past the 50ms idle window again
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(proxy.locked, true);
+
+    const r = await proxyRequest({
+      port: proxyPort,
+      target: `${upstream.url}/again`,
+      headers: { Authorization: "AgentVault tok" },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(proxy.locked, false);
+    assert.equal(reopenCalls, 2);
   });
 });

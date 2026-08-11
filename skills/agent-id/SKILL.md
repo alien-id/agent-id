@@ -128,7 +128,10 @@ node plugins/agent-id-auth/bin/cli.mjs call --url https://service/op --method PO
 - **Hard vs. soft unlock.** `--unlock passkey|passphrase` (and `proxy --unlock-form`)
   need a human; `--unlock agent-key` lets the agent auto-unlock. Pick per stakes.
 - **Idle lock** zeroes the master key after `--idle-timeout` (default 12h) →
-  `401 {error:"vault_locked"}` until re-unlocked.
+  `401 {error:"vault_locked"}` until re-unlocked. An agent-key-unlocked proxy run with
+  `--no-control` re-opens the vault itself (no human, no restart); a human-unlocked one
+  needs the restart. With the control plane on, the request parks for an owner approval
+  instead — or fails `401 no_unlock_method` when the vault has no approver slot to ask.
 - **Residual:** vault/proxy run as the **same uid** as the agent (memory-scrape risk);
   closing that needs the proxy as a separate OS principal (roadmap).
 

@@ -174,7 +174,12 @@ Prefer Mode 1 for new code.
 
 ## Idle auto-lock
 
-After `--idle-timeout` of no traffic (default **12h**, 1Password parity), the proxy zeroes the master key + drops decrypted credential records. Subsequent requests get `401 {error: "vault_locked"}`. Restart the proxy to re-unlock:
+After `--idle-timeout` of no traffic (default **12h**, 1Password parity), the proxy zeroes the master key + drops decrypted credential records. What the next request gets depends on how the vault was unlocked at start:
+
+- **Agent-key auto-unlock** (the default — not `--unlock-form`, not `--no-agent-key`) **with `--no-control`:** the proxy re-opens the vault itself and the request proceeds. No human, no restart.
+- **Control plane on** (the default) with a phone or owner-approval slot: the request parks until the unlock is approved — unchanged, unlock stays an owner action there.
+- **Control plane on with nothing to ask** (no paired device, no owner-approval slot): `401 {error: "no_unlock_method"}` on every request, agent key or not — self-reopen is reached only with `--no-control`. Pair a device before the lock, or restart the proxy.
+- **Anything else** (passphrase, passkey, `--unlock-form`): `401 {error: "vault_locked"}`; restart to re-unlock:
 
 ```bash
 node CLI stop && node CLI start --passphrase-file ~/.agent-id-pass
@@ -188,6 +193,10 @@ node CLI start --idle-timeout never     # disable (unattended agents)
 ```
 
 `node CLI status` reports the configured `idleTimeout`.
+
+## Credentials added while the proxy runs
+
+With agent-key auto-unlock (any control-plane setting), a `credential_not_found` makes the proxy re-read `vault.enc` once and retry the lookup — so a credential another process wrote after the proxy started (an `agent-id-vault add` following an OAuth flow) is picked up on next use, no restart and no port change. Started any other way, a miss stays a miss until the proxy is restarted.
 
 ## Error responses
 

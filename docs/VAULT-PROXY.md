@@ -309,7 +309,7 @@ New code should prefer Mode 1. Mode 2 stays for backward compatibility.
 
 ## Idle auto-lock
 
-After `--idle-timeout` (default **12 h**, 1Password parity) of no traffic, the proxy zeroes the master key **and the whole decrypted credential payload** (every bearer/cookie/password and wallet private key) from process memory. A subsequent request to a locked vault doesn't hard-fail: if the vault carries a re-unlock slot (mobile or owner-approval) and the control plane is on, the request **parks** and an approval re-unlocks it without restarting (see the next section). With no re-unlock slot it returns `401 {error: "vault_locked"}` and the proxy must be restarted:
+After `--idle-timeout` (default **12 h**, 1Password parity) of no traffic, the proxy zeroes the master key **and the whole decrypted credential payload** (every bearer/cookie/password and wallet private key) from process memory. A subsequent request to a locked vault doesn't hard-fail: if the vault carries a re-unlock slot (mobile or owner-approval) and the control plane is on, the request **parks** and an approval re-unlocks it without restarting (see the next section). With the control plane off (`--no-control`) and the vault unlocked at start through the **agent key**, the proxy **re-opens the vault itself** and the request proceeds — the agent-key slot is the one unlock method that needs no human, so repeating it later needs none either (see "Self-reopen" below). Otherwise it returns `401 {error: "vault_locked"}` and the proxy must be restarted:
 
 ```bash
 agent-id-proxy stop && agent-id-proxy start --passphrase-file ~/.agent-id-pass
@@ -323,6 +323,22 @@ agent-id-proxy start --idle-timeout never     # disable, for unattended agents
 ```
 
 `agent-id-proxy status` reports the configured `idleTimeout`.
+
+---
+
+## Self-reopen (agent-key unlock only)
+
+An unattended proxy — a supervisor spawning one daemon per principal, vault auto-unlocked through the agent-key slot — can re-open its own vault, because that slot needs no human. Wired **only** when the startup unlock actually used the agent key (never after `--unlock-form`, `--no-agent-key`, a passphrase or a passkey), it covers two cases:
+
+- **A credential written after start.** A `credential_not_found` triggers one vault re-read and one retry of the same lookup, so a credential another process added to `vault.enc` (e.g. `agent-id-vault add` after an out-of-band OAuth flow) is picked up on next use. Concurrent misses share a single re-read.
+- **Its own idle lock, with `--no-control`.** The next request re-opens instead of answering `401 vault_locked`. With the control plane on, the request parks for an owner approval exactly as before — self-reopen never replaces a consent/approval flow. Note the corollary: with the control plane on and **no** approver slot in the vault (nothing paired, no owner-approval slot), a locked proxy answers `401 no_unlock_method` and stays locked — self-reopen is not consulted there. Pair a device, or run that proxy with `--no-control`.
+
+**Every write to `vault.enc` goes through a re-read handle.** `save()` re-encrypts the proxy's whole in-memory payload, so writing from the handle opened at start would erase everything another process added since — including a vault-generated wallet key that exists nowhere else. Both writers therefore re-read first, and **refuse to write when the vault cannot be re-read**:
+
+- a **rotated OAuth refresh token** is applied to the freshly read handle; when there is no reopen (a human-unlocked proxy) the rotation is kept in the process's token cache — the request still succeeds — and the skip is recorded in the access log (`oauth_rotate_persist_skipped`, or `oauth_rotate_persist_failed` when the save itself failed). Losing a rotated token is recoverable; destroying another writer's credential is not.
+- **pairing** (`POST /register`) adds the mobile slot to the freshly read handle, and answers `409 {error: "vault_reread_unavailable"}` when it cannot re-read. Pair again after restarting the proxy with the agent-key unlock.
+
+The replaced handle is locked — its master key and decrypted records are zeroed — so a reopen never leaves a second decrypted copy of the vault in the heap. Its cached OAuth **refresh** tokens are dropped with it, so a credential the owner re-authorized out of band wins with its new token; still-valid **access** tokens are kept (they were minted by the authorization server, not read from the vault), so a reopen costs no extra token-endpoint round trips.
 
 ---
 
@@ -395,7 +411,7 @@ Two practical notes:
 |---|---|
 | Has vault file only | Must scrypt-brute-force the passphrase. Memory-hard, ~30 ms/guess at default params. |
 | Has vault file + agent private key | Unlocks instantly via slot 1. Same threat model as the v4 vault. |
-| Has running proxy process memory | Extracts master key + decrypted records. Mitigation: idle auto-lock. |
+| Has running proxy process memory | Extracts master key + decrypted records. Mitigation: idle auto-lock — but it only bounds the *idle* window, and only where re-unlock needs a human: with agent-key self-reopen the next request re-opens the vault (as does the agent private key on disk, row 2), so on that setup the lock is a memory-hygiene measure, not a barrier. |
 | Has agent's transcript | Sees credential names, request URLs, response bodies. **No credential values.** |
 | Has the upstream URL the agent typed | Sees the upstream hostname (also visible in DNS / TLS SNI / access logs anyway). |
 | On-path network attacker between proxy and upstream | Bounded by upstream's TLS — the proxy verifies the upstream cert against the system CA bundle. |
