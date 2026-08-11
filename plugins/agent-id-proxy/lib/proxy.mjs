@@ -675,11 +675,33 @@ export function createProxy({
 
   const lookup = (name) => (state.vault ? state.vault.get(name) : null);
 
+  // Every access-log write in flight. Callers fire these and forget, so
+  // close() is the only place that can promise the log is on disk — an
+  // operator reading it after a stop, and every test tearing a state dir down,
+  // relies on that.
+  const pendingLogWrites = new Set();
+
   async function logAccess(entry) {
+    const write = (async () => {
+      try {
+        const owed = entry.event === "auth_failed" ? 0 : takeSuppressedAuthFailures();
+        if (owed > 0) {
+          await appendJsonl(logPath, {
+            ts: new Date().toISOString(),
+            event: "auth_failed_suppressed",
+            suppressed: owed,
+          });
+        }
+        await appendJsonl(logPath, { ts: new Date().toISOString(), ...entry });
+      } catch {
+        // never let logging break a request
+      }
+    })();
+    pendingLogWrites.add(write);
     try {
-      await appendJsonl(logPath, { ts: new Date().toISOString(), ...entry });
-    } catch {
-      // never let logging break a request
+      await write;
+    } finally {
+      pendingLogWrites.delete(write);
     }
   }
 
@@ -690,14 +712,23 @@ export function createProxy({
   // failure after the window carry that count as `suppressed`. Never silent:
   // there is always a record, only its resolution degrades under a flood.
   const authFailLog = { windowStartedAt: -Infinity, suppressed: 0 };
+
+  // The counter must not die with its window: a flood that simply stops leaves
+  // its tail owed a record. Any later log pays the debt, and close() pays
+  // whatever is left, so a suppressed count is never merely forgotten.
+  function takeSuppressedAuthFailures() {
+    const suppressed = authFailLog.suppressed;
+    authFailLog.suppressed = 0;
+    return suppressed;
+  }
+
   function logAuthFailure(entry) {
     if (now() - authFailLog.windowStartedAt < AUTH_FAIL_LOG_WINDOW_MS) {
       authFailLog.suppressed += 1;
       return;
     }
-    const suppressed = authFailLog.suppressed;
+    const suppressed = takeSuppressedAuthFailures();
     authFailLog.windowStartedAt = now();
-    authFailLog.suppressed = 0;
     logAccess({ event: "auth_failed", ...entry, suppressed });
   }
 
@@ -1193,11 +1224,41 @@ export function createProxy({
     clientSocket.destroy();
   }
 
+  // A CONNECT request-target is authority-form — `host:port`, port mandatory
+  // (RFC 9110 §9.3.6). Returns null for anything else, including a port that
+  // isn't a number in range: `net.connect` THROWS on such a port
+  // (ERR_SOCKET_BAD_PORT), and one malformed line must not be able to take the
+  // proxy down.
+  function parseConnectTarget(target) {
+    const m = /^(\[[0-9A-Fa-f:.]+\]|[^:[\]]+):(\d{1,5})$/.exec(target || "");
+    if (!m) return null;
+    const port = Number(m[2]);
+    if (port < 1 || port > 65535) return null;
+    // An IPv6 literal arrives bracketed; the SSRF guard and net.connect both
+    // want it bare.
+    return { host: m[1].replace(/^\[|\]$/g, ""), port };
+  }
+
   // CONNECT tunneling for HTTPS. No MITM in v1.
-  server.on("connect", async (req, clientSocket, head) => {
+  server.on("connect", (req, clientSocket, head) => {
+    // The handler is async, so anything it throws would surface as an
+    // unhandled rejection — process death for a proxy that is supposed to
+    // answer a bad request, not die of it.
+    handleConnect(req, clientSocket, head).catch((err) => {
+      refuseConnect(clientSocket, "500 Internal Server Error", "proxy_internal");
+      logAccess({
+        method: "CONNECT",
+        host: null,
+        path: null,
+        status: 500,
+        credentials: [],
+        error: (err && (err.code || err.message)) || "proxy_internal",
+      });
+    });
+  });
+
+  async function handleConnect(req, clientSocket, head) {
     const start = Date.now();
-    const [host, portStr] = (req.url || "").split(":");
-    const port = parseInt(portStr || "443", 10);
 
     if (!authOk(req)) {
       logAuthFailure({ method: "CONNECT" });
@@ -1206,17 +1267,35 @@ export function createProxy({
     }
     delete req.headers[PROXY_AUTH_HEADER];
 
-    // Same self-heal the request handler gets on an idle lock: on the
-    // auto-unlock path a reopen needs no human. A tunnel has no parked-request
-    // path to fall through to, so a failed reopen is still a refusal.
-    if (state.locked && !(await tryReopenVault("idle_lock"))) {
-      refuseConnect(clientSocket, "401 Vault Locked", "vault_locked");
+    // Before the lock check: a malformed target is refused on its own terms,
+    // never a reason to reopen a vault.
+    const target = parseConnectTarget(req.url);
+    if (!target) {
+      refuseConnect(clientSocket, "400 Bad Request", "bad_request");
+      logAccess({
+        method: "CONNECT",
+        host: null,
+        path: null,
+        status: 400,
+        credentials: [],
+        durationMs: Date.now() - start,
+        error: "bad_request",
+      });
       return;
     }
+    const { host, port } = target;
 
-    if (!host) {
-      refuseConnect(clientSocket, "400 Bad Request", "bad_request");
-      return;
+    // Same self-heal the request handler gets on an idle lock, under the same
+    // gate: on the unattended auto-unlock path (no control plane) a reopen
+    // needs no human. With the control plane on, the unlock is the owner's
+    // decision — and a tunnel has no parked-request path to fall through to,
+    // so there it stays a refusal.
+    if (state.locked) {
+      const reopened = !controlEnabled && (await tryReopenVault("idle_lock"));
+      if (!reopened) {
+        refuseConnect(clientSocket, "401 Vault Locked", "vault_locked");
+        return;
+      }
     }
 
     // SSRF guard, same two layers as forwardUpstream: a literal-IP target is
@@ -1283,7 +1362,7 @@ export function createProxy({
     });
 
     clientSocket.on("error", () => upstream.destroy());
-  });
+  }
 
   function handleStubError(res, err) {
     if (err instanceof StubError) {
@@ -1336,9 +1415,15 @@ export function createProxy({
     async close() {
       if (ticker) clearInterval(ticker);
       if (registry) registry.cancelAll("proxy_shutdown");
+      const owed = takeSuppressedAuthFailures();
+      if (owed > 0) await logAccess({ event: "auth_failed_suppressed", suppressed: owed });
       doLock("proxy_shutdown");
       if (controlServer) await controlServer.close();
       await new Promise((resolve) => server.close(() => resolve()));
+      // The log is written fire-and-forget everywhere else; a closed proxy owes
+      // the caller a settled log (nothing still writing into a state dir that
+      // is about to go).
+      await Promise.allSettled([...pendingLogWrites]);
     },
     get locked() {
       return state.locked;

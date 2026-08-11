@@ -108,6 +108,23 @@ async function makeVault(stateDir) {
   return openVault({ stateDir, passphrase: "p" });
 }
 
+function closeServer(server) {
+  return new Promise((resolve) => (server ? server.close(() => resolve()) : resolve()));
+}
+
+async function readAccessLog(logFile) {
+  let raw = "";
+  try {
+    raw = await fs.readFile(logFile, "utf8");
+  } catch {
+    return [];
+  }
+  return raw
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 describe("CONNECT: data-plane auth", () => {
   let stateDir;
   let upstream;
@@ -128,7 +145,7 @@ describe("CONNECT: data-plane auth", () => {
   after(async () => {
     destroyOpenSockets();
     await proxy?.close();
-    upstream?.server.close();
+    await closeServer(upstream?.server);
     if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
   });
 
@@ -198,11 +215,14 @@ describe("CONNECT: SSRF guard", () => {
     strictPort = (await strictProxy.listen()).port;
   });
 
+  // Ordered so nothing is still writing when the state dir goes: close() is the
+  // quiesce point for the access log (it awaits the fire-and-forget writes), and
+  // the upstream close is awaited rather than assumed done.
   after(async () => {
     destroyOpenSockets();
     await openProxy?.close();
     await strictProxy?.close();
-    upstream?.server.close();
+    await closeServer(upstream?.server);
     if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
   });
 
@@ -274,7 +294,7 @@ describe("CONNECT: self-reopen after an idle lock", () => {
   after(async () => {
     destroyOpenSockets();
     await proxy?.close();
-    upstream?.server.close();
+    await closeServer(upstream?.server);
     if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
   });
 
@@ -287,5 +307,130 @@ describe("CONNECT: self-reopen after an idle lock", () => {
     assert.equal(r.statusLine, "HTTP/1.1 200 Connection Established");
     assert.equal(reopenCalls, 1);
     r.socket.destroy();
+  });
+});
+
+// Self-reopen is a self-heal for the unattended setup, never a way around an
+// owner. With the control plane on, an unlock is the owner's decision — the
+// tunnel must refuse exactly as it did before self-reopen existed, the same
+// gate the request path applies.
+describe("CONNECT: self-reopen never bypasses the control plane", () => {
+  let stateDir;
+  let upstream;
+  let proxy;
+  let proxyPort;
+  let reopenCalls;
+
+  before(async () => {
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-connect-consent-"));
+    upstream = await startTcpUpstream();
+    reopenCalls = 0;
+    proxy = createProxy({
+      vault: await makeVault(stateDir),
+      stateDir,
+      logPath: path.join(stateDir, "proxy.log"),
+      authToken: TOKEN,
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 1000 },
+      reopenVault: async () => {
+        reopenCalls += 1;
+        return openVault({ stateDir, passphrase: "p" });
+      },
+    });
+    proxyPort = (await proxy.listen()).port;
+    proxy.forceLock("test");
+  });
+
+  after(async () => {
+    destroyOpenSockets();
+    await proxy?.close();
+    await closeServer(upstream?.server);
+    if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("refuses an authenticated CONNECT instead of re-unlocking behind the owner", async () => {
+    const before = upstream.state.connections;
+    const r = await rawConnect({
+      port: proxyPort,
+      target: `${upstream.host}:${upstream.port}`,
+      headers: { [PROXY_AUTH_HEADER]: TOKEN },
+    });
+    assert.equal(r.statusLine, "HTTP/1.1 401 Vault Locked");
+    assert.match(r.head, /X-AgentVault-Proxy-Error: vault_locked/i);
+    assert.equal(reopenCalls, 0, "the control plane owns the unlock — no self-reopen");
+    assert.equal(proxy.locked, true);
+    assert.equal(upstream.state.connections, before);
+  });
+});
+
+// A CONNECT target is attacker-shaped input: it arrives before any credential
+// is involved, so a malformed one must be refused, not thrown — an escaping
+// throw takes the whole proxy process down with it.
+describe("CONNECT: a malformed target is refused, not fatal", () => {
+  let stateDir;
+  let upstream;
+  let proxy;
+  let proxyPort;
+
+  before(async () => {
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-connect-malformed-"));
+    upstream = await startTcpUpstream();
+    proxy = createProxy({
+      vault: await makeVault(stateDir),
+      logPath: path.join(stateDir, "proxy.log"),
+    });
+    proxyPort = (await proxy.listen()).port;
+  });
+
+  after(async () => {
+    destroyOpenSockets();
+    await proxy?.close();
+    await closeServer(upstream?.server);
+    if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  for (const target of ["bad-target", "example.com:not-a-port", "example.com:0", ":443", ""]) {
+    it(`refuses ${JSON.stringify(target)} and keeps serving`, async () => {
+      const before = upstream.state.connections;
+      const r = await rawConnect({ port: proxyPort, target });
+      assert.equal(r.statusLine, "HTTP/1.1 400 Bad Request");
+      assert.match(r.head, /X-AgentVault-Proxy-Error: bad_request/i);
+      assert.equal(upstream.state.connections, before);
+
+      // The proxy survived the malformed request and still tunnels.
+      const ok = await rawConnect({
+        port: proxyPort,
+        target: `${upstream.host}:${upstream.port}`,
+      });
+      assert.equal(ok.statusLine, "HTTP/1.1 200 Connection Established");
+      ok.socket.destroy();
+    });
+  }
+});
+
+// The access log is written fire-and-forget from the request path, so "the
+// response arrived" says nothing about the log. close() is the quiesce point
+// every teardown (and every operator reading the log after a stop) relies on.
+describe("close() settles the access log", () => {
+  it("has the refusal on disk by the time close() resolves", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-connect-quiesce-"));
+    const logFile = path.join(stateDir, "proxy.log");
+    const proxy = createProxy({
+      vault: await makeVault(stateDir),
+      logPath: logFile,
+    });
+    const proxyPort = (await proxy.listen()).port;
+    try {
+      const r = await rawConnect({ port: proxyPort, target: "169.254.169.254:80" });
+      assert.equal(r.statusLine, "HTTP/1.1 403 Forbidden");
+      await proxy.close();
+      const blocked = (await readAccessLog(logFile)).filter(
+        (e) => e.error === "upstream_blocked" && e.method === "CONNECT",
+      );
+      assert.equal(blocked.length, 1, "close() must not leave an access-log write in flight");
+    } finally {
+      destroyOpenSockets();
+      await proxy.close();
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
   });
 });

@@ -450,3 +450,80 @@ describe("no authToken configured", () => {
     assert.equal(upstream.requests.at(-1).headers[PROXY_AUTH_HEADER], undefined);
   });
 });
+
+// A suppressed count is a debt: the window it was accumulated in may be the
+// last one there ever is (the flood stops, the proxy is stopped), and the
+// refusals still have to leave a record.
+describe("the last window's suppressed count is never dropped", () => {
+  const BURST = 12;
+
+  async function floodedProxy(dirPrefix) {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), dirPrefix));
+    const upstream = await startUpstream();
+    const logFile = path.join(stateDir, "proxy.log");
+    let clock = Date.now();
+    const proxy = createProxy({
+      vault: await setupVault(stateDir, new URL(upstream.url).hostname),
+      logPath: logFile,
+      authToken: TOKEN,
+      now: () => clock,
+    });
+    const proxyPort = (await proxy.listen()).port;
+    for (let i = 0; i < BURST; i++) {
+      clock += 1000;
+      const r = await proxyRequest({ port: proxyPort, target: `${upstream.url}/${i}` });
+      assert.equal(r.status, 401);
+    }
+    return {
+      logFile,
+      proxy,
+      async teardown() {
+        await proxy.close();
+        upstream.server.close();
+        await fs.rm(stateDir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  async function logLines(logFile) {
+    return (await fs.readFile(logFile, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+  }
+
+  it("flushes the count on close", async () => {
+    const ctx = await floodedProxy("proxy-auth-flush-close-");
+    try {
+      await ctx.proxy.close();
+      const flushed = (await logLines(ctx.logFile)).filter(
+        (e) => e.event === "auth_failed_suppressed",
+      );
+      assert.equal(flushed.length, 1, "the tail of the window must leave exactly one record");
+      assert.equal(flushed[0].suppressed, BURST - 1);
+    } finally {
+      await ctx.teardown();
+    }
+  });
+
+  it("flushes the count on the next log of any kind", async () => {
+    const ctx = await floodedProxy("proxy-auth-flush-next-");
+    try {
+      ctx.proxy.forceLock("manual");
+      await ctx.proxy.close();
+      const lines = await logLines(ctx.logFile);
+      const flushedAt = lines.findIndex((e) => e.event === "auth_failed_suppressed");
+      const lockedAt = lines.findIndex((e) => e.event === "vault_locked");
+      assert.notEqual(flushedAt, -1, "the suppressed count must be recorded");
+      assert.equal(lines[flushedAt].suppressed, BURST - 1);
+      assert.ok(lockedAt !== -1 && flushedAt < lockedAt, "the debt is paid before the next entry");
+      assert.equal(
+        lines.filter((e) => e.event === "auth_failed_suppressed").length,
+        1,
+        "close() must not record the same count twice",
+      );
+    } finally {
+      await ctx.teardown();
+    }
+  });
+});
