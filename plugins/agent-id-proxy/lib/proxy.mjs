@@ -21,6 +21,7 @@ import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import { createECDH, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import fsp from "node:fs/promises";
 import { URL } from "node:url";
 
 import { rewriteHeaders, rewriteUrl, StubError } from "./stub.mjs";
@@ -49,7 +50,7 @@ import {
 import { effectiveAccess, evaluateAccess } from "@alien-id/agent-id-vault/lib/access.mjs";
 import { unsealFromPublicKey } from "@alien-id/agent-id-vault/lib/format.mjs";
 import { fingerprintOfCertPem, generateControlCert } from "./control-tls.mjs";
-import { appendJsonl } from "@alien-id/agent-id-core/lib/state.mjs";
+import { appendJsonl, statePaths } from "@alien-id/agent-id-core/lib/state.mjs";
 
 export { PROXY_AUTH_HEADER };
 
@@ -370,12 +371,52 @@ export function createProxy({
   // reopen failed) refuse to write at all. Losing a rotated token is
   // recoverable — it stays in this process's cache and the owner can re-mint —
   // destroying another writer's credential is not.
+  // `save()` re-encrypts the WHOLE in-memory payload over `vault.enc`, so a
+  // handle that predates another writer's change would erase it. Re-reading
+  // first is the sound fix, but it needs an unlock method we may not have
+  // (passphrase/passkey starts wire no reopen). The fallback is a
+  // compare-and-swap: remember the raw file as we last saw it, and allow a
+  // stale-handle save only while the file is byte-identical — nobody else
+  // wrote, so our snapshot IS current. That keeps a rotated refresh token
+  // persisted for those starts (losing it bricks the credential on the next
+  // restart, since the provider has already retired the one on disk) while
+  // still refusing the one case that can destroy another writer's data.
+  async function readVaultFileText() {
+    if (!stateDir) return null;
+    try {
+      return await fsp.readFile(statePaths(stateDir).vaultFile, "utf8");
+    } catch {
+      return null;
+    }
+  }
+  /// Whether `vault.enc` is still byte-for-byte the envelope THIS handle was
+  /// built from — i.e. nobody else has written since we opened it.
+  ///
+  /// `save()` re-encrypts the whole in-memory payload over the file, so a
+  /// handle that predates another writer's change would erase it. Re-reading
+  /// first is the sound fix, but it needs an unlock method a passphrase/passkey
+  /// start does not have. This is the fallback: allow such a save only while
+  /// the comparison holds. The baseline is the handle's OWN envelope (`raw()`),
+  /// not a snapshot taken later — a snapshot could already include the other
+  /// writer's change and would wave the erasure through. Serialization matches
+  /// the vault's writer exactly (`JSON.stringify(file, null, 2)` + newline);
+  /// any drift there makes this read "changed" and fails closed.
+  async function vaultFileMatchesHandle() {
+    const onDisk = await readVaultFileText();
+    if (onDisk === null || !state.vault) return false;
+    try {
+      return onDisk === JSON.stringify(state.vault.raw(), null, 2) + "\n";
+    } catch {
+      return false;
+    }
+  }
+
   async function persistRotatedRefreshToken(name, refreshToken) {
-    if (!(await tryReopenVault("oauth_rotate"))) {
+    if (!(await tryReopenVault("oauth_rotate")) && !(await vaultFileMatchesHandle())) {
       logAccess({
         event: "oauth_rotate_persist_skipped",
         credential: name,
-        reason: "vault_not_rereadable",
+        reason: "vault_changed_and_not_rereadable",
       }).catch(() => {});
       return false;
     }
@@ -628,12 +669,12 @@ export function createProxy({
       return { ok: false, error: "vault_locked", status: 409 };
     }
     // Pairing writes `vault.enc`, and `save()` re-encrypts this process's whole
-    // in-memory payload — see persistRotatedRefreshToken. Add the slot to a
-    // freshly re-read handle, and when the vault cannot be re-read refuse: a
-    // pairing the owner can retry is cheaper than erasing a credential another
-    // process wrote after this proxy started.
-    if (!(await tryReopenVault("pairing"))) {
-      logAccess({ event: "mobile_register_refused", reason: "vault_not_rereadable" }).catch(
+    // in-memory payload — see persistRotatedRefreshToken. Prefer a freshly
+    // re-read handle; failing that, the compare-and-swap lets the write through
+    // only while nobody else has touched the file, so a pairing still works on
+    // a passphrase/passkey start without risking another writer's data.
+    if (!(await tryReopenVault("pairing")) && !(await vaultFileMatchesHandle())) {
+      logAccess({ event: "mobile_register_refused", reason: "vault_changed_and_not_rereadable" }).catch(
         () => {},
       );
       return { ok: false, error: "vault_reread_unavailable", status: 409 };
