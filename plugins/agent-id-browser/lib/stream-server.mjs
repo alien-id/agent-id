@@ -57,13 +57,16 @@
 // delivered size — while Page.captureScreenshot DOES render at device pixels
 // (clip.scale=1 under a scale-2 override delivers exactly viewport×2). So a
 // scaled session applies Emulation.setDeviceMetricsOverride on the SAME
-// long-lived CDP session that runs the screencast (overrides revert when
-// their session detaches, so the override lives exactly as long as the cast:
-// retargeting to another tab moves it, closing reverts it), keeps the
-// screencast running purely as a damage detector, and delivers coalesced
-// captureScreenshot frames instead of the 1× cast payloads. Refinement uses
-// the same capture call, so motion and refinement frames are identical in
-// pixel dimensions — the invariant the encoders depend on.
+// long-lived CDP session that runs the screencast — the override lives
+// exactly as long as the cast (retargeting to another tab moves it there),
+// and stopping the cast clears it EXPLICITLY before detaching (detach alone
+// leaves a dormant registration that re-pins the viewport on later
+// navigations — measured). The screencast keeps running purely as a damage
+// detector, and delivery is coalesced captureScreenshot frames instead of
+// the 1× cast payloads, with metadata normalized to the session's CSS
+// geometry. Refinement uses the same capture call, so motion and refinement
+// frames are identical in pixel dimensions — the invariant the encoders
+// depend on.
 //
 // SEAL PRESERVED: this never opens a CDP debug port — frames come from a
 // patchright CDPSession over the existing pipe, input goes through
@@ -324,8 +327,7 @@ const SCALE_MAX = 3;
 const SCALE_MAX_PIXELS = 3840 * 2160;
 
 // The largest integer scale (1..requested) whose scaled capture fits the
-// axis and pixel budgets. Scale 1 always fits: width/height are already
-// clamped to RESIZE_MAX. Exported for tests.
+// axis budget and comes closest to the pixel budget. Exported for tests.
 export function effectiveScale(width, height, requested) {
   let scale = Math.min(Math.max(Math.round(requested), SCALE_MIN), SCALE_MAX);
   while (
@@ -337,6 +339,29 @@ export function effectiveScale(width, height, requested) {
     scale--;
   }
   return scale;
+}
+
+// The applied-geometry policy for a resize request, in order:
+//   1. each axis clamps to RESIZE_MIN..RESIZE_MAX (as always);
+//   2. the scale drops until the SCALED capture fits the axis and pixel
+//      budgets — layout beats density, so density gives way first;
+//   3. if the base viewport ALONE still exceeds the pixel budget (possible:
+//      RESIZE_MAX² is ~2× the budget), it shrinks proportionally to fit —
+//      scale reduction cannot fix what the base already breaks.
+// Everything returned is what will actually be applied and broadcast — the
+// `resized` status mirrors the ACHIEVED geometry, not the request.
+// Exported for tests.
+export function budgetedResize(width, height, requested) {
+  const clamp = (n) => Math.min(Math.max(n, RESIZE_MIN), RESIZE_MAX);
+  let w = clamp(width);
+  let h = clamp(height);
+  const scale = effectiveScale(w, h, requested);
+  if (w * h * scale * scale > SCALE_MAX_PIXELS) {
+    const f = Math.sqrt(SCALE_MAX_PIXELS / (w * h * scale * scale));
+    w = Math.max(RESIZE_MIN, Math.floor(w * f));
+    h = Math.max(RESIZE_MIN, Math.floor(h * f));
+  }
+  return { width: w, height: h, scale };
 }
 
 export async function startStreamServer(
@@ -358,8 +383,13 @@ export async function startStreamServer(
   // pipeline. At scale > 1 the screencast is demoted to a damage detector
   // and both frame sources are captureScreenshot calls — identical pixel
   // dimensions by construction (the encoders choke on dimension flips).
+  // streamView is the last MEASURED viewport (what the page actually became,
+  // vs streamDims = what was asked): the cast caps follow it so cast frames
+  // are never silently downscaled out of agreement with the refinement pass.
   let streamScale = 1;
   let streamDims = null;
+  let streamView = null;
+  let castCaps = null;
   // Input events apply strictly in arrival order. page.mouse/keyboard calls are
   // async; firing them unawaited lets a press overtake the move before it (or a
   // release overtake the press), which drops clicks sent in a burst.
@@ -684,6 +714,20 @@ export async function startStreamServer(
   // which serves any viewer that joined meanwhile.
   let reshaping = false;
 
+  // Frame metadata is the client's coordinate space and must be CSS px in
+  // every frame. Chrome's cast metadata is CSS in steady state, but frames
+  // emitted while an override is being applied or lifted can carry the
+  // transitional surface size (measured: 780×1688 interleaved with 390×844
+  // on the same scaled session) — so scaled delivery normalizes every
+  // frame's metadata to the session's own CSS geometry, which the override
+  // pins authoritatively.
+  function scaledMetadata() {
+    return {
+      ...(lastMetadata ?? {}),
+      ...(streamDims ? { deviceWidth: streamDims.width, deviceHeight: streamDims.height } : {}),
+    };
+  }
+
   async function pumpScaledCapture(session) {
     if (scaledBusy) return;
     scaledBusy = true;
@@ -692,7 +736,7 @@ export async function startStreamServer(
         scaledDirty = false;
         const shot = await captureShot(session, STREAM_QUALITY);
         if (closed || suspended > 0 || session !== cdp) return;
-        deliverFrame({ data: shot.data, metadata: lastMetadata });
+        deliverFrame({ data: shot.data, metadata: scaledMetadata() });
         if (encoderSinks.size > 0) {
           const jpeg = Buffer.from(shot.data, "base64");
           for (const sink of encoderSinks) sink.write(jpeg);
@@ -702,6 +746,11 @@ export async function startStreamServer(
       /* navigating/detached — the next damage tick retries */
     } finally {
       scaledBusy = false;
+      // A capture that straddled a cast switch exits with the dirty flag
+      // still set (its session lost the cast mid-flight) — re-dispatch for
+      // the live session, or the new tab's first damage tick would sit
+      // stranded behind the stale busy flag until the next tick.
+      if (scaledDirty && !closed && cdp && cdp !== session) void pumpScaledCapture(cdp);
     }
   }
 
@@ -730,25 +779,64 @@ export async function startStreamServer(
     return got;
   }
 
-  async function stopScreencast() {
+  // Cast start/stop are SERIALIZED behind one promise chain: concurrent
+  // joins used to race startScreencast's idempotence guard — a real-Chrome
+  // probe with delayed attaches left THREE live CDP sessions, each keeping
+  // its override and captures alive. An epoch stamps every state change; a
+  // session whose attach outlives its epoch (close, retarget, another
+  // start) is detached and never installed.
+  let castChain = Promise.resolve();
+  let castEpoch = 0;
+  let castOverride = false; // the CURRENT cast session applied a device-metrics override
+
+  function stopScreencast() {
+    castChain = castChain.then(stopScreencastNow).catch(() => {});
+    return castChain;
+  }
+
+  function startScreencast() {
+    castChain = castChain.then(startScreencastNow).catch(() => {});
+    return castChain;
+  }
+
+  async function stopScreencastNow() {
+    castEpoch++;
     const session = cdp;
+    const hadOverride = castOverride;
     cdp = null;
     cdpPage = null;
+    castOverride = false;
     if (!session) return;
+    // An applied override must be cleared EXPLICITLY before its session goes
+    // away: detach alone reverts the live values but leaves a dormant
+    // registration that re-pins the viewport to the stale size on every
+    // later NAVIGATION (measured: a 2040×2040 window snapped back to the old
+    // 390×844 on goto until a clear was sent). Sent only when this session
+    // applied one, so never-scaled sessions still see zero Emulation traffic.
+    if (hadOverride) {
+      try { await session.send("Emulation.clearDeviceMetricsOverride"); } catch { /* page gone */ }
+    }
     try { await session.send("Page.stopScreencast"); } catch { /* page gone */ }
     try { await session.detach(); } catch { /* already detached */ }
   }
 
-  async function startScreencast() {
+  async function startScreencastNow() {
     if (closed || clients.size === 0) return;
     const page = state.current;
     if (!page || page.isClosed?.() || (cdp && cdpPage === page)) return;
-    await stopScreencast();
+    await stopScreencastNow();
+    const epoch = ++castEpoch;
     let session;
     try {
       session = await state.ctx.newCDPSession(page);
     } catch (err) {
       log(`stream: cdp attach failed: ${err.message || err}`);
+      return;
+    }
+    // The world may have moved during the attach (close, retarget to another
+    // tab, a newer start/stop): discard the session — detach, never install.
+    if (closed || epoch !== castEpoch || state.current !== page) {
+      try { await session.detach(); } catch { /* already gone */ }
       return;
     }
     cdp = session;
@@ -789,6 +877,7 @@ export async function startStreamServer(
           deviceScaleFactor: streamScale,
           mobile: false,
         });
+        castOverride = true;
       } catch (err) {
         log(`stream: device-scale override failed, continuing at 1x: ${err.message || err}`);
         streamScale = 1;
@@ -800,17 +889,27 @@ export async function startStreamServer(
     // damage ticks, never delivered, so CSS size keeps them cheap — the
     // delivered device-pixel frames come from captureScreenshot instead
     // (the cast cannot deliver above 1× whatever the override says — measured).
+    // With no explicit context viewport the caps follow the MEASURED viewport
+    // (floored at the legacy defaults): fixed fallback caps silently
+    // downscaled big viewports' cast frames out of agreement with the
+    // refinement pass (measured: 1253×1200 cast vs 2040×1953 refinement).
     const vp = page.viewportSize?.() ?? null;
+    castCaps = vp
+      ? { width: Math.round(vp.width), height: Math.round(vp.height) }
+      : {
+          width: Math.max(Math.round(streamView?.width ?? 0), 1600),
+          height: Math.max(Math.round(streamView?.height ?? 0), 1200),
+        };
     try {
       await session.send("Page.startScreencast", {
         format: "jpeg",
         quality: STREAM_QUALITY,
-        maxWidth: Math.round(vp?.width ?? 1600),
-        maxHeight: Math.round(vp?.height ?? 1200),
+        maxWidth: castCaps.width,
+        maxHeight: castCaps.height,
       });
     } catch (err) {
       log(`stream: screencast start failed: ${err.message || err}`);
-      await stopScreencast();
+      await stopScreencastNow();
       return;
     }
     // New capture epoch (join/tab-switch/resume): restart the shared encoder
@@ -841,7 +940,11 @@ export async function startStreamServer(
       // motion frames in every mode — the encoders choke on dimension flips.
       const shot = await captureShot(session, REFINE_QUALITY);
       if (closed || suspended > 0 || session !== cdp) return;
-      deliverFrame({ data: shot.data, metadata: lastMetadata, refinement: true });
+      deliverFrame({
+        data: shot.data,
+        metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
+        refinement: true,
+      });
       // The encoder gets refinements too — on a damage-driven screencast this
       // is what keeps an h264 viewer's picture alive across idle stretches.
       // Written TWICE: raw MJPEG only delimits frame N when frame N+1's SOI
@@ -1009,15 +1112,17 @@ export async function startStreamServer(
         const width = Math.round(Number(msg.width));
         const height = Math.round(Number(msg.height));
         if (!resize || ![width, height].every(Number.isFinite)) return;
-        const clamp = (n) => Math.min(Math.max(n, RESIZE_MIN), RESIZE_MAX);
-        const w = clamp(width);
-        const h = clamp(height);
         // Optional HiDPI knob: a retina-density viewer asks for the capture
-        // at scale× device pixels — integer, budget-reduced (effectiveScale).
-        // Absent/garbage → 1, so clients that only ever send width/height
-        // keep their exact pre-`scale` behavior.
-        const requested = Number(msg.scale);
-        const scale = Number.isFinite(requested) ? effectiveScale(w, h, requested) : SCALE_MIN;
+        // at scale× device pixels. Absent/garbage → 1, so clients that only
+        // ever send width/height keep their exact pre-`scale` behavior. The
+        // request then passes the geometry policy (axis clamps, integer
+        // scale, axis + pixel budgets — see budgetedResize).
+        const requestedScale = Number(msg.scale);
+        const { width: w, height: h, scale } = budgetedResize(
+          width,
+          height,
+          Number.isFinite(requestedScale) ? requestedScale : SCALE_MIN,
+        );
         inputChain = inputChain
           .then(async () => {
             if (suspended > 0) return;
@@ -1039,13 +1144,17 @@ export async function startStreamServer(
                 viewport = await resize(w, h);
                 streamScale = scale;
                 streamDims = { width: w, height: h };
+                streamView = viewport ?? streamDims;
                 await stopScreencast(); // belt: kill anything that slipped in
                 await startScreencast();
                 // The override pins the viewport AFTER the measurement inside
                 // resize() — remeasure so the broadcast reports what the page
                 // actually became. (startScreencast may have downgraded
                 // streamScale to 1 if Chrome refused the override.)
-                if (streamScale > 1) viewport = (await measureViewport(streamDims)) ?? viewport;
+                if (streamScale > 1) {
+                  viewport = (await measureViewport(streamDims)) ?? viewport;
+                  streamView = viewport ?? streamDims;
+                }
               } finally {
                 reshaping = false;
               }
@@ -1053,6 +1162,15 @@ export async function startStreamServer(
               viewport = await resize(w, h);
               streamScale = scale;
               streamDims = { width: w, height: h };
+              streamView = viewport ?? streamDims;
+              // Frames larger than the running cast's caps would be silently
+              // downscaled out of agreement with the refinement pass — grow
+              // into fresh caps. Resizes within the caps keep the classic
+              // no-restart behavior.
+              if (cdp && castCaps && (streamView.width > castCaps.width || streamView.height > castCaps.height)) {
+                await stopScreencast();
+                await startScreencast();
+              }
             }
             broadcastStatus({
               type: "status",

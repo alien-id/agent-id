@@ -278,7 +278,11 @@ phone-viewport capture costs ~20 ms, so scaled motion tops out around
 like classic delivery). Motion and the idle refinement use the same capture
 call, so their pixel dimensions are identical in every mode. Frame payloads
 become `viewport × scale` pixels; `metadata.deviceWidth/Height` and input
-coordinates stay CSS (see *Messages*).
+coordinates stay CSS (see *Messages*) — every scaled frame's metadata is
+normalized to the session's CSS geometry, because Chrome briefly reports the
+transitional surface size while an override settles. Dropping the scale
+clears the override explicitly (a merely-detached override re-pins the
+viewport to its stale size on every later navigation).
 
 Rules:
 
@@ -291,8 +295,11 @@ Rules:
   always did.
 - Budgets after multiplication: no axis of `viewport × scale` may exceed
   4096 device pixels, and the total may not exceed one 4K frame's worth of
-  pixels (3840×2160). A request over budget is served at the largest scale
-  that fits (down to 1), never refused.
+  pixels (3840×2160). A request over budget is served, never refused: the
+  scale drops first (layout beats density), and if the base viewport ALONE
+  exceeds the pixel budget (possible — 4096×4096 is ~2× the budget) it is
+  shrunk proportionally to fit. `resized` always mirrors the ACHIEVED
+  geometry and scale, not the request.
 - Requests are serialized behind pending viewer input, so a resize lands in
   arrival order relative to queued clicks and keys.
 - The achieved viewport is broadcast to **every** watcher as the `status`

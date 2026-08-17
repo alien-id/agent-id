@@ -222,12 +222,28 @@ test(
       assert.deepEqual(status.viewport, { width: 390, height: 844 });
       assert.equal(await pageA.evaluate(() => devicePixelRatio), 2, "the override is live on the page");
 
+      // Overlapping joins while scaled: two more viewers connect
+      // concurrently. Start/stop are serialized, so exactly one cast session
+      // may exist — a leaked session would keep its override alive, which
+      // the end-of-test 1× DPR assertions would expose.
+      const [extraA, extraB] = await Promise.all([
+        connectStream(stream.port, stream.token),
+        connectStream(stream.port, stream.token),
+      ]);
+
       const scaled = { width: 780, height: 1688 };
+      const cssOf = (frames, want) => {
+        // EVERY scaled frame's metadata must be CSS geometry — a single
+        // device-pixel metadata frame doubles the viewer's tap coordinates.
+        for (const f of frames) {
+          if (!f.dims || f.dims.width !== want.width) continue;
+          assert.equal(f.metadata.deviceWidth, 390, "metadata stays CSS px on every frame");
+          assert.equal(f.metadata.deviceHeight, 844, "metadata stays CSS px on every frame");
+        }
+      };
       const motion = await collectFrames(client, { want: 4, dims: scaled });
       assertStableAfterSwitch(motion, scaled, "scale-2 motion");
-      const anyScaled = motion.find((f) => f.dims && f.dims.width === scaled.width);
-      assert.equal(anyScaled.metadata.deviceWidth, 390, "metadata stays CSS px");
-      assert.equal(anyScaled.metadata.deviceHeight, 844, "metadata stays CSS px");
+      cssOf(motion, scaled);
 
       // Quiet page → the refinement path must produce the SAME dimensions.
       await pageA.goto(STATIC);
@@ -244,6 +260,7 @@ test(
       const refinement = refined.find((f) => f.refinement);
       assert.ok(refinement, "a refinement frame arrived on the quiet page");
       assert.deepEqual(refinement.dims, scaled, "refinement pixels match motion pixels exactly");
+      cssOf(refined, scaled);
 
       // ── tab switch: the override follows the cast to the new tab ─────────
       const pageB = await ctx.newPage();
@@ -261,6 +278,9 @@ test(
       assert.equal(await pageA.evaluate(() => devicePixelRatio), 1, "the old tab reverts (override died with its session)");
       const afterSwitch = await collectFrames(client, { want: 3, dims: scaled });
       assertStableAfterSwitch(afterSwitch, scaled, "post-retarget");
+      cssOf(afterSwitch, scaled);
+      extraA.close();
+      extraB.close();
 
       // ── back to 1×: override gone, delivered pixels match the viewport ───
       client.send({ type: "resize", width: 390, height: 844 });
@@ -275,6 +295,42 @@ test(
       assert.notDeepEqual(flat, scaled, "the 1× viewport is not the scaled pixel size");
       const flatFrames = await collectFrames(client, { want: 2, dims: flat });
       assertStableAfterSwitch(flatFrames, flat, "back-to-1x");
+
+      // ── over-budget request: scale falls back, dimensions still agree ────
+      // 2040×2040 at scale 2 would be 16.6M pixels — over the 4K budget, so
+      // the achieved scale is 1. The invariant must hold here too: every
+      // delivered frame (motion and refinement) identical, equal to the
+      // broadcast viewport, with CSS metadata — the legacy fixed cast caps
+      // used to downscale exactly this case out of agreement with the
+      // refinement pass (measured: 1253×1200 vs 2040×1953).
+      client.send({ type: "resize", width: 2040, height: 2040, scale: 2 });
+      for (;;) {
+        status = await client.nextStatus(15000);
+        if (status.resized) break;
+      }
+      assert.deepEqual(status.resized, { width: 2040, height: 2040, scale: 1 });
+      assert.equal(await pageB.evaluate(() => devicePixelRatio), 1, "an effective 1× applies no override");
+      assert.ok(status.viewport, "the over-budget resize reports its viewport");
+      const big = { width: status.viewport.width, height: status.viewport.height };
+      const bigMotion = await collectFrames(client, { want: 3, dims: big, timeoutMs: 20000 });
+      assertStableAfterSwitch(bigMotion, big, "over-budget motion");
+      await pageB.goto(STATIC);
+      const bigFrames = await (async () => {
+        const frames = [];
+        const deadline = Date.now() + 12000;
+        while (!frames.some((f) => f.refinement) && Date.now() < deadline) {
+          frames.push(...(await collectFrames(client, { want: 1, dims: big, timeoutMs: 3000 })));
+        }
+        return frames;
+      })();
+      const bigRefinement = bigFrames.find((f) => f.refinement);
+      assert.ok(bigRefinement, "a refinement frame arrived on the quiet over-budget page");
+      assert.deepEqual(bigRefinement.dims, big, "over-budget refinement matches motion exactly");
+      for (const f of [...bigMotion, ...bigFrames]) {
+        if (!f.dims || f.dims.width !== big.width) continue;
+        assert.equal(f.metadata.deviceWidth, big.width, "metadata stays CSS px at 1×");
+        assert.equal(f.metadata.deviceHeight, big.height, "metadata stays CSS px at 1×");
+      }
     } finally {
       client?.close();
       stream?.close();
