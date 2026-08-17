@@ -28,7 +28,7 @@
 //                     {"type":"ack","seq":N}
 //                     {"type":"config","maxFps":N,"pacing":"ack"|"push"}
 //                     {"type":"status_request"}
-//                     {"type":"resize","width":W,"height":H}
+//                     {"type":"resize","width":W,"height":H[,"scale":S]}
 //                     {"type":"webrtc_offer"|"webrtc_ice", ...}  (experimental)
 //
 // Delivery is latest-frame-wins: each JPEG client has ONE pending slot that
@@ -44,8 +44,12 @@
 // `resize` is our one extension beyond agent-browser's shapes (harmless there —
 // unknown types are ignored). width/height are the VIEWER's dimensions — the
 // desired page viewport — so a phone-sized viewer gets the page's mobile
-// layout, not a shrunken desktop one. The resulting viewport is broadcast to
-// every watcher as {"type":"status","resized":{...},"viewport":{...}}.
+// layout, not a shrunken desktop one. An optional `scale` (1–3, default 1)
+// asks for the capture at scale× device pixels so a retina-density viewer
+// gets text crisp at native density; the page keeps its CSS geometry and
+// desktop UA — the only page-visible change is devicePixelRatio. The
+// resulting viewport is broadcast to every watcher as
+// {"type":"status","resized":{...},"viewport":{...}}.
 //
 // SEAL PRESERVED: this never opens a CDP debug port — frames come from a
 // patchright CDPSession over the existing pipe, input goes through
@@ -291,6 +295,12 @@ function mutatesPage(msg) {
 // page is unusable, above 4096 a typo'd request could balloon the framebuffer.
 const RESIZE_MIN = 200;
 const RESIZE_MAX = 4096;
+// The optional capture scale is clamped too: 1 is the classic CSS-pixel
+// capture, 3 covers the densest phone screens — beyond that the quadratic
+// pixel cost buys nothing a display can show. Anything unparseable means 1,
+// so the pre-`scale` message shape keeps its exact behavior.
+const SCALE_MIN = 1;
+const SCALE_MAX = 3;
 
 export async function startStreamServer(
   state,
@@ -306,6 +316,10 @@ export async function startStreamServer(
   let lastFrameAt = 0;
   let lastMetadata = null;
   let refined = true; // no refinement until at least one screencast frame
+  // The session's current capture scale (viewer-set via `resize`). Screencast
+  // caps and the refinement clip both follow it, so every frame source agrees
+  // on pixel dimensions — the encoders choke on dimension flips.
+  let streamScale = 1;
   // Input events apply strictly in arrival order. page.mouse/keyboard calls are
   // async; firing them unawaited lets a press overtake the move before it (or a
   // release overtake the press), which drops clicks sent in a burst.
@@ -632,15 +646,19 @@ export async function startStreamServer(
         for (const sink of encoderSinks) sink.write(jpeg);
       }
     });
-    // Capture is clamped to the CSS viewport so HiDPI doesn't ship 2× pixels
-    // that the viewer scales straight back down (input mapping is 1:1 too).
+    // Capture is capped at the CSS viewport × the session's scale. At the
+    // default 1× that stops HiDPI hosts shipping 2× pixels the viewer scales
+    // straight back down; a viewer that asked for a scaled stream (`resize`
+    // with scale > 1) raises the cap so device-pixel frames come through.
+    // Input mapping stays in CSS space either way — frame metadata reports
+    // CSS (DIP) dimensions whatever the payload's pixel size.
     const vp = page.viewportSize?.() ?? null;
     try {
       await session.send("Page.startScreencast", {
         format: "jpeg",
         quality: STREAM_QUALITY,
-        maxWidth: vp?.width ?? 1600,
-        maxHeight: vp?.height ?? 1200,
+        maxWidth: (vp?.width ?? 1600) * streamScale,
+        maxHeight: (vp?.height ?? 1200) * streamScale,
       });
     } catch (err) {
       log(`stream: screencast start failed: ${err.message || err}`);
@@ -670,13 +688,14 @@ export async function startStreamServer(
     if (Date.now() - lastFrameAt < REFINE_AFTER_MS) return;
     refined = true;
     try {
-      // clip.scale=1 pins the output to CSS-viewport pixels so it matches the
-      // screencast frame size exactly — the encoders choke on dimension flips.
+      // clip.scale mirrors the session's capture scale so the output matches
+      // the screencast frame size exactly — the encoders choke on dimension
+      // flips. (Scale 1, the default, means CSS-viewport pixels.)
       const vp = state.current?.viewportSize?.() ?? null;
       const shot = await session.send("Page.captureScreenshot", {
         format: "jpeg",
         quality: REFINE_QUALITY,
-        ...(vp ? { clip: { x: 0, y: 0, width: vp.width, height: vp.height, scale: 1 } } : {}),
+        ...(vp ? { clip: { x: 0, y: 0, width: vp.width, height: vp.height, scale: streamScale } } : {}),
       });
       if (closed || suspended > 0 || session !== cdp) return;
       deliverFrame({ data: shot.data, metadata: lastMetadata, refinement: true });
@@ -848,16 +867,29 @@ export async function startStreamServer(
         const height = Math.round(Number(msg.height));
         if (!resize || ![width, height].every(Number.isFinite)) return;
         const clamp = (n) => Math.min(Math.max(n, RESIZE_MIN), RESIZE_MAX);
+        // Optional HiDPI knob: a retina-density viewer asks for the capture
+        // at scale× device pixels. Absent/garbage → 1, so clients that only
+        // ever send width/height keep their exact pre-`scale` behavior.
+        const scale = Number.isFinite(Number(msg.scale))
+          ? Math.min(Math.max(Number(msg.scale), SCALE_MIN), SCALE_MAX)
+          : SCALE_MIN;
         inputChain = inputChain
           .then(async () => {
             if (suspended > 0) return;
-            const viewport = await resize(clamp(width), clamp(height));
+            const viewport = await resize(clamp(width), clamp(height), scale);
+            const scaleChanged = streamScale !== scale;
+            streamScale = scale;
             broadcastStatus({
               type: "status",
               source: "alien",
-              resized: { width: clamp(width), height: clamp(height) },
+              resized: { width: clamp(width), height: clamp(height), scale },
               ...(viewport ? { viewport } : {}),
             });
+            // The screencast's pixel caps follow the scale, so a scale change
+            // must restart the cast — and with it the shared encoder, so h264
+            // viewers get fresh SPS/PPS + an IDR at the new dimensions
+            // instead of a decoder stall.
+            if (scaleChanged) await stopScreencast().then(() => startScreencast());
           })
           .catch(() => {});
         return;

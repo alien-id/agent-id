@@ -84,13 +84,18 @@ Client → server (always JSON text):
 // text-only char is valid. `keyDown`/`keyUp` require `key`. Input the server
 // cannot act on comes back to the SENDER as
 // {"type":"status","error":"…","for":"input_keyboard"} rather than vanishing.
-{ "type": "resize", "width": 390, "height": 844 }  // viewport, see below
+{ "type": "resize", "width": 390, "height": 844,
+  "scale": 2 }                                     // viewport + optional HiDPI
+                                                   // capture scale, see below
 { "type": "webrtc_offer", "sdp": "…" }             // experimental, see below
 { "type": "webrtc_ice", "candidate": { … } }
 ```
 
 Input coordinates are in `metadata.deviceWidth/Height` space (CSS viewport
-pixels — capture is clamped to the CSS viewport, so the mapping is 1:1).
+pixels). At the default 1× the capture is clamped to the CSS viewport, so the
+mapping is 1:1; after a `resize` with `scale` > 1 the payload carries
+`viewport × scale` pixels while coordinates and `metadata` stay CSS — map taps
+through `metadata`, never through the payload's pixel size.
 Mutating input (click, wheel, keydown, char) invalidates the agent's element
 refs, exactly like any page mutation.
 
@@ -195,8 +200,8 @@ across feeds).
 - A freshly spawned encoder arms an immediate refinement, so an h264 viewer
   joining a quiet page gets a picture within ~250 ms instead of black until
   the next repaint.
-- Dimension changes (tab switch, viewport resize) restart the encoder; a
-  crashed encoder restarts rate-limited (500 ms).
+- Dimension changes (tab switch, viewport resize, capture-scale change)
+  restart the encoder; a crashed encoder restarts rate-limited (500 ms).
 
 ## WebRTC (experimental)
 
@@ -252,15 +257,33 @@ chrome ate, grow the window by that delta. The result lands on the exact
 requested viewport (verified against headless Chrome: requesting 390×844
 yields a 390×844 viewport).
 
+An optional `scale` asks for the capture at `scale`× device pixels — a
+retina-density viewer sends its own `devicePixelRatio` and gets text crisp at
+native density instead of a 1× upscale. It is implemented as a per-page
+device-metrics override applied together with the window resize: the page
+keeps its CSS geometry and desktop UA, and the override sets `mobile: false`
+on purpose (no touch capability, no mobile emulation) — the only page-visible
+change is `devicePixelRatio`, the common desktop-retina configuration. Frame
+payloads become `viewport × scale` pixels; `metadata.deviceWidth/Height` and
+input coordinates stay CSS (see *Messages*). A later resize without `scale`
+(or with `scale: 1`) clears the override.
+
 Rules:
 
 - Dimensions clamp to **200–4096** per axis. Non-numeric dimensions are
   ignored entirely (not resized-to-minimum).
+- `scale` clamps to **1–3**; a missing or non-numeric `scale` means 1, so the
+  two-field message behaves exactly as it always did.
 - Requests are serialized behind pending viewer input, so a resize lands in
   arrival order relative to queued clicks and keys.
 - The achieved viewport is broadcast to **every** watcher as the `status`
-  message above — the request mirror in `resized`, the authoritative result
-  in `viewport`. Do coordinate math against `viewport`.
+  message above — the request mirror in `resized` (which also carries the
+  achieved `scale`, informational only), the authoritative result in
+  `viewport`. Do coordinate math against `viewport`; frame payload dimensions
+  follow the frames themselves.
+- A scale change restarts the screencast and the shared encoder (fresh
+  SPS/PPS + IDR at the new pixel dimensions) — expect one keyframe's worth of
+  latency, as on a tab switch.
 - A resize does not invalidate element refs (the DOM is untouched; refs are
   sparse and stable) — but screenshot coordinates taken before the resize are
   stale, as after any reflow.

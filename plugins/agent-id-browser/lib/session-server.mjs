@@ -978,19 +978,60 @@ export function chromeCompensatedBounds(want, got) {
   return { width, height };
 }
 
+// One short-lived page CDP session around `fn` — the same session mechanics
+// resizeWindow uses, shared by the device-metrics override below.
+async function withPageCdp(state, page, fn) {
+  const cdp = await state.ctx.newCDPSession(page);
+  try {
+    return await fn(cdp);
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
 // Viewer-driven resize (stream protocol `resize` message): width/height are
 // the viewer's SCREEN — i.e. the desired page VIEWPORT, not the outer window
 // size the `resize` action takes. A phone watching the stream sends its own
 // dimensions and the page reflows into its mobile layout instead of staying a
 // shrunken desktop. One compensation pass converts viewport → outer: resize to
 // the requested size, measure the chrome the window ate, grow by that delta.
-async function resizeToViewport(state, width, height) {
+//
+// `scale` > 1 (a viewer that wants a HiDPI stream) additionally applies a
+// per-page device-metrics override so capture happens at scale× device
+// pixels. Same CSS geometry, same desktop UA, and `mobile: false` on purpose —
+// no touch capability, no mobile emulation; the only page-visible change is
+// `devicePixelRatio` (the common desktop-retina configuration). A later 1×
+// request clears the override again; a session no viewer ever scaled never
+// sees an Emulation call. Exported for tests.
+export async function resizeToViewport(state, width, height, scale = 1) {
   const page = state.current;
   if (!page || page.isClosed?.()) return null;
+  const wantScale = Number.isFinite(scale) && scale > 1 ? scale : 1;
+  // A live override pins window.innerWidth/Height to its own CSS size, which
+  // would blind the chrome measurement below (the inner size stops tracking
+  // the window). Lift it first — the window already matches the old viewport,
+  // so the page barely moves.
+  if ((state.deviceScaleOverride ?? 1) > 1) {
+    await withPageCdp(state, page, (cdp) => cdp.send("Emulation.clearDeviceMetricsOverride"));
+    state.deviceScaleOverride = 1;
+  }
   const first = await resizeWindow(state, page, width, height);
   const second = chromeCompensatedBounds({ width, height }, first);
-  if (!second) return first;
-  return (await resizeWindow(state, page, second.width, second.height)) ?? first;
+  const achieved = second
+    ? (await resizeWindow(state, page, second.width, second.height)) ?? first
+    : first;
+  if (wantScale > 1) {
+    await withPageCdp(state, page, (cdp) =>
+      cdp.send("Emulation.setDeviceMetricsOverride", {
+        width,
+        height,
+        deviceScaleFactor: wantScale,
+        mobile: false,
+      }),
+    );
+    state.deviceScaleOverride = wantScale;
+  }
+  return achieved;
 }
 
 // Exported for tests: the suspend/resume contract around credential fills is
@@ -1732,7 +1773,7 @@ export async function runSession({
     // h264 becomes the default for codec=auto viewers ONLY on a host the
     // owner provisioned via `agent-id-browser install-codecs`.
     h264Config: await loadCodecConfig(stateDir),
-    resize: (width, height) => resizeToViewport(state, width, height),
+    resize: (width, height, scale) => resizeToViewport(state, width, height, scale),
     onActivity: touch,
   });
   state.stream = stream;
