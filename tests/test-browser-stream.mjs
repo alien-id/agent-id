@@ -678,14 +678,11 @@ test("a strict h264 request on an unprovisioned host closes 4002", async () => {
   }
 });
 
-test("a joining h264 viewer always restarts the screencast and encoder", async () => {
-  // Provisioned host, but the recorded binary does not exist: every encoder
-  // spawn attempt fails fast and leaves an observable trace, no ffmpeg needed.
-  const logs = [];
-  const { state, server } = await startServer({
-    log: (m) => logs.push(m),
-    h264Config: { ffmpegPath: "/nonexistent/ffmpeg", encoder: "libx264" },
-  });
+test("a joining viewer always restarts the screencast", async () => {
+  // Frames are change-driven, so a viewer joining a running cast would wait
+  // for the page to move before seeing anything. The join must force a fresh
+  // capture epoch: stop + start the screencast so Chrome emits a first frame.
+  const { state, server } = await startServer();
   const a = await connectStream(server.port, server.token, "&binary=1");
   await a.nextJson();
   await sleep(20);
@@ -694,16 +691,9 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
   const sessionA = state.session;
   assert.ok(sessionA.sent.some((s) => s.method === "Page.startScreencast"));
   assert.ok(!sessionA.sent.some((s) => s.method === "Page.stopScreencast"));
-  const spawnsBefore = logs.filter((m) => m.includes("h264 unavailable")).length;
 
-  // A second viewer joins asking for h264. Frames are change-driven, so the
-  // join must force a fresh capture epoch: stop + start the screencast and
-  // restart the encoder — or the joiner stares at a blank canvas.
-  const b = await connectStream(server.port, server.token, "&codec=h264");
-  const st1 = await b.nextJson();
-  assert.equal(st1.codec, "h264");
-  const st2 = await b.nextJson(3000); // the failed spawn's fallback notice
-  assert.equal(st2.codec, "jpeg");
+  const b = await connectStream(server.port, server.token, "&binary=1");
+  await b.nextJson();
   await sleep(50);
   assert.ok(
     sessionA.sent.some((s) => s.method === "Page.stopScreencast"),
@@ -715,10 +705,6 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
     sessionB.sent.some((s) => s.method === "Page.startScreencast"),
     "the join starts a new screencast",
   );
-  assert.ok(
-    logs.filter((m) => m.includes("h264 unavailable")).length > spawnsBefore,
-    "the join attempts a fresh encoder spawn",
-  );
   // The restarted cast feeds BOTH viewers.
   state.session.emitFrame(FRAME_B64);
   const af = await a.nextBinary();
@@ -728,4 +714,110 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
   a.close();
   b.close();
   server.close();
+});
+
+test("a joining h264 viewer always restarts the screencast and encoder", async (t) => {
+  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { execFileSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fsSync = await import("node:fs");
+  const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-join-"));
+  execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
+    "-hide_banner", "-loglevel", "error",
+    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
+    "-frames:v", "10", "-q:v", "5", path.join(dir, "f%02d.jpg"),
+  ]);
+  const jpegs = fsSync.readdirSync(dir).sort()
+    .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
+
+  const { state, server } = await startServer({}, { screenshot: jpegs[0] });
+  const a = await connectStream(server.port, server.token, "&codec=h264");
+  await a.nextJson();
+  await sleep(150);
+  // Feed FEWER frames than one GOP, then go quiet. If the encoder survives
+  // the join below, its next output can only be the running GOP's next
+  // P-slice — so SPS/PPS + IDR at the head of what follows proves a respawn.
+  let fed = 0;
+  const feeder = setInterval(() => {
+    if (fed < 15) state.session.emitFrame(jpegs[fed++ % jpegs.length]);
+  }, 50);
+  try {
+    const pre = [];
+    let ordered = [];
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline && !(ordered.includes(7) && ordered.includes(5))) {
+      const { header, payload } = await a.nextBinary(3000);
+      if (header.codec !== "h264") continue;
+      pre.push(payload);
+      ordered = nalTypesInOrder(Buffer.concat(pre));
+    }
+    assert.ok(
+      ordered.includes(7) && ordered.includes(8) && ordered.includes(5),
+      "the first viewer is decoding a live h264 stream before the join",
+    );
+  } finally {
+    clearInterval(feeder);
+  }
+  // Drain until well past the one idle-refinement pass (600ms after the last
+  // frame), so the pre-join stream is fully quiet and everything observed
+  // next is caused by the join.
+  for (;;) {
+    try { await a.next(900); } catch { break; }
+  }
+  const sessionA = state.session;
+  assert.ok(!sessionA.sent.some((s) => s.method === "Page.stopScreencast"));
+
+  const b = await connectStream(server.port, server.token, "&codec=h264");
+  const st = await b.nextJson();
+  assert.equal(st.codec, "h264");
+  await sleep(50);
+  assert.ok(
+    sessionA.sent.some((s) => s.method === "Page.stopScreencast"),
+    "the join stops the running screencast",
+  );
+  const sessionB = state.session;
+  assert.notEqual(sessionB, sessionA, "the join attaches a fresh capture session");
+  assert.ok(
+    sessionB.sent.some((s) => s.method === "Page.startScreencast"),
+    "the join starts a new screencast",
+  );
+  // The restarted cast makes Chrome emit fresh frames; mimic that with
+  // IDENTICAL images so a surviving encoder could never be pushed over a
+  // scene cut or the GOP boundary into an IDR of its own — only a replaced
+  // encoder can put SPS/PPS + an IDR ahead of the next slice.
+  const rejoinFeeder = setInterval(() => {
+    state.session.emitFrame(jpegs[0]);
+  }, 50);
+  const post = [];
+  let ordered = [];
+  try {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline && !ordered.some((n) => n === 1 || n === 5)) {
+      const { header, payload } = await a.nextBinary(3000);
+      if (header.codec !== "h264") continue;
+      post.push(payload);
+      ordered = nalTypesInOrder(Buffer.concat(post));
+    }
+  } finally {
+    clearInterval(rejoinFeeder);
+  }
+  const firstSlice = ordered.find((n) => n === 1 || n === 5);
+  assert.equal(
+    firstSlice, 5,
+    `first slice after the join is an IDR — the encoder was replaced, not reused (got NAL order ${ordered.join(",")})`,
+  );
+  assert.ok(
+    ordered.indexOf(7) >= 0 && ordered.indexOf(7) < ordered.indexOf(5),
+    "fresh SPS precedes the post-join IDR",
+  );
+  assert.ok(
+    ordered.indexOf(8) >= 0 && ordered.indexOf(8) < ordered.indexOf(5),
+    "fresh PPS precedes the post-join IDR",
+  );
+  a.close();
+  b.close();
+  server.close();
+  fsSync.rmSync(dir, { recursive: true, force: true });
 });
