@@ -133,6 +133,32 @@ test("resize: viewer dimensions reach the callback; the viewport is broadcast", 
   }
 });
 
+test("resize with unknown extra fields is applied and the extras ignored", async () => {
+  // Forward compatibility: a viewer from a newer protocol revision may attach
+  // fields this daemon does not know (say, a display scale). The handler reads
+  // only width/height, so the message must behave exactly like the 2-field
+  // resize — applied, broadcast, extras neither acted on nor echoed.
+  const resizes = [];
+  const stream = await startStreamServer(makeFakeState(), {
+    resize: async (w, h) => { resizes.push([w, h]); return { width: w, height: h - 87 }; },
+  });
+  const client = await connectStream(stream.port, stream.token);
+  try {
+    const hello = await client.next();
+    assert.equal(hello.type, "status");
+    client.send({ type: "resize", width: 390, height: 844, scale: 2 });
+    const status = await client.next();
+    assert.deepEqual(resizes, [[390, 844]]);
+    assert.equal(status.type, "status");
+    assert.deepEqual(status.resized, { width: 390, height: 844 });
+    assert.deepEqual(status.viewport, { width: 390, height: 757 });
+    assert.ok(!("scale" in status), "unknown fields are not echoed back");
+  } finally {
+    client.close();
+    stream.close();
+  }
+});
+
 test("resize: out-of-range dimensions clamp instead of failing the viewer", async () => {
   const resizes = [];
   const stream = await startStreamServer(makeFakeState(), {

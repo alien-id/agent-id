@@ -20,6 +20,7 @@ import {
   encodeFrameBinary,
   decodeFrameBinary,
   makeFrameParser,
+  CLOSE_CODEC_UNAVAILABLE,
 } from "../plugins/agent-id-browser/lib/stream-server.mjs";
 
 const FRAME_B64 = Buffer.from("motion-frame-bytes").toString("base64");
@@ -143,6 +144,15 @@ async function connectStream(port, token, params = "") {
       const m = await this.next(timeout);
       assert.equal(m.opcode, 0x2, "expected a binary frame");
       return decodeFrameBinary(m.payload);
+    },
+    // Close frame: 2-byte big-endian code + UTF-8 reason (RFC 6455 §5.5.1).
+    async nextClose(timeout) {
+      const m = await this.next(timeout);
+      assert.equal(m.opcode, 0x8, "expected a close frame");
+      return {
+        code: m.payload.length >= 2 ? m.payload.readUInt16BE(0) : null,
+        reason: m.payload.subarray(2).toString("utf8"),
+      };
     },
     idle(ms) {
       return this.next(ms).then(
@@ -502,6 +512,89 @@ test("codec=h264 end-to-end: Annex-B chunks with AUD/SPS/IDR arrive", async (t) 
   fsSync.rmSync(dir, { recursive: true, force: true });
 });
 
+// NAL unit types in stream order (Annex-B start-code scan). A 4-byte start
+// code also matches as a 3-byte one — the duplicate entry lands at the same
+// position, so first-occurrence ordering is unaffected.
+function nalTypesInOrder(stream) {
+  const out = [];
+  for (let i = 0; i + 4 < stream.length; i++) {
+    if (stream[i] === 0 && stream[i + 1] === 0) {
+      if (stream[i + 2] === 1) out.push(stream[i + 3] & 0x1f);
+      else if (stream[i + 2] === 0 && stream[i + 3] === 1) out.push(stream[i + 4] & 0x1f);
+    }
+  }
+  return out;
+}
+
+test("a reconnecting h264 viewer's first chunks carry SPS PPS and an IDR", async (t) => {
+  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { execFileSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fsSync = await import("node:fs");
+  const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-rejoin-"));
+  execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
+    "-hide_banner", "-loglevel", "error",
+    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
+    "-frames:v", "10", "-q:v", "5", path.join(dir, "f%02d.jpg"),
+  ]);
+  const jpegs = fsSync.readdirSync(dir).sort()
+    .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
+
+  // The refinement capture must return a REAL jpeg: the feed keeps running
+  // across the disconnect, and a refinement firing mid-test feeds the encoder.
+  const { state, server } = await startServer({}, { screenshot: jpegs[0] });
+  const a = await connectStream(server.port, server.token, "&codec=h264");
+  await a.nextJson();
+  await sleep(150);
+  let n = 0;
+  const feeder = setInterval(() => {
+    state.session.emitFrame(jpegs[n++ % jpegs.length]);
+  }, 50);
+  try {
+    // The stream is live: the first viewer is receiving h264 before it drops.
+    let aBytes = 0;
+    const aDeadline = Date.now() + 8000;
+    while (Date.now() < aDeadline && aBytes < 500) {
+      const { header, payload } = await a.nextBinary(3000);
+      if (header.codec === "h264") aBytes += payload.length;
+    }
+    assert.ok(aBytes >= 500, `first viewer received h264 (got ${aBytes} bytes)`);
+    a.close();
+    await sleep(300); // the departed viewer's encoder teardown settles
+
+    const b = await connectStream(server.port, server.token, "&codec=h264");
+    await b.nextJson();
+    // Collect until a non-IDR slice shows up (or a deadline): its position is
+    // what proves the decoder-priming NALs came first.
+    const chunks = [];
+    const deadline = Date.now() + 8000;
+    let ordered = [];
+    while (Date.now() < deadline && !ordered.includes(1)) {
+      const { header, payload } = await b.nextBinary(3000);
+      if (header.codec !== "h264") continue;
+      chunks.push(payload);
+      ordered = nalTypesInOrder(Buffer.concat(chunks));
+    }
+    // A reconnecting viewer starts a fresh decoder: SPS (7), PPS (8) and an
+    // IDR (5) must all arrive before any non-IDR slice (1).
+    const firstNonIdr = ordered.indexOf(1);
+    for (const [type, name] of [[7, "SPS"], [8, "PPS"], [5, "IDR"]]) {
+      const at = ordered.indexOf(type);
+      assert.ok(at >= 0, `${name} present in the reconnected stream (got ${ordered.join(",")})`);
+      if (firstNonIdr >= 0) {
+        assert.ok(at < firstNonIdr, `${name} arrives before the first non-IDR slice`);
+      }
+    }
+    b.close();
+  } finally {
+    clearInterval(feeder);
+  }
+  server.close();
+  fsSync.rmSync(dir, { recursive: true, force: true });
+});
+
 test("codec=h264 on a STATIC page: refinement primes the encoder", async (t) => {
   const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
   if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
@@ -558,4 +651,173 @@ test("codec=h264 without a usable ffmpeg falls back to jpeg with a status", asyn
   } finally {
     delete process.env.AGENT_ID_FFMPEG;
   }
+});
+
+test("a strict h264 request on an unprovisioned host closes 4002", async () => {
+  process.env.AGENT_ID_FFMPEG = "/nonexistent/ffmpeg";
+  try {
+    const { server } = await startServer(); // no h264Config: unprovisioned
+    const c = await connectStream(server.port, server.token, "&codec=h264&strict=1");
+    // The refusal is typed and immediate — at join time, before any encoder
+    // work, and instead of the join status. Words first for a viewer that
+    // logs text…
+    const st = await c.nextJson();
+    assert.equal(st.type, "status");
+    assert.equal(st.code, CLOSE_CODEC_UNAVAILABLE);
+    assert.match(st.error, /install-codecs/);
+    // …then the proper close frame a strict client acts on.
+    const close = await c.nextClose();
+    assert.equal(close.code, CLOSE_CODEC_UNAVAILABLE);
+    assert.equal(close.code, 4002);
+    assert.match(close.reason, /strict=1/);
+    assert.match(close.reason, /install-codecs/);
+    c.close();
+    server.close();
+  } finally {
+    delete process.env.AGENT_ID_FFMPEG;
+  }
+});
+
+test("a joining viewer always restarts the screencast", async () => {
+  // Frames are change-driven, so a viewer joining a running cast would wait
+  // for the page to move before seeing anything. The join must force a fresh
+  // capture epoch: stop + start the screencast so Chrome emits a first frame.
+  const { state, server } = await startServer();
+  const a = await connectStream(server.port, server.token, "&binary=1");
+  await a.nextJson();
+  await sleep(20);
+  state.session.emitFrame(FRAME_B64);
+  await a.nextBinary(); // the first viewer is connected and receiving
+  const sessionA = state.session;
+  assert.ok(sessionA.sent.some((s) => s.method === "Page.startScreencast"));
+  assert.ok(!sessionA.sent.some((s) => s.method === "Page.stopScreencast"));
+
+  const b = await connectStream(server.port, server.token, "&binary=1");
+  await b.nextJson();
+  await sleep(50);
+  assert.ok(
+    sessionA.sent.some((s) => s.method === "Page.stopScreencast"),
+    "the join stops the running screencast",
+  );
+  const sessionB = state.session;
+  assert.notEqual(sessionB, sessionA, "the join attaches a fresh capture session");
+  assert.ok(
+    sessionB.sent.some((s) => s.method === "Page.startScreencast"),
+    "the join starts a new screencast",
+  );
+  // The restarted cast feeds BOTH viewers.
+  state.session.emitFrame(FRAME_B64);
+  const af = await a.nextBinary();
+  const bf = await b.nextBinary();
+  assert.deepEqual(af.payload, Buffer.from(FRAME_B64, "base64"));
+  assert.deepEqual(bf.payload, Buffer.from(FRAME_B64, "base64"));
+  a.close();
+  b.close();
+  server.close();
+});
+
+test("a joining h264 viewer always restarts the screencast and encoder", async (t) => {
+  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { execFileSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fsSync = await import("node:fs");
+  const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-join-"));
+  execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
+    "-hide_banner", "-loglevel", "error",
+    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
+    "-frames:v", "10", "-q:v", "5", path.join(dir, "f%02d.jpg"),
+  ]);
+  const jpegs = fsSync.readdirSync(dir).sort()
+    .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
+
+  const { state, server } = await startServer({}, { screenshot: jpegs[0] });
+  const a = await connectStream(server.port, server.token, "&codec=h264");
+  await a.nextJson();
+  await sleep(150);
+  // Feed FEWER frames than one GOP, then go quiet. If the encoder survives
+  // the join below, its next output can only be the running GOP's next
+  // P-slice — so SPS/PPS + IDR at the head of what follows proves a respawn.
+  let fed = 0;
+  const feeder = setInterval(() => {
+    if (fed < 15) state.session.emitFrame(jpegs[fed++ % jpegs.length]);
+  }, 50);
+  try {
+    const pre = [];
+    let ordered = [];
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline && !(ordered.includes(7) && ordered.includes(5))) {
+      const { header, payload } = await a.nextBinary(3000);
+      if (header.codec !== "h264") continue;
+      pre.push(payload);
+      ordered = nalTypesInOrder(Buffer.concat(pre));
+    }
+    assert.ok(
+      ordered.includes(7) && ordered.includes(8) && ordered.includes(5),
+      "the first viewer is decoding a live h264 stream before the join",
+    );
+  } finally {
+    clearInterval(feeder);
+  }
+  // Drain until well past the one idle-refinement pass (600ms after the last
+  // frame), so the pre-join stream is fully quiet and everything observed
+  // next is caused by the join.
+  for (;;) {
+    try { await a.next(900); } catch { break; }
+  }
+  const sessionA = state.session;
+  assert.ok(!sessionA.sent.some((s) => s.method === "Page.stopScreencast"));
+
+  const b = await connectStream(server.port, server.token, "&codec=h264");
+  const st = await b.nextJson();
+  assert.equal(st.codec, "h264");
+  await sleep(50);
+  assert.ok(
+    sessionA.sent.some((s) => s.method === "Page.stopScreencast"),
+    "the join stops the running screencast",
+  );
+  const sessionB = state.session;
+  assert.notEqual(sessionB, sessionA, "the join attaches a fresh capture session");
+  assert.ok(
+    sessionB.sent.some((s) => s.method === "Page.startScreencast"),
+    "the join starts a new screencast",
+  );
+  // The restarted cast makes Chrome emit fresh frames; mimic that with
+  // IDENTICAL images so a surviving encoder could never be pushed over a
+  // scene cut or the GOP boundary into an IDR of its own — only a replaced
+  // encoder can put SPS/PPS + an IDR ahead of the next slice.
+  const rejoinFeeder = setInterval(() => {
+    state.session.emitFrame(jpegs[0]);
+  }, 50);
+  const post = [];
+  let ordered = [];
+  try {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline && !ordered.some((n) => n === 1 || n === 5)) {
+      const { header, payload } = await a.nextBinary(3000);
+      if (header.codec !== "h264") continue;
+      post.push(payload);
+      ordered = nalTypesInOrder(Buffer.concat(post));
+    }
+  } finally {
+    clearInterval(rejoinFeeder);
+  }
+  const firstSlice = ordered.find((n) => n === 1 || n === 5);
+  assert.equal(
+    firstSlice, 5,
+    `first slice after the join is an IDR — the encoder was replaced, not reused (got NAL order ${ordered.join(",")})`,
+  );
+  assert.ok(
+    ordered.indexOf(7) >= 0 && ordered.indexOf(7) < ordered.indexOf(5),
+    "fresh SPS precedes the post-join IDR",
+  );
+  assert.ok(
+    ordered.indexOf(8) >= 0 && ordered.indexOf(8) < ordered.indexOf(5),
+    "fresh PPS precedes the post-join IDR",
+  );
+  a.close();
+  b.close();
+  server.close();
+  fsSync.rmSync(dir, { recursive: true, force: true });
 });
