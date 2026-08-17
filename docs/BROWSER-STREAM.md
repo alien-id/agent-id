@@ -259,31 +259,53 @@ yields a 390×844 viewport).
 
 An optional `scale` asks for the capture at `scale`× device pixels — a
 retina-density viewer sends its own `devicePixelRatio` and gets text crisp at
-native density instead of a 1× upscale. It is implemented as a per-page
-device-metrics override applied together with the window resize: the page
-keeps its CSS geometry and desktop UA, and the override sets `mobile: false`
-on purpose (no touch capability, no mobile emulation) — the only page-visible
-change is `devicePixelRatio`, the common desktop-retina configuration. Frame
-payloads become `viewport × scale` pixels; `metadata.deviceWidth/Height` and
-input coordinates stay CSS (see *Messages*). A later resize without `scale`
-(or with `scale: 1`) clears the override.
+native density instead of a 1× upscale. It is implemented as a device-metrics
+override (`deviceScaleFactor: scale, mobile: false`) held on the capture's own
+CDP session: the page keeps its CSS geometry and desktop UA, no touch
+capability, no mobile emulation — the only page-visible change is
+`devicePixelRatio`, the common desktop-retina configuration. The override
+follows the capture: switching tabs moves it to the new tab (the old one
+reverts), and a later resize without `scale` (or with `scale: 1`) drops it.
+
+How a scaled session captures (all of it measured against real Chrome):
+Chrome's screencast delivers CSS-pixel frames regardless of
+`devicePixelRatio`, while `Page.captureScreenshot` renders at device pixels.
+A scaled session therefore keeps the screencast running only as a damage
+detector — its 1× frames are never delivered — and serves screenshot
+captures as motion frames instead, coalesced to at most one in flight. A 2×
+phone-viewport capture costs ~20 ms, so scaled motion tops out around
+30–50 fps and idle cost is unchanged (captures are damage-driven, exactly
+like classic delivery). Motion and the idle refinement use the same capture
+call, so their pixel dimensions are identical in every mode. Frame payloads
+become `viewport × scale` pixels; `metadata.deviceWidth/Height` and input
+coordinates stay CSS (see *Messages*).
 
 Rules:
 
 - Dimensions clamp to **200–4096** per axis. Non-numeric dimensions are
   ignored entirely (not resized-to-minimum).
-- `scale` clamps to **1–3**; a missing or non-numeric `scale` means 1, so the
-  two-field message behaves exactly as it always did.
+- `scale` is rounded to the **nearest integer** and clamped to **1–3**
+  (fractional pixel dimensions are rejected at the CDP layer, and integer
+  factors keep every capture path on identical dimensions); a missing or
+  non-numeric `scale` means 1, so the two-field message behaves exactly as it
+  always did.
+- Budgets after multiplication: no axis of `viewport × scale` may exceed
+  4096 device pixels, and the total may not exceed one 4K frame's worth of
+  pixels (3840×2160). A request over budget is served at the largest scale
+  that fits (down to 1), never refused.
 - Requests are serialized behind pending viewer input, so a resize lands in
   arrival order relative to queued clicks and keys.
 - The achieved viewport is broadcast to **every** watcher as the `status`
   message above — the request mirror in `resized` (which also carries the
-  achieved `scale`, informational only), the authoritative result in
-  `viewport`. Do coordinate math against `viewport`; frame payload dimensions
-  follow the frames themselves.
-- A scale change restarts the screencast and the shared encoder (fresh
-  SPS/PPS + IDR at the new pixel dimensions) — expect one keyframe's worth of
-  latency, as on a tab switch.
+  achieved `scale` after budgets, informational only), the authoritative
+  result in `viewport`. For a scaled resize the viewport is re-measured after
+  the override lands, so it reports what the page actually became. Do
+  coordinate math against `viewport`; frame payload dimensions follow the
+  frames themselves.
+- A resize that enters, leaves, or changes a scaled mode restarts the
+  screencast and the shared encoder (fresh SPS/PPS + IDR at the new pixel
+  dimensions) — expect one keyframe's worth of latency, as on a tab switch.
+  A 1× resize from a 1× session keeps the classic no-restart behavior.
 - A resize does not invalidate element refs (the DOM is untouched; refs are
   sparse and stable) — but screenshot coordinates taken before the resize are
   stale, as after any reflow.

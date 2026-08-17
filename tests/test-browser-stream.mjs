@@ -902,8 +902,11 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
   const path = await import("node:path");
   const fsSync = await import("node:fs");
   const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-scale-"));
-  // The same nominal viewport at 1× (320×240) and at a viewer-requested 2×
-  // (640×480) — the dimension flip a HiDPI resize causes on the wire.
+  // The same nominal viewport at 1× (320×240 screencast frames) and at a
+  // viewer-requested 2× (640×480 device-pixel captures) — the dimension flip
+  // a HiDPI resize causes on the wire. In scaled mode the delivered frames
+  // come from captureScreenshot (the cast is only the damage tick), so the
+  // 2× pixels ride the screenshot fake.
   for (const size of ["320x240", "640x480"]) {
     execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
       "-hide_banner", "-loglevel", "error",
@@ -916,18 +919,20 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
   const small = framesAt("320x240");
   const big = framesAt("640x480");
 
-  const { state, server } = await startServer({
-    // The stream server owns the scale bookkeeping under test; the session
-    // side (device-metrics override) has its own fake-CDP coverage.
-    resize: async (w, h) => ({ width: w, height: h }),
-  });
+  const { state, server } = await startServer(
+    {
+      // The stream server owns all the scale bookkeeping under test; the
+      // override lifecycle has its own fake-CDP coverage.
+      resize: async (w, h) => ({ width: w, height: h }),
+    },
+    { screenshot: big[0] },
+  );
   const c = await connectStream(server.port, server.token, "&codec=h264");
   await c.nextJson(); // status (codec h264)
   await sleep(150); // screencast + encoder spawn settle
-  let feed = small;
   let n = 0;
   const feeder = setInterval(() => {
-    state.session.emitFrame(feed[n++ % feed.length]);
+    state.session.emitFrame(small[n++ % small.length]);
   }, 50);
   try {
     // Phase 1: the 1× stream flows.
@@ -941,8 +946,9 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
     }
     assert.ok(bytes >= 500, `1× h264 flowed before the resize (got ${bytes} bytes)`);
 
-    // Phase 2: the viewer asks for the HiDPI stream; the source flips to
-    // device-pixel frames. Everything after the `resized` broadcast must
+    // Phase 2: the viewer asks for the HiDPI stream; the delivered source
+    // flips to device-pixel captures (the cast keeps ticking at CSS size as
+    // the damage detector). Everything after the `resized` broadcast must
     // decode from scratch: fresh SPS/PPS + IDR, and the fresh SPS must code
     // the SCALED dimensions.
     c.sendJson({ type: "resize", width: 320, height: 240, scale: 2 });
@@ -957,7 +963,6 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
         if (msg.resized) {
           assert.equal(msg.resized.scale, 2);
           resized = true;
-          feed = big; // the page now renders 2× device pixels
         }
         continue;
       }
