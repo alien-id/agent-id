@@ -1,23 +1,24 @@
 #!/usr/bin/env node
 
-// Tests for the stream's `seq` numbering contract. seq is a per-session
-// stream-event counter shared across delivery paths (jpeg frame deliveries
-// and h264 chunk sends both draw from it), not a per-message ordinal: an
-// h264 viewer sees seq strictly increase but with holes, and that IS the
-// contract — a consumer detecting loss must use a gap threshold, never
-// `delta != 1`. A jpeg viewer that keeps up sees consecutive values because
-// nothing else burns the counter between its frames.
+// Tests for the stream's `seq` numbering contract. seq counts per codec: a
+// client consumes exactly one codec, and every message that codec's
+// subscribers receive is numbered consecutively, so a viewer can read a gap
+// as loss. A shared counter would let jpeg deliveries punch holes into the
+// h264 sequence, which viewers report as loss and answer with a reconnect.
 //
 // Driven end-to-end over real sockets against a FAKE CDP session (no
-// browser); the h264 test additionally needs a real ffmpeg and self-skips
-// without one.
+// browser). The contiguity tests drive a stub encoder binary so they always
+// run; the real-encoder test needs an ffmpeg and self-skips without one.
 //
 // Run: node --test tests/test-browser-stream-seq.mjs
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { once } from "node:events";
 
 import {
@@ -135,7 +136,119 @@ async function startServer(opts = {}, stateOpts = {}) {
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
-test("h264 seq increases monotonically with holes allowed", async (t) => {
+// Stands in for ffmpeg: answers the encoder probe, then emits one Annex-B
+// chunk per write it receives. Keeps these tests off a real encoder so they
+// always run and the chunk count follows the writes.
+const FFMPEG_STUB = `#!/usr/bin/env node
+if (process.argv.includes("-encoders")) {
+  process.stdout.write(" V....D libx264 stub\\n");
+  process.exit(0);
+}
+process.stdin.on("data", () => process.stdout.write(Buffer.from([0, 0, 0, 1, 0x65])));
+process.stdin.on("end", () => process.exit(0));
+`;
+
+function writeFfmpegStub() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stream-seq-stub-"));
+  const stub = path.join(dir, "ffmpeg-stub.mjs");
+  fs.writeFileSync(stub, FFMPEG_STUB, { mode: 0o755 });
+  return { dir, stub };
+}
+
+// Next binary frame of `codec`, skipping the status text frames a viewer
+// also receives.
+async function nextSeq(c, codec, timeout = 4000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const left = deadline - Date.now();
+    if (left <= 0) throw new Error(`timeout waiting for a ${codec} frame`);
+    const m = await c.next(left);
+    if (m.opcode !== 0x2) continue;
+    const { header } = decodeFrameBinary(m.payload);
+    if ((header.codec ?? "jpeg") === codec) return header.seq;
+  }
+}
+
+function assertConsecutive(seqs, what) {
+  for (let i = 1; i < seqs.length; i++) {
+    assert.equal(seqs[i] - seqs[i - 1], 1, `consecutive ${what} (got ${seqs.join(",")})`);
+  }
+}
+
+// The regression: with no jpeg viewer attached, every screencast frame still
+// runs a jpeg delivery, and the idle refinement adds one more plus a double
+// encoder write. None of that may number the h264 stream — a viewer reads
+// the resulting holes as frame loss and redials.
+test("h264 seq is contiguous while jpeg frames are delivered", async () => {
+  const { dir, stub } = writeFfmpegStub();
+  const jpeg = Buffer.from("jpeg-payload").toString("base64");
+  const { state, server } = await startServer(
+    { h264Config: { ffmpegPath: stub, encoder: "libx264" } },
+    { screenshot: jpeg },
+  );
+  const c = await connectStream(server.port, server.token, "&codec=h264");
+  await c.nextJson(); // join status — this is the only client on the server
+
+  const seqs = [];
+  // Motion phase. The stub encoder spawns asynchronously, so keep feeding
+  // until the first chunk comes back, then take a run of them.
+  const warmup = Date.now() + 10000;
+  while (seqs.length === 0 && Date.now() < warmup) {
+    state.session.emitFrame(jpeg);
+    try { seqs.push(await nextSeq(c, "h264", 300)); } catch { /* encoder not up yet */ }
+  }
+  assert.equal(seqs.length, 1, "the stub encoder produced a chunk");
+  for (let i = 0; i < 5; i++) {
+    state.session.emitFrame(jpeg);
+    seqs.push(await nextSeq(c, "h264"));
+  }
+  // Idle phase: silence past the refinement threshold arms one high-quality
+  // capture — a jpeg delivery plus two encoder writes.
+  seqs.push(await nextSeq(c, "h264", 4000));
+
+  assert.ok(seqs.length >= 7, `collected h264 chunks (got ${seqs.length})`);
+  assertConsecutive(seqs, "h264 chunks");
+  c.close();
+  server.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Both codecs on one server: neither sequence may be disturbed by the other.
+test("jpeg and h264 viewers each get their own contiguous seq", async () => {
+  const { dir, stub } = writeFfmpegStub();
+  const jpeg = Buffer.from("jpeg-payload").toString("base64");
+  const { state, server } = await startServer(
+    { h264Config: { ffmpegPath: stub, encoder: "libx264" } },
+    { screenshot: jpeg },
+  );
+  const h = await connectStream(server.port, server.token, "&codec=h264");
+  await h.nextJson();
+  const j = await connectStream(server.port, server.token, "&binary=1");
+  await j.nextJson();
+
+  const h264 = [];
+  const jpegs = [];
+  const warmup = Date.now() + 10000;
+  while (h264.length === 0 && Date.now() < warmup) {
+    state.session.emitFrame(jpeg);
+    jpegs.push(await nextSeq(j, "jpeg"));
+    try { h264.push(await nextSeq(h, "h264", 300)); } catch { /* encoder not up yet */ }
+  }
+  assert.equal(h264.length, 1, "the stub encoder produced a chunk");
+  for (let i = 0; i < 5; i++) {
+    state.session.emitFrame(jpeg);
+    jpegs.push(await nextSeq(j, "jpeg"));
+    h264.push(await nextSeq(h, "h264"));
+  }
+  assertConsecutive(h264, "h264 chunks");
+  assertConsecutive(jpegs, "jpeg frames");
+  h.close();
+  j.close();
+  server.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("h264 seq stays contiguous under real encoding", async (t) => {
   const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
   if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
   const { execFileSync } = await import("node:child_process");
@@ -158,8 +271,8 @@ test("h264 seq increases monotonically with holes allowed", async (t) => {
   await c.nextJson();
   await sleep(150);
   const seqs = [];
-  // Steady motion: every screencast frame burns a counter value of its own,
-  // so chunk-to-chunk deltas here are mostly ≥2 — the holes.
+  // Steady motion: each screencast frame is delivered as a jpeg frame AND
+  // fed to the encoder, and only the encoder's chunks number the h264 stream.
   let n = 0;
   const feeder = setInterval(() => {
     state.session.emitFrame(jpegs[n++ % jpegs.length]);
@@ -175,8 +288,7 @@ test("h264 seq increases monotonically with holes allowed", async (t) => {
     clearInterval(feeder);
   }
   assert.ok(seqs.length >= 8, `collected h264 chunks under motion (got ${seqs.length})`);
-  // Burst then silence: the encoder drains its backlog with nothing else
-  // burning the counter, so back-to-back chunks arrive with delta 1.
+  // Burst then silence: the encoder drains its backlog.
   await sleep(200);
   for (let i = 0; i < 30; i++) state.session.emitFrame(jpegs[i % jpegs.length]);
   const drainDeadline = Date.now() + 4000;
@@ -188,14 +300,9 @@ test("h264 seq increases monotonically with holes allowed", async (t) => {
       break; // drained
     }
   }
-  // Strictly increasing across the whole connection — which is also the
-  // no-reset guarantee.
-  for (let i = 1; i < seqs.length; i++) {
-    assert.ok(seqs[i] > seqs[i - 1], `seq strictly increases (${seqs[i - 1]} then ${seqs[i]})`);
-  }
-  const deltas = seqs.slice(1).map((s, i) => s - seqs[i]);
-  assert.ok(deltas.includes(1), `a delta of 1 occurs (deltas: ${deltas.join(",")})`);
-  assert.ok(deltas.some((d) => d >= 2), `a delta of ≥2 occurs (deltas: ${deltas.join(",")})`);
+  // Consecutive across the whole connection — which is also the no-reset
+  // guarantee.
+  assertConsecutive(seqs, "h264 chunks");
   c.close();
   server.close();
   fsSync.rmSync(dir, { recursive: true, force: true });
@@ -212,8 +319,8 @@ test("a jpeg viewer's seq increments by one per delivered frame", async () => {
     const { header } = await c.nextBinary();
     seqs.push(header.seq);
   }
-  // A keeping-up jpeg viewer sees consecutive values; holes appear only when
-  // another delivery path burns the shared counter in between.
+  // A keeping-up jpeg viewer sees consecutive values; a viewer that falls
+  // behind skips frames outright (latest-frame-wins), it does not see holes.
   for (let i = 1; i < seqs.length; i++) {
     assert.equal(seqs[i] - seqs[i - 1], 1, `consecutive frames (got ${seqs.join(",")})`);
   }
