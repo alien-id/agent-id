@@ -23,6 +23,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { createAccessUnitFramer } from "./h264-framer.mjs";
+
 const execFileP = promisify(execFile);
 
 const FFMPEG = () => process.env.AGENT_ID_FFMPEG || "ffmpeg";
@@ -180,11 +182,12 @@ function codecArgs(encoder) {
 }
 
 /**
- * Spawn an encoder. `onChunk(Buffer)` receives Annex-B output; pass `rtp:
- * {port, payloadType, ssrc}` instead to emit RTP to loopback UDP (onChunk
- * unused). Returns { write(jpegBuffer) → bool, close() }; calls `onExit()`
- * once when the process dies for any reason. Throws when ffmpeg or an H.264
- * encoder is unavailable.
+ * Spawn an encoder. `onChunk(Buffer)` receives Annex-B output, one complete
+ * access unit per call (see h264-framer.mjs: stdout chunks are not unit
+ * boundaries); pass `rtp: {port, payloadType, ssrc}` instead to emit RTP to
+ * loopback UDP (onChunk unused). Returns { write(jpegBuffer) → bool,
+ * close() }; calls `onExit()` once when the process dies for any reason.
+ * Throws when ffmpeg or an H.264 encoder is unavailable.
  */
 export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp = null, ffmpegPath = null }) {
   const ffmpeg = ffmpegPath || FFMPEG();
@@ -222,7 +225,10 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
   proc.stderr.on("data", (d) => {
     stderrTail = (stderrTail + d.toString()).slice(-2048);
   });
-  if (!rtp) proc.stdout.on("data", (chunk) => onChunk?.(chunk));
+  const framer = rtp
+    ? null
+    : createAccessUnitFramer({ onAccessUnit: (au) => onChunk?.(au), log });
+  if (framer) proc.stdout.on("data", (chunk) => framer.push(chunk));
 
   let writable = true;
   let alive = true;
@@ -230,6 +236,7 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
   proc.stdin.on("error", () => {}); // EPIPE on teardown races
   proc.once("close", (code) => {
     alive = false;
+    framer?.close(); // a dead encoder's partial unit belongs to no stream
     if (code) log(`stream: h264 encoder (${encoder}) exited ${code}: ${stderrTail.trim()}`);
     onExit?.();
   });
@@ -243,6 +250,7 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
     },
     close() {
       alive = false;
+      framer?.close();
       try { proc.stdin.destroy(); } catch { /* already gone */ }
       try { proc.kill("SIGKILL"); } catch { /* already dead */ }
     },

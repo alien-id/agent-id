@@ -15,9 +15,10 @@
 //   ?binary=1         type:"frame" messages arrive as WS binary messages:
 //                     [u32 LE header length][JSON header][payload bytes]
 //                     (everything else stays a JSON text frame)
-//   ?codec=h264       payload is an H.264 Annex-B chunk from an ffmpeg
-//                     subprocess (implies binary=1; falls back to jpeg with a
-//                     status notice when no usable ffmpeg/encoder exists)
+//   ?codec=h264       payload is ONE complete H.264 Annex-B access unit from
+//                     an ffmpeg subprocess (implies binary=1; falls back to
+//                     jpeg with a status notice when no usable ffmpeg/encoder
+//                     exists)
 //   ?pacing=ack|push  ack: at most one frame in flight — the client releases
 //                     the next with {"type":"ack","seq":N}
 //   ?maxFps=<0-120>   per-client delivery cap (0 = uncapped)
@@ -35,11 +36,12 @@
 // newer frames overwrite whenever the client is slower than the feed (socket
 // backpressure, outstanding ack, fps cap), so a viewer always resumes at live
 // and the server never queues stale frames. H.264 is a temporally-dependent
-// byte stream, so chunks can't be dropped mid-GOP — a client whose socket
-// buffer exceeds a bound is disconnected instead (it reconnects at a fresh
-// keyframe). After ~600ms without a screencast frame the page has settled and
-// one high-quality Page.captureScreenshot "refinement" frame is pushed, so
-// text is sharp at rest while motion runs at aggressive JPEG quality.
+// byte stream, so access units can't be dropped mid-GOP — a client whose
+// socket buffer exceeds a bound is disconnected instead (it reconnects at a
+// fresh keyframe). After ~600ms without a screencast frame the page has
+// settled and one high-quality Page.captureScreenshot "refinement" frame is
+// pushed, so text is sharp at rest while motion runs at aggressive JPEG
+// quality.
 //
 // `resize` is our one extension beyond agent-browser's shapes (harmless there —
 // unknown types are ignored). width/height are the VIEWER's dimensions — the
@@ -596,7 +598,11 @@ export async function startStreamServer(
     }
   }
 
-  function sendH264Chunk(chunk) {
+  // One message per ACCESS UNIT, never per stdout chunk: the encoder's pipe
+  // splits a unit larger than 64 KiB across chunks, and the tail carries no
+  // start code, so a viewer parsing one unit per message would discard it
+  // (h264-framer.mjs does the framing).
+  function sendAccessUnit(au) {
     let msg = null;
     for (const client of clients) {
       if (client.codec !== "h264") continue;
@@ -612,13 +618,16 @@ export async function startStreamServer(
             codec: "h264",
             metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
           },
-          chunk,
+          au,
         ),
       );
       client.sock.write(msg);
-      // A temporally-dependent stream can't drop chunks; a viewer that can't
-      // keep up is cut instead of buffering without bound. It reconnects and
-      // the encoder restart gives it a fresh keyframe.
+      // A temporally-dependent stream can't drop access units; a viewer that
+      // can't keep up is cut instead of buffering without bound. It reconnects
+      // and the encoder restart gives it a fresh keyframe. Whole units are
+      // larger writes than the old per-chunk ones, but the bound still holds
+      // several of even the biggest measured unit (~440 KiB against 4 MiB),
+      // so only a genuinely stalled socket trips it.
       if (client.sock.writableLength > H264_MAX_BUFFERED) {
         log("stream: h264 viewer too slow — disconnecting");
         client.sock.destroy();
@@ -647,7 +656,7 @@ export async function startStreamServer(
     if (annexB) return;
     try {
       const enc = await createH264Encoder({
-        onChunk: sendH264Chunk,
+        onChunk: sendAccessUnit,
         log,
         ffmpegPath: h264Config?.ffmpegPath ?? null,
         onExit: () => {
