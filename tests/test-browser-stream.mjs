@@ -821,3 +821,179 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
   server.close();
   fsSync.rmSync(dir, { recursive: true, force: true });
 });
+
+// Frame dimensions coded in an H.264 SPS (Annex-B, baseline/constrained-
+// baseline as our encoder emits). Minimal exp-Golomb walk — enough to prove
+// what resolution the encoder was (re)configured for.
+function spsDimensions(nal) {
+  const rbsp = [];
+  for (let i = 1; i < nal.length; i++) {
+    // Strip emulation-prevention bytes (00 00 03 xx → 00 00 xx).
+    if (nal[i] === 3 && nal[i - 1] === 0 && nal[i - 2] === 0) continue;
+    rbsp.push(nal[i]);
+  }
+  let bit = 0;
+  const u = (n) => {
+    let v = 0;
+    for (; n > 0; n--) v = (v << 1) | ((rbsp[bit >> 3] >> (7 - (bit & 7))) & 1), bit++;
+    return v;
+  };
+  const ue = () => {
+    let zeros = 0;
+    while (u(1) === 0) zeros++;
+    return (1 << zeros) - 1 + (zeros ? u(zeros) : 0);
+  };
+  const se = () => {
+    const k = ue();
+    return k & 1 ? (k + 1) / 2 : -(k / 2);
+  };
+  const profile = u(8);
+  u(16); // constraint flags + reserved + level
+  ue(); // sps id
+  if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(profile)) {
+    throw new Error("high-profile SPS unexpected from the baseline encoder");
+  }
+  ue(); // log2_max_frame_num_minus4
+  const poc = ue();
+  if (poc === 0) ue();
+  else if (poc === 1) {
+    u(1);
+    se();
+    se();
+    const n = ue();
+    for (let i = 0; i < n; i++) se();
+  }
+  ue(); // max_num_ref_frames
+  u(1); // gaps_in_frame_num_value_allowed
+  const widthMbs = ue() + 1;
+  const heightMapUnits = ue() + 1;
+  const frameMbsOnly = u(1);
+  if (!frameMbsOnly) u(1);
+  u(1); // direct_8x8_inference
+  let width = widthMbs * 16;
+  let height = (2 - frameMbsOnly) * heightMapUnits * 16;
+  if (u(1)) {
+    // frame_cropping (4:2:0 crop units: 2px horizontal, 2px·(2-fmo) vertical)
+    const [l, r, t, b] = [ue(), ue(), ue(), ue()];
+    width -= (l + r) * 2;
+    height -= (t + b) * 2 * (2 - frameMbsOnly);
+  }
+  return { width, height };
+}
+
+// NAL payloads in stream order (start-code scan, 3- and 4-byte, deduped).
+function nalPayloads(stream) {
+  const starts = [];
+  for (let i = 0; i + 3 < stream.length; i++) {
+    if (stream[i] !== 0 || stream[i + 1] !== 0) continue;
+    let s = null;
+    if (stream[i + 2] === 1) s = i + 3;
+    else if (stream[i + 2] === 0 && stream[i + 3] === 1) s = i + 4;
+    if (s !== null && starts[starts.length - 1] !== s) starts.push(s);
+  }
+  return starts.map((s, k) => stream.subarray(s, k + 1 < starts.length ? starts[k + 1] - 3 : stream.length));
+}
+
+test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensions", async (t) => {
+  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { execFileSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fsSync = await import("node:fs");
+  const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-scale-"));
+  // The same nominal viewport at 1× (320×240 screencast frames) and at a
+  // viewer-requested 2× (640×480 device-pixel captures) — the dimension flip
+  // a HiDPI resize causes on the wire. In scaled mode the delivered frames
+  // come from captureScreenshot (the cast is only the damage tick), so the
+  // 2× pixels ride the screenshot fake.
+  for (const size of ["320x240", "640x480"]) {
+    execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
+      "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", `testsrc=size=${size}:rate=10`,
+      "-frames:v", "10", "-q:v", "5", path.join(dir, `${size}-f%02d.jpg`),
+    ]);
+  }
+  const framesAt = (size) => fsSync.readdirSync(dir).filter((f) => f.startsWith(`${size}-`)).sort()
+    .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
+  const small = framesAt("320x240");
+  const big = framesAt("640x480");
+
+  const { state, server } = await startServer(
+    {
+      // The stream server owns all the scale bookkeeping under test; the
+      // override lifecycle has its own fake-CDP coverage.
+      resize: async (w, h) => ({ width: w, height: h }),
+    },
+    { screenshot: big[0] },
+  );
+  const c = await connectStream(server.port, server.token, "&codec=h264");
+  await c.nextJson(); // status (codec h264)
+  await sleep(150); // screencast + encoder spawn settle
+  let n = 0;
+  const feeder = setInterval(() => {
+    state.session.emitFrame(small[n++ % small.length]);
+  }, 50);
+  try {
+    // Phase 1: the 1× stream flows.
+    let bytes = 0;
+    const warmup = Date.now() + 8000;
+    while (Date.now() < warmup && bytes < 500) {
+      const m = await c.next(3000);
+      if (m.opcode !== 0x2) continue;
+      const { header, payload } = decodeFrameBinary(m.payload);
+      if (header.codec === "h264") bytes += payload.length;
+    }
+    assert.ok(bytes >= 500, `1× h264 flowed before the resize (got ${bytes} bytes)`);
+
+    // Phase 2: the viewer asks for the HiDPI stream; the delivered source
+    // flips to device-pixel captures (the cast keeps ticking at CSS size as
+    // the damage detector). Everything after the `resized` broadcast must
+    // decode from scratch: fresh SPS/PPS + IDR, and the fresh SPS must code
+    // the SCALED dimensions.
+    c.sendJson({ type: "resize", width: 320, height: 240, scale: 2 });
+    let resized = false;
+    const post = [];
+    let dims = null;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && !dims) {
+      const m = await c.next(3000);
+      if (m.opcode === 0x1) {
+        const msg = JSON.parse(m.payload.toString("utf8"));
+        if (msg.resized) {
+          assert.equal(msg.resized.scale, 2);
+          resized = true;
+        }
+        continue;
+      }
+      if (m.opcode !== 0x2 || !resized) continue;
+      const { header, payload } = decodeFrameBinary(m.payload);
+      if (header.codec !== "h264") continue;
+      // EVERY post-resize h264 envelope must carry CSS geometry: the fake
+      // cast reports 640×480 (device-pixel-shaped) metadata, and the h264
+      // envelope builder used to pass it through raw — doubling scaled
+      // viewers' tap coordinates.
+      assert.equal(header.metadata.deviceWidth, 320, "h264 envelope metadata is CSS width");
+      assert.equal(header.metadata.deviceHeight, 240, "h264 envelope metadata is CSS height");
+      post.push(payload);
+      const stream = Buffer.concat(post);
+      const nals = nalPayloads(stream);
+      const sps = nals.find((nl) => (nl[0] & 0x1f) === 7);
+      if (!sps) continue;
+      // Decoder-priming order across the respawn, like on a join.
+      const order = nalTypesInOrder(stream);
+      const firstSlice = order.find((x) => x === 1 || x === 5);
+      assert.equal(firstSlice, 5, `post-resize stream leads with an IDR (got ${order.join(",")})`);
+      assert.ok(order.indexOf(7) < order.indexOf(5), "SPS precedes the IDR");
+      assert.ok(order.indexOf(8) < order.indexOf(5), "PPS precedes the IDR");
+      dims = spsDimensions(sps);
+    }
+    assert.ok(dims, "a fresh SPS arrived after the scaled resize");
+    assert.deepEqual(dims, { width: 640, height: 480 }, "the fresh SPS codes viewport × scale");
+  } finally {
+    clearInterval(feeder);
+  }
+  c.close();
+  server.close();
+  fsSync.rmSync(dir, { recursive: true, force: true });
+});
