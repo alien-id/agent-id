@@ -969,6 +969,12 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
       if (m.opcode !== 0x2 || !resized) continue;
       const { header, payload } = decodeFrameBinary(m.payload);
       if (header.codec !== "h264") continue;
+      // EVERY post-resize h264 envelope must carry CSS geometry: the fake
+      // cast reports 640×480 (device-pixel-shaped) metadata, and the h264
+      // envelope builder used to pass it through raw — doubling scaled
+      // viewers' tap coordinates.
+      assert.equal(header.metadata.deviceWidth, 320, "h264 envelope metadata is CSS width");
+      assert.equal(header.metadata.deviceHeight, 240, "h264 envelope metadata is CSS height");
       post.push(payload);
       const stream = Buffer.concat(post);
       const nals = nalPayloads(stream);

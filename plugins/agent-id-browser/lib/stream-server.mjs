@@ -600,10 +600,18 @@ export async function startStreamServer(
     let msg = null;
     for (const client of clients) {
       if (client.codec !== "h264") continue;
+      // Same metadata rule as deliverFrame: EVERY envelope builder must ship
+      // CSS geometry at scale — this one stamped raw cast metadata (device
+      // pixels while scaled), doubling h264 viewers' tap coordinates.
       msg ??= wsFrame(
         0x2,
         encodeFrameBinary(
-          { type: "frame", seq: ++frameSeq, codec: "h264", metadata: lastMetadata },
+          {
+            type: "frame",
+            seq: ++frameSeq,
+            codec: "h264",
+            metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
+          },
           chunk,
         ),
       );

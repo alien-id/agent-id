@@ -26,8 +26,13 @@ import fs from "node:fs/promises";
 import { once } from "node:events";
 
 import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
-import { startStreamServer, makeFrameParser } from "../plugins/agent-id-browser/lib/stream-server.mjs";
+import {
+  startStreamServer,
+  makeFrameParser,
+  decodeFrameBinary,
+} from "../plugins/agent-id-browser/lib/stream-server.mjs";
 import { chromeCompensatedBounds } from "../plugins/agent-id-browser/lib/session-server.mjs";
+import { detectH264Encoder } from "../plugins/agent-id-browser/lib/stream-encoder.mjs";
 
 const patchrightAvailable = !!resolvePatchright();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -101,12 +106,12 @@ function maskedTextFrame(payload) {
   return Buffer.concat([header, mask, masked]);
 }
 
-async function connectStream(port, token) {
+async function connectStream(port, token, params = "") {
   const sock = net.connect(port, "127.0.0.1");
   await once(sock, "connect");
   const key = crypto.randomBytes(16).toString("base64");
   sock.write(
-    `GET /?token=${token} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n` +
+    `GET /?token=${token}${params} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n` +
       `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
   );
   const queue = [];
@@ -132,12 +137,15 @@ async function connectStream(port, token) {
   });
   return {
     send: (obj) => sock.write(maskedTextFrame(JSON.stringify(obj))),
-    async next(timeoutMs = 5000) {
-      if (queue.length) return JSON.parse(queue.shift().payload.toString("utf8"));
-      const frame = await new Promise((resolve, reject) => {
+    async nextRaw(timeoutMs = 5000) {
+      if (queue.length) return queue.shift();
+      return new Promise((resolve, reject) => {
         const t = setTimeout(() => reject(new Error("timed out waiting for a ws message")), timeoutMs);
         waiters.push((m) => { clearTimeout(t); resolve(m); });
       });
+    },
+    async next(timeoutMs = 5000) {
+      const frame = await this.nextRaw(timeoutMs);
       return JSON.parse(frame.payload.toString("utf8"));
     },
     async nextStatus(timeoutMs = 10000) {
@@ -199,9 +207,13 @@ test(
       const pageA = ctx.pages()[0] || (await ctx.newPage());
       await pageA.goto(ANIMATED);
       const state = { current: pageA, ctx, invalidateRefs() {} };
+      // h264 is offered when this machine has a usable encoder, so the
+      // binary-envelope delivery path can be pinned at scale too.
+      const encoder = await detectH264Encoder();
       stream = await startStreamServer(state, {
         log: () => {},
         resize: (w, h) => resizeToViewport(ctx, state, w, h),
+        ...(encoder ? { h264Config: { ffmpegPath: process.env.AGENT_ID_FFMPEG || null, encoder } } : {}),
       });
       client = await connectStream(stream.port, stream.token);
       await client.next(); // greeting
@@ -244,6 +256,32 @@ test(
       const motion = await collectFrames(client, { want: 4, dims: scaled });
       assertStableAfterSwitch(motion, scaled, "scale-2 motion");
       cssOf(motion, scaled);
+
+      // ── h264 delivery at scale: every binary envelope carries CSS px ─────
+      // The h264 path builds its own frame envelopes; a probe caught it
+      // shipping device-pixel metadata (780×1688) on every chunk while the
+      // jpeg path was already normalized. Self-skips with no encoder.
+      if (encoder) {
+        const h264 = await connectStream(stream.port, stream.token, "&codec=h264");
+        let h264Frames = 0;
+        const h264Deadline = Date.now() + 15000;
+        while (h264Frames < 10 && Date.now() < h264Deadline) {
+          let m;
+          try {
+            m = await h264.nextRaw(Math.max(100, h264Deadline - Date.now()));
+          } catch {
+            break;
+          }
+          if (m.opcode !== 0x2) continue; // join/status text frames
+          const { header } = decodeFrameBinary(m.payload);
+          if (header.codec !== "h264") continue;
+          assert.equal(header.metadata.deviceWidth, 390, "h264 envelope metadata is CSS width");
+          assert.equal(header.metadata.deviceHeight, 844, "h264 envelope metadata is CSS height");
+          h264Frames++;
+        }
+        assert.ok(h264Frames >= 10, `h264 chunks flowed at scale (got ${h264Frames})`);
+        h264.close();
+      }
 
       // Quiet page → the refinement path must produce the SAME dimensions.
       await pageA.goto(STATIC);
