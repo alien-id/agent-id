@@ -222,10 +222,12 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
   proc.stderr.on("data", (d) => {
     stderrTail = (stderrTail + d.toString()).slice(-2048);
   });
-  if (!rtp) proc.stdout.on("data", (chunk) => onChunk?.(chunk));
+  const onStdout = rtp ? null : (chunk) => onChunk?.(chunk);
+  if (onStdout) proc.stdout.on("data", onStdout);
 
   let writable = true;
   let alive = true;
+  let closed = false;
   proc.stdin.on("drain", () => (writable = true));
   proc.stdin.on("error", () => {}); // EPIPE on teardown races
   proc.once("close", (code) => {
@@ -242,7 +244,13 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
       return true;
     },
     close() {
+      if (closed) return;
+      closed = true;
       alive = false;
+      // Detach before the kill: whatever is already in the pipe is still
+      // delivered after it, and a replaced encoder's tail must never reach the
+      // sink its replacement writes to (it references the old parameter sets).
+      if (onStdout) proc.stdout.off("data", onStdout);
       try { proc.stdin.destroy(); } catch { /* already gone */ }
       try { proc.kill("SIGKILL"); } catch { /* already dead */ }
     },
