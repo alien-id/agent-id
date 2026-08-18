@@ -1,5 +1,40 @@
 # @alien-id/agent-id-browser
 
+## 7.12.1
+
+### Patch Changes
+
+- [#114](https://github.com/alien-id/agent-id/pull/114) [`3624267`](https://github.com/alien-id/agent-id/commit/36242673c91cee8e4e5970cf1c173536262879d5) Thanks [@sbelan-eti](https://github.com/sbelan-eti)! - Stop a closed H.264 encoder from writing into the next one's stream
+
+  Closing an encoder destroyed its stdin and killed the process, but left the
+  listener on its stdout attached — and neither of those stops delivery: what the
+  kernel pipe already holds is still read out and handed to the caller after
+  close returned (measured: ~17 KB in 9 chunks). Because an encoder is replaced by
+  closing the old one and spawning a new one onto the same viewer sink, that tail
+  was written to live viewers interleaved into the replacement's output, carrying
+  slices that reference the previous encoder's parameter sets — which a decoder
+  can only fail on. A replacement happens on every viewer join, retarget, resume
+  and watchdog restart, so a viewport could go black right after reconnecting.
+
+  Closing now detaches the output listener before killing the process, so a closed
+  encoder delivers nothing, and repeated closes are a no-op.
+
+- [#113](https://github.com/alien-id/agent-id/pull/113) [`2717f94`](https://github.com/alien-id/agent-id/commit/2717f94956b206282abd335ae148dede68e322d0) Thanks [@sbelan-eti](https://github.com/sbelan-eti)! - Stream H.264 one access unit per WebSocket message
+
+  The viewport stream forwarded each encoder stdout chunk verbatim. A pipe read
+  is capped at 64 KiB, so any access unit above that was split across messages
+  and every message after the first carried no start code at all — a viewer that
+  parses one access unit per message could only discard it. Because the keyframe
+  is the largest access unit in the stream, it was the one most likely to be
+  split, so a viewer waiting for a keyframe never got a usable one: on content
+  that produces large frames the viewport froze or went black, while a static
+  page looked fine.
+
+  The stream is now framed on access unit delimiters and each unit is sent whole,
+  however large. A unit is known-complete when the next one's delimiter arrives;
+  when the encoder goes quiet, a 50 ms idle timer releases the last one, so an
+  idle page still updates promptly.
+
 ## 7.12.0
 
 ### Minor Changes
