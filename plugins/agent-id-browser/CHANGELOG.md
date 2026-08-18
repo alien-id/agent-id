@@ -1,5 +1,79 @@
 # @alien-id/agent-id-browser
 
+## 7.12.0
+
+### Minor Changes
+
+- [#97](https://github.com/alien-id/agent-id/pull/97) [`22b7e61`](https://github.com/alien-id/agent-id/commit/22b7e616ff6887c00aef5cc1cba161dff953e987) Thanks [@TemMax](https://github.com/TemMax)! - `AGENT_ID_FFMPEG` now counts as codec provisioning: `loadCodecConfig` falls back to probing the env override when no `browser-codecs.json` record exists, so an immutable container image (which cannot pre-write per-tenant state) provisions H.264 by baking ffmpeg and setting the env var. `codec=auto` resolves to h264 and `strict=1` handshakes succeed on such hosts; a broken override degrades to unprovisioned exactly like a stale record, and nothing is probed on a host that set neither.
+
+- [#110](https://github.com/alien-id/agent-id/pull/110) [`0ce7c5d`](https://github.com/alien-id/agent-id/commit/0ce7c5db1f5cd0e5a35d4f2e660321261432b25f) Thanks [@sbelan-eti](https://github.com/sbelan-eti)! - The viewport stream's `resize` message takes an optional `scale` (1–3, default
+  1), so a viewer on a high-density screen can ask for a HiDPI capture instead of
+  a 1× stream upscaled on the device. A scaled session applies
+  `Emulation.setDeviceMetricsOverride` with that `deviceScaleFactor` (`mobile:
+false` — no touch capability, no mobile UA), and the capture path switches from
+  screencast to coalesced `captureScreenshot` calls: the screencast's `maxWidth`/
+  `maxHeight` are caps, not upsampling requests, so it can never deliver more than
+  1×, while a screenshot under the override already does. Motion and refinement
+  frames therefore come from the same call and are dimension-identical by
+  construction, which the encoder requires — a dimension flip between them
+  respawns it. Frame metadata stays CSS pixels at every scale, so viewer input
+  mapping is unchanged.
+
+  The override rides the long-lived capture session (overrides die with the
+  session that set them) and is re-applied per target on retarget, so a new tab
+  inherits the scale and the old one reverts. Scale is clamped, rounded to an
+  integer at every CDP boundary, and budgeted against per-axis and total-pixel
+  limits — an over-budget request is served at the largest scale that fits, and
+  the achieved geometry is broadcast in the `resized` status. Omitting `scale`, or
+  sending it to a build without support, behaves exactly as before.
+
+- [#101](https://github.com/alien-id/agent-id/pull/101) [`50462d6`](https://github.com/alien-id/agent-id/commit/50462d61bc9f0543191a857a1a5333febbc11f27) Thanks [@TemMax](https://github.com/TemMax)! - Driven sessions now report WebAuthn as unsupported ([#99](https://github.com/alien-id/agent-id/issues/99)). The driven browser
+  has no authenticator, so a passkey ceremony could only hang — and while one is
+  pending, the page's own fallback links ("Try another way") are inert, so a
+  sign-in against a passkey-enrolled account dead-ended. An init script now
+  removes the WebAuthn interface globals (`PublicKeyCredential` and its response
+  types) before any page script runs (sites feature-detect them and offer their
+  password/OTP path up front, exactly as for a legacy browser) and rejects any
+  `publicKey` get/create issued anyway with an immediate `NotAllowedError` — the
+  cancellation outcome every WebAuthn call site already handles. The override is
+  a Proxy over the native function, so `credentials.get.toString()` still reports
+  `[native code]` and the JS surface stays byte-for-byte native. Non-publicKey
+  credential calls pass through untouched.
+  Headed `login` keeps WebAuthn native (the owner's real Chrome may hold a
+  platform authenticator), and `AGENT_ID_BROWSER_KEEP_WEBAUTHN=1` restores
+  native WebAuthn in driven sessions for the rare passkey-only site.
+
+### Patch Changes
+
+- [#102](https://github.com/alien-id/agent-id/pull/102) [`12464fa`](https://github.com/alien-id/agent-id/commit/12464faf3a1e4e830b60c7315ca361add6aee22f) Thanks [@TemMax](https://github.com/TemMax)! - The viewport stream now reports the page's input-focus state: while a viewer
+  is attached, a poller (250 ms, isolated-world evaluate — no Runtime domain,
+  no page-visible side effects, CSP-immune) walks the page's frames for a
+  focused editable element and broadcasts `input_focus {editable, type?,
+inputmode?}` status messages, deduped, suppressed during credential-fill
+  blackouts, and snapshotted into the join status so a late viewer learns an
+  already-focused field immediately. Viewers can auto-open their keyboard (and
+  pick a layout from type/inputmode) instead of relying on a manual toggle.
+  Covered by wire-contract tests and a local-only real-browser e2e
+  (tests/integration/browser-focus-e2e.mjs) including an iframe fixture.
+
+- [#98](https://github.com/alien-id/agent-id/pull/98) [`1899e61`](https://github.com/alien-id/agent-id/commit/1899e61863e626a70a2920bfb78e17e04ad41cc7) Thanks [@TemMax](https://github.com/TemMax)! - Session liveness is now authenticated: `pruneDeadSessions` follows the pid
+  check with a one-line token handshake against the session's control port
+  (new `probeSession` helper). On hosts where the state dir outlives the
+  container, a leftover session file's pid and port are routinely recycled to
+  unrelated processes — the pid answer alone then calls a dead session alive,
+  while a listener that rejects the token proves the daemon is gone. No reply
+  within the budget keeps the file (a busy daemon answers late); files without
+  control coordinates keep the pid-only behavior.
+
+- [#100](https://github.com/alien-id/agent-id/pull/100) [`ca94f15`](https://github.com/alien-id/agent-id/commit/ca94f1534fcf495b274e5fef4f186bff0849dfac) Thanks [@TemMax](https://github.com/TemMax)! - Viewport stream quality: screencast motion frames go out at JPEG quality 80
+  (was 55 — visible ringing around text that the H.264 stage then spent bits
+  reproducing), and the libx264 path encodes at veryfast/CRF 20 with a 4M/8M
+  rate cap instead of ultrafast with defaults (~2x quality per bit, latency
+  unchanged). The openh264 fallback's bitrate rises to 4000k/6000k for parity.
+  Profile stays constrained-baseline — the WebCodecs viewer and the WebRTC path
+  pin avc1.42E01F. Traffic is roughly unchanged: the pipeline is change-driven,
+  and CRF only spends bits while the picture moves.
+
 ## 7.11.0
 
 ### Minor Changes
