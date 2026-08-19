@@ -85,6 +85,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 
 import { createH264Encoder } from "./stream-encoder.mjs";
+import { createHopCounters, startCounterTicker } from "./stream-counters.mjs";
 
 const WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const RETARGET_POLL_MS = 500;
@@ -119,6 +120,23 @@ const REFINE_QUALITY = envInt("AGENT_ID_STREAM_REFINE_QUALITY", 90, 0, 100);
 // far cheaper than a viewer staring at a frozen picture.
 const WATCHDOG_MS = envInt("AGENT_ID_STREAM_WATCHDOG_MS", 15000, 0, 600000);
 const BIND_HOST = process.env.AGENT_ID_STREAM_BIND || "127.0.0.1";
+// Per-second counter rows (stream-counters.mjs). On by default — a freeze is
+// diagnosed from the rows it produces, and a host that cannot carry two lines
+// per second per session turns them off rather than losing the diagnostic by
+// default everywhere.
+const COUNTERS = process.env.AGENT_ID_STREAM_COUNTERS !== "0";
+
+// Decoded size of a base64 payload without decoding it: the counters want the
+// byte count of every frame and a Buffer.from per frame would cost more than
+// the measurement is worth.
+function b64Bytes(s) {
+  const n = typeof s === "string" ? s.length : 0;
+  if (n === 0) return 0;
+  let pad = 0;
+  if (s.charCodeAt(n - 1) === 61) pad++;
+  if (s.charCodeAt(n - 2) === 61) pad++;
+  return Math.floor((n * 3) / 4) - pad;
+}
 
 // ── WS wire helpers (server side: outgoing unmasked, incoming masked) ────────
 
@@ -374,6 +392,20 @@ export async function startStreamServer(
 ) {
   const token = crypto.randomBytes(24).toString("hex");
   const clients = new Set();
+  // TWO rows, because the two stages fail differently and the split is the
+  // whole diagnostic: capture healthy with encode at zero means the encoder is
+  // holding the picture, both at zero means the page stopped painting. One
+  // merged row cannot express that.
+  const cap = createHopCounters("daemon.capture");
+  const enc = createHopCounters("daemon.h264", { nal: true });
+  // The `stream: ` prefix is load-bearing — the relay that mirrors these lines
+  // drops anything without it.
+  const counters = COUNTERS
+    ? startCounterTicker({
+        rows: [cap, enc],
+        emit: (line) => log(`stream: counters ${JSON.stringify(line)}`),
+      })
+    : null;
   let cdp = null; // active CDPSession for the screencast
   let cdpPage = null;
   let suspended = 0; // depth-counted: nested fills keep it suspended
@@ -598,10 +630,30 @@ export async function startStreamServer(
 
   function deliverFrame({ data, metadata, refinement = false }) {
     const frame = { seq: ++frameSeq, data, metadata, refinement };
+    cap.out(b64Bytes(data));
     for (const client of clients) {
       if (client.codec !== "jpeg") continue;
+      // Replacing an undelivered frame is the latest-wins behaviour working as
+      // designed, but it is still a frame that viewer never saw — and until
+      // now it vanished without a number anywhere.
+      if (client.pending) cap.lost("pending_overwrite");
       client.pending = frame;
       pump(client);
+    }
+  }
+
+  // The one place encoder input is offered, so every attempt is counted once.
+  // Only the shared Annex-B encoder counts: the RTP sinks are a separate path
+  // and would double this stage's input. `copies` is the refinement's flush
+  // trick (see the refine timer) — two genuine writes, so two attempts.
+  function feedEncoders(jpeg, copies = 1) {
+    for (const sink of encoderSinks) {
+      for (let i = 0; i < copies; i++) {
+        const ok = sink.write(jpeg);
+        if (sink !== annexB) continue;
+        enc.in(jpeg.length);
+        if (!ok) enc.lost("encoder_input");
+      }
     }
   }
 
@@ -609,25 +661,39 @@ export async function startStreamServer(
   // splits a unit larger than 64 KiB across chunks, and the tail carries no
   // start code, so a viewer parsing one unit per message would discard it
   // (h264-framer.mjs does the framing).
-  function sendAccessUnit(au) {
+  function sendAccessUnit(au, info) {
     let msg = null;
     for (const client of clients) {
       if (client.codec !== "h264") continue;
-      // Same metadata rule as deliverFrame: EVERY envelope builder must ship
-      // CSS geometry at scale — this one stamped raw cast metadata (device
-      // pixels while scaled), doubling h264 viewers' tap coordinates.
-      msg ??= wsFrame(
-        0x2,
-        encodeFrameBinary(
-          {
-            type: "frame",
-            seq: ++h264Seq,
-            codec: "h264",
-            metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
-          },
-          au,
-        ),
-      );
+      if (!msg) {
+        const seq = ++h264Seq;
+        // Counted here rather than per client: one unit numbered once is what
+        // the next stage receives, so this is the number its own `fi` is
+        // compared against.
+        enc.out(au.length);
+        enc.note(seq);
+        if (info?.idr) enc.idr++;
+        if (info?.sps) enc.sps++;
+        if (info?.pps) enc.pps++;
+        // A unit carrying no NAL at all is a payload this stage could not
+        // parse — the framer flushed a buffer that never held a start code.
+        if (info && info.nals.length === 0) enc.perr++;
+        // Same metadata rule as deliverFrame: EVERY envelope builder must ship
+        // CSS geometry at scale — this one stamped raw cast metadata (device
+        // pixels while scaled), doubling h264 viewers' tap coordinates.
+        msg = wsFrame(
+          0x2,
+          encodeFrameBinary(
+            {
+              type: "frame",
+              seq,
+              codec: "h264",
+              metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
+            },
+            au,
+          ),
+        );
+      }
       client.sock.write(msg);
       // A temporally-dependent stream can't drop access units; a viewer that
       // can't keep up is cut instead of buffering without bound. It reconnects
@@ -637,6 +703,7 @@ export async function startStreamServer(
       // so only a genuinely stalled socket trips it.
       if (client.sock.writableLength > H264_MAX_BUFFERED) {
         log("stream: h264 viewer too slow — disconnecting");
+        enc.lost("viewer_slow");
         client.sock.destroy();
       }
     }
@@ -662,13 +729,14 @@ export async function startStreamServer(
     }
     if (annexB) return;
     try {
-      const enc = await createH264Encoder({
+      const encoder = await createH264Encoder({
         onChunk: sendAccessUnit,
+        onResync: () => enc.perr++,
         log,
         ffmpegPath: h264Config?.ffmpegPath ?? null,
         onExit: () => {
-          if (annexB !== enc) return; // already replaced/closed deliberately
-          encoderSinks.delete(enc);
+          if (annexB !== encoder) return; // already replaced/closed deliberately
+          encoderSinks.delete(encoder);
           annexB = null;
           // Died mid-stream (e.g. a viewport resize changed the input frame
           // size). Rate-limited restart resumes the feed for h264 viewers.
@@ -677,8 +745,8 @@ export async function startStreamServer(
           }, 500).unref?.();
         },
       });
-      annexB = enc;
-      encoderSinks.add(enc);
+      annexB = encoder;
+      encoderSinks.add(encoder);
       // Prime a fresh encoder on a static page: the screencast is damage-
       // driven, so without this an h264 viewer joining a quiet page decodes
       // nothing (black) until the next repaint. Arming the refinement pass
@@ -761,10 +829,7 @@ export async function startStreamServer(
         const shot = await captureShot(session, STREAM_QUALITY);
         if (closed || suspended > 0 || session !== cdp) return;
         deliverFrame({ data: shot.data, metadata: scaledMetadata() });
-        if (encoderSinks.size > 0) {
-          const jpeg = Buffer.from(shot.data, "base64");
-          for (const sink of encoderSinks) sink.write(jpeg);
-        }
+        if (encoderSinks.size > 0) feedEncoders(Buffer.from(shot.data, "base64"));
       }
     } catch {
       /* navigating/detached — the next damage tick retries */
@@ -868,6 +933,7 @@ export async function startStreamServer(
     session.on("Page.screencastFrame", (ev) => {
       // Ack ALWAYS (even suspended/stale) or Chrome stops sending frames.
       session.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+      cap.in(b64Bytes(ev.data));
       if (suspended > 0 || session !== cdp) return;
       lastFrameAt = Date.now();
       lastMetadata = ev.metadata;
@@ -881,10 +947,7 @@ export async function startStreamServer(
         return;
       }
       deliverFrame({ data: ev.data, metadata: ev.metadata });
-      if (encoderSinks.size > 0) {
-        const jpeg = Buffer.from(ev.data, "base64");
-        for (const sink of encoderSinks) sink.write(jpeg);
-      }
+      if (encoderSinks.size > 0) feedEncoders(Buffer.from(ev.data, "base64"));
     });
     // A scaled session's device-metrics override lives on THIS session, so
     // it spans exactly the life of the capture: a retarget applies it to the
@@ -964,6 +1027,9 @@ export async function startStreamServer(
       // motion frames in every mode — the encoders choke on dimension flips.
       const shot = await captureShot(session, REFINE_QUALITY);
       if (closed || suspended > 0 || session !== cdp) return;
+      // The capture stage's SECOND frame source. Counted as input like a cast
+      // frame or `fo` would exceed `fi` every time the page went quiet.
+      cap.in(b64Bytes(shot.data));
       deliverFrame({
         data: shot.data,
         metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
@@ -975,13 +1041,7 @@ export async function startStreamServer(
       // arrives, so a single write would sit in ffmpeg's parser until the
       // next repaint. Copy #1 flushes whatever was stuck AND gets encoded
       // (flushed by copy #2); the stuck copy #2 is identical, so no loss.
-      if (encoderSinks.size > 0) {
-        const jpeg = Buffer.from(shot.data, "base64");
-        for (const sink of encoderSinks) {
-          sink.write(jpeg);
-          sink.write(jpeg);
-        }
-      }
+      if (encoderSinks.size > 0) feedEncoders(Buffer.from(shot.data, "base64"), 2);
     } catch { /* navigating/closed — the next screencast frame rearms */ }
   }, REFINE_POLL_MS);
   refine.unref?.();
@@ -1290,6 +1350,7 @@ export async function startStreamServer(
     },
     close() {
       stopFocusPoller();
+      counters?.stop();
       closed = true;
       clearInterval(retarget);
       clearInterval(watchdog);

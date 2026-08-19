@@ -15,7 +15,9 @@
 //
 // Backpressure: write() drops the frame when ffmpeg's stdin is saturated.
 // Dropping INPUT frames is safe (the encoder just sees a lower fps) — it is
-// the output that must never gap mid-GOP.
+// the output that must never gap mid-GOP. Saturation is sticky until stdin
+// drains, so what it costs is a RUN of frames rather than one, and the caller
+// only sees that by counting every refused write.
 
 import { spawn, execFile } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -184,12 +186,21 @@ function codecArgs(encoder) {
 /**
  * Spawn an encoder. `onChunk(Buffer)` receives Annex-B output, one complete
  * access unit per call (see h264-framer.mjs: stdout chunks are not unit
- * boundaries); pass `rtp: {port, payloadType, ssrc}` instead to emit RTP to
- * loopback UDP (onChunk unused). Returns { write(jpegBuffer) → bool,
- * close() }; calls `onExit()` once when the process dies for any reason.
- * Throws when ffmpeg or an H.264 encoder is unavailable.
+ * boundaries), with a {idr, sps, pps, sei, nals} descriptor of that unit as a
+ * second argument; pass `rtp: {port, payloadType, ssrc}` instead to emit RTP
+ * to loopback UDP (onChunk unused). `onResync()` fires when the framer drops
+ * an undelimited buffer. Returns { write(jpegBuffer) → bool, close() };
+ * calls `onExit()` once when the process dies for any reason. Throws when
+ * ffmpeg or an H.264 encoder is unavailable.
  */
-export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp = null, ffmpegPath = null }) {
+export async function createH264Encoder({
+  onChunk,
+  onExit,
+  onResync = () => {},
+  log = () => {},
+  rtp = null,
+  ffmpegPath = null,
+}) {
   const ffmpeg = ffmpegPath || FFMPEG();
   const encoder = await detectH264Encoder(ffmpeg);
   if (!encoder) throw new Error("ffmpeg with libx264/libopenh264 not found");
@@ -230,7 +241,7 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
   });
   const framer = rtp
     ? null
-    : createAccessUnitFramer({ onAccessUnit: (au) => onChunk?.(au), log });
+    : createAccessUnitFramer({ onAccessUnit: (au, info) => onChunk?.(au, info), onResync, log });
   const onStdout = framer ? (chunk) => framer.push(chunk) : null;
   if (onStdout) proc.stdout.on("data", onStdout);
 
@@ -249,6 +260,8 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
   return {
     encoder,
     write(jpeg) {
+      // False stays false until stdin drains, so a saturated encoder refuses a
+      // RUN of frames — every one of them a frame the viewer never sees.
       if (!alive || !writable) return false; // drop the frame — input-side only
       writable = proc.stdin.write(jpeg);
       return true;
