@@ -32,6 +32,8 @@
 //                     {"type":"resize","width":W,"height":H[,"scale":S]}
 //                     {"type":"webrtc_offer"|"webrtc_ice", ...}  (experimental)
 //
+// `seq` counts per codec, so each viewer sees its own stream contiguous.
+//
 // Delivery is latest-frame-wins: each JPEG client has ONE pending slot that
 // newer frames overwrite whenever the client is slower than the feed (socket
 // backpressure, outstanding ack, fps cap), so a viewer always resumes at live
@@ -376,7 +378,12 @@ export async function startStreamServer(
   let cdpPage = null;
   let suspended = 0; // depth-counted: nested fills keep it suspended
   let closed = false;
+  // Per-codec sequences: a client consumes exactly one codec, and each
+  // codec's subscribers must see their own stream contiguous. A shared
+  // counter made every jpeg delivery punch a hole in the h264 sequence,
+  // which viewers read as frame loss.
   let frameSeq = 0;
+  let h264Seq = 0;
   let lastFrameAt = 0;
   let lastMetadata = null;
   let refined = true; // no refinement until at least one screencast frame
@@ -614,7 +621,7 @@ export async function startStreamServer(
         encodeFrameBinary(
           {
             type: "frame",
-            seq: ++frameSeq,
+            seq: ++h264Seq,
             codec: "h264",
             metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
           },
