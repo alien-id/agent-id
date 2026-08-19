@@ -345,18 +345,27 @@ test("the tick is wall-clock aligned and win_ms reports the real window", async 
   const now = Date.now();
   await sleep(((1500 - (now % 1000)) % 1000) || 1000);
   const { server, sink } = await startServer();
-  await sleep(3300);
+  await sleep(4300);
   server.close();
 
   const rows = sink.rows.filter((r) => r.line.hop === "daemon.capture");
-  assert.ok(rows.length >= 3, `collected ticks (got ${rows.length})`);
+  assert.ok(rows.length >= 4, `collected ticks (got ${rows.length})`);
   assertContract(sink.lines());
 
-  for (const r of rows) {
-    // The window [t, t+1) closed at its own boundary, not at an arbitrary
-    // offset carried over from whenever the server happened to start.
-    const skew = r.at - (r.line.t + 1) * 1000;
-    assert.ok(skew >= 0 && skew < 250, `tick landed ${skew}ms past the second boundary`);
+  // Each window closed at its own boundary, never before it: `t` is the join
+  // key, and a window stamped with the previous second lines up with nothing.
+  const skews = rows.map((r) => r.at - (r.line.t + 1) * 1000);
+  for (const skew of skews) assert.ok(skew >= 0, `tick closed ${-skew}ms EARLY`);
+  // Lateness is a property of the machine, not of the emitter — the contract
+  // wants a late tick visible rather than suppressed — so the alignment claim
+  // rests on the punctual ticks. An interval started at connection time would
+  // sit ~500ms out on every one of them, having started there.
+  assert.ok(
+    Math.min(...skews) < 250,
+    `aligned to the wall clock, not to the connection (skews ${skews.join(",")}ms)`,
+  );
+  for (let i = 1; i < rows.length; i++) {
+    assert.equal(rows[i].line.t - rows[i - 1].line.t, 1, "one window per second, no holes");
   }
   // The first window is the short one: it began mid-second, and win_ms says so
   // rather than claiming a nominal 1000.
@@ -605,7 +614,33 @@ test("the ticker aligns to the wall clock without a server attached", async () =
   await sleep(1200);
   assert.equal(seen.length, before, "stop() ends the tick");
   assert.ok(before >= 2, `ticked once a second (got ${before})`);
-  for (const r of seen) assert.ok(r.at - (r.line.t + 1) * 1000 < 250, "aligned to the second");
+  const skews = seen.map((r) => r.at - (r.line.t + 1) * 1000);
+  for (const skew of skews) assert.ok(skew >= 0, `tick closed ${-skew}ms EARLY`);
+  assert.ok(Math.min(...skews) < 250, `aligned to the second (skews ${skews.join(",")}ms)`);
+});
+
+test("a timer firing early does not close the window on the wrong second", async () => {
+  // Caught in CI: setTimeout came back 1ms short of the boundary. Closing
+  // there stamps `t` with the PREVIOUS second — a line nothing else joins on —
+  // and leaves a 1ms remainder as the next window. Driven off an injected
+  // clock so it is the guard being tested, not the host's timer accuracy.
+  const base = Math.floor(Date.now() / 1000) * 1000;
+  let clock = base + 500;
+  const rows = [createHopCounters("daemon.capture", { local: ["refine"] })];
+  const seen = [];
+  const ticker = startCounterTicker({ rows, emit: (l) => seen.push(l), now: () => clock });
+
+  clock = base + 999; // one millisecond short of the boundary it aimed at
+  await sleep(600);
+  assert.deepEqual(seen, [], "nothing closed before the boundary");
+  clock = base + 1000;
+  await sleep(80);
+  ticker.stop();
+
+  assert.equal(seen.length, 1, "the window closed once, at its boundary");
+  assert.equal(seen[0].t, base / 1000, "stamped with the second it began in");
+  assert.equal(seen[0].win_ms, 500, "and the partial first window is reported as it was");
+  assertContract(seen);
 });
 
 // ── NAL classification against the shared corpus ─────────────────────────────

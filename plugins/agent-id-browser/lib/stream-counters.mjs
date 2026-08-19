@@ -141,15 +141,26 @@ export function createHopCounters(hop, { nal = false, local = [] } = {}) {
 export function startCounterTicker({ rows, emit, now = () => Date.now() }) {
   let timer = null;
   let stopped = false;
+  let edge = 0; // the wall-clock ms this window is aimed at
 
   function schedule() {
     if (stopped) return;
-    timer = setTimeout(fire, Math.max(1, 1000 - (now() % 1000)));
+    const at = now();
+    // A tick so late that its boundary has passed skips to the next one rather
+    // than firing a burst to catch up; the long win_ms is what reports it.
+    if (edge <= at) edge = Math.floor(at / 1000) * 1000 + 1000;
+    timer = setTimeout(fire, Math.max(1, edge - at));
     timer.unref?.();
   }
 
   function fire() {
     const at = now();
+    // A timer may fire a millisecond EARLY. Closing there would stamp the
+    // window with the previous second — `t` is the join key, so that is a line
+    // nothing else lines up with — and leave a 1 ms remainder behind it. Wait
+    // out the rest of the second instead.
+    if (at < edge) return schedule();
+    edge += 1000;
     for (const c of rows) {
       // A freeze ENDS at an event, so that boundary is knowable to the
       // millisecond and is emitted out of band by onLeaveZero. A freeze BEGINS
