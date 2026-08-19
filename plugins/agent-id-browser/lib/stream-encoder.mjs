@@ -211,6 +211,9 @@ export async function createH264Encoder({ onChunk, onExit, log = () => {}, rtp =
       // 0 bytes out). Dimensions come from the first JPEG's SOF either way.
       "-analyzeduration", "0", "-probesize", "32",
       "-f", "mjpeg", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
+      // The demuxer's nominal 25 fps becomes a constant output rate, and a
+      // screencast repaints on no grid: measured 78 frames in, 2 encoded.
+      "-fps_mode", "passthrough",
       "-an", ...codecArgs(encoder), ...output,
     ],
     { stdio: ["pipe", rtp ? "ignore" : "pipe", "pipe"] },
