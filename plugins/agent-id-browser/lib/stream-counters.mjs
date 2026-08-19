@@ -21,15 +21,20 @@ const V = 1;
 /**
  * One stage's counters. `in`/`out`/`lost` are the per-frame surface; `note`
  * records an envelope sequence number; `close` renders and resets the window.
- * `nal` adds the H.264 fields (idr/sps/pps/perr) to the rendered line.
+ * `nal` adds the H.264 fields (idr/sps/pps/perr) to the rendered line. `local`
+ * names counters that mean something only at this stage; they ride in `x` and
+ * are reported every window including at zero, because a key that disappears
+ * when it reaches 0 cannot be told apart from an emitter that never had it.
  */
-export function createHopCounters(hop, { nal = false } = {}) {
+export function createHopCounters(hop, { nal = false, local = [] } = {}) {
+  const freshLocal = () => (local.length ? Object.fromEntries(local.map((k) => [k, 0])) : null);
   const total = { fi: 0, fo: 0, bi: 0, bo: 0, drop: 0, idr: 0, perr: 0 };
   const c = {
     hop,
     fi: 0, fo: 0, bi: 0, bo: 0, drop: 0,
     idr: 0, sps: 0, pps: 0, perr: 0,
     dr: null,
+    x: freshLocal(),
     seq: null,
     prevSeq: null,
     since: Date.now(),
@@ -96,6 +101,7 @@ export function createHopCounters(hop, { nal = false } = {}) {
       if (c.seq) line.seq = c.seq;
       line.zero = zero;
       if (edge) line.edge = edge;
+      const x = c.x;
       total.fi += c.fi;
       total.fo += c.fo;
       total.bi += c.bi;
@@ -110,9 +116,11 @@ export function createHopCounters(hop, { nal = false } = {}) {
         line.c.idr = total.idr;
         line.c.perr = total.perr;
       }
+      if (x) line.x = x;
       c.fi = c.fo = c.bi = c.bo = c.drop = 0;
       c.idr = c.sps = c.pps = c.perr = 0;
       c.dr = null;
+      c.x = freshLocal();
       c.seq = null;
       c.since = now;
       c.lastZero = zero;

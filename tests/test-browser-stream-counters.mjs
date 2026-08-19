@@ -49,6 +49,13 @@ process.env.AGENT_ID_STREAM_WATCHDOG_MS = "0";
 const { startStreamServer, makeFrameParser } = await import(
   "../plugins/agent-id-browser/lib/stream-server.mjs"
 );
+// One test needs the refinement pass ON. Both knobs are read at module load,
+// so a distinct specifier is the only way to read them twice in one process.
+process.env.AGENT_ID_STREAM_REFINE_QUALITY = "90";
+const { startStreamServer: startWithRefinement } = await import(
+  "../plugins/agent-id-browser/lib/stream-server.mjs?refinement=on"
+);
+process.env.AGENT_ID_STREAM_REFINE_QUALITY = "0";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -59,7 +66,7 @@ const SHA256 = {
   "stream.h264": "032180472dfa5ef158ae9d0cf8456478df706e073eec0125a4be4785eea4cc29",
   "manifest.json": "325287826525cf019d1e889d41456bd78dcfe6854cb61580bbfdac7540acefba",
   "chunks.json": "a869cf269def0da066743851b87ac6b06bd0418ed07dfb75d8a081f3de132ac8",
-  "counter-line.schema.json": "a3570c016e4eccca1cb0e3917271e844eb6816609b07f430ef36b33399a88fe4",
+  "counter-line.schema.json": "025d2cd1e25a0a4f2ddade961b7622bacb10349a0d3aa646557ba78ce35f635f",
 };
 
 const schema = JSON.parse(read("counter-line.schema.json"));
@@ -115,6 +122,14 @@ function assertContract(lines) {
       line.fi === 0 && line.fo === 0 && line.drop === 0,
       `zero agrees with the counters: ${JSON.stringify(line)}`,
     );
+    // x is hop-local, and the capture row reports x.refine every window
+    // including at zero: a key that vanishes when it reaches 0 cannot be told
+    // apart from an emitter that never had it.
+    if (line.hop === "daemon.capture") {
+      assert.ok(Number.isInteger(line.x?.refine), `x.refine is always reported: ${JSON.stringify(line)}`);
+    } else {
+      assert.equal(line.x, undefined, `x belongs to one stage only: ${JSON.stringify(line)}`);
+    }
   }
 }
 
@@ -289,6 +304,13 @@ test("the schema check rejects what it is supposed to reject", () => {
   assert.ok(validate(schema, { ...good, seq: { first: 1 } }).length, "incomplete seq");
   const { zero, ...noZero } = good;
   assert.ok(validate(schema, noZero).length, "missing required key");
+  assert.deepEqual(validate(schema, { ...good, x: { refine: 0 } }), [], "a hop-local counter at zero");
+  assert.ok(validate(schema, { ...good, x: {} }).length, "an empty x says nothing");
+  assert.ok(validate(schema, { ...good, x: { refine: -1 } }).length, "negative hop-local counter");
+  assert.ok(validate(schema, { ...good, x: { refine: "3" } }).length, "x is a counter channel, not payload");
+  // A stage may ship a counter before this schema names it, so an unknown key
+  // inside x is a reader concern, never a validation failure.
+  assert.deepEqual(validate(schema, { ...good, x: { not_yet_named: 3 } }), []);
 });
 
 // ── the four rules that are easy to get wrong ────────────────────────────────
@@ -512,6 +534,41 @@ test("the encode row reports what the framer found in each access unit", async (
   assertCumulative(lines, "daemon.h264");
 });
 
+test("x.refine counts the idle refinement passes that actually fired", async () => {
+  const jpeg = Buffer.from("refine-me").toString("base64");
+  const sink = collector();
+  const state = makeFakeState({ screenshot: jpeg });
+  const server = await startWithRefinement(state, { log: (m) => sink.log(m) });
+  const c = await connectStream(server.port, server.token, "&binary=1");
+  await c.nextJson();
+  await sleep(30);
+
+  const capture = () => sink.hop("daemon.capture");
+  const fired = () => capture().reduce((n, l) => n + l.x.refine, 0);
+  assert.equal(fired(), 0, "nothing to refine before the page has painted");
+
+  // One frame, then silence: the pass is armed by a screencast frame and fires
+  // once the page has been quiet past its threshold, then disarms itself.
+  state.session.emitFrame(jpeg);
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline && fired() === 0) await sleep(150);
+  await sleep(1200);
+  c.close();
+  server.close();
+
+  const lines = sink.lines();
+  assertContract(lines);
+  assert.equal(fired(), 1, "one screencast frame arms exactly one refinement pass");
+  // The pass is a frame source of its own, so it lands in fi as well as x —
+  // the cast frame plus the refinement capture, each delivered once.
+  assert.equal(capture().reduce((n, l) => n + l.fi, 0), 2, "cast frame and refinement capture");
+  assert.equal(capture().reduce((n, l) => n + l.fo, 0), 2);
+  // Reported at zero too, or a quiet window could not be told from a build
+  // that never had the counter.
+  assert.ok(capture().some((l) => l.zero && l.x.refine === 0), "reported while idle");
+  assertCumulative(lines, "daemon.capture");
+});
+
 // ── seq ──────────────────────────────────────────────────────────────────────
 
 test("seq reports its range, its gaps, and a restart that replays from zero", () => {
@@ -539,7 +596,7 @@ test("seq reports its range, its gaps, and a restart that replays from zero", ()
 });
 
 test("the ticker aligns to the wall clock without a server attached", async () => {
-  const rows = [createHopCounters("daemon.capture")];
+  const rows = [createHopCounters("daemon.capture", { local: ["refine"] })];
   const seen = [];
   const ticker = startCounterTicker({ rows, emit: (l) => seen.push({ at: Date.now(), line: l }) });
   await sleep(2300);

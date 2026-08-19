@@ -396,7 +396,12 @@ export async function startStreamServer(
   // whole diagnostic: capture healthy with encode at zero means the encoder is
   // holding the picture, both at zero means the page stopped painting. One
   // merged row cannot express that.
-  const cap = createHopCounters("daemon.capture");
+  // x.refine: how many idle refinement passes actually fired. The encoder's
+  // demuxer only delimits a frame when the next one arrives, so this pass is
+  // what flushes the last frame of a burst — and four runtime gates can
+  // suppress it while the configuration looks correct. Nothing static answers
+  // whether it runs; this counter does.
+  const cap = createHopCounters("daemon.capture", { local: ["refine"] });
   const enc = createHopCounters("daemon.h264", { nal: true });
   // The `stream: ` prefix is load-bearing — the relay that mirrors these lines
   // drops anything without it.
@@ -1021,6 +1026,10 @@ export async function startStreamServer(
     if (!session || !lastMetadata || clients.size === 0) return;
     if (Date.now() - lastFrameAt < REFINE_AFTER_MS) return;
     refined = true;
+    // Counted where the pass commits, before the capture: a capture that dies
+    // on a navigation still fired, and the gap against the `fi` it would have
+    // added is itself the reading.
+    cap.x.refine++;
     try {
       // Same capture call as the scaled motion path (captureShot pins
       // clip.scale to 1), so the refinement's pixel dimensions match the

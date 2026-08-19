@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://alien.internal/browser-stream/counter-line.schema.json",
+  "$id": "counter-line.schema.json",
   "title": "Browser viewport stream — per-hop counter line",
   "description": "One object per hop per second. Emitted even when every value is zero: a freeze is a run of zeros, and a hop that goes silent must not look the same as a hop that died.",
   "type": "object",
@@ -85,6 +85,13 @@
     "sid": {
       "type": "string",
       "description": "Stream id. Phase 1b. Absent in phase 1a, where the join is t + the hop's own identity fields."
+    },
+
+    "x": {
+      "type": "object",
+      "description": "Hop-specific counters that have no meaning at other hops. Readers MUST ignore keys they do not know, so a hop can ship one without waiting on this schema. Anything that proves generally useful gets promoted to a top-level field and removed from here. Integers only: this is a counter channel, not a place to smuggle payload.",
+      "additionalProperties": { "type": "integer", "minimum": 0 },
+      "minProperties": 1
     }
   }
 }
