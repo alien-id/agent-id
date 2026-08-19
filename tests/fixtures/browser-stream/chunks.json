@@ -1,0 +1,21 @@
+{
+  "note": "Cut points that split a start code or its NAL header byte. Feeding the stream in these chunks must produce the same classification as feeding it whole.",
+  "cuts": [
+    {
+      "at": 33,
+      "why": "inside the IDR start code, after one 00"
+    },
+    {
+      "at": 34,
+      "why": "inside the IDR start code, after two 00"
+    },
+    {
+      "at": 35,
+      "why": "between the start code and the NAL header byte"
+    },
+    {
+      "at": 36,
+      "why": "immediately after the NAL header byte"
+    }
+  ]
+}

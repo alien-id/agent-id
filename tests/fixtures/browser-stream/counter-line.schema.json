@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "counter-line.schema.json",
+  "title": "Browser viewport stream — per-hop counter line",
+  "description": "One object per hop per second. Emitted even when every value is zero: a freeze is a run of zeros, and a hop that goes silent must not look the same as a hop that died.",
+  "type": "object",
+  "required": ["v", "hop", "t", "win_ms", "fi", "fo", "bi", "bo", "drop", "zero", "c"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "const": 1,
+      "description": "Contract version. Bump only on a breaking change; readers must ignore lines whose v they do not know."
+    },
+    "hop": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9]+)?$",
+      "description": "Emitting stage. A hop only ever emits its own value; no hop enumerates another's."
+    },
+    "t": {
+      "type": "integer",
+      "description": "Unix seconds of the wall-clock-aligned window START. Primary join key across hops."
+    },
+    "win_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Actual window length in ms. Nominally 1000; report the real value so a late or coalesced tick is detectable rather than silently skewing rates."
+    },
+
+    "fi": { "type": "integer", "minimum": 0, "description": "Frames (or messages) accepted into this hop during the window." },
+    "fo": { "type": "integer", "minimum": 0, "description": "Frames handed to the next hop during the window." },
+    "bi": { "type": "integer", "minimum": 0, "description": "Payload bytes in." },
+    "bo": { "type": "integer", "minimum": 0, "description": "Payload bytes out." },
+    "drop": { "type": "integer", "minimum": 0, "description": "Total frames lost inside this hop. MUST equal the sum of dr's values." },
+
+    "dr": {
+      "type": "object",
+      "description": "Drop counts by reason. Present only when drop > 0. Keys come from the hop's reason vocabulary in CONTRACT.md; an unknown key is a reader warning, never a parse failure.",
+      "additionalProperties": { "type": "integer", "minimum": 1 },
+      "minProperties": 1
+    },
+
+    "idr": { "type": "integer", "minimum": 0, "description": "Access units containing an IDR. Only where the hop parses NAL types." },
+    "sps": { "type": "integer", "minimum": 0, "description": "Access units containing an SPS." },
+    "pps": { "type": "integer", "minimum": 0, "description": "Access units containing a PPS." },
+    "perr": { "type": "integer", "minimum": 0, "description": "Payloads this hop could not parse (no NAL, bad header, resync)." },
+
+    "seq": {
+      "type": "object",
+      "description": "Envelope seq observed this window. This is what makes per-frame loss localizable WITHOUT per-frame logging: if hop N reports 1200..1229 and hop N+1 reports 1200..1225, four frames died on that link. Omit when the hop saw no numbered frame.",
+      "required": ["first", "last", "gaps"],
+      "additionalProperties": false,
+      "properties": {
+        "first": { "type": "integer", "description": "Lowest seq seen in the window." },
+        "last": { "type": "integer", "description": "Highest seq seen in the window." },
+        "gaps": { "type": "integer", "minimum": 0, "description": "Count of discontinuities: occurrences of seq != previous + 1, within the window and across its boundary." },
+        "reset": { "type": "boolean", "description": "True when seq went backwards — a daemon restart replays seq from 0, and every consumer must treat that as a new epoch rather than a 10^6-frame gap." }
+      }
+    },
+
+    "zero": {
+      "type": "boolean",
+      "description": "True when fi, fo and drop were all 0 for the whole window. Redundant with the counters by design: it makes a freeze greppable without arithmetic."
+    },
+    "edge": {
+      "enum": ["enter_zero", "leave_zero"],
+      "description": "Present only on the extra out-of-band emit at a zero transition, which timestamps a freeze boundary precisely instead of quantizing it to the tick."
+    },
+
+    "c": {
+      "type": "object",
+      "description": "Cumulative twins since the stream opened. Survives a lost line: two non-adjacent lines still yield an exact total.",
+      "required": ["fi", "fo", "bi", "bo", "drop"],
+      "additionalProperties": false,
+      "properties": {
+        "fi": { "type": "integer", "minimum": 0 },
+        "fo": { "type": "integer", "minimum": 0 },
+        "bi": { "type": "integer", "minimum": 0 },
+        "bo": { "type": "integer", "minimum": 0 },
+        "drop": { "type": "integer", "minimum": 0 },
+        "idr": { "type": "integer", "minimum": 0 },
+        "perr": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "sid": {
+      "type": "string",
+      "description": "Stream id. Phase 1b. Absent in phase 1a, where the join is t + the hop's own identity fields."
+    },
+
+    "x": {
+      "type": "object",
+      "description": "Hop-specific counters that have no meaning at other hops. Readers MUST ignore keys they do not know, so a hop can ship one without waiting on this schema. Anything that proves generally useful gets promoted to a top-level field and removed from here. Integers only: this is a counter channel, not a place to smuggle payload.",
+      "additionalProperties": { "type": "integer", "minimum": 0 },
+      "minProperties": 1
+    }
+  }
+}
