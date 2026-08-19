@@ -628,37 +628,76 @@ export async function startStreamServer(
     const frame = client.pending;
     client.pending = null;
     const ok = client.sock.write(client.binary ? frameBinary(frame) : frameText(frame));
+    // The write IS the handoff — `ok` false is backpressure, not refusal: the
+    // payload was accepted and will go out.
+    handedOn(frame);
     client.lastSentAt = Date.now();
     if (client.pacing === "ack") client.awaitingAck = frame.seq;
     if (!ok) client.congested = true; // drain listener clears and re-pumps
   }
 
+  // The capture stage's output, counted ONCE per frame at the first REAL
+  // handoff — a socket write, or the encoder taking it. Never when a frame is
+  // merely staged into a pending slot: that frame can still be replaced, and
+  // counting it there counts it twice, once as output and once as
+  // pending_overwrite. `fo` would then inflate by exactly the number of those
+  // drops, the next stage's `fi` would look deficient by the same amount, and
+  // a loss plainly visible HERE would be blamed on the link.
+  //
+  // Both consumers latch the same frame, so a frame going to a viewer and the
+  // encoder is one output, not two. A frame with neither attached is none: it
+  // went nowhere.
+  function handedOn(frame) {
+    if (frame.out) return;
+    frame.out = true;
+    cap.out(frame.bytes);
+  }
+
+  /** Stage one captured frame for every jpeg viewer. Returns it so the encoder
+   *  feed that follows shares its handoff latch. */
   function deliverFrame({ data, metadata, refinement = false }) {
-    const frame = { seq: ++frameSeq, data, metadata, refinement };
-    cap.out(b64Bytes(data));
+    const frame = { seq: ++frameSeq, data, metadata, refinement, bytes: b64Bytes(data), out: false };
     for (const client of clients) {
       if (client.codec !== "jpeg") continue;
       // Replacing an undelivered frame is the latest-wins behaviour working as
       // designed, but it is still a frame that viewer never saw — and until
-      // now it vanished without a number anywhere.
+      // now it vanished without a number anywhere. Per VIEWER, so with a jpeg
+      // and an h264 viewer sharing a stream one frame can be both handed on
+      // (to the encoder) and lost (for the stalled viewer); `fo + drop <= fi`
+      // holds for a single consumer, which is every real configuration.
       if (client.pending) cap.lost("pending_overwrite");
       client.pending = frame;
       pump(client);
     }
+    return frame;
   }
 
   // The one place encoder input is offered, so every attempt is counted once.
   // Only the shared Annex-B encoder counts: the RTP sinks are a separate path
   // and would double this stage's input. `copies` is the refinement's flush
   // trick (see the refine timer) — two genuine writes, so two attempts.
-  function feedEncoders(jpeg, copies = 1) {
+  //
+  // Offering the frame is also the capture stage handing it on, refused or
+  // not: a refusal is the ENCODE stage's drop and is recorded there, so
+  // counting the offer is what keeps this stage's `fo` equal to the next
+  // stage's `fi`. Without it a stream whose only viewer wants h264 would
+  // report capture output of zero forever, which reads as a blackout.
+  function feedEncoders(jpeg, copies = 1, frame = null) {
     for (const sink of encoderSinks) {
+      // The extra copy is the refinement's flush trick, not a second frame —
+      // the same picture written again so the demuxer delimits the first. Only
+      // the first write is a frame arriving, so only it is counted: counting
+      // the flush copy would hold this stage's `fi` permanently above the
+      // capture stage's `fo` and read as the capture stage losing what it sent.
+      let landed = true;
       for (let i = 0; i < copies; i++) {
         const ok = sink.write(jpeg);
-        if (sink !== annexB) continue;
-        enc.in(jpeg.length);
-        if (!ok) enc.lost("encoder_input");
+        if (i === 0) landed = ok;
       }
+      if (sink !== annexB) continue;
+      enc.in(jpeg.length);
+      if (frame) handedOn(frame);
+      if (!landed) enc.lost("encoder_input");
     }
   }
 
@@ -833,8 +872,8 @@ export async function startStreamServer(
         scaledDirty = false;
         const shot = await captureShot(session, STREAM_QUALITY);
         if (closed || suspended > 0 || session !== cdp) return;
-        deliverFrame({ data: shot.data, metadata: scaledMetadata() });
-        if (encoderSinks.size > 0) feedEncoders(Buffer.from(shot.data, "base64"));
+        const frame = deliverFrame({ data: shot.data, metadata: scaledMetadata() });
+        if (encoderSinks.size > 0) feedEncoders(Buffer.from(shot.data, "base64"), 1, frame);
       }
     } catch {
       /* navigating/detached — the next damage tick retries */
@@ -951,8 +990,8 @@ export async function startStreamServer(
         void pumpScaledCapture(session);
         return;
       }
-      deliverFrame({ data: ev.data, metadata: ev.metadata });
-      if (encoderSinks.size > 0) feedEncoders(Buffer.from(ev.data, "base64"));
+      const frame = deliverFrame({ data: ev.data, metadata: ev.metadata });
+      if (encoderSinks.size > 0) feedEncoders(Buffer.from(ev.data, "base64"), 1, frame);
     });
     // A scaled session's device-metrics override lives on THIS session, so
     // it spans exactly the life of the capture: a retarget applies it to the
@@ -1039,7 +1078,7 @@ export async function startStreamServer(
       // The capture stage's SECOND frame source. Counted as input like a cast
       // frame or `fo` would exceed `fi` every time the page went quiet.
       cap.in(b64Bytes(shot.data));
-      deliverFrame({
+      const frame = deliverFrame({
         data: shot.data,
         metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
         refinement: true,
@@ -1050,7 +1089,7 @@ export async function startStreamServer(
       // arrives, so a single write would sit in ffmpeg's parser until the
       // next repaint. Copy #1 flushes whatever was stuck AND gets encoded
       // (flushed by copy #2); the stuck copy #2 is identical, so no loss.
-      if (encoderSinks.size > 0) feedEncoders(Buffer.from(shot.data, "base64"), 2);
+      if (encoderSinks.size > 0) feedEncoders(Buffer.from(shot.data, "base64"), 2, frame);
     } catch { /* navigating/closed — the next screencast frame rearms */ }
   }, REFINE_POLL_MS);
   refine.unref?.();

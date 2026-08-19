@@ -434,15 +434,24 @@ test("a stalled viewer's overwritten frames are counted as pending_overwrite", a
   const lines = sink.lines();
   assertContract(lines);
   const capture = sink.hop("daemon.capture");
-  const total = (k) => capture.reduce((n, l) => n + (l.dr?.[k] ?? 0), 0);
-  // One frame is sent, one occupies the slot, every later one displaces it.
-  assert.equal(total("pending_overwrite"), frames - 2, "each displaced frame is counted");
-  assert.equal(
-    capture.reduce((n, l) => n + l.fi, 0),
-    frames,
-    "every screencast callback counted as input",
+  const sum = (k) => capture.reduce((n, l) => n + l[k], 0);
+  const because = (k) => capture.reduce((n, l) => n + (l.dr?.[k] ?? 0), 0);
+
+  assert.equal(sum("fi"), frames, "every screencast callback counted as input");
+  // One frame reached the socket, one is parked behind the unacked ack, and
+  // every frame after that displaced the parked one.
+  assert.equal(because("pending_overwrite"), frames - 2, "each displaced frame is counted");
+  // The regression: output used to be counted when a frame was assigned to the
+  // pending slot, so a frame that never reached a socket was counted BOTH as
+  // output and, on replacement, as a drop. `fo` inflated by exactly the drop
+  // count, which reads downstream as loss on the link instead of here.
+  assert.equal(sum("fo"), 1, "only the frame that actually left is output");
+  assert.ok(
+    sum("fo") + sum("drop") <= sum("fi"),
+    `no frame counted twice (fi ${sum("fi")}, fo ${sum("fo")}, drop ${sum("drop")})`,
   );
-  assert.equal(capture.reduce((n, l) => n + l.fo, 0), frames, "every delivery counted as output");
+  assert.equal(sum("fi") - sum("fo") - sum("drop"), 1, "the remainder is the frame still in the slot");
+  assert.equal(sum("bo"), Buffer.from(jpeg, "base64").length, "and its bytes, once");
   assertCumulative(lines, "daemon.capture");
 });
 
@@ -541,6 +550,87 @@ test("the encode row reports what the framer found in each access unit", async (
   assert.equal(withSeq.at(-1).seq.last, units.length);
   assert.equal(withSeq.reduce((n, l) => n + l.seq.gaps, 0), 0, "no holes in the numbering");
   assertCumulative(lines, "daemon.h264");
+});
+
+test("an h264-only viewer still counts capture output", async () => {
+  const { dir, stub } = writeStub(FFMPEG_CORPUS, "handoff");
+  const jpeg = Buffer.from("handoff-frame").toString("base64");
+  const { state, server, sink } = await startServer(
+    { h264Config: { ffmpegPath: stub, encoder: "libx264" } },
+    { screenshot: jpeg },
+  );
+  const c = await connectStream(server.port, server.token, "&codec=h264");
+  await c.nextJson();
+
+  // Nothing here ever pumps a socket — the only viewer wants h264 — so if the
+  // encoder feed did not count as a handoff this row's `fo` would sit at zero
+  // for the whole session. That reads as a blackout, and it would blame the
+  // capture-to-encode link for a loss that never happened.
+  const sum = (hop, k) => sink.hop(hop).reduce((n, l) => n + l[k], 0);
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline && sum("daemon.h264", "fi") === 0) {
+    state.session.emitFrame(jpeg);
+    await sleep(100);
+  }
+  // Measured as a delta from a closed window, so the frames fed while the
+  // encoder was still spawning cannot make this race.
+  await sleep(1200);
+  const base = { fi: sum("daemon.capture", "fi"), fo: sum("daemon.capture", "fo") };
+
+  const frames = 5;
+  for (let i = 0; i < frames; i++) {
+    state.session.emitFrame(jpeg);
+    await sleep(20);
+  }
+  await sleep(1300);
+  c.close();
+  server.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  const lines = sink.lines();
+  assertContract(lines);
+  assert.ok(base.fo > 0, "the encoder was taking frames before the measurement");
+  assert.equal(sum("daemon.capture", "fi") - base.fi, frames, "every cast frame in");
+  assert.equal(sum("daemon.capture", "fo") - base.fo, frames, "and every one handed on");
+  assert.equal(sum("daemon.capture", "drop"), 0, "no pending slot in play, so nothing displaced");
+  assertCumulative(lines, "daemon.capture");
+});
+
+test("the refinement's flush copy is the same frame, not another input", async () => {
+  const { dir, stub } = writeStub(FFMPEG_CORPUS, "flush");
+  const jpeg = Buffer.from("flush-frame").toString("base64");
+  const sink = collector();
+  const state = makeFakeState({ screenshot: jpeg });
+  const server = await startWithRefinement(state, {
+    log: (m) => sink.log(m),
+    h264Config: { ffmpegPath: stub, encoder: "libx264" },
+  });
+  const c = await connectStream(server.port, server.token, "&codec=h264");
+  await c.nextJson();
+
+  const sum = (hop, k) => sink.hop(hop).reduce((n, l) => n + l[k], 0);
+  const refines = () => sink.hop("daemon.capture").reduce((n, l) => n + l.x.refine, 0);
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline && sum("daemon.h264", "fi") === 0) {
+    state.session.emitFrame(jpeg);
+    await sleep(100);
+  }
+  await sleep(1400); // the pass armed by the warm-up fires and settles
+  const base = { fo: sum("daemon.capture", "fo"), fi: sum("daemon.h264", "fi"), r: refines() };
+
+  state.session.emitFrame(jpeg); // arms exactly one more
+  await sleep(1600);
+  c.close();
+  server.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  assertContract(sink.lines());
+  assert.equal(refines() - base.r, 1, "one refinement pass fired");
+  // That pass writes the SAME picture to the encoder twice, because raw MJPEG
+  // only delimits a frame once the next one arrives. Two writes, one frame —
+  // and the two rows must agree on which.
+  assert.equal(sum("daemon.capture", "fo") - base.fo, 2, "the cast frame and the refinement capture");
+  assert.equal(sum("daemon.h264", "fi") - base.fi, 2, "each arriving at the encoder exactly once");
 });
 
 test("x.refine counts the idle refinement passes that actually fired", async () => {
