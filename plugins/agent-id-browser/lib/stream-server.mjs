@@ -677,26 +677,30 @@ export async function startStreamServer(
   // and would double this stage's input. `copies` is the refinement's flush
   // trick (see the refine timer) — two genuine writes, so two attempts.
   //
-  // Offering the frame is also the capture stage handing it on, refused or
-  // not: a refusal is the ENCODE stage's drop and is recorded there, so
-  // counting the offer is what keeps this stage's `fo` equal to the next
-  // stage's `fi`. Without it a stream whose only viewer wants h264 would
-  // report capture output of zero forever, which reads as a blackout.
+  // Offering the frame to a sink is the capture stage handing it on, refused
+  // or not: a refusal belongs to the stage that refused and is recorded there,
+  // so counting the offer is what keeps this stage's `fo` equal to the next
+  // stage's `fi`. EVERY sink counts — the peer encoders as much as the shared
+  // one — because a session whose only consumers are peers has no socket to
+  // pump and no shared encoder either, and would otherwise report capture
+  // output of zero while frames were flowing, which reads as a blackout.
   function feedEncoders(jpeg, copies = 1, frame = null) {
     for (const sink of encoderSinks) {
       // The extra copy is the refinement's flush trick, not a second frame —
       // the same picture written again so the demuxer delimits the first. Only
       // the first write is a frame arriving, so only it is counted: counting
-      // the flush copy would hold this stage's `fi` permanently above the
-      // capture stage's `fo` and read as the capture stage losing what it sent.
+      // the flush copy would hold the encode stage's `fi` permanently above
+      // this stage's `fo` and read as the capture stage losing what it sent.
       let landed = true;
       for (let i = 0; i < copies; i++) {
         const ok = sink.write(jpeg);
         if (i === 0) landed = ok;
       }
+      if (frame) handedOn(frame); // latched, so many sinks are still one output
+      // Below the guard on purpose: the peer encoders are their own path and
+      // would double the shared encode stage's input.
       if (sink !== annexB) continue;
       enc.in(jpeg.length);
-      if (frame) handedOn(frame);
       if (!landed) enc.lost("encoder_input");
     }
   }

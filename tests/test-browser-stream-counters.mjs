@@ -36,7 +36,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createAccessUnitFramer } from "../plugins/agent-id-browser/lib/h264-framer.mjs";
 import { createHopCounters, startCounterTicker } from "../plugins/agent-id-browser/lib/stream-counters.mjs";
@@ -238,8 +239,38 @@ async function connectStream(port, token, params = "") {
     });
     sock.on("error", reject);
   });
+  // Client→server frames are always masked (RFC 6455 §5.1).
+  const send = (obj) => {
+    const body = Buffer.from(JSON.stringify(obj), "utf8");
+    const mask = crypto.randomBytes(4);
+    let header;
+    if (body.length < 126) {
+      header = Buffer.from([0x81, 0x80 | body.length]);
+    } else {
+      header = Buffer.alloc(4);
+      header[0] = 0x81;
+      header[1] = 0x80 | 126;
+      header.writeUInt16BE(body.length, 2);
+    }
+    const masked = Buffer.alloc(body.length);
+    for (let i = 0; i < body.length; i++) masked[i] = body[i] ^ mask[i & 3];
+    sock.write(Buffer.concat([header, mask, masked]));
+  };
   return {
     sock,
+    send,
+    async untilType(type, timeout = 8000) {
+      const deadline = Date.now() + timeout;
+      for (;;) {
+        const left = deadline - Date.now();
+        if (left <= 0) throw new Error(`timeout waiting for ${type}`);
+        const m = await this.next(left);
+        if (m.opcode !== 0x1) continue;
+        const msg = JSON.parse(m.payload.toString());
+        if (msg.type === type) return msg;
+        assert.notEqual(msg.type, "webrtc_error", `webrtc failed: ${msg.error}`);
+      }
+    },
     next(timeout = 2000) {
       if (queue.length) return Promise.resolve(queue.shift());
       return new Promise((resolve, reject) => {
@@ -277,6 +308,20 @@ if (process.argv.includes("-encoders")) {
   process.exit(0);
 }
 setInterval(() => {}, 1 << 30);
+`;
+
+// Drains stdin and touches a marker the moment a sink starts feeding it, so a
+// test can wait for the peer's encoder to actually attach.
+const FFMPEG_RTP = `#!/usr/bin/env node
+import fs from "node:fs";
+if (process.argv.includes("-encoders")) {
+  process.stdout.write(" V....D libx264 stub\\n");
+  process.exit(0);
+}
+process.stdin.on("data", () => {
+  try { fs.writeFileSync(process.env.AGENT_ID_TEST_RTP_READY, "1"); } catch { /* racing teardown */ }
+});
+process.stdin.on("end", () => process.exit(0));
 `;
 
 // ── the vendored corpus ──────────────────────────────────────────────────────
@@ -631,6 +676,87 @@ test("the refinement's flush copy is the same frame, not another input", async (
   // and the two rows must agree on which.
   assert.equal(sum("daemon.capture", "fo") - base.fo, 2, "the cast frame and the refinement capture");
   assert.equal(sum("daemon.h264", "fi") - base.fi, 2, "each arriving at the encoder exactly once");
+});
+
+test("a WebRTC peer is a consumer too, and its frames are capture output", async (t) => {
+  let werift;
+  try {
+    const req = createRequire(new URL("../plugins/agent-id-browser/lib/", import.meta.url));
+    werift = await import(pathToFileURL(req.resolve("werift")).href);
+  } catch {
+    return t.skip("werift is an optional dependency and is not installed");
+  }
+
+  const ready = path.join(os.tmpdir(), `rtp-ready-${crypto.randomBytes(6).toString("hex")}`);
+  process.env.AGENT_ID_TEST_RTP_READY = ready;
+  const { dir, stub } = writeStub(FFMPEG_RTP, "rtp");
+  const jpeg = Buffer.from("webrtc-frame").toString("base64");
+  const sink = collector();
+  const state = makeFakeState({ screenshot: jpeg });
+  const server = await startStreamServer(state, {
+    log: (m) => sink.log(m),
+    h264Config: { ffmpegPath: stub, encoder: "libx264" },
+  });
+  // No `codec` param, and it never acks: this viewer takes exactly one frame
+  // and then stalls forever. Everything counted after that had one consumer
+  // left — the peer — and no shared encoder exists to stand in for it, since
+  // that is only built for an h264 WebSocket viewer.
+  const c = await connectStream(server.port, server.token, "&binary=1&pacing=ack");
+  await c.nextJson();
+
+  const pc = new werift.RTCPeerConnection({
+    codecs: {
+      video: [
+        new werift.RTCRtpCodecParameters({
+          mimeType: "video/H264",
+          clockRate: 90000,
+          payloadType: 96,
+          parameters: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+        }),
+      ],
+    },
+  });
+  pc.addTransceiver(new werift.MediaStreamTrack({ kind: "video" }), { direction: "recvonly" });
+  await pc.setLocalDescription(await pc.createOffer());
+  c.send({ type: "webrtc_offer", sdp: pc.localDescription.sdp });
+  await c.untilType("webrtc_answer");
+
+  // The answer is sent before the peer's encoder is spawned, so wait for the
+  // sink itself to start taking frames rather than for the handshake.
+  const sum = (hop, k) => sink.hop(hop).reduce((n, l) => n + l[k], 0);
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline && !fs.existsSync(ready)) {
+    state.session.emitFrame(jpeg);
+    await sleep(100);
+  }
+  assert.ok(fs.existsSync(ready), "the peer's encoder attached as a sink");
+  await sleep(1200); // measure from a closed window
+  const base = { fo: sum("daemon.capture", "fo"), fi: sum("daemon.h264", "fi") };
+
+  const frames = 5;
+  for (let i = 0; i < frames; i++) {
+    state.session.emitFrame(jpeg);
+    await sleep(20);
+  }
+  await sleep(1300);
+  try { await pc.close(); } catch { /* already gone */ }
+  c.close();
+  server.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(ready, { force: true });
+  delete process.env.AGENT_ID_TEST_RTP_READY;
+
+  assertContract(sink.lines());
+  assert.equal(
+    sum("daemon.capture", "fo") - base.fo,
+    frames,
+    "every frame the peer took left this stage",
+  );
+  // A handoff is not always a socket write, but it is also not always the
+  // shared encoder: the peer path must stay out of the encode row's input or
+  // it doubles it.
+  assert.equal(sum("daemon.h264", "fi") - base.fi, 0, "the peer path is not encode-stage input");
+  assertCumulative(sink.lines(), "daemon.capture");
 });
 
 test("x.refine counts the idle refinement passes that actually fired", async () => {
