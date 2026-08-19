@@ -1,5 +1,13 @@
 # @alien-id/agent-id-browser
 
+## 7.12.3
+
+### Patch Changes
+
+- [#117](https://github.com/alien-id/agent-id/pull/117) [`5afa291`](https://github.com/alien-id/agent-id/commit/5afa29168f3dcc9cbc019f2ee427aa38e4381d63) Thanks [@I-Dart-Vader-I](https://github.com/I-Dart-Vader-I)! - Encode every frame instead of resampling to a fixed rate — the demuxer's
+  nominal 25 fps became a constant output rate and ffmpeg dropped every
+  screencast frame that missed the grid (78 frames in, 2 encoded).
+
 ## 7.12.2
 
 ### Patch Changes
