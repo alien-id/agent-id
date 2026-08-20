@@ -293,12 +293,17 @@ export async function calibratePointer(page) {
   try {
     await page.evaluate(() => {
       window.__aibPtrCal = null;
+      // isTrusted only: a page could dispatch a synthetic mousemove at a
+      // chosen position to poison the calibration and redirect the viewer's
+      // clicks. CDP-dispatched input is trusted; page JS can never be.
       window.addEventListener(
         "mousemove",
-        (e) => {
+        function probe(e) {
+          if (!e.isTrusted) return;
           window.__aibPtrCal = { x: e.clientX, y: e.clientY };
+          window.removeEventListener("mousemove", probe, true);
         },
-        { capture: true, once: true },
+        { capture: true },
       );
     });
     await page.mouse.move(CAL_PROBE_PX, CAL_PROBE_PX);
