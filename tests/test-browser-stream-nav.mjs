@@ -42,6 +42,10 @@ function makeFakeCdpSession(history = { currentIndex: 0, entries: [] }) {
 
 function makeFakeSession(screenshotData = "sharp") {
   const handlers = new Map();
+  // The long-lived cast session also answers the focus poller's
+  // Page.getNavigationHistory reads; navHistory is settable so a test can
+  // change what the "next" read would report before triggering it.
+  let navHistory = { currentIndex: 0, entries: [{ id: "e1" }] };
   const session = {
     sent: [],
     detached: false,
@@ -49,22 +53,29 @@ function makeFakeSession(screenshotData = "sharp") {
     async send(method, params) {
       session.sent.push({ method, params });
       if (method === "Page.captureScreenshot") return { data: screenshotData };
+      if (method === "Page.getNavigationHistory") return navHistory;
       return {};
     },
     async detach() { session.detached = true; },
     emitFrame(data, metadata = { deviceWidth: 640, deviceHeight: 480, timestamp: Date.now() }) {
       handlers.get("Page.screencastFrame")?.({ data, metadata, sessionId: 1 });
     },
+    setNavHistory(next) { navHistory = next; },
   };
   return session;
 }
 
+// `castGate` (resolved by default) lets a test hold back the moment the
+// long-lived screencast CDP session becomes available, to drive the
+// late-attaching-session case without a second timer.
 function makeFakeState() {
   let session = makeFakeSession();
   const navSessions = [];
+  let castGate = Promise.resolve();
+  let urlValue = "https://example.test/";
   const page = {
     isClosed: () => false,
-    url: () => "https://example.test/",
+    url: () => urlValue,
     viewportSize: () => ({ width: 640, height: 480 }),
     mouse: { move: async () => {}, down: async () => {}, up: async () => {}, wheel: async () => {} },
     keyboard: { down: async () => {}, up: async () => {}, insertText: async () => {} },
@@ -83,11 +94,19 @@ function makeFakeState() {
     navSessions,
     ctx: {
       newCDPSession: async () => {
+        await castGate;
         if (session.detached) session = makeFakeSession();
         return session;
       },
     },
     get session() { return session; },
+    setUrl(next) { urlValue = next; },
+    /** Delay the next newCDPSession resolution until the returned fn is called. */
+    holdCast() {
+      let release;
+      castGate = new Promise((resolve) => { release = resolve; });
+      return () => release();
+    },
   };
 }
 
@@ -261,6 +280,66 @@ test("a nav command sent while suspended performs no navigation", async () => {
   assert.equal(state.navSessions.length, 0, "no nav CDP session was opened while suspended");
   assert.equal(state.invalidated.length, 0, "no refs invalidated while suspended");
   server.resume();
+  c.close();
+  server.close();
+});
+
+// ── nav-poll cost: Page.getNavigationHistory is gated on the cheap url read ──
+
+function historyCallCount(state) {
+  return state.session.sent.filter((s) => s.method === "Page.getNavigationHistory").length;
+}
+
+test("steady state: an unchanging url gets Page.getNavigationHistory once, not once per poll tick", async () => {
+  const { state, server } = await startServer();
+  const c = await connectStream(server.port, server.token);
+  await c.nextJson(); // initial status, no nav yet
+  await sleep(700); // several FOCUS_POLL_MS(250ms) ticks over an unmoving url
+  assert.equal(historyCallCount(state), 1, "the history flags are measured once, then reused");
+  c.close();
+  server.close();
+});
+
+test("after a navigation, the next tick re-measures and the broadcast nav carries the new flags", async () => {
+  const { state, server } = await startServer();
+  const c = await connectStream(server.port, server.token);
+  await c.nextJson(); // initial status, no nav yet
+  const first = await c.nextJson(); // first poll tick
+  assert.deepEqual(first.nav, { url: "https://example.test/", canGoBack: false, canGoForward: false });
+  assert.equal(historyCallCount(state), 1);
+
+  state.setUrl("https://example.test/next");
+  state.session.setNavHistory({ currentIndex: 1, entries: [{ id: "e1" }, { id: "e2" }] });
+
+  const second = await c.nextJson(); // next tick, after the url moved
+  assert.deepEqual(second.nav, { url: "https://example.test/next", canGoBack: true, canGoForward: false });
+  assert.equal(historyCallCount(state), 2, "a url change re-measures the history flags");
+
+  c.close();
+  server.close();
+});
+
+test("a late-attaching cast session is measured on the next tick even though the url never changed", async () => {
+  const { state, server } = await startServer();
+  const release = state.holdCast(); // hold back the screencast CDP session
+  const c = await connectStream(server.port, server.token);
+  await c.nextJson(); // initial status, no nav yet
+
+  const first = await c.nextJson(); // first poll tick: no cast session exists yet
+  assert.deepEqual(first.nav, { url: "https://example.test/", canGoBack: false, canGoForward: false });
+  assert.equal(historyCallCount(state), 0, "no CDP call is made while there is no cast session");
+
+  state.session.setNavHistory({ currentIndex: 1, entries: [{ id: "e1" }, { id: "e2" }] });
+  release(); // the cast session now attaches
+
+  const second = await c.nextJson(); // next tick: same url, session now present
+  assert.deepEqual(second.nav, { url: "https://example.test/", canGoBack: true, canGoForward: false });
+  assert.equal(
+    historyCallCount(state),
+    1,
+    "the newly attached session is measured even though the url didn't change",
+  );
+
   c.close();
   server.close();
 });

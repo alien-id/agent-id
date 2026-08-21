@@ -572,6 +572,11 @@ export async function startStreamServer(
   // a credential fill — the owner's keyboard must not pop over a blackout.
   let lastInputFocus = null;
   let lastNav = null;
+  // The url/session state the history flags were last measured against, so
+  // readNav can skip Page.getNavigationHistory on a poll tick where neither
+  // could have moved the flags (see readNav).
+  let navFlagsUrl = null;
+  let navFlagsHadSession = false;
 
   function inputFocus(payload) {
     if (suspended > 0) return;
@@ -650,15 +655,37 @@ export async function startStreamServer(
       url = null;
     }
     if (!url) return null;
-    if (!cdp) return { url, canGoBack: false, canGoForward: false };
+    if (!cdp) {
+      navFlagsUrl = url;
+      navFlagsHadSession = false;
+      return { url, canGoBack: false, canGoForward: false };
+    }
+    // The history flags only move on a navigation, and every navigation that
+    // moves them also changes the url (a same-url reload leaves the cursor
+    // untouched) — so re-measuring is needed only on a url change, or once a
+    // cast session first becomes available for a url already seen (that is
+    // what navFlagsHadSession false catches, since the branch above records
+    // "no session" even when the url hasn't moved).
+    const sameUrl = url === navFlagsUrl;
+    if (sameUrl && navFlagsHadSession) {
+      return {
+        url,
+        canGoBack: lastNav?.canGoBack ?? false,
+        canGoForward: lastNav?.canGoForward ?? false,
+      };
+    }
     try {
       const h = await cdp.send("Page.getNavigationHistory");
+      navFlagsUrl = url;
+      navFlagsHadSession = Boolean(cdp);
       return {
         url,
         canGoBack: h.currentIndex > 0,
         canGoForward: h.currentIndex < h.entries.length - 1,
       };
     } catch {
+      navFlagsUrl = url;
+      navFlagsHadSession = Boolean(cdp);
       return { url, canGoBack: false, canGoForward: false };
     }
   }
@@ -687,6 +714,8 @@ export async function startStreamServer(
     focusPoller = null;
     lastInputFocus = null;
     lastNav = null;
+    navFlagsUrl = null;
+    navFlagsHadSession = false;
   }
 
   function statusFor(client) {

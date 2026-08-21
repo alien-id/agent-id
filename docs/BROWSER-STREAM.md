@@ -324,16 +324,23 @@ Rules:
 
 ## Viewer navigation
 
-The session's `url`, `canGoBack` and `canGoForward` are polled on the same
-250 ms cadence as `input_focus`, deduped the same way (a `JSON.stringify`
-comparison against the last-broadcast value, so a static page produces no
-traffic), and remembered so a joining viewer receives the current `nav` state
-in its join `status` immediately — before it can send anything, and before
-any navigation of its own has happened. `canGoBack`/`canGoForward` come from
-the same CDP session the screencast already holds open; a page whose `url()`
-cannot be read yet (no navigation has landed) is skipped rather than
-broadcast, and a detached/failing history read still reports the `url` with
-both flags `false` rather than dropping the update.
+The session's `url` is read on the same 250 ms cadence as `input_focus` —
+cheap, in-process, no CDP round trip. `canGoBack`/`canGoForward` are the
+expensive half: they only move when the page actually navigates, so they are
+re-measured (one `Page.getNavigationHistory` on the same CDP session the
+screencast already holds open) only when the polled `url` differs from the
+one they were last measured against, or when a cast session first becomes
+available for a `url` already seen — otherwise the last-measured flags are
+reused as-is. A page nobody navigates therefore costs no recurring
+`Page.getNavigationHistory` traffic beyond the one measurement it takes to
+learn that. The result is deduped the same way as `input_focus` (a
+`JSON.stringify` comparison against the last-broadcast value, so a static
+page still produces no wire traffic) and remembered so a joining viewer
+receives the current `nav` state in its join `status` immediately — before it
+can send anything, and before any navigation of its own has happened. A page
+whose `url()` cannot be read yet (no navigation has landed) is skipped rather
+than broadcast, and a detached/failing history read still reports the `url`
+with both flags `false` rather than dropping the update.
 
 A `nav` command (`back` | `forward` | `reload`) is suspend-gated exactly like
 input and `resize` — dropped outright while a credential fill is in flight —
