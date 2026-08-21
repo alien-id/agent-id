@@ -66,6 +66,10 @@ Server → client (JSON text unless noted):
   "refinement": true }                             // text mode only; the
                                                    // refinement flag marks an
                                                    // idle high-quality frame
+{ "type": "status", "source": "alien",
+  "nav": { "url": "https://example.com/", "canGoBack": true,
+           "canGoForward": false } }               // polled + deduped, see
+                                                   // below
 ```
 
 Client → server (always JSON text):
@@ -87,6 +91,7 @@ Client → server (always JSON text):
 { "type": "resize", "width": 390, "height": 844,
   "scale": 2 }                                     // viewport + optional HiDPI
                                                    // capture scale, see below
+{ "type": "nav", "action": "back" | "forward" | "reload" }  // see below
 { "type": "webrtc_offer", "sdp": "…" }             // experimental, see below
 { "type": "webrtc_ice", "candidate": { … } }
 ```
@@ -316,6 +321,36 @@ Rules:
 - A resize does not invalidate element refs (the DOM is untouched; refs are
   sparse and stable) — but screenshot coordinates taken before the resize are
   stale, as after any reflow.
+
+## Viewer navigation
+
+The session's `url`, `canGoBack` and `canGoForward` are polled on the same
+250 ms cadence as `input_focus`, deduped the same way (a `JSON.stringify`
+comparison against the last-broadcast value, so a static page produces no
+traffic), and remembered so a joining viewer receives the current `nav` state
+in its join `status` immediately — before it can send anything, and before
+any navigation of its own has happened. `canGoBack`/`canGoForward` come from
+the same CDP session the screencast already holds open; a page whose `url()`
+cannot be read yet (no navigation has landed) is skipped rather than
+broadcast, and a detached/failing history read still reports the `url` with
+both flags `false` rather than dropping the update.
+
+A `nav` command (`back` | `forward` | `reload`) is suspend-gated exactly like
+input and `resize` — dropped outright while a credential fill is in flight —
+and, once accepted, queued behind pending input on the same chain, so a
+`reload` can't race a click and land on a page the click already left. An
+unrecognized `action` is ignored. Navigation itself executes over CDP
+(`Page.getNavigationHistory` + `Page.navigateToHistoryEntry`, or
+`Page.reload`) on a fresh, short-lived CDP session opened and detached per
+command — never via `page.goBack`/`goForward`/`reload`, which wait for a load
+event that a single-page app may never fire, which would stall the shared
+input queue behind it — and never disturbs the long-lived cast session, which
+carries the scaled-capture device-metrics override and its own lifecycle.
+Mutating input's "invalidate the agent's element refs" rule applies to `nav`
+too, on receipt, before the command is queued.
+
+There is deliberately no way to send a viewer-supplied URL to navigate to —
+only the three history-relative actions above.
 
 ## Suspend (credential blackout)
 

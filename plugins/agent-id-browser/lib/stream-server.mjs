@@ -30,6 +30,7 @@
 //                     {"type":"config","maxFps":N,"pacing":"ack"|"push"}
 //                     {"type":"status_request"}
 //                     {"type":"resize","width":W,"height":H[,"scale":S]}
+//                     {"type":"nav","action":"back"|"forward"|"reload"}
 //                     {"type":"webrtc_offer"|"webrtc_ice", ...}  (experimental)
 //
 // `seq` counts per codec, so each viewer sees its own stream contiguous.
@@ -333,6 +334,26 @@ export function withPointerCal(msg, cal) {
   return { ...msg, x: Number(msg.x) / cal.fx, y: Number(msg.y) / cal.fy };
 }
 
+// Exported for tests: navigation is executed over CDP rather than through
+// page.goBack/goForward/reload, which WAIT for a load event — a single-page
+// app that never fires one would stall the shared input queue behind it.
+export async function applyNav(page, action) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    if (action === "reload") {
+      await session.send("Page.reload");
+      return;
+    }
+    const history = await session.send("Page.getNavigationHistory");
+    const target = history.currentIndex + (action === "back" ? -1 : 1);
+    const entry = history.entries?.[target];
+    if (!entry) return;
+    await session.send("Page.navigateToHistoryEntry", { entryId: entry.id });
+  } finally {
+    await session.detach().catch(() => {});
+  }
+}
+
 // Exported for tests: the input contract is only observable here.
 export async function applyInput(page, msg) {
   if (msg.type === "input_mouse") {
@@ -550,6 +571,7 @@ export async function startStreamServer(
   // to a viewer that joins with a field already focused, and suppressed during
   // a credential fill — the owner's keyboard must not pop over a blackout.
   let lastInputFocus = null;
+  let lastNav = null;
 
   function inputFocus(payload) {
     if (suspended > 0) return;
@@ -557,6 +579,15 @@ export async function startStreamServer(
     if (lastInputFocus && JSON.stringify(lastInputFocus) === JSON.stringify(next)) return;
     lastInputFocus = next;
     broadcastStatus({ type: "status", source: "alien", input_focus: next });
+  }
+
+  // Same shape as inputFocus: polled on the focus cadence, deduped, remembered
+  // so a joining viewer learns the current url/history state immediately.
+  function navState(payload) {
+    if (suspended > 0) return;
+    if (lastNav && JSON.stringify(lastNav) === JSON.stringify(payload)) return;
+    lastNav = payload;
+    broadcastStatus({ type: "status", source: "alien", nav: payload });
   }
 
   // Focus is POLLED, not event-driven: the stealth patching deliberately keeps
@@ -606,6 +637,32 @@ export async function startStreamServer(
     return { editable: false };
   }
 
+  // Same cadence and channel as focus: url + history flags, read from the
+  // SAME long-lived CDP session the screencast owns (`cdp`) rather than
+  // opening a fresh one every poll tick.
+  async function readNav() {
+    const page = state.current;
+    if (!page || page.isClosed?.()) return null;
+    let url = null;
+    try {
+      url = typeof page.url === "function" ? page.url() : null;
+    } catch {
+      url = null;
+    }
+    if (!url) return null;
+    if (!cdp) return { url, canGoBack: false, canGoForward: false };
+    try {
+      const h = await cdp.send("Page.getNavigationHistory");
+      return {
+        url,
+        canGoBack: h.currentIndex > 0,
+        canGoForward: h.currentIndex < h.entries.length - 1,
+      };
+    } catch {
+      return { url, canGoBack: false, canGoForward: false };
+    }
+  }
+
   function ensureFocusPoller() {
     if (focusPoller) return;
     let inFlight = false;
@@ -615,6 +672,8 @@ export async function startStreamServer(
       try {
         const focus = await readInputFocus();
         if (focus) inputFocus(focus);
+        const nav = await readNav();
+        if (nav) navState(nav);
       } finally {
         inFlight = false;
       }
@@ -627,6 +686,7 @@ export async function startStreamServer(
     clearInterval(focusPoller);
     focusPoller = null;
     lastInputFocus = null;
+    lastNav = null;
   }
 
   function statusFor(client) {
@@ -643,6 +703,7 @@ export async function startStreamServer(
       maxFps: client.maxFps,
       ...(vp ? { viewportWidth: vp.width, viewportHeight: vp.height } : {}),
       ...(lastInputFocus ? { input_focus: lastInputFocus } : {}),
+      ...(lastNav ? { nav: lastNav } : {}),
     };
   }
 
@@ -1391,6 +1452,29 @@ export async function startStreamServer(
             });
           })
           .catch(() => {});
+        return;
+      }
+      if (msg.type === "nav") {
+        const action = msg.action;
+        if (!["back", "forward", "reload"].includes(action)) return;
+        state.invalidateRefs?.("owner navigated the live browser");
+        // Queued behind pending input for the same reason input is queued: a
+        // reload racing a click would apply to a page the click already left.
+        inputChain = inputChain
+          .then(async () => {
+            if (suspended > 0) return;
+            const page = state.current;
+            if (!page || page.isClosed?.()) return;
+            await applyNav(page, action);
+          })
+          .catch((err) => {
+            sendText(client, {
+              type: "status",
+              source: "alien",
+              error: err?.message || String(err),
+              for: "nav",
+            });
+          });
         return;
       }
       if (mutatesPage(msg)) state.invalidateRefs?.("owner used live browser control");
