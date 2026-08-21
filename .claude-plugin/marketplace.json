@@ -69,7 +69,7 @@
     {
       "name": "agent-id-browser",
       "description": "Alien Browser with an auto-created anonymous L0 profile for public pages and vault-sealed logged-in profiles. Includes compact form inspection and one-call verified filling for fields, checks, selects, and uploads, plus fine-grained refs, tabs, dialogs, downloads, screenshots, and live viewport control.",
-      "version": "7.12.5",
+      "version": "7.13.0",
       "source": "./plugins/agent-id-browser",
       "category": "identity",
       "keywords": [
