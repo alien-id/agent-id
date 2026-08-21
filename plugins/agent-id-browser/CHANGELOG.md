@@ -1,5 +1,21 @@
 # @alien-id/agent-id-browser
 
+## 7.12.5
+
+### Patch Changes
+
+- [#122](https://github.com/alien-id/agent-id/pull/122) [`da78646`](https://github.com/alien-id/agent-id/commit/da78646fa902aab3ceae8aca6bb58310a269046a) Thanks [@TemMax](https://github.com/TemMax)! - Align scaled-session pointer input with the captured frame. On some hosts an
+  active device-metrics override (a `scale ≥ 2` viewer) leaves CDP-dispatched
+  pointer coordinates in a different space than the picture: the frame is
+  correct, wheel and keyboard work, but a click lands at roughly 1/scale of the
+  intended point — on nothing, or on the wrong element. The displacement is
+  host-specific (headless mac and Linux Chromium dispatch cleanly through the
+  same override), so the stream server now measures it on the live page instead
+  of deriving it from platform assumptions: one probe mousemove per cast epoch
+  reports where the page actually saw the pointer, and every subsequent pointer
+  coordinate is pre-scaled by the inverse. On aligned hosts the probe measures
+  identity and the correction disables itself.
+
 ## 7.12.4
 
 ### Patch Changes
