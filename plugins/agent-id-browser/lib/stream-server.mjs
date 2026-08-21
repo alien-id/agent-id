@@ -263,6 +263,76 @@ export function parseStreamParams(url) {
 
 const KEY_ALIASES = { " ": "Space" };
 
+// ── Pointer alignment for scaled sessions ────────────────────────────────────
+//
+// A host has been observed where, with the scaled session's device-metrics
+// override active, CDP-dispatched pointer coordinates land in a DIFFERENT
+// space than the captured frame: the picture is correct, wheel and keyboard
+// work (they are position-insensitive), but a press/release pair lands at
+// roughly 1/scale of the intended point — so taps click nothing, or the
+// wrong element. The displacement does not reproduce on every host (headless
+// mac and Linux Chromium dispatch cleanly through the same override), so the
+// transform is MEASURED on the live page rather than derived from platform
+// assumptions: one probe mousemove reports where the page actually saw it,
+// and every subsequent pointer coordinate is pre-scaled by the inverse.
+// Identity within tolerance disables the correction — on a well-behaved host
+// this is a no-op beyond the single probe.
+//
+// The probe is a plain mousemove (the same event class every pan already
+// emits), sent once per cast epoch and only while a scale override is
+// active; hover side effects are the same as any viewer moving their finger.
+
+const CAL_PROBE_PX = 64;
+const CAL_TOLERANCE = 0.02;
+
+// Exported for tests: measure where the page sees a probe mousemove.
+// Returns {fx, fy} when the pointer space is displaced, null for identity
+// (or when the page cannot run the probe — no correction is safer than a
+// guessed one).
+export async function calibratePointer(page) {
+  try {
+    await page.evaluate(() => {
+      window.__aibPtrCal = null;
+      // isTrusted only: a page could dispatch a synthetic mousemove at a
+      // chosen position to poison the calibration and redirect the viewer's
+      // clicks. CDP-dispatched input is trusted; page JS can never be.
+      window.addEventListener(
+        "mousemove",
+        function probe(e) {
+          if (!e.isTrusted) return;
+          window.__aibPtrCal = { x: e.clientX, y: e.clientY };
+          window.removeEventListener("mousemove", probe, true);
+        },
+        { capture: true },
+      );
+    });
+    await page.mouse.move(CAL_PROBE_PX, CAL_PROBE_PX);
+    let seen = null;
+    for (let attempt = 0; attempt < 10 && !seen; attempt++) {
+      seen = await page.evaluate(() => window.__aibPtrCal);
+      if (!seen) await new Promise((r) => setTimeout(r, 30));
+    }
+    await page.evaluate(() => {
+      delete window.__aibPtrCal;
+    });
+    if (!seen || !(seen.x > 0) || !(seen.y > 0)) return null;
+    const fx = seen.x / CAL_PROBE_PX;
+    const fy = seen.y / CAL_PROBE_PX;
+    if (Math.abs(fx - 1) <= CAL_TOLERANCE && Math.abs(fy - 1) <= CAL_TOLERANCE) return null;
+    return { fx, fy };
+  } catch {
+    return null;
+  }
+}
+
+// Exported for tests: pre-scale a pointer message by the inverse of the
+// measured displacement so it lands where the viewer aimed. Wheel deltas are
+// scroll amounts, not positions — only x/y are corrected.
+export function withPointerCal(msg, cal) {
+  if (!cal || msg.type !== "input_mouse") return msg;
+  return { ...msg, x: Number(msg.x) / cal.fx, y: Number(msg.y) / cal.fy };
+}
+
 // Exported for tests: the input contract is only observable here.
 export async function applyInput(page, msg) {
   if (msg.type === "input_mouse") {
@@ -925,6 +995,11 @@ export async function startStreamServer(
   let castChain = Promise.resolve();
   let castEpoch = 0;
   let castOverride = false; // the CURRENT cast session applied a device-metrics override
+  // Pointer-space calibration, keyed to the cast epoch: the override (and any
+  // displacement it brings) lives exactly as long as the cast session, so a
+  // retarget/resize/restart naturally re-measures.
+  let pointerCal = null;
+  let pointerCalEpoch = -1;
 
   function stopScreencast() {
     castChain = castChain.then(stopScreencastNow).catch(() => {});
@@ -1322,10 +1397,26 @@ export async function startStreamServer(
       // Queue, don't fire-and-forget: the suspend/page checks re-run at apply
       // time so a fill starting mid-queue still blacks out the queued tail.
       inputChain = inputChain
-        .then(() => {
+        .then(async () => {
           if (suspended > 0) return;
           const page = state.current;
           if (!page || page.isClosed?.()) return;
+          if (msg.type === "input_mouse" && castOverride) {
+            if (pointerCalEpoch !== castEpoch) {
+              // Stamp first: a probe that fails must not re-run per event.
+              pointerCalEpoch = castEpoch;
+              pointerCal = await calibratePointer(page);
+              // The measured factor is the one fact that decides whether every
+              // subsequent click is corrected — a host where it silently
+              // measures wrong would look exactly like the original bug.
+              log(
+                pointerCal
+                  ? `stream: pointer calibration measured fx=${pointerCal.fx.toFixed(4)} fy=${pointerCal.fy.toFixed(4)}, correcting input`
+                  : "stream: pointer calibration measured identity, no correction",
+              );
+            }
+            msg = withPointerCal(msg, pointerCal);
+          }
           return applyInput(page, msg);
         })
         // Malformed input used to disappear here: the viewer sent something
