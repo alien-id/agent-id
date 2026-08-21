@@ -30,6 +30,7 @@
 //                     {"type":"config","maxFps":N,"pacing":"ack"|"push"}
 //                     {"type":"status_request"}
 //                     {"type":"resize","width":W,"height":H[,"scale":S]}
+//                     {"type":"nav","action":"back"|"forward"|"reload"}
 //                     {"type":"webrtc_offer"|"webrtc_ice", ...}  (experimental)
 //
 // `seq` counts per codec, so each viewer sees its own stream contiguous.
@@ -119,6 +120,12 @@ const REFINE_QUALITY = envInt("AGENT_ID_STREAM_REFINE_QUALITY", 90, 0, 100);
 // two CDP calls and one keyframe, which also proves the pipe is alive and is
 // far cheaper than a viewer staring at a frozen picture.
 const WATCHDOG_MS = envInt("AGENT_ID_STREAM_WATCHDOG_MS", 15000, 0, 600000);
+// Reused history flags expire: a single-page app can move the history cursor
+// without changing the url (pushState to the same url, a back into a duplicate
+// entry), which the url-keyed reuse below cannot see. This bounds how long such
+// a move can leave the flags wrong, at one CDP call per interval instead of one
+// per poll tick.
+const NAV_FLAGS_MAX_AGE_MS = envInt("AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS", 10000, 0, 600000);
 const BIND_HOST = process.env.AGENT_ID_STREAM_BIND || "127.0.0.1";
 // Per-second counter rows (stream-counters.mjs). On by default — a freeze is
 // diagnosed from the rows it produces, and a host that cannot carry two lines
@@ -331,6 +338,26 @@ export async function calibratePointer(page) {
 export function withPointerCal(msg, cal) {
   if (!cal || msg.type !== "input_mouse") return msg;
   return { ...msg, x: Number(msg.x) / cal.fx, y: Number(msg.y) / cal.fy };
+}
+
+// Exported for tests: navigation is executed over CDP rather than through
+// page.goBack/goForward/reload, which WAIT for a load event — a single-page
+// app that never fires one would stall the shared input queue behind it.
+export async function applyNav(page, action) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    if (action === "reload") {
+      await session.send("Page.reload");
+      return;
+    }
+    const history = await session.send("Page.getNavigationHistory");
+    const target = history.currentIndex + (action === "back" ? -1 : 1);
+    const entry = history.entries?.[target];
+    if (!entry) return;
+    await session.send("Page.navigateToHistoryEntry", { entryId: entry.id });
+  } finally {
+    await session.detach().catch(() => {});
+  }
 }
 
 // Exported for tests: the input contract is only observable here.
@@ -550,6 +577,13 @@ export async function startStreamServer(
   // to a viewer that joins with a field already focused, and suppressed during
   // a credential fill — the owner's keyboard must not pop over a blackout.
   let lastInputFocus = null;
+  let lastNav = null;
+  // Whether the history flags were last measured with a cast session at all,
+  // and when — so readNav can skip Page.getNavigationHistory on a poll tick
+  // where neither the url nor the session state could have moved the flags,
+  // while still expiring that reuse after NAV_FLAGS_MAX_AGE_MS (see readNav).
+  let navFlagsHadSession = false;
+  let navFlagsAt = 0;
 
   function inputFocus(payload) {
     if (suspended > 0) return;
@@ -557,6 +591,15 @@ export async function startStreamServer(
     if (lastInputFocus && JSON.stringify(lastInputFocus) === JSON.stringify(next)) return;
     lastInputFocus = next;
     broadcastStatus({ type: "status", source: "alien", input_focus: next });
+  }
+
+  // Same shape as inputFocus: polled on the focus cadence, deduped, remembered
+  // so a joining viewer learns the current url/history state immediately.
+  function navState(payload) {
+    if (suspended > 0) return;
+    if (lastNav && JSON.stringify(lastNav) === JSON.stringify(payload)) return;
+    lastNav = payload;
+    broadcastStatus({ type: "status", source: "alien", nav: payload });
   }
 
   // Focus is POLLED, not event-driven: the stealth patching deliberately keeps
@@ -606,6 +649,55 @@ export async function startStreamServer(
     return { editable: false };
   }
 
+  // Same cadence and channel as focus: url + history flags, read from the
+  // SAME long-lived CDP session the screencast owns (`cdp`) rather than
+  // opening a fresh one every poll tick.
+  async function readNav() {
+    const page = state.current;
+    if (!page || page.isClosed?.()) return null;
+    let url = null;
+    try {
+      url = typeof page.url === "function" ? page.url() : null;
+    } catch {
+      url = null;
+    }
+    if (!url) return null;
+    if (!cdp) {
+      navFlagsHadSession = false;
+      navFlagsAt = Date.now();
+      return { url, canGoBack: false, canGoForward: false };
+    }
+    // The history flags only move on a navigation, and every navigation that
+    // moves them also changes the url (a same-url reload leaves the cursor
+    // untouched) — so re-measuring is needed only on a url change, once a cast
+    // session first becomes available for a url already seen (that is what
+    // navFlagsHadSession false catches), or once the last measurement is
+    // stale, which covers a same-url history-cursor move a single-page app
+    // can make (pushState to the same url, a back into a duplicate entry).
+    // The url half is keyed on lastNav (what was actually broadcast), not a
+    // parallel memo, so a broadcast dropped by navState while suspended
+    // leaves lastNav on the old url and forces a re-measure on the next tick.
+    const sameUrl = lastNav?.url === url;
+    const fresh = Date.now() - navFlagsAt < NAV_FLAGS_MAX_AGE_MS;
+    if (sameUrl && navFlagsHadSession && fresh) {
+      return { url, canGoBack: lastNav.canGoBack, canGoForward: lastNav.canGoForward };
+    }
+    try {
+      const h = await cdp.send("Page.getNavigationHistory");
+      navFlagsHadSession = Boolean(cdp);
+      navFlagsAt = Date.now();
+      return {
+        url,
+        canGoBack: h.currentIndex > 0,
+        canGoForward: h.currentIndex < h.entries.length - 1,
+      };
+    } catch {
+      navFlagsHadSession = Boolean(cdp);
+      navFlagsAt = Date.now();
+      return { url, canGoBack: false, canGoForward: false };
+    }
+  }
+
   function ensureFocusPoller() {
     if (focusPoller) return;
     let inFlight = false;
@@ -615,6 +707,8 @@ export async function startStreamServer(
       try {
         const focus = await readInputFocus();
         if (focus) inputFocus(focus);
+        const nav = await readNav();
+        if (nav) navState(nav);
       } finally {
         inFlight = false;
       }
@@ -627,6 +721,9 @@ export async function startStreamServer(
     clearInterval(focusPoller);
     focusPoller = null;
     lastInputFocus = null;
+    lastNav = null;
+    navFlagsHadSession = false;
+    navFlagsAt = 0;
   }
 
   function statusFor(client) {
@@ -643,6 +740,7 @@ export async function startStreamServer(
       maxFps: client.maxFps,
       ...(vp ? { viewportWidth: vp.width, viewportHeight: vp.height } : {}),
       ...(lastInputFocus ? { input_focus: lastInputFocus } : {}),
+      ...(lastNav ? { nav: lastNav } : {}),
     };
   }
 
@@ -1391,6 +1489,29 @@ export async function startStreamServer(
             });
           })
           .catch(() => {});
+        return;
+      }
+      if (msg.type === "nav") {
+        const action = msg.action;
+        if (!["back", "forward", "reload"].includes(action)) return;
+        state.invalidateRefs?.("owner navigated the live browser");
+        // Queued behind pending input for the same reason input is queued: a
+        // reload racing a click would apply to a page the click already left.
+        inputChain = inputChain
+          .then(async () => {
+            if (suspended > 0) return;
+            const page = state.current;
+            if (!page || page.isClosed?.()) return;
+            await applyNav(page, action);
+          })
+          .catch((err) => {
+            sendText(client, {
+              type: "status",
+              source: "alien",
+              error: err?.message || String(err),
+              for: "nav",
+            });
+          });
         return;
       }
       if (mutatesPage(msg)) state.invalidateRefs?.("owner used live browser control");
