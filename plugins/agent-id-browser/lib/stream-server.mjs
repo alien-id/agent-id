@@ -120,6 +120,12 @@ const REFINE_QUALITY = envInt("AGENT_ID_STREAM_REFINE_QUALITY", 90, 0, 100);
 // two CDP calls and one keyframe, which also proves the pipe is alive and is
 // far cheaper than a viewer staring at a frozen picture.
 const WATCHDOG_MS = envInt("AGENT_ID_STREAM_WATCHDOG_MS", 15000, 0, 600000);
+// Reused history flags expire: a single-page app can move the history cursor
+// without changing the url (pushState to the same url, a back into a duplicate
+// entry), which the url-keyed reuse below cannot see. This bounds how long such
+// a move can leave the flags wrong, at one CDP call per interval instead of one
+// per poll tick.
+const NAV_FLAGS_MAX_AGE_MS = envInt("AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS", 10000, 0, 600000);
 const BIND_HOST = process.env.AGENT_ID_STREAM_BIND || "127.0.0.1";
 // Per-second counter rows (stream-counters.mjs). On by default — a freeze is
 // diagnosed from the rows it produces, and a host that cannot carry two lines
@@ -572,11 +578,12 @@ export async function startStreamServer(
   // a credential fill — the owner's keyboard must not pop over a blackout.
   let lastInputFocus = null;
   let lastNav = null;
-  // The url/session state the history flags were last measured against, so
-  // readNav can skip Page.getNavigationHistory on a poll tick where neither
-  // could have moved the flags (see readNav).
-  let navFlagsUrl = null;
+  // Whether the history flags were last measured with a cast session at all,
+  // and when — so readNav can skip Page.getNavigationHistory on a poll tick
+  // where neither the url nor the session state could have moved the flags,
+  // while still expiring that reuse after NAV_FLAGS_MAX_AGE_MS (see readNav).
   let navFlagsHadSession = false;
+  let navFlagsAt = 0;
 
   function inputFocus(payload) {
     if (suspended > 0) return;
@@ -656,36 +663,37 @@ export async function startStreamServer(
     }
     if (!url) return null;
     if (!cdp) {
-      navFlagsUrl = url;
       navFlagsHadSession = false;
+      navFlagsAt = Date.now();
       return { url, canGoBack: false, canGoForward: false };
     }
     // The history flags only move on a navigation, and every navigation that
     // moves them also changes the url (a same-url reload leaves the cursor
-    // untouched) — so re-measuring is needed only on a url change, or once a
-    // cast session first becomes available for a url already seen (that is
-    // what navFlagsHadSession false catches, since the branch above records
-    // "no session" even when the url hasn't moved).
-    const sameUrl = url === navFlagsUrl;
-    if (sameUrl && navFlagsHadSession) {
-      return {
-        url,
-        canGoBack: lastNav?.canGoBack ?? false,
-        canGoForward: lastNav?.canGoForward ?? false,
-      };
+    // untouched) — so re-measuring is needed only on a url change, once a cast
+    // session first becomes available for a url already seen (that is what
+    // navFlagsHadSession false catches), or once the last measurement is
+    // stale, which covers a same-url history-cursor move a single-page app
+    // can make (pushState to the same url, a back into a duplicate entry).
+    // The url half is keyed on lastNav (what was actually broadcast), not a
+    // parallel memo, so a broadcast dropped by navState while suspended
+    // leaves lastNav on the old url and forces a re-measure on the next tick.
+    const sameUrl = lastNav?.url === url;
+    const fresh = Date.now() - navFlagsAt < NAV_FLAGS_MAX_AGE_MS;
+    if (sameUrl && navFlagsHadSession && fresh) {
+      return { url, canGoBack: lastNav.canGoBack, canGoForward: lastNav.canGoForward };
     }
     try {
       const h = await cdp.send("Page.getNavigationHistory");
-      navFlagsUrl = url;
       navFlagsHadSession = Boolean(cdp);
+      navFlagsAt = Date.now();
       return {
         url,
         canGoBack: h.currentIndex > 0,
         canGoForward: h.currentIndex < h.entries.length - 1,
       };
     } catch {
-      navFlagsUrl = url;
       navFlagsHadSession = Boolean(cdp);
+      navFlagsAt = Date.now();
       return { url, canGoBack: false, canGoForward: false };
     }
   }
@@ -714,8 +722,8 @@ export async function startStreamServer(
     focusPoller = null;
     lastInputFocus = null;
     lastNav = null;
-    navFlagsUrl = null;
     navFlagsHadSession = false;
+    navFlagsAt = 0;
   }
 
   function statusFor(client) {

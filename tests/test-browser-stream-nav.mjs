@@ -20,6 +20,17 @@ import {
   applyNav,
 } from "../plugins/agent-id-browser/lib/stream-server.mjs";
 
+// AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS is read at module load, same as
+// AGENT_ID_STREAM_WATCHDOG_MS in tests/test-browser-stream-counters.mjs — a
+// distinct specifier is the only way to read it with a second value in this
+// process, so the freshness-bound test gets its own short-lived import
+// instead of waiting out the real 10s default.
+process.env.AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS = "300";
+const { startStreamServer: startStreamServerShortMaxAge } = await import(
+  "../plugins/agent-id-browser/lib/stream-server.mjs?navFlagsMaxAge=300"
+);
+delete process.env.AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── fakes (local copies — see header note) ─────────────────────────────────
@@ -46,6 +57,10 @@ function makeFakeSession(screenshotData = "sharp") {
   // Page.getNavigationHistory reads; navHistory is settable so a test can
   // change what the "next" read would report before triggering it.
   let navHistory = { currentIndex: 0, entries: [{ id: "e1" }] };
+  // Lets a test hold a Page.getNavigationHistory call open, so it can land a
+  // suspend() call while the read is in flight — reproducing a broadcast
+  // dropped mid-tick rather than one dropped before the tick even started.
+  let historyGate = Promise.resolve();
   const session = {
     sent: [],
     detached: false,
@@ -53,7 +68,10 @@ function makeFakeSession(screenshotData = "sharp") {
     async send(method, params) {
       session.sent.push({ method, params });
       if (method === "Page.captureScreenshot") return { data: screenshotData };
-      if (method === "Page.getNavigationHistory") return navHistory;
+      if (method === "Page.getNavigationHistory") {
+        await historyGate;
+        return navHistory;
+      }
       return {};
     },
     async detach() { session.detached = true; },
@@ -61,6 +79,12 @@ function makeFakeSession(screenshotData = "sharp") {
       handlers.get("Page.screencastFrame")?.({ data, metadata, sessionId: 1 });
     },
     setNavHistory(next) { navHistory = next; },
+    /** Delay the next Page.getNavigationHistory resolution until released. */
+    holdHistory() {
+      let release;
+      historyGate = new Promise((resolve) => { release = resolve; });
+      return () => release();
+    },
   };
   return session;
 }
@@ -192,6 +216,12 @@ async function connectStream(port, token, params = "") {
 async function startServer(opts = {}) {
   const state = makeFakeState();
   const server = await startStreamServer(state, { log: () => {}, ...opts });
+  return { state, server };
+}
+
+async function startServerShortMaxAge(opts = {}) {
+  const state = makeFakeState();
+  const server = await startStreamServerShortMaxAge(state, { log: () => {}, ...opts });
   return { state, server };
 }
 
@@ -338,6 +368,62 @@ test("a late-attaching cast session is measured on the next tick even though the
     historyCallCount(state),
     1,
     "the newly attached session is measured even though the url didn't change",
+  );
+
+  c.close();
+  server.close();
+});
+
+// ── nav-flags freshness: bounded staleness + the dropped-broadcast path ────
+
+test("a same-url measurement older than AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS is re-measured", async () => {
+  const { state, server } = await startServerShortMaxAge();
+  const c = await connectStream(server.port, server.token);
+  await c.nextJson(); // initial status, no nav yet
+  await c.nextJson(); // first poll tick: measures once
+  assert.equal(historyCallCount(state), 1, "the first tick measures the flags");
+
+  await sleep(900); // several ticks past the 300ms max age; the url never changes
+  assert.ok(
+    historyCallCount(state) >= 2,
+    "reused flags older than the max age are re-measured even though the url stayed the same " +
+      "(covers a same-url history-cursor move a single-page app can make)",
+  );
+
+  c.close();
+  server.close();
+});
+
+test("a broadcast dropped while suspended does not leave the flags pinned — resume re-measures", async () => {
+  const { state, server } = await startServer();
+  const c = await connectStream(server.port, server.token);
+  await c.nextJson(); // initial status, no nav yet
+  const first = await c.nextJson(); // first poll tick
+  assert.deepEqual(first.nav, { url: "https://example.test/", canGoBack: false, canGoForward: false });
+  assert.equal(historyCallCount(state), 1);
+
+  state.setUrl("https://example.test/next");
+  // Hold the next Page.getNavigationHistory call open, so the tick that
+  // reads it is still in flight when suspend() lands mid-tick — the exact
+  // race that lets a dropped broadcast pin the flags (see readNav).
+  const release = state.session.holdHistory();
+  await sleep(280); // let the next tick start and stall on the held call
+  assert.equal(historyCallCount(state), 2, "the tick is mid-measurement, held by the gate");
+
+  server.suspend(); // suspended lands while the read is already in flight
+  await c.nextJson(); // suspended: true
+  release(); // the held call resolves; navState() drops the broadcast
+  await sleep(50); // let the stalled tick finish
+
+  server.resume(); // also restarts the screencast — a fresh cast session
+  await c.nextJson(); // suspended: false
+
+  await c.nextJson(); // the next tick's re-measured broadcast
+  assert.equal(
+    historyCallCount(state),
+    1,
+    "the flags are re-measured on the fresh cast session after resume, not reused from " +
+      "the dropped tick — a dropped broadcast must not pin lastNav to the old url",
   );
 
   c.close();

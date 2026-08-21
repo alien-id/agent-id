@@ -329,18 +329,27 @@ cheap, in-process, no CDP round trip. `canGoBack`/`canGoForward` are the
 expensive half: they only move when the page actually navigates, so they are
 re-measured (one `Page.getNavigationHistory` on the same CDP session the
 screencast already holds open) only when the polled `url` differs from the
-one they were last measured against, or when a cast session first becomes
-available for a `url` already seen — otherwise the last-measured flags are
-reused as-is. A page nobody navigates therefore costs no recurring
-`Page.getNavigationHistory` traffic beyond the one measurement it takes to
-learn that. The result is deduped the same way as `input_focus` (a
-`JSON.stringify` comparison against the last-broadcast value, so a static
-page still produces no wire traffic) and remembered so a joining viewer
-receives the current `nav` state in its join `status` immediately — before it
-can send anything, and before any navigation of its own has happened. A page
-whose `url()` cannot be read yet (no navigation has landed) is skipped rather
-than broadcast, and a detached/failing history read still reports the `url`
-with both flags `false` rather than dropping the update.
+one on the last value actually broadcast to viewers, when a cast session
+first becomes available for a `url` already seen, or when the last
+measurement is older than `AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS` (10 s by
+default, overridable) — otherwise the last-measured flags are reused as-is.
+The reuse check is keyed on the broadcast value rather than a
+measurement-time memo so that a measurement taken while the feed is
+suspended (see below), and therefore dropped instead of broadcast, cannot
+pin the viewer's flags to a url the session has already moved past; the
+max-age bound exists because a single-page app can move the history cursor
+without changing the `url` at all (`pushState` to the same url, a back into
+a duplicate entry), which the url comparison alone can't see. A page nobody
+navigates therefore costs no recurring `Page.getNavigationHistory` traffic
+beyond one measurement per max-age window. The result is deduped the same
+way as `input_focus` (a `JSON.stringify` comparison against the
+last-broadcast value, so a static page still produces no wire traffic) and
+remembered so a joining viewer receives the current `nav` state in its join
+`status` immediately — before it can send anything, and before any
+navigation of its own has happened. A page whose `url()` cannot be read yet
+(no navigation has landed) is skipped rather than broadcast, and a
+detached/failing history read still reports the `url` with both flags
+`false` rather than dropping the update.
 
 A `nav` command (`back` | `forward` | `reload`) is suspend-gated exactly like
 input and `resize` — dropped outright while a credential fill is in flight —
