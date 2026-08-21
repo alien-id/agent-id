@@ -1406,6 +1406,14 @@ export async function startStreamServer(
               // Stamp first: a probe that fails must not re-run per event.
               pointerCalEpoch = castEpoch;
               pointerCal = await calibratePointer(page);
+              // The measured factor is the one fact that decides whether every
+              // subsequent click is corrected — a host where it silently
+              // measures wrong would look exactly like the original bug.
+              log(
+                pointerCal
+                  ? `stream: pointer calibration measured fx=${pointerCal.fx.toFixed(4)} fy=${pointerCal.fy.toFixed(4)}, correcting input`
+                  : "stream: pointer calibration measured identity, no correction",
+              );
             }
             msg = withPointerCal(msg, pointerCal);
           }
