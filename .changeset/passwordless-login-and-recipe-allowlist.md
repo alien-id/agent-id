@@ -1,4 +1,5 @@
 ---
+"@alien-id/agent-id-core": patch
 "@alien-id/agent-id-vault": minor
 "@alien-id/agent-id-browser": minor
 "@alien-id/agent-id-mcp": minor
@@ -33,3 +34,6 @@ could not be filled truthfully.
   success.
 - `vault list` reports a login's non-secret shape (`otp`, `passwordless`,
   `loginUrl`, `hasRecipe`).
+- The secure form quotes the caller's real `timeoutMs` to the human instead of a
+  hardcoded "5 min" — the sign-in card's window is 10 minutes, and that line is
+  what a person reads to decide whether they can go fetch a mailed code.
