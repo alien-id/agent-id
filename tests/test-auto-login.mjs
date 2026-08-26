@@ -12,7 +12,9 @@ import assert from "node:assert/strict";
 import {
   applyVars,
   stepNeedsOtp,
+  stepCarriesSecret,
   runRecipe,
+  autoLogin,
   resolveOtp,
   isLoginishPath,
   stillOnLoginPage,
@@ -31,6 +33,12 @@ test("stepNeedsOtp detects {otp} in a placeholder field", () => {
   assert.equal(stepNeedsOtp({ action: "fill", selector: "#code", value: "{otp}" }), true);
   assert.equal(stepNeedsOtp({ action: "fill", selector: "#pw", value: "{password}" }), false);
 });
+
+// A page stub that reports the origin it is "on" — the allowlist gate reads it
+// live via page.url(), so a bare {} is no longer a usable stand-in.
+function pageOn(url) {
+  return { url: () => url };
+}
 
 // A recording driver stands in for the human-input driver so the recipe
 // mapping / var-substitution / lazy-OTP logic is tested without a browser.
@@ -60,10 +68,11 @@ test("runRecipe maps steps to driver calls, substitutes vars, resolves {otp} onc
     { action: "fill", selector: "#otp", value: "{otp}" },
     { action: "press", selector: "#otp", key: "Enter" },
   ];
-  await runRecipe({}, steps, {
+  await runRecipe(pageOn("https://x/login"), steps, {
     username: "alice",
     password: "s3cret",
     getOtp,
+    domains: ["x"],
     driver: recordingDriver(calls),
   });
   assert.deepEqual(calls, [
@@ -79,13 +88,14 @@ test("runRecipe maps steps to driver calls, substitutes vars, resolves {otp} onc
 
 test("runRecipe does not resolve OTP when no step needs it", async () => {
   let otpCalls = 0;
-  await runRecipe({}, [{ action: "fill", selector: "#u", value: "{username}" }], {
+  await runRecipe(pageOn("https://x/login"), [{ action: "fill", selector: "#u", value: "{username}" }], {
     username: "u",
     password: "p",
     getOtp: async () => {
       otpCalls++;
       return "x";
     },
+    domains: ["x"],
     driver: recordingDriver([]),
   });
   assert.equal(otpCalls, 0);
@@ -93,13 +103,121 @@ test("runRecipe does not resolve OTP when no step needs it", async () => {
 
 test("runRecipe rejects an unknown action", async () => {
   await assert.rejects(
-    runRecipe({}, [{ action: "frobnicate" }], {
+    runRecipe(pageOn("https://x/login"), [{ action: "frobnicate" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => "",
+      domains: ["x"],
+      driver: recordingDriver([]),
+    }),
+    /unknown recipe action/,
+  );
+});
+
+test("stepCarriesSecret sees a placeholder in any substituted field, not just value", () => {
+  assert.equal(stepCarriesSecret({ action: "fill", selector: "#c", value: "{otp}" }), true);
+  assert.equal(stepCarriesSecret({ action: "click", selector: "#x-{password}" }), true);
+  assert.equal(stepCarriesSecret({ action: "fill", selector: "#u", value: "{username}" }), false);
+  assert.equal(stepCarriesSecret(undefined), false);
+});
+
+test("runRecipe requires the credential's domains allowlist", async () => {
+  await assert.rejects(
+    runRecipe(pageOn("https://x/login"), [{ action: "wait", ms: 1 }], {
       username: "u",
       password: "p",
       getOtp: async () => "",
       driver: recordingDriver([]),
     }),
-    /unknown recipe action/,
+    /requires the credential's `domains` allowlist/,
+  );
+});
+
+test("runRecipe refuses to navigate off the credential's allowlist", async () => {
+  const calls = [];
+  await assert.rejects(
+    runRecipe(pageOn("https://x/login"), [{ action: "navigate", url: "https://evil.test/collect" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => "",
+      domains: ["x"],
+      driver: recordingDriver(calls),
+    }),
+    /not on the credential's domain allowlist/,
+  );
+  assert.deepEqual(calls, [], "the navigation must not have happened");
+});
+
+test("runRecipe refuses a secret step on a foreign origin BEFORE resolving the code", async () => {
+  const calls = [];
+  let otpCalls = 0;
+  await assert.rejects(
+    runRecipe(pageOn("https://evil.test/phish"), [{ action: "fill", selector: "#code", value: "{otp}" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => {
+        otpCalls++;
+        return "654321";
+      },
+      domains: ["x"],
+      driver: recordingDriver(calls),
+    }),
+    /not on the credential's domain allowlist/,
+  );
+  assert.deepEqual(calls, [], "the fill must not have happened");
+  assert.equal(otpCalls, 0, "the owner must not be asked for a code we were going to refuse");
+});
+
+test("runRecipe gates a secret hidden in a selector, not just in a value", async () => {
+  const calls = [];
+  await assert.rejects(
+    runRecipe(pageOn("https://evil.test/phish"), [{ action: "click", selector: "#x-{password}" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => "",
+      domains: ["x"],
+      driver: recordingDriver(calls),
+    }),
+    /not on the credential's domain allowlist/,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("runRecipe refuses a navigate URL carrying a secret placeholder", async () => {
+  const calls = [];
+  await assert.rejects(
+    runRecipe(pageOn("https://x/login"), [{ action: "navigate", url: "https://x/c?v={otp}" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => "654321",
+      domains: ["x"],
+      driver: recordingDriver(calls),
+    }),
+    /must not carry \{password\} or \{otp\}/,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("runRecipe fails closed when the page cannot report its origin", async () => {
+  await assert.rejects(
+    runRecipe({}, [{ action: "fill", selector: "#code", value: "{otp}" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => "654321",
+      domains: ["x"],
+      driver: recordingDriver([]),
+    }),
+    /cannot determine the current page origin/,
+  );
+});
+
+test("autoLogin refuses a loginUrl off the credential's allowlist, before opening anything", async () => {
+  await assert.rejects(
+    autoLogin({
+      page: {},
+      cred: { name: "c", username: "u", password: "p", loginUrl: "https://evil.test/login", domains: ["x"] },
+    }),
+    /not on the credential's domain allowlist/,
   );
 });
 

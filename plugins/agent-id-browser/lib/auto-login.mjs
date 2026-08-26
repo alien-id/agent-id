@@ -19,6 +19,13 @@
 // The password is typed by this (vault-unlocked) process straight into the page —
 // the same trust boundary as the proxy injecting `basic`; the agent never sees it.
 //
+// Recipes are authored by the agent from page content, so every origin a recipe
+// reaches is checked against the credential's `domains` before anything happens
+// there — the same allowlist gate `fill-secret`/`fill-otp` apply in the session
+// server. Without it a recipe step could navigate anywhere and type {password} /
+// {otp} into it, which is a credential-exfiltration primitive driven by whatever
+// the page said. `domains` is therefore load-bearing for `login`, not advisory.
+//
 // The browser-driving functions take a `page` object (a patchright Page), so the
 // pure pieces (applyVars / stepNeedsOtp / runRecipe / resolveOtp-totp) unit-test
 // against a stub page with no real browser.
@@ -26,6 +33,7 @@
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
+import { hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { classifyLogin } from "./login-detect.mjs";
 import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
@@ -42,6 +50,29 @@ async function typeSecret(page, selector, value, opts = {}) {
 }
 
 const PLACEHOLDER_FIELDS = ["url", "value", "text", "selector", "key"];
+
+// Refuse an origin the credential was never scoped to. `where` names the step so
+// a refusal is actionable; the offending VALUE is never interpolated, only the
+// host, so this stays safe to surface to the agent.
+function assertHostAllowed(host, domains, where) {
+  if (!hostMatchesAllowlist(host, domains)) {
+    throw new Error(
+      `${where}: refusing "${host || "(no host)"}" — not on the credential's domain ` +
+        `allowlist (${(domains || []).join(", ") || "none"}). Add the host to the credential's ` +
+        "domains (wildcards like *.example.com are allowed).",
+    );
+  }
+}
+
+// The origin the page is on RIGHT NOW. Read live rather than tracked across
+// steps: a login flow redirects between hosts, and a tracked value would check
+// an origin we already left. Fails closed when `page` cannot report one.
+function liveHost(page, where) {
+  if (!page || typeof page.url !== "function") {
+    throw new Error(`${where}: cannot determine the current page origin`);
+  }
+  return hostOf(page.url());
+}
 
 function hostOf(url) {
   try {
@@ -124,10 +155,25 @@ export function stepNeedsOtp(step) {
   );
 }
 
+// Does this step resolve a secret value anywhere in it? Every placeholder field is
+// substituted, so a {password}/{otp} in `selector` reaches the page as surely as
+// one in `value`. Pure. Exported for tests.
+export function stepCarriesSecret(step) {
+  return PLACEHOLDER_FIELDS.some(
+    (k) =>
+      typeof step?.[k] === "string" &&
+      (step[k].includes("{password}") || step[k].includes("{otp}")),
+  );
+}
+
 /**
  * Execute recipe `steps` against a page. `{otp}` is resolved lazily via `getOtp()`
  * the first time a step needs it (so a recipe whose login fails before the OTP
  * step never prompts). Actions: navigate, fill, type, click, press, wait.
+ *
+ * `domains` is the credential's allowlist and is required: every navigation
+ * target, and the live origin of every step that types {password} or {otp}, is
+ * checked against it before the step runs.
  */
 // `driver` maps the action vocabulary to page interactions; it defaults to the
 // human-input driver (curved motion, key-by-key typing) and is injectable so the
@@ -135,8 +181,11 @@ export function stepNeedsOtp(step) {
 export async function runRecipe(
   page,
   steps,
-  { username, password, getOtp, driver = humanDriver },
+  { username, password, getOtp, domains, driver = humanDriver },
 ) {
+  if (!Array.isArray(domains)) {
+    throw new Error("runRecipe requires the credential's `domains` allowlist");
+  }
   let otp;
   const sub = async (s) => {
     if (typeof s !== "string") return s;
@@ -144,8 +193,7 @@ export async function runRecipe(
     return applyVars(s, { username, password, otp });
   };
   // A step whose template injects the password/otp must never surface the raw
-  // value in an error (the recipe path is otherwise unguarded, unlike the
-  // heuristic/Microsoft fills). Run it under a value-free catch.
+  // value in an error. Run it under a value-free catch.
   const carriesSecret = (tpl) =>
     typeof tpl === "string" && (tpl.includes("{password}") || tpl.includes("{otp}"));
   const guarded = async (tpl, run) => {
@@ -156,25 +204,45 @@ export async function runRecipe(
       throw new Error(`recipe step '${tpl}' failed while entering a secret value`);
     }
   };
+  // Gate on the origin the page is on, before `sub` runs — so a refusal never
+  // costs the owner a secure-input card for a code we were going to reject.
+  // Checked per STEP, not per field: `selector` is substituted too, so a secret
+  // placeholder anywhere in the step can resolve a value.
+  const gateSecret = (step, where) => {
+    if (stepCarriesSecret(step)) assertHostAllowed(liveHost(page, where), domains, where);
+  };
   for (const step of steps) {
     switch (step.action) {
-      case "navigate":
-        await driver.navigate(page, await sub(step.url));
+      case "navigate": {
+        // A sign-in never needs a secret in a URL, and allowing one would be the
+        // exfiltration channel this gate exists to close — refuse before `sub`
+        // can resolve it.
+        if (stepCarriesSecret(step)) {
+          throw new Error("recipe navigate: a URL must not carry {password} or {otp}");
+        }
+        const url = await sub(step.url);
+        assertHostAllowed(hostOf(url), domains, "recipe navigate");
+        await driver.navigate(page, url);
         break;
+      }
       case "fill":
+        gateSecret(step, "recipe fill");
         await guarded(step.value, async () =>
           driver.fill(page, await sub(step.selector), await sub(step.value)),
         );
         break;
       case "type": // alias of fill (kept for parity with the session vocabulary)
+        gateSecret(step, "recipe type");
         await guarded(step.text, async () =>
           driver.type(page, await sub(step.selector), await sub(step.text)),
         );
         break;
       case "click":
+        gateSecret(step, "recipe click");
         await driver.click(page, await sub(step.selector));
         break;
       case "press":
+        gateSecret(step, "recipe press");
         await driver.press(page, await sub(step.selector), step.key || "Enter");
         break;
       case "wait":
@@ -439,6 +507,10 @@ export async function autoLogin({
   confirmWaitMs = 180000,
 }) {
   if (!cred.loginUrl) throw new Error(`login '${cred.name}': loginUrl is required for auto-login`);
+  // The whole run — warmup, the login page, every recipe step — happens on the
+  // credential's own origins. Checked once here so a loginUrl pointing off the
+  // allowlist fails before a browser goes anywhere, not after.
+  assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl");
   const getOtp = () => resolveOtp(cred, { env, log });
 
   // Warm up before a deep login link. Some sites (e.g. Reddit) wall a COLD
@@ -465,7 +537,12 @@ export async function autoLogin({
   await page.waitForTimeout(settleMs);
 
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
-    await runRecipe(page, cred.recipe, { username: cred.username, password: cred.password, getOtp });
+    await runRecipe(page, cred.recipe, {
+      username: cred.username,
+      password: cred.password,
+      getOtp,
+      domains: cred.domains,
+    });
   } else if (await detectMicrosoftFlow(page)) {
     // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
     await microsoftLogin(page, cred, log);
