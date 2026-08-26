@@ -442,10 +442,14 @@ export function collectViaForm({
       const where = webauthn && process.platform === "darwin" ? " (in Safari, for Touch ID)" : "";
       // Happy path: the browser opened — tell the human to look there, no URL.
       // Fallback only (headless / AGENT_ID_NO_BROWSER): print the URL to open by hand.
+      // The budget is quoted from `timeoutMs`, not a constant: this line is what
+      // the person decides against ("can I go fetch that code and come back?"), so
+      // a caller that widens the window must not be contradicted by the copy.
+      const budget = `${Math.round(timeoutMs / 60000)} min`;
       process.stderr.write(
         opened
-          ? `→ Opened a secure form in your browser${where}${what} — fill it in there (waiting up to 5 min)…\n`
-          : `→ Open this URL in a browser${what} (waiting up to 5 min):\n  ${url}\n`,
+          ? `→ Opened a secure form in your browser${where}${what} — fill it in there (waiting up to ${budget})…\n`
+          : `→ Open this URL in a browser${what} (waiting up to ${budget}):\n  ${url}\n`,
       );
       timer = setTimeout(() => {
         finish(() => {
