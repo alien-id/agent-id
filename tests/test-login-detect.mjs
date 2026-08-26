@@ -323,3 +323,37 @@ for (const [name, bodyText] of SIGNED_IN_PAGES) {
     assert.equal(classifyLogin({ hasPasswordField: false, bodyText }), "logged-in");
   });
 }
+
+// ─── QR sign-in: found by probing telegram.org's real markup ──────────────────────
+
+test("a QR sign-in screen is neither a finished login nor something to type into", () => {
+  // A screen whose only affordance is a code to scan has no form left, so it was
+  // otherwise indistinguishable from being signed in.
+  for (const bodyText of [
+    "Log in to Telegram by QR Code\nOpen Telegram on your phone\nPoint your phone at this screen",
+    "Scan to log in\nLink with phone number instead.\nScan the QR code with your phone's camera",
+    "Log in with QR Code\nScan with the Discord mobile app to log in instantly.",
+  ]) {
+    assert.equal(classifyLogin({ bodyText }), "qr-sign-in");
+  }
+});
+
+test("a QR code that is not a sign-in leaves a signed-in page alone", () => {
+  for (const bodyText of [
+    "Dashboard\nScan the QR code to open on mobile",
+    "Settings\nShow QR code for this device",
+    "Tickets\nYour boarding pass QR code",
+  ]) {
+    assert.equal(classifyLogin({ hasPasswordField: false, bodyText }), "logged-in");
+  }
+});
+
+test("a QR screen that also offers a code field is an ordinary code step", () => {
+  assert.equal(
+    classifyLogin({
+      hasOtpField: true,
+      bodyText: "Log in with QR code, or enter the 6-digit code we sent you",
+    }),
+    "otp-required",
+  );
+});

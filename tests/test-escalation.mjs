@@ -80,3 +80,17 @@ test("magic-link tells the agent there is nothing to type, and where the link mu
   // Clicking it anywhere else authenticates that browser, not the sealed profile.
   assert.match(message, /browser view for profile 'substack'/);
 });
+
+test("qr-sign-in sends the owner to the browser view, because that is where the code is drawn", () => {
+  const { action, reason, message } = escalationFor("qr-sign-in", {
+    credName: "telegram",
+    profile: "telegram",
+  });
+  assert.equal(action, OWNER_MUST_DRIVE);
+  assert.equal(reason, "qr_code_sign_in");
+  assert.match(message, /nothing to type/i);
+  // The code is rendered inside a headless browser the owner cannot see, so the
+  // viewport is not a last resort here — it is the only way this signs in at all.
+  assert.match(message, /browser view for profile 'telegram'/);
+  assert.ok(!/Google, Microsoft/.test(message));
+});

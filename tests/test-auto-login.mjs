@@ -17,6 +17,7 @@ import {
   autoLogin,
   otpPromptWording,
   IDENTIFIER_FIELD_SEL,
+  CODE_SUBMIT_TEXT_RE,
   resolveOtp,
   isLoginishPath,
   stillOnLoginPage,
@@ -360,5 +361,24 @@ test("the identifier selector covers phone-first sign-ins, not just e-mail-first
     'input[autocomplete="tel"]',
   ]) {
     assert.ok(parts.includes(needed), `identifier selector is missing ${needed}`);
+  }
+});
+
+test("the code-screen submit vocabulary never matches a control that discards the code", () => {
+  for (const label of ["Verify", "Continue", "Submit", "Confirm", "Next", "Sign in", "Log in"]) {
+    assert.ok(CODE_SUBMIT_TEXT_RE.test(label), `"${label}" should advance the code screen`);
+  }
+  // Clicking any of these throws away a code the owner has just typed, and on a
+  // mailed code that means waiting for a fresh one.
+  for (const label of [
+    "Resend code",
+    "Send again",
+    "Send a new code",
+    "Use another method",
+    "Back",
+    "Cancel",
+    "Try another way",
+  ]) {
+    assert.ok(!CODE_SUBMIT_TEXT_RE.test(label), `"${label}" must never be clicked`);
   }
 });

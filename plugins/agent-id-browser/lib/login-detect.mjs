@@ -11,6 +11,9 @@
 //                    gone but we are NOT in — must not be mistaken for success.
 //   "confirm-on-device" — the owner must approve on another device (a push
 //                    prompt); nothing is typed here, so the caller waits
+//   "qr-sign-in"   — the sign-in completes by scanning a QR code rendered on THIS
+//                    page with the service's phone app. Nothing to type, and the
+//                    owner cannot see the code unless the browser view is opened.
 //   "magic-link"   — the sign-in completes by clicking a link in an e-mail. There
 //                    is no code to ask for and the link lands in whatever browser
 //                    the owner opens it in, not this profile — the caller cannot
@@ -80,6 +83,18 @@ const OTP_BODY_RE = new RegExp(
 const MAGIC_LINK_RE =
   /((?:magic|login|sign[- ]?in|confirmation) link|link to (?:log|sign) ?in|(?:click|open) the link (?:in|we) |check your (?:e-?mail|inbox)[^.]{0,40}link)/i;
 
+// Body copy for a sign-in whose credential is a QR code on THIS screen, scanned
+// with the service's phone app (Telegram Web, WhatsApp Web, Discord). Like a magic
+// link there is nothing to type — but unlike it, the thing the owner needs is
+// rendered here, in a browser they cannot see unless the viewport is opened for
+// them. Found by running the classifier against telegram.org's real markup, where
+// a screen with NO input of any kind read as a finished login.
+//
+// Every alternative ties the code to signing in: "scan the QR code to open on
+// mobile" is ordinary copy on a signed-in dashboard.
+const QR_SIGN_IN_RE =
+  /((?:log|sign) ?in[^\n]{0,40}\bqr\b|\bqr\b[^\n]{0,40}(?:to )?(?:log|sign) ?in|scan (?:to|and) (?:log|sign) ?in|point your phone at this screen)/i;
+
 // Body copy for a challenge the owner answers on ANOTHER device: a push prompt
 // ("tap Yes on your phone"), a number match ("tap 42"), or an app notification.
 // Distinct from OTP because nothing is ever typed on this page — the sign-in
@@ -117,8 +132,8 @@ const BLOCK_RE =
  *   bodyText           — visible page text
  *   errorText          — optional focused error text (role=alert etc.)
  *
- * Returns "blocked" | "confirm-on-device" | "magic-link" | "otp-required"
- *       | "failed" | "logged-in" | "unknown".
+ * Returns "blocked" | "confirm-on-device" | "magic-link" | "qr-sign-in"
+ *       | "otp-required" | "failed" | "logged-in" | "unknown".
  */
 export function classifyLogin({
   hasPasswordField = false,
@@ -141,6 +156,9 @@ export function classifyLogin({
   // Same "nothing to type here" guard as the device prompt: a page that offers a
   // code input AND mentions a link (Slack does both) is an ordinary OTP step.
   const magicLinkAffordance = !codeInput && MAGIC_LINK_RE.test(bodyText);
+  // Same "nothing to type" guard: a page offering QR *and* a code field is an
+  // ordinary code step, and the QR is just the other way in.
+  const qrAffordance = !codeInput && QR_SIGN_IN_RE.test(bodyText);
   const hasError = ERROR_RE.test(String(errorText || "")) || ERROR_RE.test(bodyText);
 
   // A bot-block / human-verification wall: the form is gone but we are NOT in.
@@ -156,6 +174,10 @@ export function classifyLogin({
   // a page with no form left is otherwise indistinguishable from being signed in
   // — which would seal an unauthenticated profile and report success.
   if (magicLinkAffordance) return "magic-link";
+  // A QR sign-in, for the same reason and in the same place: a page whose only
+  // affordance is a code to scan has no form left, so it is otherwise
+  // indistinguishable from being signed in.
+  if (qrAffordance) return "qr-sign-in";
   // An OTP affordance is the strongest signal the password step succeeded and a
   // second factor is now being requested — check it next.
   if (otpAffordance) return "otp-required";
@@ -173,4 +195,4 @@ export function classifyLogin({
   return "unknown";
 }
 
-export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, ERROR_RE, BLOCK_RE };
+export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, QR_SIGN_IN_RE, ERROR_RE, BLOCK_RE };

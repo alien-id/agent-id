@@ -350,7 +350,7 @@ export const IDENTIFIER_FIELD_SEL = [
   'input[autocomplete="tel-national"]',
 ].join(",");
 
-async function detectPageState(page) {
+export async function detectPageState(page) {
   return page.evaluate(([challengeSel, identifierSel]) => {
     const all = (sel) => Array.from(document.querySelectorAll(sel));
     const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
@@ -378,15 +378,66 @@ async function typeOtp(page, code) {
     'input[inputmode="numeric"]';
   // The OTP code is low-sensitivity (single-use, seconds-lived) but still typed
   // with human cadence and the value-free error guard, for consistency.
+  const before = page.url();
   await typeSecret(page, sel, code);
-  // ADFS / Entra submit via a button; generic forms submit on Enter.
-  if (await page.locator("#submitButton").count()) {
-    await humanClick(page, "#submitButton").catch(() => {});
-  } else if (await page.locator("#idSubmit_SAOTCC_Continue").count()) {
-    await humanClick(page, "#idSubmit_SAOTCC_Continue").catch(() => {});
-  } else {
-    await page.locator(sel).first().press("Enter").catch(() => {});
+  // Many code screens submit themselves the moment the last box is filled. Then
+  // there is nothing left to click, and hunting for a button on the page we just
+  // landed on costs a full element-wait per candidate.
+  if (page.url() !== before) return;
+  await submitCode(page, sel);
+}
+
+// Buttons that advance a code screen, by their visible text. Deliberately excludes
+// the ones that undo the step — "resend", "send again", "use another method",
+// "back" — because clicking one of those discards a code the owner just typed.
+// Every probe in submitCode is bounded: the page may have navigated out from under
+// us the instant the code completed, and a missing control must cost a beat rather
+// than the 30s default element wait, ten times over.
+const SUBMIT_TIMEOUT = 3000;
+
+export const CODE_SUBMIT_TEXT_RE =
+  /^(verify|verify code|continue|submit|confirm|next|done|sign ?in|log ?in|check code)$/i;
+
+// Get a typed code accepted. Enter alone is not enough: Chrome only submits a form
+// implicitly when it has a submit button or a single field, and a code screen built
+// from six one-character boxes has neither — so on those the code sat there, typed
+// and unsent, until auto-login ran out of rounds. Found driving a real browser.
+async function submitCode(page, fieldSel) {
+  // Vendor-specific first: these have stable ids and no useful text.
+  for (const known of ["#submitButton", "#idSubmit_SAOTCC_Continue"]) {
+    if (await page.locator(known).count()) {
+      await humanClick(page, known, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
+      return;
+    }
   }
+  // A real submit control, if the form has one.
+  const submit = page.locator('button[type="submit"], input[type="submit"]').first();
+  if ((await submit.count()) && (await submit.isVisible().catch(() => false))) {
+    await humanClick(page, 'button[type="submit"], input[type="submit"]', {
+      timeout: SUBMIT_TIMEOUT,
+    }).catch(() => {});
+    return;
+  }
+  // Otherwise a button whose label says it advances. Read the labels rather than
+  // guessing selectors — these screens differ everywhere.
+  const buttons = page.locator('button, [role="button"], a[href="#"]');
+  const count = Math.min(await buttons.count(), 20);
+  for (let i = 0; i < count; i++) {
+    const button = buttons.nth(i);
+    if (!(await button.isVisible().catch(() => false))) continue;
+    const label = ((await button.textContent().catch(() => "")) || "").trim();
+    if (!CODE_SUBMIT_TEXT_RE.test(label)) continue;
+    await button.click({ timeout: SUBMIT_TIMEOUT }).catch(() => {});
+    return;
+  }
+  // Nothing to click: a single-field form, or a screen that submits on its own
+  // once the last box is filled. Enter is correct for the first and harmless for
+  // the second.
+  await page
+    .locator(fieldSel)
+    .first()
+    .press("Enter", { timeout: SUBMIT_TIMEOUT })
+    .catch(() => {});
 }
 
 // ── Microsoft ADFS / Entra (Azure AD) driver ──────────────────────────────────
@@ -622,7 +673,25 @@ export async function autoLogin({
     if (outcome === "magic-link") {
       return { ok: false, outcome: "magic-link", finalUrl: page.url() };
     }
+    // A QR sign-in is the same dead end with the code on this screen instead of in
+    // the owner's mail — and a headless browser they cannot see makes it useless
+    // until the viewport is opened for them.
+    if (outcome === "qr-sign-in") {
+      return { ok: false, outcome: "qr-sign-in", finalUrl: page.url() };
+    }
     if (outcome === "logged-in") {
+      // Never believe it on the first look. A heavy SPA a second into loading has
+      // no form, no code and no error, which is indistinguishable from success —
+      // caught live on web.whatsapp.com, whose sign-in lives at the origin root so
+      // stillOnLoginPage has no login-ish path to catch it with. The classifier
+      // cannot tell these apart from text alone (a real signed-in page can be just
+      // as terse), but a second look after a settle can: an unrendered page has
+      // moved on by then, a signed-in one says the same thing twice.
+      if (round === 0) {
+        log("auto-login: looks signed in on the first look — settling and re-checking");
+        await page.waitForTimeout(settleMs);
+        continue;
+      }
       // Positive confirmation: the form is gone AND we've left the login page.
       // Without this, a vanished password field on a block/challenge or SPA
       // re-render sealed an unauthenticated session while reporting success.

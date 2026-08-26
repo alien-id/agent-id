@@ -71,6 +71,21 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           "click the link from their mail THERE: opening it anywhere else signs in that " +
           "browser instead of this one.",
       };
+    // The credential is a QR code drawn on this page, scanned with the service's
+    // phone app. Nothing to type, and the thing the owner needs is rendered inside
+    // a browser they cannot see — so the viewport is not an escalation of last
+    // resort here, it is the only way the sign-in can happen at all.
+    case "qr-sign-in":
+      return {
+        action: OWNER_MUST_DRIVE,
+        reason: "qr_code_sign_in",
+        message:
+          `'${credName}' signs in by scanning a QR code shown on the page — there is nothing ` +
+          "to type, and no stored credential or secure card can help. Open the browser view " +
+          `for profile '${profile}' so the owner can SEE the code, and ask them to scan it ` +
+          "with the service's phone app. Some sites also offer a phone/e-mail option on the " +
+          "same screen; if the owner prefers that, they can switch to it in the same view.",
+      };
     // A second factor was demanded that the credential says it does not have.
     case "otp-unexpected":
       return {

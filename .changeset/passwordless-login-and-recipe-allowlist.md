@@ -42,3 +42,16 @@ could not be filled truthfully.
   vocabulary covers spelled-out digit counts and login / confirmation / access
   code wording, and a mailed sign-in LINK gets its own `magic-link` outcome that
   escalates to the owner instead of being reported as success.
+- A QR sign-in (Telegram Web, WhatsApp Web, Discord) gets its own `qr-sign-in`
+  outcome. A screen whose only affordance is a code to scan has no form left, so
+  it read as a finished login; and since the code is drawn inside a browser the
+  owner cannot see, it escalates to the browser view rather than a card.
+- A typed code is now actually submitted. Enter alone only works where the form
+  has a submit button or a single field — a code screen built from six
+  one-character boxes has neither, so the code sat there, typed and unsent, until
+  auto-login ran out of rounds. A submit control is found by its visible text,
+  excluding the ones that discard the code ("resend", "use another method").
+- "logged-in" is never believed on the first look: a heavy SPA a second into
+  loading has no form, no code and no error, which is indistinguishable from
+  success.
+
