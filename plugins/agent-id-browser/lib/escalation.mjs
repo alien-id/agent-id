@@ -56,6 +56,21 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           "and do not ask for the password. Ask the owner to approve the prompt on their " +
           "device, then run auto-login again.",
       };
+    // A mailed sign-in LINK, not a code. Nothing on the page can be typed, so
+    // neither a stored secret nor a secure card helps — and the link authenticates
+    // whichever browser the owner opens it in. In the browser view that is this
+    // profile, which is the only place clicking it signs THIS session in.
+    case "magic-link":
+      return {
+        action: OWNER_MUST_DRIVE,
+        reason: "magic_link_sign_in",
+        message:
+          `'${credName}' signs in with a link e-mailed to the owner, not a code — there is ` +
+          "nothing to type and no code to ask for. Do NOT raise a secure card and do NOT ask " +
+          `for a password. Ask the owner to open the browser view for profile '${profile}' and ` +
+          "click the link from their mail THERE: opening it anywhere else signs in that " +
+          "browser instead of this one.",
+      };
     // A second factor was demanded that the credential says it does not have.
     case "otp-unexpected":
       return {

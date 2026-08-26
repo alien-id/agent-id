@@ -230,3 +230,96 @@ test("the identifier signal does not outrank a block wall or a credential error"
     "failed",
   );
 });
+
+// ─── the shapes real services actually use ────────────────────────────────────────
+//
+// The first cut of the passwordless work was written against one site and silently
+// assumed all of them looked like it. These are the snapshots detectPageState
+// produces for a spread of real sign-ins; each one used to come back "logged-in",
+// which seals an unauthenticated profile and reports success.
+
+const IDENTIFIER_STEPS = [
+  ["booking, e-mail first", "Sign in or create an account\nEmail address\nContinue with email"],
+  ["slack, e-mail first", "Sign in to your workspace\nyou@example.com\nSign In With Email"],
+  ["notion, e-mail first", "Think it. Make it.\nEmail\nContinue"],
+  ["airbnb, phone first", "Log in or sign up\nCountry/Region\nPhone number\nContinue"],
+  ["uber, phone first", "Enter your mobile number"],
+  ["telegram, phone first", "Sign in to Telegram\nPlease confirm your country code and enter your phone number."],
+];
+
+for (const [name, bodyText] of IDENTIFIER_STEPS) {
+  test(`identifier step (${name}) is not a finished login`, () => {
+    assert.equal(classifyLogin({ hasIdentifierField: true, bodyText }), "unknown");
+  });
+}
+
+const CODE_STEPS = [
+  ["booking", { hasOtpField: true, bodyText: "Enter your verification code\nWe've sent a 6-digit code to a***@example.com" }],
+  // Spells the digit count out; no autocomplete hint on the split inputs.
+  ["slack", { bodyText: "Check your email for a code\nWe've sent a six-digit code to you@example.com." }],
+  // Says "login code", which no earlier vocabulary covered.
+  ["notion", { otpFieldNames: ["Enter code"], bodyText: "Check your inbox\nEnter the login code we just emailed you." }],
+  ["airbnb sms", { hasOtpField: true, bodyText: "Confirm your number\nEnter the code we sent to +1 ***" }],
+  ["amazon", { otpFieldNames: ["otpCode"], bodyText: "Two-Step Verification\nEnter OTP" }],
+  ["confirmation-code wording", { bodyText: "We emailed you a confirmation code. Please enter it below." }],
+  ["access-code wording", { bodyText: "Enter the access code sent to your email" }],
+];
+
+for (const [name, snap] of CODE_STEPS) {
+  test(`code step (${name}) asks for a code`, () => {
+    assert.equal(classifyLogin(snap), "otp-required");
+  });
+}
+
+test("a mailed sign-in LINK is neither a code step nor a finished login", () => {
+  // Nothing to type, and the link authenticates whichever browser opens it — so
+  // this must not read as success, and must not send anyone hunting for a code.
+  assert.equal(
+    classifyLogin({ bodyText: "Check your email\nWe sent a login link to you@example.com. Click it to sign in." }),
+    "magic-link",
+  );
+  assert.equal(
+    classifyLogin({ bodyText: "We emailed a magic link to you@example.com" }),
+    "magic-link",
+  );
+  assert.equal(
+    classifyLogin({ bodyText: "Click the link in the email we just sent to finish signing in." }),
+    "magic-link",
+  );
+});
+
+test("a page offering BOTH a link and a code is an ordinary code step", () => {
+  assert.equal(
+    classifyLogin({
+      hasOtpField: true,
+      bodyText: "We sent a magic link to you@example.com — or enter the 6-digit code below.",
+    }),
+    "otp-required",
+  );
+});
+
+// ─── the widened vocabulary must not fire on ordinary pages ───────────────────────
+//
+// Every one of these sits on a page where the login already SUCCEEDED. A false
+// "otp-required" stalls the flow until timeout; a false "magic-link" turns a
+// completed sign-in into a handover.
+
+const SIGNED_IN_PAGES = [
+  ["a promo code", "Welcome back!\nEnter your promo code at checkout for 10% off"],
+  ["a discount code", "My trips\nYour discount code has been applied"],
+  ["a postal code", "Billing address\nPostal code\nCountry"],
+  ["a zip code", "Shipping\nZip code 10001"],
+  ["a country code", "Profile\nPhone: country code +1"],
+  ["a QR code", "Dashboard\nScan the QR code to open on mobile"],
+  ["source code", "Repositories\nBrowse the source code"],
+  ["a coupon code", "Cart\nHave a coupon code?"],
+  ["a referral code", "Invite friends\nShare your referral code"],
+  ["someone sharing a link", "Messages\nAlice sent you a link to the doc"],
+  ["a shared link", "Inbox\nBob shared a link with you"],
+];
+
+for (const [name, bodyText] of SIGNED_IN_PAGES) {
+  test(`${name} on a signed-in page stays logged-in`, () => {
+    assert.equal(classifyLogin({ hasPasswordField: false, bodyText }), "logged-in");
+  });
+}

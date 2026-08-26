@@ -332,14 +332,30 @@ export const CHALLENGE_WIDGET_SEL = [
 ].join(",");
 
 // Snapshot the page into the shape classifyLogin expects (browser-side).
+// What a sign-in asks for FIRST, as a selector. Phone-first flows (Airbnb, Uber,
+// Telegram) are as common as e-mail-first ones, and omitting the `tel` forms made
+// their opening screen — no password field, no code copy — read as a finished
+// login. A code input that merely uses type="tel" for the numeric keypad is not
+// mistaken for an identifier: classifyLogin checks the code affordances first.
+//
+// Module-level and passed into the page like CHALLENGE_WIDGET_SEL, because a
+// function handed to page.evaluate cannot close over anything. Exported so the
+// vocabulary is checkable without a browser.
+export const IDENTIFIER_FIELD_SEL = [
+  'input[type="email"]',
+  'input[type="tel"]',
+  'input[autocomplete="username"]',
+  'input[autocomplete="email"]',
+  'input[autocomplete="tel"]',
+  'input[autocomplete="tel-national"]',
+].join(",");
+
 async function detectPageState(page) {
-  return page.evaluate((challengeSel) => {
+  return page.evaluate(([challengeSel, identifierSel]) => {
     const all = (sel) => Array.from(document.querySelectorAll(sel));
     const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
     const hasPasswordField = all('input[type="password"]').some(visible);
-    const hasIdentifierField = all(
-      'input[type="email"],input[autocomplete="username"],input[autocomplete="email"]',
-    ).some(visible);
+    const hasIdentifierField = all(identifierSel).some(visible);
     const hasOtpField = all('input[autocomplete="one-time-code"]').some(visible);
     const otpFieldNames = all(
       'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"]',
@@ -351,7 +367,7 @@ async function detectPageState(page) {
     // classifyLogin via its `blocked` input so it wins over "logged-in".
     const blocked = all(challengeSel).some(visible);
     return { hasPasswordField, hasIdentifierField, hasOtpField, otpFieldNames, bodyText, blocked };
-  }, CHALLENGE_WIDGET_SEL);
+  }, [CHALLENGE_WIDGET_SEL, IDENTIFIER_FIELD_SEL]);
 }
 
 // Best-effort fill of the OTP field, then submit.
@@ -536,7 +552,11 @@ export async function autoLogin({
   cred,
   env = process.env,
   log = () => {},
-  maxRounds = 6,
+  // The identifier step now legitimately spends rounds: a screen asking only for
+  // an e-mail or phone classifies as "unknown" until the site advances, where it
+  // used to short-circuit to a (wrong) "logged-in" on the first look. Six rounds
+  // left ~9s for that transition, which a slow sign-in can outlast.
+  maxRounds = 10,
   settleMs = 1500,
   // A device-approval prompt is answered by a human reaching for their phone,
   // so it gets its own budget: the ordinary rounds are far too short, and
@@ -595,6 +615,13 @@ export async function autoLogin({
     // A bot-block / human-verification wall never clears by waiting — stop and
     // report it (the caller advises a headed login, which a human can clear).
     if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url() };
+    // A mailed sign-in link cannot be finished from here at all: there is no code
+    // to ask for, and the link authenticates whichever browser the owner opens it
+    // in — never this sealed profile. Waiting would just burn the budget and then
+    // report a timeout, so say what it is and let the caller hand the browser over.
+    if (outcome === "magic-link") {
+      return { ok: false, outcome: "magic-link", finalUrl: page.url() };
+    }
     if (outcome === "logged-in") {
       // Positive confirmation: the form is gone AND we've left the login page.
       // Without this, a vanished password field on a block/challenge or SPA

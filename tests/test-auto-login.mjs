@@ -16,6 +16,7 @@ import {
   runRecipe,
   autoLogin,
   otpPromptWording,
+  IDENTIFIER_FIELD_SEL,
   resolveOtp,
   isLoginishPath,
   stillOnLoginPage,
@@ -307,4 +308,57 @@ test("otpPromptWording: an ordinary second factor keeps the 2FA wording", () => 
 test("otpPromptWording: no loginUrl leaves the description empty rather than half-built", () => {
   assert.equal(otpPromptWording({ name: "x", passwordless: true }).description, "");
   assert.equal(otpPromptWording({ name: "x" }).description, "");
+});
+
+// ─── multi-host sign-ins refuse safely, not silently ──────────────────────────────
+
+test("a sign-in that hops to an unlisted subdomain is refused BEFORE the owner is asked", async () => {
+  // Sign-ins routinely redirect (www.example.com -> account.example.com). The
+  // credential's domains default to the login-page host alone, so this is the
+  // shape a model gets wrong most often. It must cost a clear error, never a code
+  // the owner typed into a card and then had thrown away.
+  const calls = [];
+  let otpCalls = 0;
+  await assert.rejects(
+    runRecipe(pageOn("https://account.example.com/verify"), [{ action: "fill", selector: "#code", value: "{otp}" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => {
+        otpCalls++;
+        return "654321";
+      },
+      domains: ["www.example.com"],
+      driver: recordingDriver(calls),
+    }),
+    /account\.example\.com.*not on the credential's domain allowlist/s,
+  );
+  assert.equal(otpCalls, 0, "no card may be raised for a step we are going to refuse");
+  assert.deepEqual(calls, []);
+});
+
+test("a wildcard covering the whole sign-in flow lets the hop through", async () => {
+  const calls = [];
+  await runRecipe(pageOn("https://account.example.com/verify"), [{ action: "fill", selector: "#code", value: "{otp}" }], {
+    username: "u",
+    password: "p",
+    getOtp: async () => "654321",
+    domains: ["*.example.com"],
+    driver: recordingDriver(calls),
+  });
+  assert.deepEqual(calls, [["fill", "#code", "654321"]]);
+});
+
+test("the identifier selector covers phone-first sign-ins, not just e-mail-first ones", () => {
+  // Airbnb / Uber / Telegram open with a phone number. Without the tel forms their
+  // first screen has no password field and no code copy, which classifies as a
+  // finished login and seals an unauthenticated profile.
+  const parts = IDENTIFIER_FIELD_SEL.split(",").map((s) => s.trim());
+  for (const needed of [
+    'input[type="email"]',
+    'input[type="tel"]',
+    'input[autocomplete="username"]',
+    'input[autocomplete="tel"]',
+  ]) {
+    assert.ok(parts.includes(needed), `identifier selector is missing ${needed}`);
+  }
 });

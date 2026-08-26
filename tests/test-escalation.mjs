@@ -64,3 +64,19 @@ test("every outcome yields one of the three actions", () => {
     assert.ok(e.reason && e.message, `${outcome} needs a reason and a message`);
   }
 });
+
+test("magic-link tells the agent there is nothing to type, and where the link must be opened", () => {
+  const { action, reason, message } = escalationFor("magic-link", {
+    credName: "substack",
+    profile: "substack",
+  });
+  assert.equal(action, OWNER_MUST_DRIVE);
+  assert.equal(reason, "magic_link_sign_in");
+  // The generic fallback blames big-IdP automation, which is wrong here and sends
+  // the agent looking for a password or a code that does not exist.
+  assert.ok(!/Google, Microsoft/.test(message));
+  assert.match(message, /nothing to type/i);
+  assert.match(message, /do not raise a secure card/i);
+  // Clicking it anywhere else authenticates that browser, not the sealed profile.
+  assert.match(message, /browser view for profile 'substack'/);
+});

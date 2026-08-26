@@ -11,8 +11,12 @@
 //                    gone but we are NOT in — must not be mistaken for success.
 //   "confirm-on-device" — the owner must approve on another device (a push
 //                    prompt); nothing is typed here, so the caller waits
-//   "otp-required" — a second-factor affordance is present (a one-time-code input,
-//                    an OTP-ish field name, or body copy describing 2FA)
+//   "magic-link"   — the sign-in completes by clicking a link in an e-mail. There
+//                    is no code to ask for and the link lands in whatever browser
+//                    the owner opens it in, not this profile — the caller cannot
+//                    finish it and must hand the browser over.
+//   "otp-required" — a one-time-code affordance is present (a one-time-code input,
+//                    an OTP-ish field name, or body copy naming a code)
 //   "failed"       — a credential error is shown and there is no OTP affordance
 //   "logged-in"    — no password field remains and nothing looks gated
 //   "unknown"      — indeterminate (page may not have advanced yet; caller waits)
@@ -33,9 +37,48 @@
 const OTP_FIELD_RE =
   /(otp|otc|totp|\bmfa\b|2fa|two[-_ ]?factor|one[-_ ]?time|verif(?:y|ication)|authenticator|auth[-_ ]?code|security[-_ ]?code|sms[-_ ]?code)/i;
 
-// Body copy that describes a 2FA / verification step.
-const OTP_BODY_RE =
-  /(verification code|one[- ]?time (?:code|password|passcode)|two[- ]?factor|2-step|authenticator app|enter the code|security code|\b6[- ]?digit\b|check your phone|approve.*sign)/i;
+// Body copy that describes a one-time-code step. Every alternative names the code
+// explicitly — a bare "code" would match promo/postal copy on an ordinary page.
+// The vocabulary is deliberately wide on the QUALIFIER because sites disagree on
+// what to call the same thing: Slack spells the digit count out ("six-digit"),
+// Notion says "login code", others say confirmation / access / one-time. Missing a
+// qualifier here is not a cosmetic gap — with no `autocomplete="one-time-code"` on
+// the field, this regex is the only thing standing between a code screen and a
+// false "logged-in".
+//
+// "code" is only ever matched with a qualifier attached, or as something that was
+// SENT to you. A bare "enter your … code" would fire on "enter your promo code" on
+// an ordinary post-login page and stall a sign-in that had already finished.
+const CODE_WORD =
+  "(?:verification|security|confirmation|access|login|sign[- ]?in|one[- ]?time|authentication|auth|otp|passcode|(?:\\d|four|five|six|seven|eight)[- ]?digit)";
+const OTP_BODY_RE = new RegExp(
+  [
+    `${CODE_WORD}[- ]?code`,
+    "one[- ]?time (?:code|password|passcode)",
+    // A code described by where it came from — no promo/postal copy says this.
+    "code (?:we |that we )?(?:just )?(?:sent|e-?mailed|texted)",
+    `(?:sent|e-?mailed|texted) (?:you )?an? (?:${CODE_WORD}[- ]?)?code`,
+    `check your (?:e-?mail|inbox|phone) for (?:a|the|your) (?:${CODE_WORD}[- ]?)?code`,
+    "two[- ]?factor",
+    "2-step",
+    "authenticator app",
+    "\\b(?:\\d|four|five|six|seven|eight)[- ]digit\\b",
+    "check your phone",
+    "approve.*sign",
+  ].join("|"),
+  "i",
+);
+
+// Body copy for a sign-in that completes by clicking a link in an e-mail. Nothing
+// is typed on this page and there is no code to ask for, so it must never be
+// mistaken for either an OTP step or a finished login. The agent cannot finish it:
+// the link lands in whatever browser the owner opens it in, not this sealed
+// profile — so the honest outcome is to hand the browser over.
+// Every alternative ties the link to signing in: a bare "sent you a link" is
+// ordinary chatter on a signed-in page ("Alice sent you a link"), and matching it
+// would turn a successful login into a handover.
+const MAGIC_LINK_RE =
+  /((?:magic|login|sign[- ]?in|confirmation) link|link to (?:log|sign) ?in|(?:click|open) the link (?:in|we) |check your (?:e-?mail|inbox)[^.]{0,40}link)/i;
 
 // Body copy for a challenge the owner answers on ANOTHER device: a push prompt
 // ("tap Yes on your phone"), a number match ("tap 42"), or an app notification.
@@ -74,8 +117,8 @@ const BLOCK_RE =
  *   bodyText           — visible page text
  *   errorText          — optional focused error text (role=alert etc.)
  *
- * Returns "blocked" | "confirm-on-device" | "otp-required" | "failed"
- *       | "logged-in" | "unknown".
+ * Returns "blocked" | "confirm-on-device" | "magic-link" | "otp-required"
+ *       | "failed" | "logged-in" | "unknown".
  */
 export function classifyLogin({
   hasPasswordField = false,
@@ -95,6 +138,9 @@ export function classifyLogin({
   // Device approval only when there is nothing to type: an SMS step can show
   // "check your phone" AND a code field, and that one is an ordinary OTP.
   const confirmAffordance = !codeInput && CONFIRM_BODY_RE.test(bodyText);
+  // Same "nothing to type here" guard as the device prompt: a page that offers a
+  // code input AND mentions a link (Slack does both) is an ordinary OTP step.
+  const magicLinkAffordance = !codeInput && MAGIC_LINK_RE.test(bodyText);
   const hasError = ERROR_RE.test(String(errorText || "")) || ERROR_RE.test(bodyText);
 
   // A bot-block / human-verification wall: the form is gone but we are NOT in.
@@ -105,6 +151,11 @@ export function classifyLogin({
   // so treating it as "otp-required" sends the caller looking for a code that
   // will never appear and the login stalls until it times out.
   if (confirmAffordance) return "confirm-on-device";
+  // A mailed link, before the OTP check for the same reason: there is no code on
+  // this page to hunt for, and before "logged-in" because "we sent you a link" on
+  // a page with no form left is otherwise indistinguishable from being signed in
+  // — which would seal an unauthenticated profile and report success.
+  if (magicLinkAffordance) return "magic-link";
   // An OTP affordance is the strongest signal the password step succeeded and a
   // second factor is now being requested — check it next.
   if (otpAffordance) return "otp-required";
@@ -122,4 +173,4 @@ export function classifyLogin({
   return "unknown";
 }
 
-export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, ERROR_RE, BLOCK_RE };
+export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, ERROR_RE, BLOCK_RE };

@@ -67,7 +67,7 @@ export const TOOLS = [
           enum: ["bearer", "basic", "header", "query", "cookie", "oauth2", "login", "totp"],
           description: "Credential type.",
         },
-        domains: strArr("Host allowlist this credential may be used on (e.g. api.github.com)."),
+        domains: strArr("Host allowlist this credential may be used on (e.g. api.github.com). For type=login it is enforced: sign-ins often hop subdomains, so cover the whole flow (e.g. *.example.com) rather than just the login page host."),
         access: { type: "string", enum: ["ro", "rw"], description: "Access level (default rw)." },
         description: str("Optional human-readable description."),
         login_url: str("For type=login only: the sign-in page URL (required for browser auto-login)."),

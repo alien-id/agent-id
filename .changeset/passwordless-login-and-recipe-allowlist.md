@@ -37,3 +37,8 @@ could not be filled truthfully.
 - The secure form quotes the caller's real `timeoutMs` to the human instead of a
   hardcoded "5 min" — the sign-in card's window is 10 minutes, and that line is
   what a person reads to decide whether they can go fetch a mailed code.
+- The classifier generalises past one site's markup: a phone-first opening screen
+  (Airbnb, Uber, Telegram) is recognised as an identifier step, the code-copy
+  vocabulary covers spelled-out digit counts and login / confirmation / access
+  code wording, and a mailed sign-in LINK gets its own `magic-link` outcome that
+  escalates to the owner instead of being reported as success.
