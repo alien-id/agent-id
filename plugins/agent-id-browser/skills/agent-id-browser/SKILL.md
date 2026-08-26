@@ -145,6 +145,17 @@ decides what you do next. There are exactly three:
 Never answer `owner_must_drive` by asking for a password. An account created
 through "Sign in with Google" has none, so the owner cannot give you one.
 
+A failure also carries `trace` (what the engine saw each round: password field
+present or gone, challenge widget, URL) and `pageError` (the page's own error
+copy). Read them before acting on `action`: a rejection message there means the
+credential is wrong, whatever the site's language.
+
+`auto-login` and `login` **close an open session on the target profile first**
+(the payload says `closedLiveSession: true`). A daemon opened earlier keeps the
+copy it unsealed at `open` time and re-seals it on close, so sealing a new login
+underneath it would be lost. After a successful auto-login, `open` the profile
+again to use the new session.
+
 **Domain allowlist (security):** a `login` credential is only typed into hosts on
 its `domains` list (default-deny, the same control the proxy enforces); a foreign
 origin is **refused**, and a sealed in-vault-generated secret can never be typed

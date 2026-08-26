@@ -47,9 +47,14 @@ const OTP_BODY_RE =
 const CONFIRM_BODY_RE =
   /(check your phone|tap (?:yes|\d{1,3})\b|approve (?:this |the )?sign[- ]?in|sent a (?:notification|prompt) to|open the .{0,24}app on your|confirm (?:it.?s|its) you on your|2-step verification.*(?:notification|prompt))/i;
 
-// Body / inline text that signals the credentials were rejected.
+// Body / inline text that signals the credentials were rejected. English plus
+// Russian: a datacenter-hosted browser gets the page in the site's language,
+// and a rejection it cannot read degrades to `unknown` → `timeout` →
+// `owner_must_drive`, which sends the owner to a browser for what is really a
+// wrong password (seen on lk.eneva.ru: «Пользователь не найден или неверный
+// пароль»). Keep each phrase specific to a failed sign-in.
 const ERROR_RE =
-  /(incorrect|invalid|wrong password|that password|couldn.?t (?:sign|log) ?you in|try again|doesn.?t match|not recognized|too many attempts|account.*lock)/i;
+  /(incorrect|invalid|wrong password|that password|couldn.?t (?:sign|log) ?you in|try again|doesn.?t match|not recognized|too many attempts|account.*lock|неверн[а-яё]*\s+(?:логин|парол|имя|номер|данные|код)|неправильн[а-яё]*\s+(?:логин|парол|имя|номер|данные)|пользователь не найден|не найден или неверн|ошибка (?:входа|авторизации|аутентификации)|попробуйте (?:ещё|еще) раз|слишком много попыток|учетн[а-яё]* запись заблокирована)/i;
 
 // Bot-block / human-verification interstitial copy. DISTINCT from ERROR_RE: these
 // describe an anti-automation wall (network-security block, CAPTCHA, rate limit),
