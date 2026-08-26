@@ -15,6 +15,7 @@ import {
   stepCarriesSecret,
   runRecipe,
   autoLogin,
+  otpPromptWording,
   resolveOtp,
   isLoginishPath,
   stillOnLoginPage,
@@ -281,4 +282,29 @@ test("isDeepLoginUrl: true for a real path, false for the bare origin root", () 
   assert.equal(isDeepLoginUrl("https://www.reddit.com/"), false);
   assert.equal(isDeepLoginUrl("https://www.reddit.com"), false);
   assert.equal(isDeepLoginUrl("garbage"), false);
+});
+
+// ─── the code card's wording ──────────────────────────────────────────────────────
+
+test("otpPromptWording: a passwordless code is not presented as a second factor", () => {
+  const w = otpPromptWording({
+    name: "booking",
+    passwordless: true,
+    loginUrl: "https://account.booking.example/sign-in",
+  });
+  assert.match(w.title, /Sign-in code for booking/);
+  assert.ok(!/2FA/i.test(w.title), "the only factor must not be called 2FA");
+  assert.ok(!/2FA/i.test(w.label));
+  assert.match(w.description, /account\.booking\.example/);
+});
+
+test("otpPromptWording: an ordinary second factor keeps the 2FA wording", () => {
+  const w = otpPromptWording({ name: "gh", loginUrl: "https://github.example/login" });
+  assert.match(w.title, /2FA code for gh/);
+  assert.match(w.label, /2FA/);
+});
+
+test("otpPromptWording: no loginUrl leaves the description empty rather than half-built", () => {
+  assert.equal(otpPromptWording({ name: "x", passwordless: true }).description, "");
+  assert.equal(otpPromptWording({ name: "x" }).description, "");
 });

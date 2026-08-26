@@ -65,19 +65,21 @@ const BLOCK_RE =
 /**
  * Classify a login attempt's current page state.
  *
- *   hasPasswordField — a visible password input is still present
- *   hasOtpField      — a strong one-time-code input is present
- *                      (e.g. autocomplete="one-time-code")
- *   otpFieldNames    — candidate field name/id/placeholder strings to test against
- *                      the OTP token regex
- *   bodyText         — visible page text
- *   errorText        — optional focused error text (role=alert etc.)
+ *   hasPasswordField   — a visible password input is still present
+ *   hasIdentifierField — a visible e-mail / username input is still present
+ *   hasOtpField        — a strong one-time-code input is present
+ *                        (e.g. autocomplete="one-time-code")
+ *   otpFieldNames      — candidate field name/id/placeholder strings to test against
+ *                        the OTP token regex
+ *   bodyText           — visible page text
+ *   errorText          — optional focused error text (role=alert etc.)
  *
  * Returns "blocked" | "confirm-on-device" | "otp-required" | "failed"
  *       | "logged-in" | "unknown".
  */
 export function classifyLogin({
   hasPasswordField = false,
+  hasIdentifierField = false,
   hasOtpField = false,
   otpFieldNames = [],
   bodyText = "",
@@ -108,6 +110,12 @@ export function classifyLogin({
   if (otpAffordance) return "otp-required";
   // No second factor, but a credential error → the password was rejected.
   if (hasError) return "failed";
+  // An identifier prompt with no password beside it is a sign-in that has not
+  // started, not one that finished: the e-mail-first step of a passwordless flow,
+  // or the first screen of a two-step IdP. Without this the absent password field
+  // below reads as success and an unauthenticated session gets sealed — the same
+  // "the form is gone but we are NOT in" mistake the "blocked" outcome exists for.
+  if (hasIdentifierField && !hasPasswordField) return "unknown";
   // No password field left and nothing gated → we're through.
   if (!hasPasswordField) return "logged-in";
   // Password field still present, no error, no OTP → indeterminate.

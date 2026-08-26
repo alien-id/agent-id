@@ -254,7 +254,29 @@ export async function runRecipe(
   }
 }
 
-// Resolve the current 2FA code for a `login` credential: generate it from a stored
+// What the code card says. On a passwordless login the code is the FIRST and only
+// factor, not a second one — a card headed "2FA code" would be telling the owner
+// something untrue about the account they are signing into. Pure; exported so the
+// wording is testable without standing up a prompt provider.
+export function otpPromptWording(cred) {
+  const host = cred.loginUrl ? hostOf(cred.loginUrl) : "";
+  if (cred.passwordless) {
+    return {
+      title: `Sign-in code for ${cred.name}`,
+      description: host ? `${host} just sent you a code — enter it to finish signing in` : "",
+      label: "Sign-in code",
+      ask: `enter the sign-in code for "${cred.name}"`,
+    };
+  }
+  return {
+    title: `2FA code for ${cred.name}`,
+    description: host ? `Sign-in to ${host} needs your current code` : "",
+    label: "Current 2FA code",
+    ask: `enter the 2FA code for "${cred.name}"`,
+  };
+}
+
+// Resolve the one-time code for a `login` credential: generate it from a stored
 // seed, or ask the human over the secure-prompt channel.
 export async function resolveOtp(cred, { env = process.env, log = () => {}, now } = {}) {
   if (cred.otp === "totp") {
@@ -267,15 +289,19 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now 
       ...(now != null ? { now } : {}),
     });
   }
-  log("Waiting for the current 2FA code via the secure prompt…");
+  const wording = otpPromptWording(cred);
+  log(`Waiting for the ${cred.passwordless ? "sign-in" : "current 2FA"} code via the secure prompt…`);
   const { values } = await collectSecret(
     {
-      title: `2FA code for ${cred.name}`,
-      description: cred.loginUrl ? `Sign-in to ${hostOf(cred.loginUrl)} needs your current code` : "",
-      fields: [{ name: "otp", label: "Current 2FA code" }],
-      label: `enter the 2FA code for "${cred.name}"`,
+      title: wording.title,
+      description: wording.description,
+      fields: [{ name: "otp", label: wording.label }],
+      label: wording.ask,
       security: "Used once to complete sign-in; never stored or shown to the agent.",
-      timeoutMs: 5 * 60 * 1000,
+      // A mailed code costs a trip to another app and back, so the card outlives
+      // the 5 minutes a TOTP app needs. Kept under the hosted channel's own
+      // 15-minute ceiling.
+      timeoutMs: 10 * 60 * 1000,
     },
     { env },
   );
@@ -311,6 +337,9 @@ async function detectPageState(page) {
     const all = (sel) => Array.from(document.querySelectorAll(sel));
     const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
     const hasPasswordField = all('input[type="password"]').some(visible);
+    const hasIdentifierField = all(
+      'input[type="email"],input[autocomplete="username"],input[autocomplete="email"]',
+    ).some(visible);
     const hasOtpField = all('input[autocomplete="one-time-code"]').some(visible);
     const otpFieldNames = all(
       'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"]',
@@ -321,7 +350,7 @@ async function detectPageState(page) {
     // Language-independent block signal: a visible challenge widget. Fed to
     // classifyLogin via its `blocked` input so it wins over "logged-in".
     const blocked = all(challengeSel).some(visible);
-    return { hasPasswordField, hasOtpField, otpFieldNames, bodyText, blocked };
+    return { hasPasswordField, hasIdentifierField, hasOtpField, otpFieldNames, bodyText, blocked };
   }, CHALLENGE_WIDGET_SEL);
 }
 
@@ -405,8 +434,9 @@ export async function microsoftLogin(page, cred, log = () => {}) {
 export { detectMicrosoftFlow };
 
 // Heuristic fallback: fill a username/email field and the password field, submit.
-// Handles a simple two-step flow (username page → password page).
-async function heuristicLogin(page, { username, password }) {
+// Handles a simple two-step flow (username page → password page), and the
+// passwordless flow where submitting the identifier is the entire step.
+async function heuristicLogin(page, { username, password, passwordless }) {
   const userSel =
     'input[type="email"], input[name*="user" i], input[name*="email" i], ' +
     'input[id*="user" i], input[id*="email" i], input[autocomplete="username"], input[type="text"]';
@@ -422,6 +452,14 @@ async function heuristicLogin(page, { username, password }) {
   };
 
   await fillFirst(userSel, username);
+  // Passwordless: submitting the identifier IS the whole step — it is what makes
+  // the site send the code. Stop here deliberately rather than falling into the
+  // password hunt below, which would press Enter a second time and re-submit a
+  // form that has already advanced.
+  if (passwordless) {
+    await page.keyboard.press("Enter").catch(() => {});
+    return;
+  }
   // If the password field isn't on this page yet, advance (two-step IdP) and retry.
   if ((await page.locator(pwSel).count()) === 0) {
     await page.keyboard.press("Enter").catch(() => {});

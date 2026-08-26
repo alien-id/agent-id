@@ -184,3 +184,49 @@ test("blocked outranks a device prompt", () => {
     "blocked",
   );
 });
+
+// ─── the identifier step is not a finished login ──────────────────────────────────
+
+test("an e-mail-first screen is NOT mistaken for logged-in", () => {
+  // Booking-shaped passwordless step 1: an identifier prompt, no password beside
+  // it, and no code copy yet. Without the identifier signal this reads as success
+  // and seals an unauthenticated session.
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      hasIdentifierField: true,
+      bodyText: "Sign in or create an account\nEmail address\nContinue with email",
+    }),
+    "unknown",
+  );
+});
+
+test("the identifier step yields to a code step once the code screen appears", () => {
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: false,
+      hasIdentifierField: true,
+      hasOtpField: true,
+      bodyText: "Enter the 6-digit code we sent to a***@example.com",
+    }),
+    "otp-required",
+  );
+});
+
+test("the identifier signal does not suppress a real logged-in page", () => {
+  assert.equal(
+    classifyLogin({ hasPasswordField: false, hasIdentifierField: false, bodyText: "Welcome back" }),
+    "logged-in",
+  );
+});
+
+test("the identifier signal does not outrank a block wall or a credential error", () => {
+  assert.equal(
+    classifyLogin({ hasIdentifierField: true, bodyText: "Verify you are human" }),
+    "blocked",
+  );
+  assert.equal(
+    classifyLogin({ hasIdentifierField: true, errorText: "That email is not recognized" }),
+    "failed",
+  );
+});
