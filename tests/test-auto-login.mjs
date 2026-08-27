@@ -23,6 +23,7 @@ import {
   originOf,
   isDeepLoginUrl,
   otpCardBudgetMs,
+  otpCardSpec,
 } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { generateTotp } from "../plugins/agent-id-core/lib/totp.mjs";
 
@@ -514,4 +515,24 @@ test("the retry card is sized by where the code comes from, not by the fact of r
     const total = otpCardBudgetMs(cred) + otpCardBudgetMs(cred, { retry: true });
     assert.ok(total < HUMAN_TIMEOUT_MS, `${cred.otp}: ${total}ms leaves nothing for the page`);
   }
+});
+
+test("the code card does not mask what it asks for", () => {
+  const mailed = otpCardSpec({ name: "booking", otp: "interactive", loginUrl: "https://x.test/in" });
+  const generated = otpCardSpec({ name: "gh", otp: "interactive", loginUrl: "https://gh.test/in" }, { retry: true });
+
+  // Every other value this vault collects is masked by default — the code is the
+  // one that must opt out, and it has to hold on the retry card too, which is
+  // where a mistyped code lands in the first place.
+  for (const spec of [mailed, generated]) {
+    assert.equal(spec.fields.length, 1);
+    assert.equal(spec.fields[0].name, "otp");
+    assert.equal(spec.fields[0].secret, false, "a single-use code is not a lasting secret");
+  }
+});
+
+test("the code card never says '2FA' to someone who has no first factor", () => {
+  const passwordless = otpCardSpec({ name: "booking", otp: "interactive", passwordless: true, loginUrl: "https://x.test/in" });
+  assert.ok(!/2fa|two-factor/i.test(JSON.stringify(passwordless)), "this code IS the sign-in, not a second step");
+  assert.match(passwordless.fields[0].label, /sign-in code/i);
 });

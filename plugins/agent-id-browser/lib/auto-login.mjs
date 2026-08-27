@@ -324,20 +324,34 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now,
       ...(now != null ? { now } : {}),
     });
   }
-  const wording = otpPromptWording(cred, { retry });
-  log(`Waiting for the ${wording.label.toLowerCase()} via the secure prompt…`);
-  const { values } = await collectSecret(
-    {
-      title: wording.title,
-      description: wording.description,
-      fields: [{ name: "otp", label: wording.label }],
-      label: wording.ask,
-      security: "Used once to complete sign-in; never stored or shown to the agent.",
-      timeoutMs: otpCardBudgetMs(cred, { retry }),
-    },
-    { env },
-  );
+  const spec = otpCardSpec(cred, { retry });
+  log(`Waiting for the ${spec.fields[0].label.toLowerCase()} via the secure prompt…`);
+  const { values } = await collectSecret(spec, { env });
+
   return String(values.otp || "").trim();
+}
+
+// The whole card an interactive code is asked for through, as a value. Pure, and
+// exported for the same reason `otpPromptWording` is: what the owner is shown is
+// worth asserting without standing up a prompt provider, and this is the one card
+// both auto-login and `fill_otp` raise.
+export function otpCardSpec(cred, { retry = false } = {}) {
+  const wording = otpPromptWording(cred, { retry });
+
+  return {
+    title: wording.title,
+    description: wording.description,
+    // Not masked, unlike every other value this vault collects. A code is
+    // single-use and dead within minutes, so there is no lasting secret for the
+    // dots to protect — and it is being copied by hand out of a mail client,
+    // which is exactly the transcription whose slips the dots would hide. A wrong
+    // code costs another round trip to the mailbox; watching it being typed
+    // costs nothing.
+    fields: [{ name: "otp", label: wording.label, secret: false }],
+    label: wording.ask,
+    security: "Used once to complete sign-in; never stored or shown to the agent.",
+    timeoutMs: otpCardBudgetMs(cred, { retry }),
+  };
 }
 
 // A visible CAPTCHA / anti-automation challenge WIDGET, matched by well-known
