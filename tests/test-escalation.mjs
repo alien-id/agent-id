@@ -56,6 +56,19 @@ test("an unexpected OTP tells you which credential field is missing", () => {
   assert.match(e.message, /set-totp|interactive/);
 });
 
+test("an unexpected OTP also names the case where the site has no password at all", () => {
+  // This outcome is where a passwordless site lands when it was stored as an
+  // ordinary login — the agent is here precisely because its first guess about
+  // the site was wrong, and this message is the only sentence it gets to correct
+  // itself from. It has to name `overwrite` too: re-adding an existing name
+  // without it returns the stored entry and the agent loops.
+  const e = escalationFor("otp-unexpected", ctx);
+  assert.match(e.message, /passwordless/);
+  assert.match(e.message, /overwrite/);
+  assert.match(e.message, /no password field/i);
+  assert.match(e.message, /do not retry as-is/i);
+});
+
 test("every outcome yields one of the three actions", () => {
   const actions = new Set([OWNER_MUST_DRIVE, OWNER_MUST_CONFIRM, FIX_CREDENTIAL]);
   for (const outcome of ["blocked", "confirm-timeout", "failed", "otp-unexpected", "weird", ""]) {

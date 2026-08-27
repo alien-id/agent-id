@@ -102,15 +102,24 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           "Either way the password is FINE: do not re-check it and do not ask for one. " +
           "Run auto-login again once the cause is addressed.",
       };
-    // A second factor was demanded that the credential says it does not have.
+    // A code was demanded that the credential says it does not have. This is also
+    // where a passwordless site lands when it was stored as an ordinary login, so
+    // the message has to name that possibility: the agent is here precisely
+    // because its first guess about the site was wrong, and this is the only
+    // sentence it gets to correct it from.
     case "otp-unexpected":
       return {
         action: FIX_CREDENTIAL,
         reason: "otp_required_but_not_configured",
         message:
-          `The site asked '${credName}' for a second factor, but the credential is set to ` +
-          "`otp: none`. Update it with a TOTP seed (`vault set-totp`) or set `otp: interactive` " +
-          "so the owner can be asked for the current code.",
+          `The site asked '${credName}' for a one-time code, but the credential is set to ` +
+          "`otp: none`. If the sign-in page has NO password field — it takes an e-mail or " +
+          "phone number and sends a code — the credential is the wrong shape: re-add it with " +
+          "`passwordless: true` and `otp: \"interactive\"`, passing `overwrite: true` (without " +
+          "that the call returns the stored entry and nothing changes). If the site does have " +
+          "a password and this code is a second factor, keep the credential and set " +
+          "`otp: \"interactive\"` so the owner can be asked, or attach a seed with " +
+          "`vault set-totp`. Do not retry as-is; it will ask again.",
       };
     case "failed":
       return {
