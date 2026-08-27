@@ -424,3 +424,18 @@ test("millisToNextTotpWindow respects the credential's own period", () => {
   // A beat past the boundary, so the new window is unambiguously current.
   assert.ok(millisToNextTotpWindow({}, 0) > 30_000);
 });
+
+// ─── a mistyped code gets one more chance, and the card says why ──────────────────
+
+test("the retry card says the code was refused, so the owner reads a fresh one", () => {
+  // Without it the owner sees the same prompt twice and cannot tell a refused
+  // code from a lost one — and for a time-based code the right move is to read
+  // the CURRENT one, not retype what they just sent.
+  const cred = { name: "site", loginUrl: "https://x.example/login" };
+  assert.ok(!otpPromptWording(cred).description.includes("not accepted"));
+  assert.match(otpPromptWording(cred, { retry: true }).description, /not accepted/);
+  assert.match(
+    otpPromptWording({ ...cred, passwordless: true }, { retry: true }).description,
+    /not accepted/,
+  );
+});

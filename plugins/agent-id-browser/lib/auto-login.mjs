@@ -258,19 +258,33 @@ export async function runRecipe(
 // factor, not a second one — a card headed "2FA code" would be telling the owner
 // something untrue about the account they are signing into. Pure; exported so the
 // wording is testable without standing up a prompt provider.
-export function otpPromptWording(cred) {
+// The first card waits for someone who may be away from the screen; the retry does
+// not, because it only ever follows a card they just answered. Sized so both fit
+// under the host's own ceiling: 10 + 2 is under lethe's 16-minute HUMAN_TIMEOUT,
+// where 10 + 10 is not — which is the whole reason a retry is affordable at all.
+const OTP_CARD_MS = 10 * 60 * 1000;
+const OTP_RETRY_CARD_MS = 2 * 60 * 1000;
+
+export function otpPromptWording(cred, { retry = false } = {}) {
   const host = cred.loginUrl ? hostOf(cred.loginUrl) : "";
+  // A retry card has to say why it is there. Without it the owner sees the same
+  // prompt twice and cannot tell a refused code from a lost one — and for a
+  // time-based code the right move is to read the CURRENT one, not retype the
+  // one they just sent.
+  const retryNote = retry ? "That code was not accepted — enter the current one. " : "";
   if (cred.passwordless) {
     return {
       title: `Sign-in code for ${cred.name}`,
-      description: host ? `${host} just sent you a code — enter it to finish signing in` : "",
+      description: host
+        ? `${retryNote}${host} just sent you a code — enter it to finish signing in`
+        : retryNote.trim(),
       label: "Sign-in code",
       ask: `enter the sign-in code for "${cred.name}"`,
     };
   }
   return {
     title: `2FA code for ${cred.name}`,
-    description: host ? `Sign-in to ${host} needs your current code` : "",
+    description: host ? `${retryNote}Sign-in to ${host} needs your current code` : retryNote.trim(),
     label: "Current 2FA code",
     ask: `enter the 2FA code for "${cred.name}"`,
   };
@@ -285,7 +299,7 @@ export function millisToNextTotpWindow(cred, now = Date.now()) {
 
 // Resolve the one-time code for a `login` credential: generate it from a stored
 // seed, or ask the human over the secure-prompt channel.
-export async function resolveOtp(cred, { env = process.env, log = () => {}, now } = {}) {
+export async function resolveOtp(cred, { env = process.env, log = () => {}, now, retry = false } = {}) {
   if (cred.otp === "totp") {
     if (!cred.totpSecret) throw new Error(`login '${cred.name}': otp=totp but no totpSecret stored`);
     return generateTotp({
@@ -296,7 +310,7 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now 
       ...(now != null ? { now } : {}),
     });
   }
-  const wording = otpPromptWording(cred);
+  const wording = otpPromptWording(cred, { retry });
   log(`Waiting for the ${wording.label.toLowerCase()} via the secure prompt…`);
   const { values } = await collectSecret(
     {
@@ -305,11 +319,7 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now 
       fields: [{ name: "otp", label: wording.label }],
       label: wording.ask,
       security: "Used once to complete sign-in; never stored or shown to the agent.",
-      // A mailed code costs a trip to another app and back, so the card outlives
-      // the 5 minutes a TOTP app needs. The ceiling is the host's, not ours: the
-      // lethe hub expires a pending request at 15 minutes and kills this process
-      // at 16, which is also why one run only ever asks once (see maxOtpAsks).
-      timeoutMs: 10 * 60 * 1000,
+      timeoutMs: retry ? OTP_RETRY_CARD_MS : OTP_CARD_MS,
     },
     { env },
   );
@@ -667,20 +677,22 @@ export async function autoLogin({
   // credential's own origins. Checked once here so a loginUrl pointing off the
   // allowlist fails before a browser goes anywhere, not after.
   assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
-  const getOtp = () => resolveOtp(cred, { env, log });
-  // How many times one run may answer a code challenge, and it is two at most.
+  const getOtp = (retry) => resolveOtp(cred, { env, log, retry });
+  // One run answers a code challenge twice at most, and the second attempt is
+  // deliberately cheap.
   //
-  // A generated code does not become right by being sent again: within one period
-  // the seed produces the SAME digits, so back-to-back retries submit an identical
-  // code and only look like diligence. The one retry that can succeed is across a
-  // period boundary — the classic race where a code is generated at t+29s and
-  // validated at t+31s — so the second attempt waits the window out first.
+  // A six-digit code read off a phone under a thirty-second clock is mistyped or
+  // outrun often enough that one shot is the wrong budget — and the owner who
+  // just answered is demonstrably at the screen, so the retry card is a short one
+  // (2 min). That is what makes it affordable: 10 + 2 fits under the host's
+  // 16-minute ceiling where 10 + 10 does not.
   //
-  // Asking a HUMAN is bounded by arithmetic instead: the card waits up to 10
-  // minutes and the host kills this process at 16 (lethe's HUMAN_TIMEOUT), so a
-  // second full-length ask does not fit. One ask, then report — a fresh
-  // auto-login gets a fresh budget AND makes the site send a fresh code.
-  const maxOtpAsks = cred.otp === "totp" ? 2 : 1;
+  // A GENERATED code needs the same second chance for a different reason. Within
+  // one period the seed produces identical digits, so an immediate retry
+  // resubmits the code just refused; the attempt that can succeed is across a
+  // period boundary — the race where a code is made at t+29s and checked at
+  // t+31s — so that one waits the window out first.
+  const maxOtpAsks = 2;
   let otpAsks = 0;
 
   // Warm up before a deep login link. Some sites (e.g. Reddit) wall a COLD
@@ -787,13 +799,14 @@ export async function autoLogin({
         // "incorrect code" is the difference between retrying and giving up.
         return { ok: false, outcome: "otp-rejected", finalUrl: page.url(), errorText };
       }
-      if (otpAsks > 0) {
-        // Only reachable for a stored seed (see maxOtpAsks). Land in the next
-        // period so the retry is a different code than the one just refused.
+      const retry = otpAsks > 0;
+      if (retry && cred.otp === "totp") {
+        // Land in the next period, so the retry is a different code than the one
+        // just refused. A human retry needs no wait: they read the current code.
         await page.waitForTimeout(millisToNextTotpWindow(cred));
       }
       otpAsks += 1;
-      await typeOtp(page, await getOtp());
+      await typeOtp(page, await getOtp(retry));
       await page.waitForTimeout(settleMs);
       continue;
     }

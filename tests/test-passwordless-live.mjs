@@ -229,8 +229,8 @@ test(
       });
       assert.equal(result.ok, false);
       assert.equal(result.outcome, "otp-rejected");
-      // A stored seed is cheap to regenerate, so it gets a few tries — but a
-      // bounded few, not one per round.
+      // Two attempts, not one per round. The second waits out the TOTP window so
+      // it is a different code — which is the only retry that can succeed.
       assert.ok(asks <= 4, `asked ${asks} times; the budget is meant to stop it`);
     } finally {
       server.close();
