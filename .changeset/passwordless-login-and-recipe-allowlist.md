@@ -33,14 +33,29 @@ could not be filled truthfully.
   redirects through once it has been driven, and the alternative was remove +
   re-add, which asks the owner for the secret again.
 - One run answers a code challenge twice at most, then reports `otp-rejected`.
-  A six-digit code read off a phone under a thirty-second clock is mistyped or
-  outrun often enough that one shot is the wrong budget; the retry card is a
-  short one (2 min) and says the previous code was refused, so the owner reads
-  the current one instead of retyping. For a stored seed the retry waits out the
-  time window first — within one period the seed produces the same digits, so an
-  immediate retry resubmits exactly what was just refused. Re-asking a human for a code the site has already
-  refused is both useless and unaffordable: the card waits ten minutes and the
-  host kills the process at sixteen.
+  A code is mistyped or outrun often enough that one shot is the wrong budget;
+  the retry card says the previous code was refused, so the owner reads the
+  current one instead of retyping. For a stored seed the retry waits out the time
+  window first — within one period the seed produces the same digits, so an
+  immediate retry resubmits exactly what was just refused. Re-asking a human for
+  a code the site has already refused is both useless and unaffordable: the first
+  card waits ten minutes and the host kills the process at sixteen.
+- The retry card is sized by where the code comes from. A generated one is read
+  off a device the owner is already holding, so its retry is a glance (2 min); a
+  mailed one sends them back to the mailbox, and two minutes expired on a live
+  sign-in with the owner still fetching it (4 min). Neither can be a second
+  full-length card — the host's sixteen-minute ceiling covers the whole run, page
+  work included.
+- An unanswered code card is reported as an `otp-timeout` outcome instead of
+  throwing. The error used to travel straight out of auto-login, so the caller
+  learned nothing about where the browser stopped — and it had stopped somewhere
+  useful, on the code screen, where a fresh code still finishes the job. The
+  escalation says as much: the credential is fine, and no password is missing.
+- The code field is not masked. Every other value this vault collects is, and for
+  a password or a token that is right — it is long-lived, reusable, and the owner
+  already knows what they typed. A code is none of those: single-use, dead in
+  minutes, and copied by hand out of a mail client, which is exactly the
+  transcription whose slips the dots would hide.
 - `login` no longer falls back to `domains: ["*"]`. `"*"` is a not-applicable
   placeholder that matches no host, so that default minted credentials which
   could never be typed anywhere.
