@@ -20,11 +20,11 @@
 
 import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
 import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
-import { hostMatchesAllowlist, validateAccessFields } from "./access.mjs";
+import { assertHostAllowed, hostMatchesAllowlist, validateAccessFields } from "./access.mjs";
 
 // Domain matching lives in access.mjs (access rules share the syntax); kept
 // exported here for the proxy/browser consumers that import it from store.
-export { hostMatchesAllowlist };
+export { assertHostAllowed, hostMatchesAllowlist };
 
 export const CREDENTIAL_TYPES = Object.freeze([
   "bearer",
@@ -45,9 +45,10 @@ export const CREDENTIAL_TYPES = Object.freeze([
 // Allowed `otp` policies on a `login` credential.
 export const LOGIN_OTP_MODES = Object.freeze(["none", "totp", "interactive"]);
 
-// The recipe step vocabulary auto-login can execute (runRecipe's switch). Declared
-// here so writing a recipe and running one agree on the same closed set.
-export const LOGIN_RECIPE_ACTIONS = Object.freeze([
+// The recipe step vocabulary auto-login can execute (runRecipe's switch). Kept in
+// step with it by hand — validation happens on write, so a drift shows up as a
+// recipe the vault accepts and runRecipe then rejects at the `default` arm.
+const LOGIN_RECIPE_ACTIONS = Object.freeze([
   "navigate",
   "fill",
   "type",

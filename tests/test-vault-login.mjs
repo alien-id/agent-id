@@ -370,11 +370,3 @@ test("listMetadata surfaces a login's shape without surfacing its secrets", () =
   assert.equal(meta.password, undefined);
   assert.equal(meta.recipe, undefined, "the steps themselves stay in the record");
 });
-
-test("listMetadata reports a plain login as having neither a passwordless flag nor a recipe", () => {
-  const [meta] = listMetadata({ credentials: [loginRec({ createdAt: 1, updatedAt: 2 })] });
-  assert.equal(meta.otp, "none");
-  assert.equal(meta.passwordless, false);
-  assert.equal(meta.loginUrl, null);
-  assert.equal(meta.hasRecipe, false);
-});

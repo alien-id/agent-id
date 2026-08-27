@@ -80,7 +80,7 @@ export const TOOLS = [
         passwordless: {
           type: "boolean",
           description:
-            "For type=login: the site has no password — an identifier is submitted and a code arrives by mail/SMS. Requires otp=interactive. The owner's card then has a single field.",
+            "For type=login: the site has no password — an identifier is submitted and a code arrives by mail/SMS. Requires otp=interactive (or totp, where a seed covers it). The owner's card then has a single field.",
         },
         recipe: str("For type=login: JSON array of sign-in steps (navigate|fill|type|click|press|wait) with {username}/{password}/{otp}."),
       },

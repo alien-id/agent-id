@@ -59,6 +59,24 @@ export function hostMatchesAllowlist(host, allowlist) {
   return false;
 }
 
+// Refuse an origin a credential was never scoped to. Lives here, beside the
+// matcher, because two callers need the identical verdict AND the identical
+// sentence: the browser session server (fill-secret / fill-otp) and the auto-login
+// recipe engine. Two copies of a user-facing refusal drift, and this one tells the
+// reader how to fix it.
+//
+// `what` names the thing being refused, so the same sentence serves "refusing to
+// type this credential on X" and "recipe fill: refusing X". The offending VALUE is
+// never interpolated — only the host — so this is safe to hand to an agent.
+export function assertHostAllowed(host, domains, what) {
+  if (hostMatchesAllowlist(host, domains)) return;
+  throw new Error(
+    `${what} "${host || "(no host)"}" — not on the credential's domain allowlist ` +
+      `(${(domains || []).join(", ") || "none"}). Add the host to the credential's ` +
+      "domains (wildcards like *.example.com are allowed), or fix the credential.",
+  );
+}
+
 // The level in force for a record — absent means unrestricted ("rw").
 export function effectiveAccess(rec) {
   return rec && rec.access != null ? rec.access : "rw";

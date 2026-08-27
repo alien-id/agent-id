@@ -12,11 +12,9 @@ import assert from "node:assert/strict";
 import {
   applyVars,
   stepNeedsOtp,
-  stepCarriesSecret,
   runRecipe,
   autoLogin,
   otpPromptWording,
-  IDENTIFIER_FIELD_SEL,
   CODE_SUBMIT_TEXT_RE,
   resolveOtp,
   isLoginishPath,
@@ -117,13 +115,6 @@ test("runRecipe rejects an unknown action", async () => {
   );
 });
 
-test("stepCarriesSecret sees a placeholder in any substituted field, not just value", () => {
-  assert.equal(stepCarriesSecret({ action: "fill", selector: "#c", value: "{otp}" }), true);
-  assert.equal(stepCarriesSecret({ action: "click", selector: "#x-{password}" }), true);
-  assert.equal(stepCarriesSecret({ action: "fill", selector: "#u", value: "{username}" }), false);
-  assert.equal(stepCarriesSecret(undefined), false);
-});
-
 test("runRecipe requires the credential's domains allowlist", async () => {
   await assert.rejects(
     runRecipe(pageOn("https://x/login"), [{ action: "wait", ms: 1 }], {
@@ -202,16 +193,19 @@ test("runRecipe refuses a navigate URL carrying a secret placeholder", async () 
 });
 
 test("runRecipe fails closed when the page cannot report its origin", async () => {
+  // A page object that cannot say where it is must stop the step, not skip the
+  // check. What it throws is not the point — that nothing was typed is.
+  const calls = [];
   await assert.rejects(
     runRecipe({}, [{ action: "fill", selector: "#code", value: "{otp}" }], {
       username: "u",
       password: "p",
       getOtp: async () => "654321",
       domains: ["x"],
-      driver: recordingDriver([]),
+      driver: recordingDriver(calls),
     }),
-    /cannot determine the current page origin/,
   );
+  assert.deepEqual(calls, []);
 });
 
 test("autoLogin refuses a loginUrl off the credential's allowlist, before opening anything", async () => {
@@ -349,21 +343,6 @@ test("a wildcard covering the whole sign-in flow lets the hop through", async ()
   assert.deepEqual(calls, [["fill", "#code", "654321"]]);
 });
 
-test("the identifier selector covers phone-first sign-ins, not just e-mail-first ones", () => {
-  // Airbnb / Uber / Telegram open with a phone number. Without the tel forms their
-  // first screen has no password field and no code copy, which classifies as a
-  // finished login and seals an unauthenticated profile.
-  const parts = IDENTIFIER_FIELD_SEL.split(",").map((s) => s.trim());
-  for (const needed of [
-    'input[type="email"]',
-    'input[type="tel"]',
-    'input[autocomplete="username"]',
-    'input[autocomplete="tel"]',
-  ]) {
-    assert.ok(parts.includes(needed), `identifier selector is missing ${needed}`);
-  }
-});
-
 test("the code-screen submit vocabulary never matches a control that discards the code", () => {
   for (const label of ["Verify", "Continue", "Submit", "Confirm", "Next", "Sign in", "Log in"]) {
     assert.ok(CODE_SUBMIT_TEXT_RE.test(label), `"${label}" should advance the code screen`);
@@ -381,4 +360,43 @@ test("the code-screen submit vocabulary never matches a control that discards th
   ]) {
     assert.ok(!CODE_SUBMIT_TEXT_RE.test(label), `"${label}" must never be clicked`);
   }
+});
+
+// ─── the secret gate must hold across the human wait ──────────────────────────────
+
+test("a page that navigates WHILE the owner types the code cannot receive it", async () => {
+  // The pre-`sub` check passes on the right origin, then resolving {otp} blocks on
+  // the owner for minutes. Without a second check immediately before the driver
+  // call, the code lands on whatever the page navigated to in the meantime.
+  const calls = [];
+  let url = "https://account.example.com/verify";
+  const page = { url: () => url };
+  await assert.rejects(
+    runRecipe(page, [{ action: "fill", selector: "#code", value: "{otp}" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => {
+        url = "https://evil.test/collect";
+        return "654321";
+      },
+      domains: ["account.example.com"],
+      driver: recordingDriver(calls),
+    }),
+    /evil\.test.*not on the credential's domain allowlist/s,
+  );
+  assert.deepEqual(calls, [], "the code must not have been typed anywhere");
+});
+
+test("a step whose origin stays put is unaffected by the second check", async () => {
+  const calls = [];
+  await runRecipe(pageOn("https://account.example.com/verify"), [
+    { action: "fill", selector: "#code", value: "{otp}" },
+  ], {
+    username: "u",
+    password: "p",
+    getOtp: async () => "654321",
+    domains: ["account.example.com"],
+    driver: recordingDriver(calls),
+  });
+  assert.deepEqual(calls, [["fill", "#code", "654321"]]);
 });

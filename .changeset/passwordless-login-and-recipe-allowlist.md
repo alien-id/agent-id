@@ -21,11 +21,21 @@ could not be filled truthfully.
   It was validated in the store and read by auto-login while nothing could set
   it. The step vocabulary is now checked on write rather than throwing mid-login.
 - **Security:** `runRecipe` navigated anywhere and substituted `{password}` /
-  `{otp}` into any selector with no host check. Now every navigation target, and
-  the live origin of every step that resolves a secret, is checked against the
-  credential's `domains` — the same gate `fill-secret` / `fill-otp` already
-  apply. `runRecipe`'s `domains` option is required, so the check cannot be
-  omitted by a caller.
+  `{otp}` into any selector with no host check. Now every navigation target is
+  checked against the credential's `domains`, and so is the live origin of every
+  step that resolves a secret — twice, before and after the value is resolved,
+  because resolving `{otp}` awaits the owner for minutes and the page is free to
+  navigate in that window. `runRecipe`'s `domains` option is required, so the
+  check cannot be omitted by a caller. A step whose value is a literal is not
+  gated; nothing secret is at stake in one.
+- `vault set-domains` edits that allowlist on a stored credential. It has to
+  exist now that the list is load-bearing: a sign-in only reveals which hosts it
+  redirects through once it has been driven, and the alternative was remove +
+  re-add, which asks the owner for the secret again.
+- One run answers a code challenge once (three times for a stored TOTP seed) and
+  then reports `otp-rejected`. Re-asking a human for a code the site has already
+  refused is both useless and unaffordable: the card waits ten minutes and the
+  host kills the process at sixteen.
 - `login` no longer falls back to `domains: ["*"]`. `"*"` is a not-applicable
   placeholder that matches no host, so that default minted credentials which
   could never be typed anywhere.

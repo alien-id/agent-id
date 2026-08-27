@@ -671,6 +671,34 @@ async function cmdSetRecipe(flags) {
   }
 }
 
+// Replace the host allowlist on an existing credential. Needed because `domains`
+// is load-bearing for a `login` — the browser refuses a secret anywhere off it, and
+// auto-login refuses to navigate off it — while a sign-in that redirects between
+// subdomains only reveals which hosts it needs once it has been driven. Without
+// this the only fix is remove + re-add, which asks the owner for the secret again.
+async function cmdSetDomains(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const domains = parseDomains(flags);
+  if (domains.length === 0) {
+    return outputError("--domains <host[,host…]> is required (wildcards like *.example.com are allowed)");
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    const previous = rec.domains;
+    rec.domains = domains;
+    vault.add(rec); // re-validates + upserts (createdAt preserved)
+    await vault.save();
+    stderr(`Set domains on '${name}': ${previous.join(", ")} -> ${domains.join(", ")}.`);
+    outputJson({ ok: true, name, domains });
+  } finally {
+    vault.lock();
+  }
+}
+
 async function cmdShow(flags) {
   const name = flags.name;
   if (!name) return outputError("--name <NAME> is required");
@@ -1319,6 +1347,8 @@ function printHelp() {
       "              --passwordless drops the password field: the site has none and",
       "              mails/SMSes a code at sign-in (needs --otp interactive|totp)",
       "              driven by `agent-id-browser auto-login`, not the HTTP proxy",
+      "  set-domains --name N --domains H[,H…]   replace the host allowlist",
+      "              a sign-in that redirects between subdomains needs them all",
       "  set-recipe --name N (--recipe '<JSON steps>' | --clear)",
       "              attach/replace the auto-login recipe on a login cred; steps are",
       "              navigate|fill|type|click|press|wait with {username}/{password}/{otp}",
@@ -1372,6 +1402,7 @@ const commands = {
   add: cmdAdd,
   "set-totp": cmdSetTotp,
   "set-recipe": cmdSetRecipe,
+  "set-domains": cmdSetDomains,
   "set-access": cmdSetAccess,
   generate: cmdGenerate,
   show: cmdShow,

@@ -122,61 +122,39 @@ test("webauthn authenticate: returns just the PRF secret", async () => {
   assert.deepEqual(values, { prfSecret: "cafe" });
 });
 
-test("the wait budget printed to the human matches the caller's timeoutMs", async () => {
+test("the wait budget printed to the human is the caller's, not a constant", async () => {
   // The line a person reads to decide "can I go fetch that code and come back?".
-  // It used to be the constant "5 min" while the real budget came from timeoutMs,
+  // It used to be a hardcoded "5 min" while the real budget came from timeoutMs,
   // so any caller that widened the window was contradicted by its own copy.
-  const captured = [];
-  const original = process.stderr.write.bind(process.stderr);
-  process.stderr.write = (chunk, ...rest) => {
-    captured.push(typeof chunk === "string" ? chunk : String(chunk));
-    return true;
-  };
-  try {
-    const { urlReady, done } = startForm({
-      title: "Sign-in code for booking",
-      fields: [{ name: "otp", label: "Sign-in code" }],
-      timeoutMs: 10 * 60 * 1000,
-    });
-    const url = await urlReady;
-    const said = captured.join("");
-    assert.match(said, /waiting up to 10 min/);
-    assert.ok(!/waiting up to 5 min/.test(said), "must not quote a budget it is not using");
+  for (const [timeoutMs, expected] of [
+    [undefined, /waiting up to 5 min/],
+    [10 * 60 * 1000, /waiting up to 10 min/],
+  ]) {
+    const captured = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk) => {
+      captured.push(typeof chunk === "string" ? chunk : String(chunk));
+      return true;
+    };
+    try {
+      const { urlReady, done } = startForm({
+        title: "Sign-in code for booking",
+        fields: [{ name: "otp", label: "Sign-in code" }],
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      });
+      const url = await urlReady;
+      assert.match(captured.join(""), expected);
 
-    // Close the form so the test does not sit on the 10-minute timer.
-    const u = new URL(url);
-    await fetch(`http://127.0.0.1:${u.port}/submit`, {
-      method: "POST",
-      body: new URLSearchParams({ _token: u.searchParams.get("t"), otp: "483920" }),
-    });
-    const { values } = await done;
-    assert.equal(values.otp, "483920");
-  } finally {
-    process.stderr.write = original;
-  }
-});
-
-test("the wait budget still reads 5 min when the caller does not widen it", async () => {
-  const captured = [];
-  const original = process.stderr.write.bind(process.stderr);
-  process.stderr.write = (chunk) => {
-    captured.push(typeof chunk === "string" ? chunk : String(chunk));
-    return true;
-  };
-  try {
-    const { urlReady, done } = startForm({
-      title: "Add credential: x",
-      fields: [{ name: "value", label: "Token" }],
-    });
-    const url = await urlReady;
-    assert.match(captured.join(""), /waiting up to 5 min/);
-    const u = new URL(url);
-    await fetch(`http://127.0.0.1:${u.port}/submit`, {
-      method: "POST",
-      body: new URLSearchParams({ _token: u.searchParams.get("t"), value: "v" }),
-    });
-    await done;
-  } finally {
-    process.stderr.write = original;
+      // Close the form so the test does not sit on the timer.
+      const u = new URL(url);
+      await fetch(`http://127.0.0.1:${u.port}/submit`, {
+        method: "POST",
+        body: new URLSearchParams({ _token: u.searchParams.get("t"), otp: "483920" }),
+      });
+      const { values } = await done;
+      assert.equal(values.otp, "483920");
+    } finally {
+      process.stderr.write = original;
+    }
   }
 });

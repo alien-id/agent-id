@@ -195,6 +195,7 @@ test("an e-mail-first screen is NOT mistaken for logged-in", () => {
     classifyLogin({
       hasPasswordField: false,
       hasIdentifierField: true,
+      onLoginPage: true,
       bodyText: "Sign in or create an account\nEmail address\nContinue with email",
     }),
     "unknown",
@@ -206,6 +207,7 @@ test("the identifier step yields to a code step once the code screen appears", (
     classifyLogin({
       hasPasswordField: false,
       hasIdentifierField: true,
+      onLoginPage: true,
       hasOtpField: true,
       bodyText: "Enter the 6-digit code we sent to a***@example.com",
     }),
@@ -222,11 +224,11 @@ test("the identifier signal does not suppress a real logged-in page", () => {
 
 test("the identifier signal does not outrank a block wall or a credential error", () => {
   assert.equal(
-    classifyLogin({ hasIdentifierField: true, bodyText: "Verify you are human" }),
+    classifyLogin({ hasIdentifierField: true, onLoginPage: true, bodyText: "Verify you are human" }),
     "blocked",
   );
   assert.equal(
-    classifyLogin({ hasIdentifierField: true, errorText: "That email is not recognized" }),
+    classifyLogin({ hasIdentifierField: true, onLoginPage: true, errorText: "That email is not recognized" }),
     "failed",
   );
 });
@@ -249,7 +251,7 @@ const IDENTIFIER_STEPS = [
 
 for (const [name, bodyText] of IDENTIFIER_STEPS) {
   test(`identifier step (${name}) is not a finished login`, () => {
-    assert.equal(classifyLogin({ hasIdentifierField: true, bodyText }), "unknown");
+    assert.equal(classifyLogin({ hasIdentifierField: true, onLoginPage: true, bodyText }), "unknown");
   });
 }
 
@@ -353,6 +355,93 @@ test("a QR screen that also offers a code field is an ordinary code step", () =>
     classifyLogin({
       hasOtpField: true,
       bodyText: "Log in with QR code, or enter the 6-digit code we sent you",
+    }),
+    "otp-required",
+  );
+});
+
+// ─── what the widened vocabulary must NOT do ──────────────────────────────────────
+//
+// Each of these was a live regression: the vocabulary was widened until real
+// sign-in screens matched, without a pass over what those alternatives do to
+// ordinary pages. Every one turns a login that SUCCEEDED into a failure — the
+// expensive direction, since the caller then never seals the session.
+
+test("an identifier field off the sign-in page is a newsletter box, not a sign-in step", () => {
+  const snap = {
+    hasPasswordField: false,
+    hasIdentifierField: true,
+    bodyText: "Welcome back, Daniel\nMy trips\nSubscribe to our newsletter",
+  };
+  assert.equal(classifyLogin({ ...snap, onLoginPage: false }), "logged-in");
+  // On the sign-in page the same shape still means the sign-in has not started.
+  assert.equal(classifyLogin({ ...snap, onLoginPage: true }), "unknown");
+});
+
+test("'the link' copy that is not about signing in leaves a signed-in page alone", () => {
+  for (const bodyText of [
+    "Welcome back! Open the link in a new tab to view your itinerary",
+    "Click the link in the description below to watch",
+    "Messages\nAlice sent you a link to the doc",
+  ]) {
+    assert.equal(classifyLogin({ hasPasswordField: false, bodyText }), "logged-in");
+  }
+});
+
+test("'signin' inside an ordinary word is not a QR sign-in", () => {
+  // No word boundary meant "signin" was found inside "designing" and "assigning".
+  for (const bodyText of [
+    "Designing QR codes for your storefront",
+    "Assigning a QR code to each table",
+    "Resigning from the QR pilot",
+  ]) {
+    assert.equal(classifyLogin({ hasPasswordField: false, bodyText }), "logged-in");
+  }
+});
+
+test("a QR that signs you in ELSEWHERE is the linked-devices panel, not a sign-in screen", () => {
+  for (const bodyText of [
+    "Scan the QR code to sign in on another device",
+    "Linked devices\nUse the QR code to log in on your phone",
+  ]) {
+    assert.equal(classifyLogin({ hasPasswordField: false, bodyText }), "logged-in");
+  }
+  assert.equal(classifyLogin({ bodyText: "Scan the QR code to sign in" }), "qr-sign-in");
+});
+
+test("'access code' is ordinary copy and must not raise a card for a code that does not exist", () => {
+  for (const bodyText of [
+    "Meeting access code: 482 910",
+    "Enter the access code at checkout for members",
+  ]) {
+    assert.equal(classifyLogin({ hasPasswordField: false, bodyText }), "logged-in");
+  }
+});
+
+test("an unqualified 'enter the code' still reads as a code step", () => {
+  // Dropped once on the premise that it fires on "enter your promo code". It does
+  // not — and dropping it cost the screens that say only this.
+  assert.equal(classifyLogin({ bodyText: "Enter the code below to continue" }), "otp-required");
+  assert.equal(
+    classifyLogin({ hasPasswordField: false, bodyText: "Enter your promo code at checkout" }),
+    "logged-in",
+  );
+});
+
+test("a code screen that also mentions a link is a code step, however weak its field", () => {
+  // The six-box screens this feature targets often carry no autocomplete hint, so
+  // guarding the link/QR outcomes on the code INPUT sent them to a handover.
+  assert.equal(
+    classifyLogin({
+      hasOtpField: false,
+      otpFieldNames: [""],
+      bodyText: "Enter the 6-digit code we sent, or use the login link in the same email",
+    }),
+    "otp-required",
+  );
+  assert.equal(
+    classifyLogin({
+      bodyText: "Log in with a QR code, or enter the verification code we sent you",
     }),
     "otp-required",
   );

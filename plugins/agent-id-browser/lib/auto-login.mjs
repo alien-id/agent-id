@@ -19,12 +19,16 @@
 // The password is typed by this (vault-unlocked) process straight into the page —
 // the same trust boundary as the proxy injecting `basic`; the agent never sees it.
 //
-// Recipes are authored by the agent from page content, so every origin a recipe
-// reaches is checked against the credential's `domains` before anything happens
-// there — the same allowlist gate `fill-secret`/`fill-otp` apply in the session
-// server. Without it a recipe step could navigate anywhere and type {password} /
-// {otp} into it, which is a credential-exfiltration primitive driven by whatever
-// the page said. `domains` is therefore load-bearing for `login`, not advisory.
+// Recipes are authored by the agent from page content, so two things are checked
+// against the credential's `domains`: every navigation target, and the live origin
+// of every step that resolves {password} or {otp} — the latter twice, before and
+// after the value is resolved, because resolving it can await a human for minutes.
+// A step whose value is a literal string is NOT gated; nothing secret is at stake
+// in one. Without this a recipe could navigate anywhere and type a secret into it,
+// which is a credential-exfiltration primitive driven by whatever the page said.
+// `domains` is therefore load-bearing for `login`, not advisory — and editable
+// after the fact with `agent-id-vault set-domains`, since a sign-in only reveals
+// which hosts it needs once it has been driven.
 //
 // The browser-driving functions take a `page` object (a patchright Page), so the
 // pure pieces (applyVars / stepNeedsOtp / runRecipe / resolveOtp-totp) unit-test
@@ -33,7 +37,7 @@
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
-import { hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
+import { assertHostAllowed } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { classifyLogin } from "./login-detect.mjs";
 import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
@@ -50,29 +54,6 @@ async function typeSecret(page, selector, value, opts = {}) {
 }
 
 const PLACEHOLDER_FIELDS = ["url", "value", "text", "selector", "key"];
-
-// Refuse an origin the credential was never scoped to. `where` names the step so
-// a refusal is actionable; the offending VALUE is never interpolated, only the
-// host, so this stays safe to surface to the agent.
-function assertHostAllowed(host, domains, where) {
-  if (!hostMatchesAllowlist(host, domains)) {
-    throw new Error(
-      `${where}: refusing "${host || "(no host)"}" — not on the credential's domain ` +
-        `allowlist (${(domains || []).join(", ") || "none"}). Add the host to the credential's ` +
-        "domains (wildcards like *.example.com are allowed).",
-    );
-  }
-}
-
-// The origin the page is on RIGHT NOW. Read live rather than tracked across
-// steps: a login flow redirects between hosts, and a tracked value would check
-// an origin we already left. Fails closed when `page` cannot report one.
-function liveHost(page, where) {
-  if (!page || typeof page.url !== "function") {
-    throw new Error(`${where}: cannot determine the current page origin`);
-  }
-  return hostOf(page.url());
-}
 
 function hostOf(url) {
   try {
@@ -157,8 +138,8 @@ export function stepNeedsOtp(step) {
 
 // Does this step resolve a secret value anywhere in it? Every placeholder field is
 // substituted, so a {password}/{otp} in `selector` reaches the page as surely as
-// one in `value`. Pure. Exported for tests.
-export function stepCarriesSecret(step) {
+// one in `value`. Pure.
+function stepCarriesSecret(step) {
   return PLACEHOLDER_FIELDS.some(
     (k) =>
       typeof step?.[k] === "string" &&
@@ -204,12 +185,16 @@ export async function runRecipe(
       throw new Error(`recipe step '${tpl}' failed while entering a secret value`);
     }
   };
-  // Gate on the origin the page is on, before `sub` runs — so a refusal never
-  // costs the owner a secure-input card for a code we were going to reject.
-  // Checked per STEP, not per field: `selector` is substituted too, so a secret
-  // placeholder anywhere in the step can resolve a value.
+  // Refuse a secret-bearing step on an origin the credential was never scoped to.
+  // Called TWICE per step, and both calls earn their place: once before `sub`, so
+  // a step we are going to refuse never costs the owner a card; once after,
+  // because resolving {otp} awaits a human for up to ten minutes and the page is
+  // free to navigate in that window — the second call is what actually confines
+  // the secret. Checked per STEP, not per field: `selector` is substituted too.
   const gateSecret = (step, where) => {
-    if (stepCarriesSecret(step)) assertHostAllowed(liveHost(page, where), domains, where);
+    if (stepCarriesSecret(step)) {
+      assertHostAllowed(hostOf(page.url()), domains, `${where}: refusing`);
+    }
   };
   for (const step of steps) {
     switch (step.action) {
@@ -221,30 +206,45 @@ export async function runRecipe(
           throw new Error("recipe navigate: a URL must not carry {password} or {otp}");
         }
         const url = await sub(step.url);
-        assertHostAllowed(hostOf(url), domains, "recipe navigate");
+        assertHostAllowed(hostOf(url), domains, "recipe navigate: refusing");
         await driver.navigate(page, url);
         break;
       }
-      case "fill":
+      // Each of the four below resolves its values FIRST, re-checks the origin, and
+      // only then touches the page. The order is the point: `sub` can block on the
+      // owner for minutes, so the origin that mattered at the top of the step is
+      // not necessarily the one the value would land on.
+      case "fill": {
         gateSecret(step, "recipe fill");
-        await guarded(step.value, async () =>
-          driver.fill(page, await sub(step.selector), await sub(step.value)),
-        );
+        const selector = await sub(step.selector);
+        const value = await sub(step.value);
+        gateSecret(step, "recipe fill");
+        await guarded(step.value, () => driver.fill(page, selector, value));
         break;
-      case "type": // alias of fill (kept for parity with the session vocabulary)
+      }
+      case "type": {
+        // alias of fill (kept for parity with the session vocabulary)
         gateSecret(step, "recipe type");
-        await guarded(step.text, async () =>
-          driver.type(page, await sub(step.selector), await sub(step.text)),
-        );
+        const selector = await sub(step.selector);
+        const text = await sub(step.text);
+        gateSecret(step, "recipe type");
+        await guarded(step.text, () => driver.type(page, selector, text));
         break;
-      case "click":
+      }
+      case "click": {
         gateSecret(step, "recipe click");
-        await driver.click(page, await sub(step.selector));
+        const selector = await sub(step.selector);
+        gateSecret(step, "recipe click");
+        await driver.click(page, selector);
         break;
-      case "press":
+      }
+      case "press": {
         gateSecret(step, "recipe press");
-        await driver.press(page, await sub(step.selector), step.key || "Enter");
+        const selector = await sub(step.selector);
+        gateSecret(step, "recipe press");
+        await driver.press(page, selector, step.key || "Enter");
         break;
+      }
       case "wait":
         await driver.wait(page, Number(step.ms) || 1000);
         break;
@@ -290,7 +290,7 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now 
     });
   }
   const wording = otpPromptWording(cred);
-  log(`Waiting for the ${cred.passwordless ? "sign-in" : "current 2FA"} code via the secure prompt…`);
+  log(`Waiting for the ${wording.label.toLowerCase()} via the secure prompt…`);
   const { values } = await collectSecret(
     {
       title: wording.title,
@@ -299,8 +299,9 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now 
       label: wording.ask,
       security: "Used once to complete sign-in; never stored or shown to the agent.",
       // A mailed code costs a trip to another app and back, so the card outlives
-      // the 5 minutes a TOTP app needs. Kept under the hosted channel's own
-      // 15-minute ceiling.
+      // the 5 minutes a TOTP app needs. The ceiling is the host's, not ours: the
+      // lethe hub expires a pending request at 15 minutes and kills this process
+      // at 16, which is also why one run only ever asks once (see maxOtpAsks).
       timeoutMs: 10 * 60 * 1000,
     },
     { env },
@@ -339,9 +340,8 @@ export const CHALLENGE_WIDGET_SEL = [
 // mistaken for an identifier: classifyLogin checks the code affordances first.
 //
 // Module-level and passed into the page like CHALLENGE_WIDGET_SEL, because a
-// function handed to page.evaluate cannot close over anything. Exported so the
-// vocabulary is checkable without a browser.
-export const IDENTIFIER_FIELD_SEL = [
+// function handed to page.evaluate cannot close over anything.
+const IDENTIFIER_FIELD_SEL = [
   'input[type="email"]',
   'input[type="tel"]',
   'input[autocomplete="username"]',
@@ -405,17 +405,20 @@ export const CODE_SUBMIT_TEXT_RE =
 async function submitCode(page, fieldSel) {
   // Vendor-specific first: these have stable ids and no useful text.
   for (const known of ["#submitButton", "#idSubmit_SAOTCC_Continue"]) {
-    if (await page.locator(known).count()) {
+    const button = page.locator(known).first();
+    if ((await button.count()) && (await button.isVisible().catch(() => false))) {
       await humanClick(page, known, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
       return;
     }
   }
-  // A real submit control, if the form has one.
-  const submit = page.locator('button[type="submit"], input[type="submit"]').first();
-  if ((await submit.count()) && (await submit.isVisible().catch(() => false))) {
-    await humanClick(page, 'button[type="submit"], input[type="submit"]', {
-      timeout: SUBMIT_TIMEOUT,
-    }).catch(() => {});
+  // A real submit control belonging to the code field's OWN form. Page-wide would
+  // hand the click to a header search box or a newsletter footer, and the label
+  // branch below would never run.
+  const SUBMIT_SEL = 'button[type="submit"], input[type="submit"]';
+  const ownForm = page.locator(fieldSel).first().locator("xpath=ancestor::form[1]");
+  const ownSubmit = ownForm.locator(SUBMIT_SEL).first();
+  if ((await ownSubmit.count()) && (await ownSubmit.isVisible().catch(() => false))) {
+    await ownSubmit.click({ timeout: SUBMIT_TIMEOUT }).catch(() => {});
     return;
   }
   // Otherwise a button whose label says it advances. Read the labels rather than
@@ -425,9 +428,11 @@ async function submitCode(page, fieldSel) {
   for (let i = 0; i < count; i++) {
     const button = buttons.nth(i);
     if (!(await button.isVisible().catch(() => false))) continue;
-    const label = ((await button.textContent().catch(() => "")) || "").trim();
+    const label = (
+      (await button.textContent({ timeout: SUBMIT_TIMEOUT }).catch(() => "")) || ""
+    ).trim();
     if (!CODE_SUBMIT_TEXT_RE.test(label)) continue;
-    await button.click({ timeout: SUBMIT_TIMEOUT }).catch(() => {});
+    await humanClick(page, button, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
     return;
   }
   // Nothing to click: a single-field form, or a screen that submits on its own
@@ -504,9 +509,14 @@ export { detectMicrosoftFlow };
 // Handles a simple two-step flow (username page → password page), and the
 // passwordless flow where submitting the identifier is the entire step.
 async function heuristicLogin(page, { username, password, passwordless }) {
+  // Ordered widest-signal-first, and it must cover everything IDENTIFIER_FIELD_SEL
+  // recognises — a screen the classifier calls an identifier step and this cannot
+  // fill is a stall, which is what phone-first sign-ins used to do.
   const userSel =
-    'input[type="email"], input[name*="user" i], input[name*="email" i], ' +
-    'input[id*="user" i], input[id*="email" i], input[autocomplete="username"], input[type="text"]';
+    'input[type="email"], input[type="tel"], input[autocomplete="username"], ' +
+    'input[autocomplete="email"], input[autocomplete^="tel"], ' +
+    'input[name*="user" i], input[name*="email" i], input[name*="phone" i], ' +
+    'input[id*="user" i], input[id*="email" i], input[id*="phone" i], input[type="text"]';
   const pwSel = 'input[type="password"]';
 
   const fillFirst = async (sel, value, secret = false) => {
@@ -576,7 +586,10 @@ async function awaitDeviceConfirmation(page, cred, { log, settleMs, budgetMs }) 
   const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
     await page.waitForTimeout(settleMs);
-    const state = classifyLogin(await detectPageState(page));
+    const state = classifyLogin({
+      ...(await detectPageState(page)),
+      onLoginPage: stillOnLoginPage(page.url(), cred.loginUrl),
+    });
     // Anything other than "still asking" ends the wait — including a block or a
     // denial, which the main loop then classifies on its own terms.
     if (state !== "confirm-on-device" && state !== "unknown") {
@@ -619,8 +632,16 @@ export async function autoLogin({
   // The whole run — warmup, the login page, every recipe step — happens on the
   // credential's own origins. Checked once here so a loginUrl pointing off the
   // allowlist fails before a browser goes anywhere, not after.
-  assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl");
+  assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
   const getOtp = () => resolveOtp(cred, { env, log });
+  // How many times one run may answer a code challenge. A stored seed costs
+  // nothing to regenerate, so a few attempts are fine there. Asking a HUMAN is
+  // bounded by arithmetic, not taste: the card waits up to 10 minutes and the host
+  // kills this process at 16 (lethe's HUMAN_TIMEOUT), so a second full-length ask
+  // does not fit. One ask, then report it — a fresh auto-login gets a fresh budget
+  // and makes the site send a fresh code, which is the better retry anyway.
+  const maxOtpAsks = cred.otp === "totp" ? 3 : 1;
+  let otpAsks = 0;
 
   // Warm up before a deep login link. Some sites (e.g. Reddit) wall a COLD
   // deep-link straight to /login with a "blocked by network security" bot block,
@@ -661,23 +682,19 @@ export async function autoLogin({
   await page.waitForTimeout(settleMs);
 
   for (let round = 0; round < maxRounds; round++) {
-    const outcome = classifyLogin(await detectPageState(page));
+    const onLoginPage = stillOnLoginPage(page.url(), cred.loginUrl);
+    const outcome = classifyLogin({ ...(await detectPageState(page)), onLoginPage });
     log(`auto-login: ${outcome}`);
     // A bot-block / human-verification wall never clears by waiting — stop and
     // report it (the caller advises a headed login, which a human can clear).
     if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url() };
-    // A mailed sign-in link cannot be finished from here at all: there is no code
-    // to ask for, and the link authenticates whichever browser the owner opens it
-    // in — never this sealed profile. Waiting would just burn the budget and then
-    // report a timeout, so say what it is and let the caller hand the browser over.
-    if (outcome === "magic-link") {
-      return { ok: false, outcome: "magic-link", finalUrl: page.url() };
-    }
-    // A QR sign-in is the same dead end with the code on this screen instead of in
-    // the owner's mail — and a headless browser they cannot see makes it useless
-    // until the viewport is opened for them.
-    if (outcome === "qr-sign-in") {
-      return { ok: false, outcome: "qr-sign-in", finalUrl: page.url() };
+    // Neither of these can be finished from here at all: a mailed link
+    // authenticates whichever browser the owner opens it in — never this sealed
+    // profile — and a QR code is drawn inside a browser they cannot see. There is
+    // nothing to type either way, so waiting only burns the budget before
+    // reporting a timeout. Name it and let the caller hand the browser over.
+    if (outcome === "magic-link" || outcome === "qr-sign-in") {
+      return { ok: false, outcome, finalUrl: page.url() };
     }
     if (outcome === "logged-in") {
       // Never believe it on the first look. A heavy SPA a second into loading has
@@ -695,7 +712,7 @@ export async function autoLogin({
       // Positive confirmation: the form is gone AND we've left the login page.
       // Without this, a vanished password field on a block/challenge or SPA
       // re-render sealed an unauthenticated session while reporting success.
-      if (!stillOnLoginPage(page.url(), cred.loginUrl)) {
+      if (!onLoginPage) {
         return { ok: true, outcome, finalUrl: page.url() };
       }
       log("auto-login: form cleared but still on the login page — awaiting redirect");
@@ -719,6 +736,13 @@ export async function autoLogin({
       if (cred.otp === "none") {
         return { ok: false, outcome: "otp-unexpected", finalUrl: page.url() };
       }
+      if (otpAsks >= maxOtpAsks) {
+        // The site is still asking after we answered. Looping here re-asks the
+        // owner for a code the site has already refused once, and each ask is
+        // another ten minutes of a budget that does not have them to give.
+        return { ok: false, outcome: "otp-rejected", finalUrl: page.url() };
+      }
+      otpAsks += 1;
       await typeOtp(page, await getOtp());
       await page.waitForTimeout(settleMs);
       continue;
