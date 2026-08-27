@@ -32,8 +32,10 @@ could not be filled truthfully.
   exist now that the list is load-bearing: a sign-in only reveals which hosts it
   redirects through once it has been driven, and the alternative was remove +
   re-add, which asks the owner for the secret again.
-- One run answers a code challenge once (three times for a stored TOTP seed) and
-  then reports `otp-rejected`. Re-asking a human for a code the site has already
+- One run answers a code challenge once, or twice for a stored TOTP seed with
+  the second attempt waiting out the time window — within one period the seed
+  produces the same digits, so a back-to-back retry resubmits the code that was
+  just refused. Then it reports `otp-rejected`. Re-asking a human for a code the site has already
   refused is both useless and unaffordable: the card waits ten minutes and the
   host kills the process at sixteen.
 - `login` no longer falls back to `domains: ["*"]`. `"*"` is a not-applicable
@@ -64,4 +66,3 @@ could not be filled truthfully.
 - "logged-in" is never believed on the first look: a heavy SPA a second into
   loading has no form, no code and no error, which is indistinguishable from
   success.
-
