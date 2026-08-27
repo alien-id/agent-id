@@ -18,7 +18,6 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
-import { createRequire } from "node:module";
 
 import {
   outputError,
@@ -34,6 +33,7 @@ import {
 import {
   loadAgentPrivateKey,
   openVault,
+  readMobileSlotChallenges,
   readOwnerApprovalChallenge,
   readPasskeyChallenges,
   recoverMasterKeyViaOwnerApproval,
@@ -48,14 +48,13 @@ import {
   promptSecret,
 } from "@alien-id/agent-id-vault/lib/trusted-input.mjs";
 import { collectViaForm } from "@alien-id/agent-id-core/lib/secure-form.mjs";
+// Static, not createRequire: the compiled binary has no node_modules to resolve against.
+import qrcode from "@alien-id/agent-id-core/bin/qrcode.cjs";
 
 import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
 import { loadOauthSecretsFile } from "../lib/oauth.mjs";
 import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
 import { normalizeFingerprint } from "../lib/control-tls.mjs";
-
-// The QR renderer is a CommonJS module vendored in agent-id-core.
-const qrcode = createRequire(import.meta.url)("@alien-id/agent-id-core/bin/qrcode.cjs");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -109,6 +108,10 @@ async function resolvePassphrase(flags) {
   return null;
 }
 
+// Returns { vault, viaAgentKey }. `viaAgentKey` is true only when the vault
+// was unlocked through the agent-key slot — the one unlock method that needs
+// no human, so it's also the only one a self-reopen (see `reopenVault` in
+// cmdStart) can safely repeat later without prompting anyone.
 async function loadVaultForProxy(stateDir, flags) {
   if (!(await vaultFileExists(stateDir))) {
     throw new Error(
@@ -123,11 +126,12 @@ async function loadVaultForProxy(stateDir, flags) {
     const passkeys = await readPasskeyChallenges(stateDir);
     if (passkeys.length) {
       const prfSecret = await authenticatePasskey(passkeys[0]);
-      return openVault({ stateDir, passkeyPrfSecret: prfSecret });
+      return { vault: await openVault({ stateDir, passkeyPrfSecret: prfSecret }), viaAgentKey: false };
     }
     const passphrase = await resolvePassphrase(flags);
     if (!passphrase) throw new Error("Unlock form was cancelled or returned no passphrase");
-    return openVault({ stateDir, passphrase }); // no privateKeyPem → passphrase slot only
+    // no privateKeyPem → passphrase slot only
+    return { vault: await openVault({ stateDir, passphrase }), viaAgentKey: false };
   }
 
   const useAgentKey = flags["agent-key"] !== false;
@@ -135,7 +139,7 @@ async function loadVaultForProxy(stateDir, flags) {
 
   if (privateKeyPem) {
     try {
-      return await openVault({ stateDir, privateKeyPem });
+      return { vault: await openVault({ stateDir, privateKeyPem }), viaAgentKey: true, privateKeyPem };
     } catch (err) {
       if (err.code !== "VAULT_UNLOCK_FAILED") throw err;
       // fall through
@@ -144,7 +148,7 @@ async function loadVaultForProxy(stateDir, flags) {
 
   const passphrase = await resolvePassphrase(flags);
   if (!passphrase) throw new Error("No passphrase available to unlock vault");
-  return openVault({ stateDir, privateKeyPem, passphrase });
+  return { vault: await openVault({ stateDir, privateKeyPem, passphrase }), viaAgentKey: false };
 }
 
 async function writeProxyState(paths, info) {
@@ -351,6 +355,37 @@ async function startOwnerApprovalApprover({
 
 // ─── Commands ───────────────────────────────────────────────────────────────────
 
+// What can re-unlock a locked proxy is decided by the configuration, NOT by
+// whatever unlocked it at start:
+//   • control plane ON  — a locked request parks until an approver releases the
+//     master key (a paired device, or the owner-approval slot). With neither
+//     slot present every request is answered `no_unlock_method`, agent key or
+//     not: the self-reopen path is reached only with the control plane off.
+//   • control plane OFF — the proxy re-opens the vault itself iff it unlocked
+//     via the agent key; otherwise only a restart brings it back.
+async function lockNotice({ reason, stateDir, controlEnabled, canSelfReopen }) {
+  const head = `Vault locked (${reason}).`;
+  if (controlEnabled) {
+    const [mobile, ownerApproval] = await Promise.all([
+      readMobileSlotChallenges(stateDir).catch(() => []),
+      readOwnerApprovalChallenge(stateDir).catch(() => null),
+    ]);
+    if (mobile.length && ownerApproval) {
+      return `${head} Next request will ask a paired device or the owner for an unlock approval.`;
+    }
+    if (mobile.length) return `${head} Next request will ask a paired device for an unlock approval.`;
+    if (ownerApproval) return `${head} Next request will ask the owner for an unlock approval.`;
+    return (
+      `${head} No paired device and no owner-approval slot — every request now fails with ` +
+      "no_unlock_method" +
+      (canSelfReopen ? " (self-reopen via the agent key needs --no-control)" : "") +
+      ". Pair a device (`agent-id-proxy pair`) before the next lock, or restart the proxy."
+    );
+  }
+  if (canSelfReopen) return `${head} Next request re-opens it via the agent key.`;
+  return `${head} Restart the proxy to re-unlock.`;
+}
+
 async function cmdStart(flags) {
   const stateDir = resolveStateDir(flags);
   const paths = statePaths(stateDir);
@@ -384,7 +419,60 @@ async function cmdStart(flags) {
     return;
   }
 
-  const vault = awaitMobile ? null : await loadVaultForProxy(stateDir, flags);
+  // Data-plane shared secret (issue #104), read from a file because argv is
+  // world-readable. Read before the vault is opened so a bad flag fails the
+  // startup without ever unsealing anything.
+  const authTokenFile = flags["auth-token-file"];
+  if (authTokenFile === true) {
+    outputError("--auth-token-file needs a path");
+    return;
+  }
+  let authToken = null;
+  if (authTokenFile) {
+    const tokenPath = String(authTokenFile);
+    try {
+      // Same bar as the oauth secrets file: a shared secret readable by every
+      // account on the box is not a boundary at all.
+      const stat = await fs.stat(tokenPath);
+      if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+        outputError(
+          `--auth-token-file ${tokenPath} must not be group/world accessible (chmod 600 it)`,
+        );
+        return;
+      }
+      authToken = (await fs.readFile(tokenPath, "utf8")).trim();
+    } catch (err) {
+      outputError(`Cannot read --auth-token-file ${tokenPath}: ${err.message}`);
+      return;
+    }
+    if (!authToken) {
+      outputError(`--auth-token-file ${tokenPath} is empty — refusing to start unauthenticated.`);
+      return;
+    }
+    // The file is read as utf8 but the token travels as an HTTP header value,
+    // which is latin1 on the wire — a multi-byte character would arrive as
+    // different bytes and 401 every request with no diagnostic. Refuse loudly
+    // at startup instead.
+    if (!/^[\x21-\x7e]+$/.test(authToken)) {
+      outputError(
+        `--auth-token-file ${tokenPath} must contain printable ASCII only ` +
+          "(no spaces, no non-ASCII characters) — an HTTP header cannot carry it otherwise.",
+      );
+      return;
+    }
+  }
+
+  const loaded = awaitMobile ? null : await loadVaultForProxy(stateDir, flags);
+  const vault = loaded ? loaded.vault : null;
+  // Self-reopen is wired only for the agent-key path — the one unlock method
+  // that needs no human, so repeating it later (on a credential miss or after
+  // the idle lock) still needs nobody. Every other path (passphrase, passkey,
+  // --unlock-form) leaves this undefined and the proxy behaves exactly as
+  // before: a miss stays a miss, an idle lock stays a restart-to-recover.
+  const reopenVault =
+    loaded && loaded.viaAgentKey
+      ? async () => openVault({ stateDir, privateKeyPem: loaded.privateKeyPem })
+      : undefined;
   await ensureDir(path.dirname(paths.proxyLog));
 
   const idleTimeoutMs =
@@ -441,17 +529,22 @@ async function cmdStart(flags) {
     logPath: paths.proxyLog,
     listen: { port, host },
     idleTimeoutMs,
+    reopenVault,
     control,
     requireConsent,
     grantTtlMs,
     oauthClientSecrets,
+    authToken,
     blockPrivateHosts: !!flags["block-private-hosts"],
     onLock: (reason) => {
-      if (controlEnabled) {
-        stderr(`Vault locked (${reason}). Next request will ask for an unlock approval.`);
-      } else {
-        stderr(`Vault locked (${reason}). Restart the proxy to re-unlock.`);
-      }
+      lockNotice({
+        reason,
+        stateDir,
+        controlEnabled,
+        canSelfReopen: !!reopenVault,
+      })
+        .then(stderr)
+        .catch(() => {});
     },
     onUnlock: () => stderr("Vault unlocked via owner approval."),
   });
@@ -679,6 +772,12 @@ function printHelp() {
       "        [--await-mobile]",
       "        [--require-consent] [--approval-timeout 2m] [--grant-ttl 1h]",
       "        [--block-private-hosts]",
+      "        [--auth-token-file F]   opt-in shared secret for the data plane: the proxy",
+      "                          then requires `X-Agent-Id-Proxy-Token: <file contents>` on",
+      "                          every request and CONNECT. The file must be 0600 and hold",
+      "                          printable ASCII (an HTTP header carries nothing else); the",
+      "                          token never rides argv. Omitted, the data plane stays open",
+      "                          to anything that can reach the port.",
       "        [--oauth-secrets-file F]   0600 JSON {clientId: clientSecret} consulted for",
       "                          oauth2 creds that carry no clientSecret of their own",
       "                          (platform-managed connectors; env: AGENT_ID_OAUTH_SECRETS_FILE)",
@@ -693,6 +792,11 @@ function printHelp() {
       "Idle lock: master key zeroed after `--idle-timeout` (default 12h). With the",
       "  control plane on (default), the next request re-unlocks via a phone approval;",
       "  otherwise restart the proxy. Use --idle-timeout never to disable.",
+      "Self-reopen: when unlocked via the agent key (default; not --unlock-form or",
+      "  --no-agent-key), the proxy can re-open its own vault without a human — a",
+      "  credential added after start is picked up on next use, and (without the",
+      "  control plane) an idle lock recovers on the next request instead of needing",
+      "  a restart.",
       "Control plane (default 127.0.0.1:48772, loopback only — NOT the data-plane",
       "  --host): the phone polls /pending and POSTs /approve | /deny. Those routes",
       "  (and /register) require a bearer token (auto-generated, written to the 0600",
@@ -706,9 +810,13 @@ function printHelp() {
       "    `agent-id-vault rekey add-mobile --device-pubkey HEX`, or add an SSO",
       "    owner-approval slot with `agent-id-vault rekey add-owner-approval`",
       "    (the proxy then drives owner approvals itself — no phone app needed).",
+      "CORS: a browser preflight (OPTIONS + Access-Control-Request-Method) is never",
+      "  relayed upstream — it is answered locally with 403 cross_origin_refused (or,",
+      "  with --auth-token-file on and no token presented, 401 like any other request).",
       "SSRF guard: link-local (incl. 169.254.169.254 cloud metadata), unspecified,",
       "  and multicast upstreams are always refused (403 upstream_blocked).",
       "  --block-private-hosts also refuses loopback/RFC1918/ULA targets.",
+      "  Applies to CONNECT tunnels too, by literal address and by resolved name.",
       "v1: HTTP only. HTTPS is CONNECT-tunneled without injection — TLS MITM is the next spike.",
     ].join("\n"),
   );

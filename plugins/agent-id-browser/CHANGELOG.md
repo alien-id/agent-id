@@ -1,5 +1,385 @@
 # @alien-id/agent-id-browser
 
+## 7.13.1
+
+### Patch Changes
+
+- [#128](https://github.com/alien-id/agent-id/pull/128) [`4ccbda5`](https://github.com/alien-id/agent-id/commit/4ccbda509c869037471e6739c70a8ed617e8b48c) Thanks [@trifid-eti](https://github.com/trifid-eti)! - Sealing a login no longer loses it to a live session daemon
+
+  `auto-login` (and headed `login`) sealed the new session into the vault while a
+  daemon opened earlier on the same profile kept running. That daemon holds the
+  copy it unsealed at `open` time, so the next `open` reused it and showed the
+  login form, and its eventual close re-sealed that stale, logged-out copy over
+  the fresh login. Seen end to end: auto-login reported `logged-in`, `open main`
+  was still logged out, and the login was gone after the close.
+
+  Both commands now close a live session on the target profile first and wait for
+  its re-seal to finish (`closeLiveSession`). The success payload carries
+  `closedLiveSession` so the caller knows to open the profile again.
+
+  Also:
+
+  - `classifyLogin` recognizes Russian rejection copy («Пользователь не найден или
+    неверный пароль», «Неверный логин или пароль», «Ошибка авторизации»). A
+    rejection it could not read degraded to `unknown` every round, and the login
+    ended as `timeout` / `owner_must_drive` — the owner was sent to the browser
+    for a wrong password.
+  - `AUTO_LOGIN_FAILED` carries `trace` (what the engine saw each round: password
+    field present or gone, challenge widget, URL) and `pageError` (the page's
+    visible error copy), so a failure is diagnosable from the payload alone.
+
+## 7.13.0
+
+### Minor Changes
+
+- [#125](https://github.com/alien-id/agent-id/pull/125) [`405e1d8`](https://github.com/alien-id/agent-id/commit/405e1d87f7f81cc9749ecdd1ade29b9a8c065569) Thanks [@TemMax](https://github.com/TemMax)! - The viewport stream now carries viewer navigation. Server → client: a `nav`
+  status object (`url`, `canGoBack`, `canGoForward`). The `url` is read on the
+  same 250 ms cadence as `input_focus`, cheap and in-process; `canGoBack`/
+  `canGoForward` are only re-measured over CDP when the polled `url` changes
+  since the last value actually broadcast, when a cast session first becomes
+  available, or when the last measurement is older than
+  `AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS` (10 s by default, overridable) — the
+  last of which covers a single-page app moving the history cursor without
+  changing the `url` (`pushState` to the same url, a back into a duplicate
+  entry). Keying reuse on the broadcast value rather than a measurement-time
+  memo also means a measurement dropped by a suspend blackout can no longer
+  pin the flags to a `url` the session already moved past. A page nobody
+  navigates therefore costs no recurring CDP traffic beyond one measurement
+  per max-age window. The result is deduped the same way as `input_focus` and
+  handed to a joining viewer in its join status. Client → server:
+  `{"type":"nav","action":"back"|"forward"|"reload"}`, suspend-gated and
+  queued behind pending input like every other viewer command.
+
+  Navigation executes over CDP (`Page.getNavigationHistory` +
+  `Page.navigateToHistoryEntry`, or `Page.reload`) on a fresh, short-lived CDP
+  session opened and detached per command — never `page.goBack`/`goForward`/
+  `reload`, which wait for a load event a single-page app may never fire and
+  would stall the shared input queue, and never the long-lived cast session,
+  which carries the scaled-capture device-metrics override and must not be
+  disturbed by navigation. There is no free-URL entry — only the three
+  history-relative actions.
+
+## 7.12.5
+
+### Patch Changes
+
+- [#122](https://github.com/alien-id/agent-id/pull/122) [`da78646`](https://github.com/alien-id/agent-id/commit/da78646fa902aab3ceae8aca6bb58310a269046a) Thanks [@TemMax](https://github.com/TemMax)! - Align scaled-session pointer input with the captured frame. On some hosts an
+  active device-metrics override (a `scale ≥ 2` viewer) leaves CDP-dispatched
+  pointer coordinates in a different space than the picture: the frame is
+  correct, wheel and keyboard work, but a click lands at roughly 1/scale of the
+  intended point — on nothing, or on the wrong element. The displacement is
+  host-specific (headless mac and Linux Chromium dispatch cleanly through the
+  same override), so the stream server now measures it on the live page instead
+  of deriving it from platform assumptions: one probe mousemove per cast epoch
+  reports where the page actually saw the pointer, and every subsequent pointer
+  coordinate is pre-scaled by the inverse. On aligned hosts the probe measures
+  identity and the correction disables itself.
+
+## 7.12.4
+
+### Patch Changes
+
+- [#119](https://github.com/alien-id/agent-id/pull/119) [`b740421`](https://github.com/alien-id/agent-id/commit/b740421c7d6475cb0531dc1783337ceb33fb514e) Thanks [@sbelan-eti](https://github.com/sbelan-eti)! - Emit per-second frame counters for the viewport stream — one row for the
+  capture stage, one for the encode stage — so a frozen picture is localized to
+  the stage that lost the frame instead of guessed at. Two silent losses now
+  carry a number: a frame displaced in a stalled viewer's single pending slot,
+  and the RUN of frames a saturated encoder refuses until its input drains. The
+  capture row also reports how many idle refinement passes actually fired, which
+  is what flushes the last frame of a burst and is not answerable from the
+  configuration. The access-unit framer now reports what each unit carried
+  (keyframe, parameter sets) from the scan it was already making. Set
+  `AGENT_ID_STREAM_COUNTERS=0` to turn the rows off.
+
+## 7.12.3
+
+### Patch Changes
+
+- [#117](https://github.com/alien-id/agent-id/pull/117) [`5afa291`](https://github.com/alien-id/agent-id/commit/5afa29168f3dcc9cbc019f2ee427aa38e4381d63) Thanks [@I-Dart-Vader-I](https://github.com/I-Dart-Vader-I)! - Encode every frame instead of resampling to a fixed rate — the demuxer's
+  nominal 25 fps became a constant output rate and ffmpeg dropped every
+  screencast frame that missed the grid (78 frames in, 2 encoded).
+
+## 7.12.2
+
+### Patch Changes
+
+- [#112](https://github.com/alien-id/agent-id/pull/112) [`4006a26`](https://github.com/alien-id/agent-id/commit/4006a2624b31c462428ca62540341dc4b4040c50) Thanks [@sbelan-eti](https://github.com/sbelan-eti)! - Viewport stream: number `seq` per codec. The stream server drew every message
+  from a single counter, so a JPEG frame delivery (which happens for each
+  screencast frame whether or not a JPEG viewer is attached, and again for the
+  idle refinement pass) consumed sequence numbers out of the H.264 stream. An
+  H.264 viewer therefore saw its sequence advance in steps of two or three,
+  read that as dropped frames, waited for a keyframe that was never missing,
+  and redialed — a relay that reconnected every few seconds on an otherwise
+  healthy stream. Each codec now has its own counter, so a viewer's sequence is
+  contiguous and a real gap once again means real loss. No wire-format or
+  client change: `seq` is still a monotonically increasing per-message ordinal.
+
+## 7.12.1
+
+### Patch Changes
+
+- [#114](https://github.com/alien-id/agent-id/pull/114) [`3624267`](https://github.com/alien-id/agent-id/commit/36242673c91cee8e4e5970cf1c173536262879d5) Thanks [@sbelan-eti](https://github.com/sbelan-eti)! - Stop a closed H.264 encoder from writing into the next one's stream
+
+  Closing an encoder destroyed its stdin and killed the process, but left the
+  listener on its stdout attached — and neither of those stops delivery: what the
+  kernel pipe already holds is still read out and handed to the caller after
+  close returned (measured: ~17 KB in 9 chunks). Because an encoder is replaced by
+  closing the old one and spawning a new one onto the same viewer sink, that tail
+  was written to live viewers interleaved into the replacement's output, carrying
+  slices that reference the previous encoder's parameter sets — which a decoder
+  can only fail on. A replacement happens on every viewer join, retarget, resume
+  and watchdog restart, so a viewport could go black right after reconnecting.
+
+  Closing now detaches the output listener before killing the process, so a closed
+  encoder delivers nothing, and repeated closes are a no-op.
+
+- [#113](https://github.com/alien-id/agent-id/pull/113) [`2717f94`](https://github.com/alien-id/agent-id/commit/2717f94956b206282abd335ae148dede68e322d0) Thanks [@sbelan-eti](https://github.com/sbelan-eti)! - Stream H.264 one access unit per WebSocket message
+
+  The viewport stream forwarded each encoder stdout chunk verbatim. A pipe read
+  is capped at 64 KiB, so any access unit above that was split across messages
+  and every message after the first carried no start code at all — a viewer that
+  parses one access unit per message could only discard it. Because the keyframe
+  is the largest access unit in the stream, it was the one most likely to be
+  split, so a viewer waiting for a keyframe never got a usable one: on content
+  that produces large frames the viewport froze or went black, while a static
+  page looked fine.
+
+  The stream is now framed on access unit delimiters and each unit is sent whole,
+  however large. A unit is known-complete when the next one's delimiter arrives;
+  when the encoder goes quiet, a 50 ms idle timer releases the last one, so an
+  idle page still updates promptly.
+
+## 7.12.0
+
+### Minor Changes
+
+- [#97](https://github.com/alien-id/agent-id/pull/97) [`22b7e61`](https://github.com/alien-id/agent-id/commit/22b7e616ff6887c00aef5cc1cba161dff953e987) Thanks [@TemMax](https://github.com/TemMax)! - `AGENT_ID_FFMPEG` now counts as codec provisioning: `loadCodecConfig` falls back to probing the env override when no `browser-codecs.json` record exists, so an immutable container image (which cannot pre-write per-tenant state) provisions H.264 by baking ffmpeg and setting the env var. `codec=auto` resolves to h264 and `strict=1` handshakes succeed on such hosts; a broken override degrades to unprovisioned exactly like a stale record, and nothing is probed on a host that set neither.
+
+- [#110](https://github.com/alien-id/agent-id/pull/110) [`0ce7c5d`](https://github.com/alien-id/agent-id/commit/0ce7c5db1f5cd0e5a35d4f2e660321261432b25f) Thanks [@sbelan-eti](https://github.com/sbelan-eti)! - The viewport stream's `resize` message takes an optional `scale` (1–3, default
+  1), so a viewer on a high-density screen can ask for a HiDPI capture instead of
+  a 1× stream upscaled on the device. A scaled session applies
+  `Emulation.setDeviceMetricsOverride` with that `deviceScaleFactor` (`mobile:
+false` — no touch capability, no mobile UA), and the capture path switches from
+  screencast to coalesced `captureScreenshot` calls: the screencast's `maxWidth`/
+  `maxHeight` are caps, not upsampling requests, so it can never deliver more than
+  1×, while a screenshot under the override already does. Motion and refinement
+  frames therefore come from the same call and are dimension-identical by
+  construction, which the encoder requires — a dimension flip between them
+  respawns it. Frame metadata stays CSS pixels at every scale, so viewer input
+  mapping is unchanged.
+
+  The override rides the long-lived capture session (overrides die with the
+  session that set them) and is re-applied per target on retarget, so a new tab
+  inherits the scale and the old one reverts. Scale is clamped, rounded to an
+  integer at every CDP boundary, and budgeted against per-axis and total-pixel
+  limits — an over-budget request is served at the largest scale that fits, and
+  the achieved geometry is broadcast in the `resized` status. Omitting `scale`, or
+  sending it to a build without support, behaves exactly as before.
+
+- [#101](https://github.com/alien-id/agent-id/pull/101) [`50462d6`](https://github.com/alien-id/agent-id/commit/50462d61bc9f0543191a857a1a5333febbc11f27) Thanks [@TemMax](https://github.com/TemMax)! - Driven sessions now report WebAuthn as unsupported ([#99](https://github.com/alien-id/agent-id/issues/99)). The driven browser
+  has no authenticator, so a passkey ceremony could only hang — and while one is
+  pending, the page's own fallback links ("Try another way") are inert, so a
+  sign-in against a passkey-enrolled account dead-ended. An init script now
+  removes the WebAuthn interface globals (`PublicKeyCredential` and its response
+  types) before any page script runs (sites feature-detect them and offer their
+  password/OTP path up front, exactly as for a legacy browser) and rejects any
+  `publicKey` get/create issued anyway with an immediate `NotAllowedError` — the
+  cancellation outcome every WebAuthn call site already handles. The override is
+  a Proxy over the native function, so `credentials.get.toString()` still reports
+  `[native code]` and the JS surface stays byte-for-byte native. Non-publicKey
+  credential calls pass through untouched.
+  Headed `login` keeps WebAuthn native (the owner's real Chrome may hold a
+  platform authenticator), and `AGENT_ID_BROWSER_KEEP_WEBAUTHN=1` restores
+  native WebAuthn in driven sessions for the rare passkey-only site.
+
+### Patch Changes
+
+- [#102](https://github.com/alien-id/agent-id/pull/102) [`12464fa`](https://github.com/alien-id/agent-id/commit/12464faf3a1e4e830b60c7315ca361add6aee22f) Thanks [@TemMax](https://github.com/TemMax)! - The viewport stream now reports the page's input-focus state: while a viewer
+  is attached, a poller (250 ms, isolated-world evaluate — no Runtime domain,
+  no page-visible side effects, CSP-immune) walks the page's frames for a
+  focused editable element and broadcasts `input_focus {editable, type?,
+inputmode?}` status messages, deduped, suppressed during credential-fill
+  blackouts, and snapshotted into the join status so a late viewer learns an
+  already-focused field immediately. Viewers can auto-open their keyboard (and
+  pick a layout from type/inputmode) instead of relying on a manual toggle.
+  Covered by wire-contract tests and a local-only real-browser e2e
+  (tests/integration/browser-focus-e2e.mjs) including an iframe fixture.
+
+- [#98](https://github.com/alien-id/agent-id/pull/98) [`1899e61`](https://github.com/alien-id/agent-id/commit/1899e61863e626a70a2920bfb78e17e04ad41cc7) Thanks [@TemMax](https://github.com/TemMax)! - Session liveness is now authenticated: `pruneDeadSessions` follows the pid
+  check with a one-line token handshake against the session's control port
+  (new `probeSession` helper). On hosts where the state dir outlives the
+  container, a leftover session file's pid and port are routinely recycled to
+  unrelated processes — the pid answer alone then calls a dead session alive,
+  while a listener that rejects the token proves the daemon is gone. No reply
+  within the budget keeps the file (a busy daemon answers late); files without
+  control coordinates keep the pid-only behavior.
+
+- [#100](https://github.com/alien-id/agent-id/pull/100) [`ca94f15`](https://github.com/alien-id/agent-id/commit/ca94f1534fcf495b274e5fef4f186bff0849dfac) Thanks [@TemMax](https://github.com/TemMax)! - Viewport stream quality: screencast motion frames go out at JPEG quality 80
+  (was 55 — visible ringing around text that the H.264 stage then spent bits
+  reproducing), and the libx264 path encodes at veryfast/CRF 20 with a 4M/8M
+  rate cap instead of ultrafast with defaults (~2x quality per bit, latency
+  unchanged). The openh264 fallback's bitrate rises to 4000k/6000k for parity.
+  Profile stays constrained-baseline — the WebCodecs viewer and the WebRTC path
+  pin avc1.42E01F. Traffic is roughly unchanged: the pipeline is change-driven,
+  and CRF only spends bits while the picture moves.
+
+## 7.11.0
+
+### Minor Changes
+
+- [#94](https://github.com/alien-id/agent-id/pull/94) [`89e316d`](https://github.com/alien-id/agent-id/commit/89e316d288346df33a01b8c066090ae35ca83058) Thanks [@atemerev](https://github.com/atemerev)! - Strict codec negotiation, text-only `char`, and a screencast watchdog
+
+  **`codec=h264&strict=1` refuses instead of falling back.** An explicit h264
+  request that landed on an unprovisioned host was quietly served JPEG, so broken
+  provisioning stayed invisible while costing roughly 10× the traffic. With
+  `strict=1` the handshake is refused immediately with close code **4002** — before
+  a single frame — and an encoder that fails later closes the same way rather than
+  downgrading a client that never agreed to it. `codec=auto` deliberately ignores
+  `strict`: it asks for the best available, and JPEG is a valid answer.
+
+  **`char` no longer needs a `key`.** The payload of a text-insertion event is
+  `text`; `key` is only a fallback for it. Requiring `key` dropped well-formed
+  `{eventType:"char", text:"…"}` on the floor without a word, silently losing the
+  character. `keyDown`/`keyUp` still require a key — there is no pressing
+  "nothing" — and input the server cannot act on now comes back to the sender as
+  `{"type":"status","error":"…","for":"input_keyboard"}` instead of disappearing
+  into a swallowed rejection.
+
+  **A watchdog restarts a stalled screencast.** With viewers attached and no frame
+  for `AGENT_ID_STREAM_WATCHDOG_MS` (default 15s, 0 disables), the screencast is
+  restarted. The idle refinement pass is not a substitute: it is _armed_ by a
+  screencast frame, so a cast that dies before or between frames never triggers
+  it, and the retarget poll only fires when the current page CHANGES — which a
+  silently-detached CDP session does not do. A healthy session never trips this
+  (Chrome keeps emitting frames even on a blank page); when it does trip, the
+  restart delivers a fresh keyframe, which is also how it proves the pipe is back.
+
+## 7.10.0
+
+### Minor Changes
+
+- [#84](https://github.com/alien-id/agent-id/pull/84) [`f37fb58`](https://github.com/alien-id/agent-id/commit/f37fb586bc8ce58fa8bad075f553d944390d8738) Thanks [@atemerev](https://github.com/atemerev)! - Viewport stream v2 — binary frames, backpressure, H.264, provisioning
+
+  The stream gains a negotiated wire protocol. Everything is opt-in per client via
+  upgrade-URL query params, and a client that sends none of them gets the v1
+  format unchanged, so existing viewers keep working byte for byte.
+
+  - `binary=1` delivers frames as WS binary messages (`[u32 LE header length]
+[JSON header][payload]`) instead of base64 — measured 25% less stream traffic
+    at identical latency.
+  - `codec=h264` encodes through an ffmpeg subprocess; `codec=auto` picks H.264
+    only on a host provisioned with `agent-id-browser install-codecs`, and falls
+    back to JPEG with a status notice anywhere else.
+  - `pacing=ack` holds at most one frame in flight, released by the client's
+    `{"type":"ack","seq":N}`; `maxFps` caps per-client delivery.
+  - Delivery is latest-frame-wins for JPEG (one pending slot per client, newer
+    frames overwrite it) so a slow viewer resumes at live rather than replaying a
+    queue. H.264 can't drop mid-GOP, so a client whose socket buffer exceeds a
+    bound is disconnected and reconnects at a fresh keyframe.
+  - A settled page gets one high-quality refinement frame, so text is sharp at
+    rest while motion runs at aggressive JPEG quality.
+  - Experimental WebRTC transport and a bundled reference viewer page.
+
+  `werift` is an optional dependency: WebRTC is unavailable without it and every
+  other mode is unaffected.
+
+  The seal is unchanged — no CDP debug port, frames come from the existing
+  patchright pipe, and a credential fill still suspends the feed, drops pending
+  frames, gates the encoder, and re-checks after every await.
+
+## 7.9.0
+
+### Minor Changes
+
+- [#92](https://github.com/alien-id/agent-id/pull/92) [`193a0f8`](https://github.com/alien-id/agent-id/commit/193a0f8761c533f11f663f8873e45448c6032e61) Thanks [@atemerev](https://github.com/atemerev)! - Unused sessions close themselves
+
+  A session holds a Chrome and a node process for as long as it lives, and nothing
+  ended one: an agent that opened a browser and moved on — or failed a login and
+  gave up — left it running until the container stopped. Sessions accumulated,
+  holding memory and making "which browser is this?" genuinely ambiguous, since
+  every host-side pick that falls back to "whichever started last" was choosing
+  between browsers nobody was using.
+
+  A session now closes itself after 20 minutes with no agent action, no viewer
+  input, and nobody watching. Closing is the safe direction: the existing shutdown
+  path reseals the profile into the vault first, so a signed-in session that times
+  out keeps its cookies and simply reopens next time.
+
+  A session with a viewer attached is never idle, however quiet it is — the owner
+  may be reading a page or part-way through a sign-in they were handed. Set
+  `AGENT_ID_BROWSER_IDLE_MS` to change the window, or `0` to disable it.
+
+- [#86](https://github.com/alien-id/agent-id/pull/86) [`2847f48`](https://github.com/alien-id/agent-id/commit/2847f48971da2dac415aee37f03badcca3b0ed5e) Thanks [@atemerev](https://github.com/atemerev)! - Viewer `resize` in the stream protocol + profile name in the session file.
+
+  - The viewport stream now accepts `{"type":"resize","width":W,"height":H}`
+    from viewers: the session reshapes the page viewport to the viewer's own
+    dimensions (window-chrome-compensated, lands the exact size), so a phone
+    watching the stream gets the page's mobile layout instead of a shrunken
+    desktop one. The achieved viewport is broadcast to every watcher as a
+    `status` message; requests are clamped to 200–4096 per axis and ignored
+    while a credential fill has the stream suspended.
+  - Session files now name their `profile` in the body, so viewers scanning the
+    sessions directory can attach to the right profile's stream instead of
+    guessing by newest `startedAt`.
+
+## 7.8.1
+
+### Patch Changes
+
+- [#89](https://github.com/alien-id/agent-id/pull/89) [`a0c5273`](https://github.com/alien-id/agent-id/commit/a0c527388cb12fd880993f7668b0ef30324a7ac8) Thanks [@atemerev](https://github.com/atemerev)! - The viewport blackout is always lifted, and a joining viewer always gets a frame
+
+  Three faults that together made the live browser view look dead. An owner asked
+  to finish a sign-in opened the view and watched a blank canvas — the relay said
+  it was streaming, and not one frame ever arrived.
+
+  **A failed credential fill blacked out the feed forever.** `fill-secret`
+  suspends the stream, then unlocks the vault — but the unlock ran _outside_ the
+  `try` whose `finally` resumes. Any failure there (locked vault, no agent-key
+  slot, timeout) left the suspend depth stuck above zero for the rest of the
+  session: frames were acked and dropped, so every later viewer saw
+  `screencasting` and nothing else. That is exactly what a failed auto-login leaves
+  behind, minutes before the owner is asked to take over. `fill-otp` already had
+  the right shape; `fill-secret` now matches it.
+
+  **A viewer joining an already-running screencast got no frame.** Frames are
+  change-driven, and Chrome emits its first one when the cast starts — so a client
+  that arrives afterwards has nothing to draw until the page happens to move. On a
+  sign-in form that is never. A joining client now restarts the cast to force a
+  fresh keyframe, the same trick `resume` uses.
+
+  **A blacked-out feed was indistinguishable from a broken one.** The status sent
+  on connect claimed `screencasting: true` and said nothing about the blackout, so
+  a suspended feed and a dead one looked identical from the outside. The connect
+  status now reports `suspended`.
+
+## 7.8.0
+
+### Minor Changes
+
+- [#87](https://github.com/alien-id/agent-id/pull/87) [`5ba6ef2`](https://github.com/alien-id/agent-id/commit/5ba6ef274c83fcf9267788153929a5d63150e8eb) Thanks [@atemerev](https://github.com/atemerev)! - An owner can be handed a browser to sign into, and dead sessions stop haunting the viewer
+
+  **A named profile can be created for the owner to sign into.** When a sign-in
+  cannot be automated — a bot challenge, an IdP that refuses agents, no display for
+  a headed `login` — the answer is to hand the browser to the owner. That was
+  impossible for any site not already set up: `login` needs a GUI, `auto-login` had
+  just failed, and `open` refuses to auto-create a named profile, so there was
+  nowhere to sign in. `open --bootstrap-profile` mints an empty jar for a named
+  profile; the owner signs in, and `close` seals it like any other. Without the
+  flag a named profile still never auto-creates — the account boundary is
+  unchanged, the opt-in is explicit.
+
+  **Orphaned sessions are pruned.** A clean `close` reseals and removes its own
+  session file, but an abrupt death (a recreated container, a killed daemon) leaves
+  it behind, and the state dir usually outlives the process. Those orphans still
+  advertise a `streamPort`, so a viewer picking "the newest session with a stream"
+  can dial a dead port and show nothing, and `status` lists sessions that do not
+  exist. `open` and `status` now drop session files whose pid is gone.
+
+  **Stale plaintext profile copies are removed too.** `<name>.work` is the
+  UNSEALED profile — cookies on disk, outside the vault. A clean close wipes it;
+  an abrupt death left it there indefinitely (weeks-old copies were found for
+  sessions long gone). Orphaned work dirs are now removed once they are old enough
+  that they cannot belong to a launch still in flight.
+
 ## 7.7.0
 
 ### Minor Changes

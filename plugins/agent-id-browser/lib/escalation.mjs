@@ -127,8 +127,10 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
         message:
           `Auto-login for '${credName}' did not complete (${outcome}). This is common for ` +
           "big-IdP sign-in (Google, Microsoft), which refuses automated credential entry. " +
-          `Ask the owner to sign in once in the browser view for profile '${profile}'; the ` +
-          "session then seals and later visits are headless.",
+          "Read `trace` and `pageError` first: a rejection message there means the stored " +
+          "credential is wrong (fix it), not that a human is needed. Otherwise ask the owner " +
+          `to sign in once in the browser view for profile '${profile}'; the session then ` +
+          "seals and later visits are headless.",
       };
   }
 }

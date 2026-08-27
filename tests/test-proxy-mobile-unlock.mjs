@@ -288,13 +288,16 @@ describe("proxy: self-registration (no rekey)", () => {
     await vault.save();
     vault.lock();
 
-    // Proxy starts UNLOCKED via passphrase (stands in for the agent-key path).
+    // Proxy starts UNLOCKED via passphrase (stands in for the agent-key path,
+    // reopen callback included — pairing writes the vault, and that write goes
+    // to a re-read handle so it cannot erase another process's later credential).
     vault = await openVault({ stateDir, passphrase: "p" });
     const proxy = createProxy({
       vault,
       stateDir,
       logPath: path.join(stateDir, "proxy.log"),
       idleTimeoutMs: Infinity,
+      reopenVault: async () => openVault({ stateDir, passphrase: "p" }),
       control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
     });
     const dataPort = (await proxy.listen()).port;

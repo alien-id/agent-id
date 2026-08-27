@@ -75,16 +75,29 @@ export async function sealedProfileExists(stateDir, file) {
 // Bootstrap the shared default cookie jar for an L0 identity. Public browsing
 // must not require a fake login credential, while explicitly named profiles
 // remain opt-in account boundaries and therefore never auto-create.
-export async function ensureAnonymousDefaultProfile({ vault, stateDir, name, defaultName = "main" }) {
+//
+// `allowCreate` is that opt-in, and the ONLY way a named profile is minted
+// without a login: an owner-driven sign-in (headed login impossible, auto-login
+// refused by the site) needs an empty jar to sign into and seal, and there was
+// no way to make one — so "open the browser view and sign in yourself" pointed
+// at a profile that could never exist. Callers pass it deliberately; the
+// default stays refuse-by-name.
+export async function ensureAnonymousDefaultProfile({
+  vault,
+  stateDir,
+  name,
+  defaultName = "main",
+  allowCreate = false,
+}) {
   const existing = vault.get(name);
   if (existing) return existing;
-  if (name !== defaultName) {
+  if (name !== defaultName && !allowCreate) {
     const error = new Error(`no browser-profile named '${name}'`);
     error.code = "NO_PROFILE";
     throw error;
   }
 
-  const file = `${defaultName}.tar.enc`;
+  const file = `${name}.tar.enc`;
   const dek = newDek();
   const empty = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-banon-"));
   try {
@@ -93,10 +106,13 @@ export async function ensureAnonymousDefaultProfile({ vault, stateDir, name, def
     await fs.rm(empty, { recursive: true, force: true });
   }
   const record = vault.add({
-    name: defaultName,
+    name,
     type: "browser-profile",
     domains: ["*"],
-    description: "Anonymous L0 browser profile (agent-id-browser)",
+    description:
+      name === defaultName
+        ? "Anonymous L0 browser profile (agent-id-browser)"
+        : `Empty browser profile for owner-driven sign-in (${name})`,
     dek,
     profileFile: file,
     headless: true,

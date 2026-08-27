@@ -446,3 +446,31 @@ test("a code screen that also mentions a link is a code step, however weak its f
     "otp-required",
   );
 });
+
+test("failed: a Russian rejection is read as a bad credential, not `unknown`", () => {
+  // lk.eneva.ru — without this the password field stays, every round is
+  // `unknown`, and the result is a `timeout` blamed on the owner.
+  assert.equal(
+    classifyLogin({
+      hasPasswordField: true,
+      bodyText: "Вход в Личный кабинет\nПользователь не найден или неверный пароль\nВойти",
+    }),
+    "failed",
+  );
+  assert.equal(
+    classifyLogin({ hasPasswordField: true, errorText: "Неверный логин или пароль" }),
+    "failed",
+  );
+  assert.equal(
+    classifyLogin({ hasPasswordField: true, bodyText: "Ошибка авторизации. Попробуйте ещё раз." }),
+    "failed",
+  );
+});
+
+test("Russian body copy without a rejection does not trip the error match", () => {
+  assert.equal(
+    classifyLogin({ hasPasswordField: true, bodyText: "Вход в Личный кабинет\nНомер договора\nПароль\nВойти" }),
+    "unknown",
+  );
+  assert.equal(classifyLogin({ hasPasswordField: false, bodyText: "Добро пожаловать, Иван" }), "logged-in");
+});

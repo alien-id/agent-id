@@ -366,8 +366,35 @@ export async function detectPageState(page) {
     // Language-independent block signal: a visible challenge widget. Fed to
     // classifyLogin via its `blocked` input so it wins over "logged-in".
     const blocked = all(challengeSel).some(visible);
-    return { hasPasswordField, hasIdentifierField, hasOtpField, otpFieldNames, bodyText, blocked };
+    // The page's own error/alert copy, surfaced verbatim in a failure report so
+    // a rejection the classifier cannot read is still visible to the caller.
+    const errorText =
+      all('[role="alert"], [aria-live="assertive"], [class*="error" i], [class*="alert" i], [class*="invalid" i]')
+        .filter(visible)
+        .map((e) => (e.innerText || "").trim())
+        .filter(Boolean)
+        .join(" | ")
+        .slice(0, 300) || null;
+    return {
+      hasPasswordField,
+      hasIdentifierField,
+      hasOtpField,
+      otpFieldNames,
+      bodyText,
+      blocked,
+      errorText,
+    };
   }, [CHALLENGE_WIDGET_SEL, IDENTIFIER_FIELD_SEL]);
+}
+
+// One line of page state for the trace: what the classifier saw, never any
+// secret (field values are not read).
+function describeState(s) {
+  const bits = [`pw=${s.hasPasswordField ? "visible" : "gone"}`];
+  if (s.hasOtpField) bits.push("otp-field");
+  if (s.blocked) bits.push("challenge-widget");
+  if (s.errorText) bits.push(`error="${s.errorText.slice(0, 120)}"`);
+  return bits.join(" ");
 }
 
 // Best-effort fill of the OTP field, then submit.
@@ -681,20 +708,23 @@ export async function autoLogin({
   }
   await page.waitForTimeout(settleMs);
 
+  let errorText = null;
   for (let round = 0; round < maxRounds; round++) {
     const onLoginPage = stillOnLoginPage(page.url(), cred.loginUrl);
-    const outcome = classifyLogin({ ...(await detectPageState(page)), onLoginPage });
-    log(`auto-login: ${outcome}`);
+    const state = { ...(await detectPageState(page)), onLoginPage };
+    const outcome = classifyLogin(state);
+    errorText = state.errorText || errorText;
+    log(`auto-login: round ${round + 1}/${maxRounds} ${outcome} (${describeState(state)}) at ${page.url()}`);
     // A bot-block / human-verification wall never clears by waiting — stop and
     // report it (the caller advises a headed login, which a human can clear).
-    if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url() };
+    if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url(), errorText };
     // Neither of these can be finished from here at all: a mailed link
     // authenticates whichever browser the owner opens it in — never this sealed
     // profile — and a QR code is drawn inside a browser they cannot see. There is
     // nothing to type either way, so waiting only burns the budget before
     // reporting a timeout. Name it and let the caller hand the browser over.
     if (outcome === "magic-link" || outcome === "qr-sign-in") {
-      return { ok: false, outcome, finalUrl: page.url() };
+      return { ok: false, outcome, finalUrl: page.url(), errorText };
     }
     if (outcome === "logged-in") {
       // Never believe it on the first look. A heavy SPA a second into loading has
@@ -717,7 +747,7 @@ export async function autoLogin({
       }
       log("auto-login: form cleared but still on the login page — awaiting redirect");
     } else if (outcome === "failed") {
-      return { ok: false, outcome, finalUrl: page.url() };
+      return { ok: false, outcome, finalUrl: page.url(), errorText };
     } else if (outcome === "confirm-on-device") {
       // Nothing to type: the owner approves on their own device and the page
       // advances by itself. Tell them once, then poll until it does. This is
@@ -740,7 +770,9 @@ export async function autoLogin({
         // The site is still asking after we answered. Looping here re-asks the
         // owner for a code the site has already refused once, and each ask is
         // another ten minutes of a budget that does not have them to give.
-        return { ok: false, outcome: "otp-rejected", finalUrl: page.url() };
+        // The page's own copy is the diagnosis here — "that code has expired" vs
+        // "incorrect code" is the difference between retrying and giving up.
+        return { ok: false, outcome: "otp-rejected", finalUrl: page.url(), errorText };
       }
       otpAsks += 1;
       await typeOtp(page, await getOtp());
@@ -749,5 +781,5 @@ export async function autoLogin({
     }
     await page.waitForTimeout(settleMs); // unknown / unconfirmed — settle, re-check
   }
-  return { ok: false, outcome: "timeout", finalUrl: page.url() };
+  return { ok: false, outcome: "timeout", finalUrl: page.url(), errorText };
 }

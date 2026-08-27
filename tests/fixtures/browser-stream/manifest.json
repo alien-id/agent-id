@@ -1,0 +1,163 @@
+{
+  "note": "Expected parse results for stream.h264. Every hop that classifies NAL types asserts against this. `nals` are nal_unit_type values in order.",
+  "version": 1,
+  "totalBytes": 444,
+  "cases": [
+    {
+      "name": "keyframe-au-4byte",
+      "note": "Canonical keyframe access unit, 4-byte start codes: AUD, SPS, PPS, IDR.",
+      "expect": {
+        "idr": true,
+        "sps": true,
+        "pps": true,
+        "sei": false,
+        "aud": true,
+        "nals": [
+          9,
+          7,
+          8,
+          5
+        ]
+      },
+      "offset": 0,
+      "length": 101
+    },
+    {
+      "name": "delta-au-4byte",
+      "note": "Ordinary delta access unit. The steady-state case.",
+      "expect": {
+        "idr": false,
+        "sps": false,
+        "pps": false,
+        "sei": false,
+        "aud": true,
+        "nals": [
+          9,
+          1
+        ]
+      },
+      "offset": 101,
+      "length": 51
+    },
+    {
+      "name": "delta-au-3byte-startcodes",
+      "note": "Same shape with 3-byte start codes. A parser hardcoded to 4 bytes misses every NAL here.",
+      "expect": {
+        "idr": false,
+        "sps": false,
+        "pps": false,
+        "sei": false,
+        "aud": true,
+        "nals": [
+          9,
+          1
+        ]
+      },
+      "offset": 152,
+      "length": 33
+    },
+    {
+      "name": "delta-au-mixed-startcodes",
+      "note": "4-byte AUD then 3-byte slice. ffmpeg emits both widths; a parser must accept either mid-stream.",
+      "expect": {
+        "idr": false,
+        "sps": false,
+        "pps": false,
+        "sei": false,
+        "aud": true,
+        "nals": [
+          9,
+          1
+        ]
+      },
+      "offset": 185,
+      "length": 34
+    },
+    {
+      "name": "keyframe-au-with-sei",
+      "note": "AUD, SPS, PPS, SEI, IDR — the real encoder's usual keyframe ordering.",
+      "expect": {
+        "idr": true,
+        "sps": true,
+        "pps": true,
+        "sei": true,
+        "aud": true,
+        "nals": [
+          9,
+          7,
+          8,
+          6,
+          5
+        ]
+      },
+      "offset": 219,
+      "length": 98
+    },
+    {
+      "name": "au-with-emulation-prevention",
+      "note": "Slice body contains 00 00 03 twice. Must yield exactly two NALs — a parser that reads 00 00 03 as a start code reports more.",
+      "expect": {
+        "idr": false,
+        "sps": false,
+        "pps": false,
+        "sei": false,
+        "aud": true,
+        "nals": [
+          9,
+          1
+        ]
+      },
+      "offset": 317,
+      "length": 20
+    },
+    {
+      "name": "idr-without-parameter-sets",
+      "note": "IDR with no preceding SPS/PPS. A decoder cannot start here; the client gate treats this as a forced redial.",
+      "expect": {
+        "idr": true,
+        "sps": false,
+        "pps": false,
+        "sei": false,
+        "aud": true,
+        "nals": [
+          9,
+          5
+        ]
+      },
+      "offset": 337,
+      "length": 43
+    },
+    {
+      "name": "parameter-sets-without-idr",
+      "note": "SPS+PPS with no slice. Carries no picture; must not be counted as a keyframe.",
+      "expect": {
+        "idr": false,
+        "sps": true,
+        "pps": true,
+        "sei": false,
+        "aud": true,
+        "nals": [
+          9,
+          7,
+          8
+        ]
+      },
+      "offset": 380,
+      "length": 32
+    },
+    {
+      "name": "no-nal-at-all",
+      "note": "Payload with no start code. The client counts this as `unparsed`; every hop must count it as perr and must not crash.",
+      "expect": {
+        "idr": false,
+        "sps": false,
+        "pps": false,
+        "sei": false,
+        "aud": false,
+        "nals": []
+      },
+      "offset": 412,
+      "length": 32
+    }
+  ]
+}

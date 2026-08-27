@@ -52,10 +52,11 @@ import {
 import { launchContext } from "../lib/launch.mjs";
 import { DEFAULT_PROFILE, loginHint, noProfileHint, profileName } from "../lib/hints.mjs";
 import { sessionReplyError } from "../lib/session-route.mjs";
+import { installCodecs, loadCodecConfig } from "../lib/stream-encoder.mjs";
 import { escalationFor } from "../lib/escalation.mjs";
 import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
-import { runSession, callSession } from "../lib/session-server.mjs";
+import { runSession, callSession, closeLiveSession, pruneDeadSessions } from "../lib/session-server.mjs";
 import { hasOwnerApproval, unlockViaOwnerApproval } from "../lib/unlock.mjs";
 import {
   ACCESS_LEVELS,
@@ -289,6 +290,10 @@ async function cmdLogin(flags) {
       // one cookie jar — sign into Google once and every "Sign in with Google" site
       // reuses it. `--fresh` discards the existing session and starts clean.
       const existing = vault.get(name);
+      // Same hazard as auto-login: a live daemon would re-seal its stale copy
+      // over this login on close. Close it first (and wait for its reseal) so
+      // the profile we unseal below is the latest one.
+      await closeLiveSession(stateDir, name, { log: stderr });
       const resuming =
         flags.fresh !== true &&
         existing &&
@@ -312,7 +317,9 @@ async function cmdLogin(flags) {
       const headlessDefault =
         flags["headed-default"] === true ? false : reuse ? reuse.headless !== false : true;
 
-      const ctx = await launchContext({ profileDir: work, headless: false });
+      // The owner sits at this window — a real platform authenticator (Touch
+      // ID, a security key) may exist and complete, so WebAuthn stays native.
+      const ctx = await launchContext({ profileDir: work, headless: false, nativeWebAuthn: true });
       stderr(
         resuming
           ? `A browser opened with your '${name}' session loaded${flags.url ? " at " + startUrl : ""}. ` +
@@ -453,13 +460,29 @@ async function cmdAutoLogin(flags) {
     const dek = reuse ? reuse.dek : newDek();
     const headless = resolveHeadless(flags) ?? true;
 
+    // A live daemon on the target profile would keep serving its pre-login
+    // copy and re-seal it over ours on close. See closeLiveSession.
+    const closedLiveSession = await closeLiveSession(stateDir, targetProfile, { log: stderr });
+
     const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-autologin-"));
     try {
       const ctx = await launchContext({ profileDir: work, headless });
       let result;
+      // What the engine saw, round by round — the failure report carries it so
+      // a wrong password is distinguishable from a changed form or a redirect
+      // that was never awaited. Never includes a secret.
+      const trace = [];
       try {
         const page = ctx.pages()[0] || (await ctx.newPage());
-        result = await autoLogin({ page, cred, env: process.env, log: (m) => stderr(m) });
+        result = await autoLogin({
+          page,
+          cred,
+          env: process.env,
+          log: (m) => {
+            stderr(m);
+            trace.push(m);
+          },
+        });
       } finally {
         // Close so the context flushes cookies/storage to the work dir before sealing.
         await ctx.close().catch(() => {});
@@ -482,6 +505,8 @@ async function cmdAutoLogin(flags) {
           reason,
           profile: targetProfile,
           finalUrl: result ? result.finalUrl : null,
+          ...(result && result.errorText ? { pageError: result.errorText } : {}),
+          trace,
           message,
         });
         process.exitCode = 1;
@@ -517,7 +542,12 @@ async function cmdAutoLogin(flags) {
         finalUrl: result.finalUrl,
         access: sessionAccess,
         sealedBytes: bytes,
-        message: `Logged in and sealed session '${targetProfile}'. Reuse it: \`read --name ${targetProfile} --url …\`.`,
+        closedLiveSession,
+        message:
+          `Logged in and sealed session '${targetProfile}'. Reuse it: \`read --name ${targetProfile} --url …\`.` +
+          (closedLiveSession
+            ? ` The '${targetProfile}' session that was open has been closed; open it again to use the new login.`
+            : ""),
       });
     } finally {
       await fs.rm(work, { recursive: true, force: true });
@@ -665,6 +695,9 @@ async function cmdFetch(flags) {
 async function cmdStatus(flags) {
   const stateDir = resolveStateDir(flags);
   const only = flags.name ? profileName(flags.name) : null;
+  // Report on sessions that exist: an orphaned file otherwise shows as an open
+  // session nobody can talk to.
+  await pruneDeadSessions(stateDir).catch(() => []);
   let vault;
   try {
     // Don't drive an Alien-app prompt just to report status — agent-key/passphrase only.
@@ -709,6 +742,10 @@ async function cmdStatus(flags) {
 async function cmdOpen(flags) {
   const name = profileName(flags.name);
   const stateDir = resolveStateDir(flags);
+  // Orphaned session files (killed container, crashed daemon) still advertise a
+  // streamPort, so a viewer picking "the newest session" can dial a dead port.
+  // Clear them before we add ours.
+  await pruneDeadSessions(stateDir).catch(() => []);
   let vault;
   try {
     vault = await openVaultUnlocked(flags);
@@ -720,7 +757,15 @@ async function cmdOpen(flags) {
   let headlessDefault;
   let policy = null;
   try {
-    const cred = await ensureAnonymousDefaultProfile({ vault, stateDir, name });
+    const cred = await ensureAnonymousDefaultProfile({
+      vault,
+      stateDir,
+      name,
+      // Opt-in minting of an empty jar for a named profile: the owner-driven
+      // sign-in path needs somewhere to sign in. Without the flag, a named
+      // profile still refuses to auto-create.
+      allowCreate: flags["bootstrap-profile"] === true,
+    });
     if (!cred || cred.type !== "browser-profile") {
       const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
       e.code = "NO_PROFILE";
@@ -760,6 +805,33 @@ async function cmdOpen(flags) {
   } catch (err) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     handleErr(err);
+  }
+}
+
+// Provision H.264 for the viewport stream: probe (env → PATH → prior
+// download), else fetch a static ffmpeg (Linux), and record the result in
+// <stateDir>/browser-codecs.json. Only after this does a `codec=auto` viewer
+// get h264 by default — an unprovisioned host streams jpeg and never spawns
+// ffmpeg implicitly. Re-run any time; it re-verifies the recorded binary.
+async function cmdInstallCodecs(flags) {
+  const stateDir = resolveStateDir(flags);
+  try {
+    const existing = await loadCodecConfig(stateDir);
+    if (existing && flags.force !== true) {
+      return outputJson({ ok: true, ...existing, note: "already provisioned (use --force to re-probe)" });
+    }
+    const cfg = await installCodecs({
+      stateDir,
+      allowDownload: flags["no-download"] !== true,
+      log: (m) => stderr(m),
+    });
+    outputJson({
+      ok: true,
+      ...cfg,
+      note: "h264 is now the default stream codec for codec=auto viewers (open sessions pick it up on restart)",
+    });
+  } catch (err) {
+    outputError(err.message || String(err));
   }
 }
 
@@ -830,6 +902,7 @@ runCli({
     read: cmdRead,
     fetch: cmdFetch,
     status: cmdStatus,
+    "install-codecs": cmdInstallCodecs,
     open: cmdOpen,
     close: cmdClose,
     sessions: cmdSessions,
@@ -919,11 +992,19 @@ runCli({
         "          one-shot: navigate (headless) → page text + final URL + sessionExpired\n" +
         "  fetch   [--name N] --url URL [--max-chars K]\n" +
         "          one-shot authenticated HTTP GET via the session (API / feed)\n" +
-        "  status  [--name N]      list sealed sessions\n\n" +
+        "  status  [--name N]      list sealed sessions\n" +
+        "  install-codecs [--no-download] [--force]\n" +
+        "          provision ffmpeg/H.264 for the viewport stream (probe, else\n" +
+        "          download a static build on Linux). Once provisioned, viewers\n" +
+        "          connecting with codec=auto stream h264 (≈10× less traffic)\n" +
+        "          instead of jpeg; without it the stream stays jpeg-only.\n\n" +
         "Interactive session (--name optional; defaults to 'main'):\n" +
-        "  open    --name N [--headed] [--url START]   start a persistent session (run in\n" +
-        "          background); navigates to START before reporting ready;\n" +
-        "          missing default 'main' auto-creates as an anonymous L0 profile\n" +
+        "  open    --name N [--headed] [--url START] [--bootstrap-profile]\n" +
+        "          start a persistent session (run in background); navigates to START\n" +
+        "          before reporting ready; missing default 'main' auto-creates as an\n" +
+        "          anonymous L0 profile. --bootstrap-profile mints an EMPTY jar for a\n" +
+        "          named profile so the owner can sign in themselves (then `close`\n" +
+        "          seals it); without it a named profile never auto-creates\n" +
         "  snapshot --name N             accessibility tree with element refs; iframe\n" +
         "          elements get frame-prefixed refs (f1e3); reports open tabs when >1\n" +
         "  form-inspect --name N           compact form controls + labels/types/requirements\n" +

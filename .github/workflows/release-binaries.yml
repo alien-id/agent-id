@@ -1,0 +1,58 @@
+name: Release binaries
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  release:
+    name: Build and publish binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun project
+        uses: ./.github/actions/setup-bun-project
+
+      - name: Test
+        run: bun run test
+
+      - name: Build
+        run: |
+          for plugin in agent-id-core agent-id-vault agent-id-proxy; do
+            bun build --compile --target=bun-linux-x64 \
+              "plugins/$plugin/bin/cli.mjs" --outfile "$plugin"
+          done
+
+      - name: Smoke test
+        run: |
+          for plugin in agent-id-core agent-id-vault agent-id-proxy; do
+            "./$plugin" --help > /dev/null
+          done
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for plugin in agent-id-core agent-id-vault agent-id-proxy; do
+            sha256sum "$plugin" > "$plugin.sha256"
+          done
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "agent-id ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            agent-id-core agent-id-core.sha256 \
+            agent-id-vault agent-id-vault.sha256 \
+            agent-id-proxy agent-id-proxy.sha256

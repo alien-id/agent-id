@@ -145,12 +145,35 @@ decides what you do next. There are exactly three:
 Never answer `owner_must_drive` by asking for a password. An account created
 through "Sign in with Google" has none, so the owner cannot give you one.
 
+A failure also carries `trace` (what the engine saw each round: password field
+present or gone, challenge widget, URL) and `pageError` (the page's own error
+copy). Read them before acting on `action`: a rejection message there means the
+credential is wrong, whatever the site's language.
+
+`auto-login` and `login` **close an open session on the target profile first**
+(the payload says `closedLiveSession: true`). A daemon opened earlier keeps the
+copy it unsealed at `open` time and re-seals it on close, so sealing a new login
+underneath it would be lost. After a successful auto-login, `open` the profile
+again to use the new session.
+
 **Domain allowlist (security):** a `login` credential is only typed into hosts on
 its `domains` list (default-deny, the same control the proxy enforces); a foreign
 origin is **refused**, and a sealed in-vault-generated secret can never be typed
 into a page. SSO redirects credential entry to the identity provider, so set
 `domains` to cover it — a wildcard works: `--domains '*.acme.com'` allows
 `idp.acme.com`. The refusal error names the blocked host.
+
+**Passkeys (WebAuthn):** a driven session reports WebAuthn as **unsupported** —
+the browser has no authenticator, so a passkey ceremony could only hang (and
+while one is pending, the page's own "Try another way" links are inert). Sites
+with a passkey enrolled therefore skip the passkey prompt and offer their
+password/OTP path directly; expect that path, don't look for a passkey prompt.
+The exception is headed `login` (path A): the owner sits at a real Chrome
+window there, so WebAuthn stays native and a platform passkey can complete. If
+a site offers **only** a passkey (no fallback), it is unreachable in a driven
+session; `AGENT_ID_BROWSER_KEEP_WEBAUTHN=1` restores native WebAuthn — a
+ceremony will then hang as before; send `Escape` to cancel it and revive the
+fallback links.
 
 ## Read-only sessions (access levels)
 
