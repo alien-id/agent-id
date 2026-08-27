@@ -14,11 +14,11 @@
   "dependencies": [
     {
       "name": "agent-id-core",
-      "version": "^7.3.0"
+      "version": "^7.3.1"
     },
     {
       "name": "agent-id-vault",
-      "version": "^7.3.1"
+      "version": "^7.4.0"
     }
   ]
 }
