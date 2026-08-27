@@ -276,6 +276,13 @@ export function otpPromptWording(cred) {
   };
 }
 
+// How long until the credential's TOTP period rolls over, plus a beat so the new
+// window is unambiguously current. Exported for the test that pins the arithmetic.
+export function millisToNextTotpWindow(cred, now = Date.now()) {
+  const periodMs = (Number(cred.period) || 30) * 1000;
+  return periodMs - (now % periodMs) + 500;
+}
+
 // Resolve the one-time code for a `login` credential: generate it from a stored
 // seed, or ask the human over the secure-prompt channel.
 export async function resolveOtp(cred, { env = process.env, log = () => {}, now } = {}) {
@@ -661,13 +668,19 @@ export async function autoLogin({
   // allowlist fails before a browser goes anywhere, not after.
   assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
   const getOtp = () => resolveOtp(cred, { env, log });
-  // How many times one run may answer a code challenge. A stored seed costs
-  // nothing to regenerate, so a few attempts are fine there. Asking a HUMAN is
-  // bounded by arithmetic, not taste: the card waits up to 10 minutes and the host
-  // kills this process at 16 (lethe's HUMAN_TIMEOUT), so a second full-length ask
-  // does not fit. One ask, then report it — a fresh auto-login gets a fresh budget
-  // and makes the site send a fresh code, which is the better retry anyway.
-  const maxOtpAsks = cred.otp === "totp" ? 3 : 1;
+  // How many times one run may answer a code challenge, and it is two at most.
+  //
+  // A generated code does not become right by being sent again: within one period
+  // the seed produces the SAME digits, so back-to-back retries submit an identical
+  // code and only look like diligence. The one retry that can succeed is across a
+  // period boundary — the classic race where a code is generated at t+29s and
+  // validated at t+31s — so the second attempt waits the window out first.
+  //
+  // Asking a HUMAN is bounded by arithmetic instead: the card waits up to 10
+  // minutes and the host kills this process at 16 (lethe's HUMAN_TIMEOUT), so a
+  // second full-length ask does not fit. One ask, then report — a fresh
+  // auto-login gets a fresh budget AND makes the site send a fresh code.
+  const maxOtpAsks = cred.otp === "totp" ? 2 : 1;
   let otpAsks = 0;
 
   // Warm up before a deep login link. Some sites (e.g. Reddit) wall a COLD
@@ -773,6 +786,11 @@ export async function autoLogin({
         // The page's own copy is the diagnosis here — "that code has expired" vs
         // "incorrect code" is the difference between retrying and giving up.
         return { ok: false, outcome: "otp-rejected", finalUrl: page.url(), errorText };
+      }
+      if (otpAsks > 0) {
+        // Only reachable for a stored seed (see maxOtpAsks). Land in the next
+        // period so the retry is a different code than the one just refused.
+        await page.waitForTimeout(millisToNextTotpWindow(cred));
       }
       otpAsks += 1;
       await typeOtp(page, await getOtp());

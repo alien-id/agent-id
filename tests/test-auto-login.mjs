@@ -15,6 +15,7 @@ import {
   runRecipe,
   autoLogin,
   otpPromptWording,
+  millisToNextTotpWindow,
   CODE_SUBMIT_TEXT_RE,
   resolveOtp,
   isLoginishPath,
@@ -399,4 +400,27 @@ test("a step whose origin stays put is unaffected by the second check", async ()
     driver: recordingDriver(calls),
   });
   assert.deepEqual(calls, [["fill", "#code", "654321"]]);
+});
+
+// ─── retrying a generated code only means something across a window ───────────────
+
+test("the TOTP retry lands in the next period, not the one just refused", () => {
+  // Within one period the seed produces the same digits, so a back-to-back retry
+  // submits an identical code and only looks like diligence. The retry that can
+  // succeed is the boundary race: generated at t+29s, validated at t+31s.
+  const seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+  const now = 1_000_000_000_000;
+  const first = generateTotp({ secret: seed, now });
+  const immediate = generateTotp({ secret: seed, now: now + 3000 });
+  const afterWait = generateTotp({ secret: seed, now: now + millisToNextTotpWindow({}, now) });
+
+  assert.equal(immediate, first, "a retry three seconds later is the same code");
+  assert.notEqual(afterWait, first, "a retry after the wait is a different one");
+});
+
+test("millisToNextTotpWindow respects the credential's own period", () => {
+  assert.equal(millisToNextTotpWindow({}, 29_500), 1000);
+  assert.equal(millisToNextTotpWindow({ period: 60 }, 59_500), 1000);
+  // A beat past the boundary, so the new window is unambiguously current.
+  assert.ok(millisToNextTotpWindow({}, 0) > 30_000);
 });

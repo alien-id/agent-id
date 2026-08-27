@@ -94,10 +94,13 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
         action: OWNER_MUST_CONFIRM,
         reason: "otp_not_accepted",
         message:
-          `The code entered for '${credName}' was not accepted — mistyped, or it expired ` +
-          "while it was being fetched. The stored credentials are FINE; do not re-check them " +
-          "and do not ask for a password. Run auto-login again when the owner is ready: that " +
-          "makes the site send a fresh code and starts a fresh window to enter it.",
+          `The code for '${credName}' was not accepted, and a fresh one from the next time ` +
+          "window was refused too. For a stored 2FA seed that points at the seed itself " +
+          "(re-add it with `vault set-totp`) or at this machine's clock being out of step — " +
+          "codes are time-derived, so a skew of more than one period makes every code wrong. " +
+          "For an owner-entered code it was mistyped, or it expired while being fetched. " +
+          "Either way the password is FINE: do not re-check it and do not ask for one. " +
+          "Run auto-login again once the cause is addressed.",
       };
     // A second factor was demanded that the credential says it does not have.
     case "otp-unexpected":
