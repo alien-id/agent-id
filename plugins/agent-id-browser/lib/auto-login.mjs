@@ -671,13 +671,16 @@ export async function autoLogin({
   // spending them here would report a timeout while the owner is still walking
   // to the desk.
   confirmWaitMs = 180000,
+  // Injected the same way runRecipe takes `driver`: the code card is a ten-minute
+  // wait on a human, which no test can afford to take literally.
+  resolveOtpFn = resolveOtp,
 }) {
   if (!cred.loginUrl) throw new Error(`login '${cred.name}': loginUrl is required for auto-login`);
   // The whole run — warmup, the login page, every recipe step — happens on the
   // credential's own origins. Checked once here so a loginUrl pointing off the
   // allowlist fails before a browser goes anywhere, not after.
   assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
-  const getOtp = (retry) => resolveOtp(cred, { env, log, retry });
+  const getOtp = (retry) => resolveOtpFn(cred, { env, log, retry });
   // One run answers a code challenge twice at most, and the second attempt is
   // deliberately cheap.
   //
@@ -718,13 +721,25 @@ export async function autoLogin({
   await page.goto(cred.loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForTimeout(settleMs);
 
+  let errorText = null;
+  // An unanswered code card is the owner walking away, not a broken sign-in: the
+  // site is waiting at a screen a fresh code can still clear. Reporting it as an
+  // outcome keeps the run's shape — a caller that gets an exception here learns
+  // nothing about where the browser stopped, and the profile is sealed anyway.
+  const otpTimedOut = () => ({ ok: false, outcome: "otp-timeout", finalUrl: page.url(), errorText });
+
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
-    await runRecipe(page, cred.recipe, {
-      username: cred.username,
-      password: cred.password,
-      getOtp,
-      domains: cred.domains,
-    });
+    try {
+      await runRecipe(page, cred.recipe, {
+        username: cred.username,
+        password: cred.password,
+        getOtp,
+        domains: cred.domains,
+      });
+    } catch (err) {
+      if (err?.code !== "FORM_TIMEOUT") throw err;
+      return otpTimedOut();
+    }
   } else if (await detectMicrosoftFlow(page)) {
     // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
     await microsoftLogin(page, cred, log);
@@ -733,7 +748,6 @@ export async function autoLogin({
   }
   await page.waitForTimeout(settleMs);
 
-  let errorText = null;
   for (let round = 0; round < maxRounds; round++) {
     const onLoginPage = stillOnLoginPage(page.url(), cred.loginUrl);
     const state = { ...(await detectPageState(page)), onLoginPage };
@@ -806,7 +820,12 @@ export async function autoLogin({
         await page.waitForTimeout(millisToNextTotpWindow(cred));
       }
       otpAsks += 1;
-      await typeOtp(page, await getOtp(retry));
+      try {
+        await typeOtp(page, await getOtp(retry));
+      } catch (err) {
+        if (err?.code !== "FORM_TIMEOUT") throw err;
+        return otpTimedOut();
+      }
       await page.waitForTimeout(settleMs);
       continue;
     }

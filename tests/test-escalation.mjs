@@ -107,3 +107,18 @@ test("qr-sign-in sends the owner to the browser view, because that is where the 
   assert.match(message, /browser view for profile 'telegram'/);
   assert.ok(!/Google, Microsoft/.test(message));
 });
+
+test("otp-timeout blames nobody's credential — the owner simply was not at the screen", () => {
+  const { action, reason, message } = escalationFor("otp-timeout", {
+    credName: "booking",
+    profile: "booking",
+  });
+  assert.equal(action, OWNER_MUST_CONFIRM);
+  assert.equal(reason, "otp_not_entered");
+  // The three wrong turns an agent takes from here: re-adding the credential,
+  // asking for a password a passwordless site does not have, and reading the
+  // silence as the site refusing the code.
+  assert.match(message, /do not re-add it/i);
+  assert.match(message, /do not ask for a password/i);
+  assert.match(message, /run auto-login again/i);
+});

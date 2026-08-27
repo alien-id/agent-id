@@ -439,3 +439,54 @@ test("the retry card says the code was refused, so the owner reads a fresh one",
     /not accepted/,
   );
 });
+
+// ── An unanswered code card ends the run as an outcome, not an exception ─────────
+
+function formTimeout() {
+  const err = new Error("timed out waiting for the secure form to be submitted");
+  err.code = "FORM_TIMEOUT";
+  return err;
+}
+
+function recipePage(url) {
+  return { url: () => url, goto: async () => {}, waitForTimeout: async () => {} };
+}
+
+const OTP_FIRST_RECIPE = [{ action: "fill", selector: "#code", value: "{otp}" }];
+const PWLESS_CRED = {
+  name: "booking",
+  username: "u@example.test",
+  passwordless: true,
+  otp: "interactive",
+  loginUrl: "https://x.test/sign-in",
+  domains: ["x.test"],
+  recipe: OTP_FIRST_RECIPE,
+};
+
+test("autoLogin reports an expired code card as an outcome, so the caller learns where it stopped", async () => {
+  const result = await autoLogin({
+    page: recipePage("https://x.test/otp"),
+    cred: PWLESS_CRED,
+    resolveOtpFn: async () => {
+      throw formTimeout();
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "otp-timeout");
+  assert.equal(result.finalUrl, "https://x.test/otp");
+});
+
+test("autoLogin does not dress every OTP failure up as a timeout", async () => {
+  // Only an unanswered card is an outcome. A credential that cannot produce a
+  // code at all is a fault, and swallowing it would report "nobody typed it".
+  await assert.rejects(
+    autoLogin({
+      page: recipePage("https://x.test/otp"),
+      cred: PWLESS_CRED,
+      resolveOtpFn: async () => {
+        throw new Error("login 'booking': otp=totp but no totpSecret stored");
+      },
+    }),
+    /totpSecret/,
+  );
+});
