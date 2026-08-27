@@ -22,6 +22,7 @@ import {
   stillOnLoginPage,
   originOf,
   isDeepLoginUrl,
+  otpCardBudgetMs,
 } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { generateTotp } from "../plugins/agent-id-core/lib/totp.mjs";
 
@@ -489,4 +490,28 @@ test("autoLogin does not dress every OTP failure up as a timeout", async () => {
     }),
     /totpSecret/,
   );
+});
+
+test("the retry card is sized by where the code comes from, not by the fact of retrying", () => {
+  const mailed = { name: "booking", otp: "interactive", passwordless: true };
+  const generated = { name: "gh", otp: "totp", totpSecret: "x" };
+
+  // A first card is the same either way: nobody knows whether the owner is there.
+  assert.equal(otpCardBudgetMs(mailed), otpCardBudgetMs(generated));
+
+  // A mailed code sends the owner back to the mailbox, so its retry cannot be
+  // sized like a glance at an authenticator already in their hand.
+  assert.ok(
+    otpCardBudgetMs(mailed, { retry: true }) > otpCardBudgetMs(generated, { retry: true }),
+    "a mailbox trip must outlast a glance",
+  );
+
+  // Both retries stay under lethe's 16-minute HUMAN_TIMEOUT once the first card
+  // has spent its own budget — that ceiling covers the whole subprocess, so a
+  // second full-length card would have the host kill the run mid-answer.
+  const HUMAN_TIMEOUT_MS = 16 * 60 * 1000;
+  for (const cred of [mailed, generated]) {
+    const total = otpCardBudgetMs(cred) + otpCardBudgetMs(cred, { retry: true });
+    assert.ok(total < HUMAN_TIMEOUT_MS, `${cred.otp}: ${total}ms leaves nothing for the page`);
+  }
 });

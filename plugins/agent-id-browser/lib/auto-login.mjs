@@ -258,12 +258,26 @@ export async function runRecipe(
 // factor, not a second one — a card headed "2FA code" would be telling the owner
 // something untrue about the account they are signing into. Pure; exported so the
 // wording is testable without standing up a prompt provider.
-// The first card waits for someone who may be away from the screen; the retry does
-// not, because it only ever follows a card they just answered. Sized so both fit
-// under the host's own ceiling: 10 + 2 is under lethe's 16-minute HUMAN_TIMEOUT,
-// where 10 + 10 is not — which is the whole reason a retry is affordable at all.
+// The first card waits for someone who may be away from the screen. What the retry
+// waits for depends on where the code comes from, and the two are not comparable:
+// a generated code is read off a device the owner is already holding, so the retry
+// is a glance, while a mailed one sends them back to the mailbox for a second trip.
+// Measured on a live Booking.com run, where a two-minute retry expired with the
+// owner still fetching the mail.
+//
+// Both budgets are bounded by the same thing — lethe's 16-minute HUMAN_TIMEOUT
+// (`src/agent_id/cli.rs`) kills the whole auto-login subprocess, cards, navigation
+// and settles included. That is what rules out a second full-length card: 10 + 4
+// leaves room for the page work either side, where 10 + 10 does not.
 const OTP_CARD_MS = 10 * 60 * 1000;
-const OTP_RETRY_CARD_MS = 2 * 60 * 1000;
+const OTP_GLANCE_RETRY_CARD_MS = 2 * 60 * 1000;
+const OTP_MAILBOX_RETRY_CARD_MS = 4 * 60 * 1000;
+
+export function otpCardBudgetMs(cred, { retry = false } = {}) {
+  if (!retry) return OTP_CARD_MS;
+
+  return cred.otp === "totp" ? OTP_GLANCE_RETRY_CARD_MS : OTP_MAILBOX_RETRY_CARD_MS;
+}
 
 export function otpPromptWording(cred, { retry = false } = {}) {
   const host = cred.loginUrl ? hostOf(cred.loginUrl) : "";
@@ -319,7 +333,7 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now,
       fields: [{ name: "otp", label: wording.label }],
       label: wording.ask,
       security: "Used once to complete sign-in; never stored or shown to the agent.",
-      timeoutMs: retry ? OTP_RETRY_CARD_MS : OTP_CARD_MS,
+      timeoutMs: otpCardBudgetMs(cred, { retry }),
     },
     { env },
   );
