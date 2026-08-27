@@ -258,12 +258,26 @@ export async function runRecipe(
 // factor, not a second one — a card headed "2FA code" would be telling the owner
 // something untrue about the account they are signing into. Pure; exported so the
 // wording is testable without standing up a prompt provider.
-// The first card waits for someone who may be away from the screen; the retry does
-// not, because it only ever follows a card they just answered. Sized so both fit
-// under the host's own ceiling: 10 + 2 is under lethe's 16-minute HUMAN_TIMEOUT,
-// where 10 + 10 is not — which is the whole reason a retry is affordable at all.
+// The first card waits for someone who may be away from the screen. What the retry
+// waits for depends on where the code comes from, and the two are not comparable:
+// a generated code is read off a device the owner is already holding, so the retry
+// is a glance, while a mailed one sends them back to the mailbox for a second trip.
+// Measured on a live Booking.com run, where a two-minute retry expired with the
+// owner still fetching the mail.
+//
+// Both budgets are bounded by the same thing — lethe's 16-minute HUMAN_TIMEOUT
+// (`src/agent_id/cli.rs`) kills the whole auto-login subprocess, cards, navigation
+// and settles included. That is what rules out a second full-length card: 10 + 4
+// leaves room for the page work either side, where 10 + 10 does not.
 const OTP_CARD_MS = 10 * 60 * 1000;
-const OTP_RETRY_CARD_MS = 2 * 60 * 1000;
+const OTP_GLANCE_RETRY_CARD_MS = 2 * 60 * 1000;
+const OTP_MAILBOX_RETRY_CARD_MS = 4 * 60 * 1000;
+
+export function otpCardBudgetMs(cred, { retry = false } = {}) {
+  if (!retry) return OTP_CARD_MS;
+
+  return cred.otp === "totp" ? OTP_GLANCE_RETRY_CARD_MS : OTP_MAILBOX_RETRY_CARD_MS;
+}
 
 export function otpPromptWording(cred, { retry = false } = {}) {
   const host = cred.loginUrl ? hostOf(cred.loginUrl) : "";
@@ -310,20 +324,34 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now,
       ...(now != null ? { now } : {}),
     });
   }
-  const wording = otpPromptWording(cred, { retry });
-  log(`Waiting for the ${wording.label.toLowerCase()} via the secure prompt…`);
-  const { values } = await collectSecret(
-    {
-      title: wording.title,
-      description: wording.description,
-      fields: [{ name: "otp", label: wording.label }],
-      label: wording.ask,
-      security: "Used once to complete sign-in; never stored or shown to the agent.",
-      timeoutMs: retry ? OTP_RETRY_CARD_MS : OTP_CARD_MS,
-    },
-    { env },
-  );
+  const spec = otpCardSpec(cred, { retry });
+  log(`Waiting for the ${spec.fields[0].label.toLowerCase()} via the secure prompt…`);
+  const { values } = await collectSecret(spec, { env });
+
   return String(values.otp || "").trim();
+}
+
+// The whole card an interactive code is asked for through, as a value. Pure, and
+// exported for the same reason `otpPromptWording` is: what the owner is shown is
+// worth asserting without standing up a prompt provider, and this is the one card
+// both auto-login and `fill_otp` raise.
+export function otpCardSpec(cred, { retry = false } = {}) {
+  const wording = otpPromptWording(cred, { retry });
+
+  return {
+    title: wording.title,
+    description: wording.description,
+    // Not masked, unlike every other value this vault collects. A code is
+    // single-use and dead within minutes, so there is no lasting secret for the
+    // dots to protect — and it is being copied by hand out of a mail client,
+    // which is exactly the transcription whose slips the dots would hide. A wrong
+    // code costs another round trip to the mailbox; watching it being typed
+    // costs nothing.
+    fields: [{ name: "otp", label: wording.label, secret: false }],
+    label: wording.ask,
+    security: "Used once to complete sign-in; never stored or shown to the agent.",
+    timeoutMs: otpCardBudgetMs(cred, { retry }),
+  };
 }
 
 // A visible CAPTCHA / anti-automation challenge WIDGET, matched by well-known
@@ -671,13 +699,16 @@ export async function autoLogin({
   // spending them here would report a timeout while the owner is still walking
   // to the desk.
   confirmWaitMs = 180000,
+  // Injected the same way runRecipe takes `driver`: the code card is a ten-minute
+  // wait on a human, which no test can afford to take literally.
+  resolveOtpFn = resolveOtp,
 }) {
   if (!cred.loginUrl) throw new Error(`login '${cred.name}': loginUrl is required for auto-login`);
   // The whole run — warmup, the login page, every recipe step — happens on the
   // credential's own origins. Checked once here so a loginUrl pointing off the
   // allowlist fails before a browser goes anywhere, not after.
   assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
-  const getOtp = (retry) => resolveOtp(cred, { env, log, retry });
+  const getOtp = (retry) => resolveOtpFn(cred, { env, log, retry });
   // One run answers a code challenge twice at most, and the second attempt is
   // deliberately cheap.
   //
@@ -718,13 +749,25 @@ export async function autoLogin({
   await page.goto(cred.loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForTimeout(settleMs);
 
+  let errorText = null;
+  // An unanswered code card is the owner walking away, not a broken sign-in: the
+  // site is waiting at a screen a fresh code can still clear. Reporting it as an
+  // outcome keeps the run's shape — a caller that gets an exception here learns
+  // nothing about where the browser stopped, and the profile is sealed anyway.
+  const otpTimedOut = () => ({ ok: false, outcome: "otp-timeout", finalUrl: page.url(), errorText });
+
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
-    await runRecipe(page, cred.recipe, {
-      username: cred.username,
-      password: cred.password,
-      getOtp,
-      domains: cred.domains,
-    });
+    try {
+      await runRecipe(page, cred.recipe, {
+        username: cred.username,
+        password: cred.password,
+        getOtp,
+        domains: cred.domains,
+      });
+    } catch (err) {
+      if (err?.code !== "FORM_TIMEOUT") throw err;
+      return otpTimedOut();
+    }
   } else if (await detectMicrosoftFlow(page)) {
     // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
     await microsoftLogin(page, cred, log);
@@ -733,7 +776,6 @@ export async function autoLogin({
   }
   await page.waitForTimeout(settleMs);
 
-  let errorText = null;
   for (let round = 0; round < maxRounds; round++) {
     const onLoginPage = stillOnLoginPage(page.url(), cred.loginUrl);
     const state = { ...(await detectPageState(page)), onLoginPage };
@@ -806,7 +848,12 @@ export async function autoLogin({
         await page.waitForTimeout(millisToNextTotpWindow(cred));
       }
       otpAsks += 1;
-      await typeOtp(page, await getOtp(retry));
+      try {
+        await typeOtp(page, await getOtp(retry));
+      } catch (err) {
+        if (err?.code !== "FORM_TIMEOUT") throw err;
+        return otpTimedOut();
+      }
       await page.waitForTimeout(settleMs);
       continue;
     }

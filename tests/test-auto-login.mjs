@@ -22,6 +22,8 @@ import {
   stillOnLoginPage,
   originOf,
   isDeepLoginUrl,
+  otpCardBudgetMs,
+  otpCardSpec,
 } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { generateTotp } from "../plugins/agent-id-core/lib/totp.mjs";
 
@@ -438,4 +440,99 @@ test("the retry card says the code was refused, so the owner reads a fresh one",
     otpPromptWording({ ...cred, passwordless: true }, { retry: true }).description,
     /not accepted/,
   );
+});
+
+// ── An unanswered code card ends the run as an outcome, not an exception ─────────
+
+function formTimeout() {
+  const err = new Error("timed out waiting for the secure form to be submitted");
+  err.code = "FORM_TIMEOUT";
+  return err;
+}
+
+function recipePage(url) {
+  return { url: () => url, goto: async () => {}, waitForTimeout: async () => {} };
+}
+
+const OTP_FIRST_RECIPE = [{ action: "fill", selector: "#code", value: "{otp}" }];
+const PWLESS_CRED = {
+  name: "booking",
+  username: "u@example.test",
+  passwordless: true,
+  otp: "interactive",
+  loginUrl: "https://x.test/sign-in",
+  domains: ["x.test"],
+  recipe: OTP_FIRST_RECIPE,
+};
+
+test("autoLogin reports an expired code card as an outcome, so the caller learns where it stopped", async () => {
+  const result = await autoLogin({
+    page: recipePage("https://x.test/otp"),
+    cred: PWLESS_CRED,
+    resolveOtpFn: async () => {
+      throw formTimeout();
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "otp-timeout");
+  assert.equal(result.finalUrl, "https://x.test/otp");
+});
+
+test("autoLogin does not dress every OTP failure up as a timeout", async () => {
+  // Only an unanswered card is an outcome. A credential that cannot produce a
+  // code at all is a fault, and swallowing it would report "nobody typed it".
+  await assert.rejects(
+    autoLogin({
+      page: recipePage("https://x.test/otp"),
+      cred: PWLESS_CRED,
+      resolveOtpFn: async () => {
+        throw new Error("login 'booking': otp=totp but no totpSecret stored");
+      },
+    }),
+    /totpSecret/,
+  );
+});
+
+test("the retry card is sized by where the code comes from, not by the fact of retrying", () => {
+  const mailed = { name: "booking", otp: "interactive", passwordless: true };
+  const generated = { name: "gh", otp: "totp", totpSecret: "x" };
+
+  // A first card is the same either way: nobody knows whether the owner is there.
+  assert.equal(otpCardBudgetMs(mailed), otpCardBudgetMs(generated));
+
+  // A mailed code sends the owner back to the mailbox, so its retry cannot be
+  // sized like a glance at an authenticator already in their hand.
+  assert.ok(
+    otpCardBudgetMs(mailed, { retry: true }) > otpCardBudgetMs(generated, { retry: true }),
+    "a mailbox trip must outlast a glance",
+  );
+
+  // Both retries stay under lethe's 16-minute HUMAN_TIMEOUT once the first card
+  // has spent its own budget — that ceiling covers the whole subprocess, so a
+  // second full-length card would have the host kill the run mid-answer.
+  const HUMAN_TIMEOUT_MS = 16 * 60 * 1000;
+  for (const cred of [mailed, generated]) {
+    const total = otpCardBudgetMs(cred) + otpCardBudgetMs(cred, { retry: true });
+    assert.ok(total < HUMAN_TIMEOUT_MS, `${cred.otp}: ${total}ms leaves nothing for the page`);
+  }
+});
+
+test("the code card does not mask what it asks for", () => {
+  const mailed = otpCardSpec({ name: "booking", otp: "interactive", loginUrl: "https://x.test/in" });
+  const generated = otpCardSpec({ name: "gh", otp: "interactive", loginUrl: "https://gh.test/in" }, { retry: true });
+
+  // Every other value this vault collects is masked by default — the code is the
+  // one that must opt out, and it has to hold on the retry card too, which is
+  // where a mistyped code lands in the first place.
+  for (const spec of [mailed, generated]) {
+    assert.equal(spec.fields.length, 1);
+    assert.equal(spec.fields[0].name, "otp");
+    assert.equal(spec.fields[0].secret, false, "a single-use code is not a lasting secret");
+  }
+});
+
+test("the code card never says '2FA' to someone who has no first factor", () => {
+  const passwordless = otpCardSpec({ name: "booking", otp: "interactive", passwordless: true, loginUrl: "https://x.test/in" });
+  assert.ok(!/2fa|two-factor/i.test(JSON.stringify(passwordless)), "this code IS the sign-in, not a second step");
+  assert.match(passwordless.fields[0].label, /sign-in code/i);
 });

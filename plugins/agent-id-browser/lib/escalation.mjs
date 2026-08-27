@@ -102,6 +102,19 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           "Either way the password is FINE: do not re-check it and do not ask for one. " +
           "Run auto-login again once the cause is addressed.",
       };
+    // The code card expired unanswered — the owner was away, not the sign-in
+    // broken. The page is still sitting on the code screen, so the fix is a fresh
+    // code, and nothing about the credential is in doubt.
+    case "otp-timeout":
+      return {
+        action: OWNER_MUST_CONFIRM,
+        reason: "otp_not_entered",
+        message:
+          `Nobody entered the sign-in code for '${credName}' before the secure card expired. ` +
+          "The credential is FINE — do not re-add it, do not ask for a password, and do not " +
+          "assume the site refused anything. The code that was mailed has probably expired too, " +
+          "so ask the owner to be ready, then run auto-login again to have a fresh one sent.",
+      };
     // A code was demanded that the credential says it does not have. This is also
     // where a passwordless site lands when it was stored as an ordinary login, so
     // the message has to name that possibility: the agent is here precisely
