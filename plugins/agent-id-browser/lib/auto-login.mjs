@@ -19,6 +19,17 @@
 // The password is typed by this (vault-unlocked) process straight into the page —
 // the same trust boundary as the proxy injecting `basic`; the agent never sees it.
 //
+// Recipes are authored by the agent from page content, so two things are checked
+// against the credential's `domains`: every navigation target, and the live origin
+// of every step that resolves {password} or {otp} — the latter twice, before and
+// after the value is resolved, because resolving it can await a human for minutes.
+// A step whose value is a literal string is NOT gated; nothing secret is at stake
+// in one. Without this a recipe could navigate anywhere and type a secret into it,
+// which is a credential-exfiltration primitive driven by whatever the page said.
+// `domains` is therefore load-bearing for `login`, not advisory — and editable
+// after the fact with `agent-id-vault set-domains`, since a sign-in only reveals
+// which hosts it needs once it has been driven.
+//
 // The browser-driving functions take a `page` object (a patchright Page), so the
 // pure pieces (applyVars / stepNeedsOtp / runRecipe / resolveOtp-totp) unit-test
 // against a stub page with no real browser.
@@ -26,6 +37,7 @@
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
+import { assertHostAllowed } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { classifyLogin } from "./login-detect.mjs";
 import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
@@ -124,10 +136,25 @@ export function stepNeedsOtp(step) {
   );
 }
 
+// Does this step resolve a secret value anywhere in it? Every placeholder field is
+// substituted, so a {password}/{otp} in `selector` reaches the page as surely as
+// one in `value`. Pure.
+function stepCarriesSecret(step) {
+  return PLACEHOLDER_FIELDS.some(
+    (k) =>
+      typeof step?.[k] === "string" &&
+      (step[k].includes("{password}") || step[k].includes("{otp}")),
+  );
+}
+
 /**
  * Execute recipe `steps` against a page. `{otp}` is resolved lazily via `getOtp()`
  * the first time a step needs it (so a recipe whose login fails before the OTP
  * step never prompts). Actions: navigate, fill, type, click, press, wait.
+ *
+ * `domains` is the credential's allowlist and is required: every navigation
+ * target, and the live origin of every step that types {password} or {otp}, is
+ * checked against it before the step runs.
  */
 // `driver` maps the action vocabulary to page interactions; it defaults to the
 // human-input driver (curved motion, key-by-key typing) and is injectable so the
@@ -135,8 +162,11 @@ export function stepNeedsOtp(step) {
 export async function runRecipe(
   page,
   steps,
-  { username, password, getOtp, driver = humanDriver },
+  { username, password, getOtp, domains, driver = humanDriver },
 ) {
+  if (!Array.isArray(domains)) {
+    throw new Error("runRecipe requires the credential's `domains` allowlist");
+  }
   let otp;
   const sub = async (s) => {
     if (typeof s !== "string") return s;
@@ -144,8 +174,7 @@ export async function runRecipe(
     return applyVars(s, { username, password, otp });
   };
   // A step whose template injects the password/otp must never surface the raw
-  // value in an error (the recipe path is otherwise unguarded, unlike the
-  // heuristic/Microsoft fills). Run it under a value-free catch.
+  // value in an error. Run it under a value-free catch.
   const carriesSecret = (tpl) =>
     typeof tpl === "string" && (tpl.includes("{password}") || tpl.includes("{otp}"));
   const guarded = async (tpl, run) => {
@@ -156,27 +185,66 @@ export async function runRecipe(
       throw new Error(`recipe step '${tpl}' failed while entering a secret value`);
     }
   };
+  // Refuse a secret-bearing step on an origin the credential was never scoped to.
+  // Called TWICE per step, and both calls earn their place: once before `sub`, so
+  // a step we are going to refuse never costs the owner a card; once after,
+  // because resolving {otp} awaits a human for up to ten minutes and the page is
+  // free to navigate in that window — the second call is what actually confines
+  // the secret. Checked per STEP, not per field: `selector` is substituted too.
+  const gateSecret = (step, where) => {
+    if (stepCarriesSecret(step)) {
+      assertHostAllowed(hostOf(page.url()), domains, `${where}: refusing`);
+    }
+  };
   for (const step of steps) {
     switch (step.action) {
-      case "navigate":
-        await driver.navigate(page, await sub(step.url));
+      case "navigate": {
+        // A sign-in never needs a secret in a URL, and allowing one would be the
+        // exfiltration channel this gate exists to close — refuse before `sub`
+        // can resolve it.
+        if (stepCarriesSecret(step)) {
+          throw new Error("recipe navigate: a URL must not carry {password} or {otp}");
+        }
+        const url = await sub(step.url);
+        assertHostAllowed(hostOf(url), domains, "recipe navigate: refusing");
+        await driver.navigate(page, url);
         break;
-      case "fill":
-        await guarded(step.value, async () =>
-          driver.fill(page, await sub(step.selector), await sub(step.value)),
-        );
+      }
+      // Each of the four below resolves its values FIRST, re-checks the origin, and
+      // only then touches the page. The order is the point: `sub` can block on the
+      // owner for minutes, so the origin that mattered at the top of the step is
+      // not necessarily the one the value would land on.
+      case "fill": {
+        gateSecret(step, "recipe fill");
+        const selector = await sub(step.selector);
+        const value = await sub(step.value);
+        gateSecret(step, "recipe fill");
+        await guarded(step.value, () => driver.fill(page, selector, value));
         break;
-      case "type": // alias of fill (kept for parity with the session vocabulary)
-        await guarded(step.text, async () =>
-          driver.type(page, await sub(step.selector), await sub(step.text)),
-        );
+      }
+      case "type": {
+        // alias of fill (kept for parity with the session vocabulary)
+        gateSecret(step, "recipe type");
+        const selector = await sub(step.selector);
+        const text = await sub(step.text);
+        gateSecret(step, "recipe type");
+        await guarded(step.text, () => driver.type(page, selector, text));
         break;
-      case "click":
-        await driver.click(page, await sub(step.selector));
+      }
+      case "click": {
+        gateSecret(step, "recipe click");
+        const selector = await sub(step.selector);
+        gateSecret(step, "recipe click");
+        await driver.click(page, selector);
         break;
-      case "press":
-        await driver.press(page, await sub(step.selector), step.key || "Enter");
+      }
+      case "press": {
+        gateSecret(step, "recipe press");
+        const selector = await sub(step.selector);
+        gateSecret(step, "recipe press");
+        await driver.press(page, selector, step.key || "Enter");
         break;
+      }
       case "wait":
         await driver.wait(page, Number(step.ms) || 1000);
         break;
@@ -186,9 +254,52 @@ export async function runRecipe(
   }
 }
 
-// Resolve the current 2FA code for a `login` credential: generate it from a stored
+// What the code card says. On a passwordless login the code is the FIRST and only
+// factor, not a second one — a card headed "2FA code" would be telling the owner
+// something untrue about the account they are signing into. Pure; exported so the
+// wording is testable without standing up a prompt provider.
+// The first card waits for someone who may be away from the screen; the retry does
+// not, because it only ever follows a card they just answered. Sized so both fit
+// under the host's own ceiling: 10 + 2 is under lethe's 16-minute HUMAN_TIMEOUT,
+// where 10 + 10 is not — which is the whole reason a retry is affordable at all.
+const OTP_CARD_MS = 10 * 60 * 1000;
+const OTP_RETRY_CARD_MS = 2 * 60 * 1000;
+
+export function otpPromptWording(cred, { retry = false } = {}) {
+  const host = cred.loginUrl ? hostOf(cred.loginUrl) : "";
+  // A retry card has to say why it is there. Without it the owner sees the same
+  // prompt twice and cannot tell a refused code from a lost one — and for a
+  // time-based code the right move is to read the CURRENT one, not retype the
+  // one they just sent.
+  const retryNote = retry ? "That code was not accepted — enter the current one. " : "";
+  if (cred.passwordless) {
+    return {
+      title: `Sign-in code for ${cred.name}`,
+      description: host
+        ? `${retryNote}${host} just sent you a code — enter it to finish signing in`
+        : retryNote.trim(),
+      label: "Sign-in code",
+      ask: `enter the sign-in code for "${cred.name}"`,
+    };
+  }
+  return {
+    title: `2FA code for ${cred.name}`,
+    description: host ? `${retryNote}Sign-in to ${host} needs your current code` : retryNote.trim(),
+    label: "Current 2FA code",
+    ask: `enter the 2FA code for "${cred.name}"`,
+  };
+}
+
+// How long until the credential's TOTP period rolls over, plus a beat so the new
+// window is unambiguously current. Exported for the test that pins the arithmetic.
+export function millisToNextTotpWindow(cred, now = Date.now()) {
+  const periodMs = (Number(cred.period) || 30) * 1000;
+  return periodMs - (now % periodMs) + 500;
+}
+
+// Resolve the one-time code for a `login` credential: generate it from a stored
 // seed, or ask the human over the secure-prompt channel.
-export async function resolveOtp(cred, { env = process.env, log = () => {}, now } = {}) {
+export async function resolveOtp(cred, { env = process.env, log = () => {}, now, retry = false } = {}) {
   if (cred.otp === "totp") {
     if (!cred.totpSecret) throw new Error(`login '${cred.name}': otp=totp but no totpSecret stored`);
     return generateTotp({
@@ -199,15 +310,16 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now 
       ...(now != null ? { now } : {}),
     });
   }
-  log("Waiting for the current 2FA code via the secure prompt…");
+  const wording = otpPromptWording(cred, { retry });
+  log(`Waiting for the ${wording.label.toLowerCase()} via the secure prompt…`);
   const { values } = await collectSecret(
     {
-      title: `2FA code for ${cred.name}`,
-      description: cred.loginUrl ? `Sign-in to ${hostOf(cred.loginUrl)} needs your current code` : "",
-      fields: [{ name: "otp", label: "Current 2FA code" }],
-      label: `enter the 2FA code for "${cred.name}"`,
+      title: wording.title,
+      description: wording.description,
+      fields: [{ name: "otp", label: wording.label }],
+      label: wording.ask,
       security: "Used once to complete sign-in; never stored or shown to the agent.",
-      timeoutMs: 5 * 60 * 1000,
+      timeoutMs: retry ? OTP_RETRY_CARD_MS : OTP_CARD_MS,
     },
     { env },
   );
@@ -238,11 +350,29 @@ export const CHALLENGE_WIDGET_SEL = [
 ].join(",");
 
 // Snapshot the page into the shape classifyLogin expects (browser-side).
-async function detectPageState(page) {
-  return page.evaluate((challengeSel) => {
+// What a sign-in asks for FIRST, as a selector. Phone-first flows (Airbnb, Uber,
+// Telegram) are as common as e-mail-first ones, and omitting the `tel` forms made
+// their opening screen — no password field, no code copy — read as a finished
+// login. A code input that merely uses type="tel" for the numeric keypad is not
+// mistaken for an identifier: classifyLogin checks the code affordances first.
+//
+// Module-level and passed into the page like CHALLENGE_WIDGET_SEL, because a
+// function handed to page.evaluate cannot close over anything.
+const IDENTIFIER_FIELD_SEL = [
+  'input[type="email"]',
+  'input[type="tel"]',
+  'input[autocomplete="username"]',
+  'input[autocomplete="email"]',
+  'input[autocomplete="tel"]',
+  'input[autocomplete="tel-national"]',
+].join(",");
+
+export async function detectPageState(page) {
+  return page.evaluate(([challengeSel, identifierSel]) => {
     const all = (sel) => Array.from(document.querySelectorAll(sel));
     const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
     const hasPasswordField = all('input[type="password"]').some(visible);
+    const hasIdentifierField = all(identifierSel).some(visible);
     const hasOtpField = all('input[autocomplete="one-time-code"]').some(visible);
     const otpFieldNames = all(
       'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"]',
@@ -262,8 +392,16 @@ async function detectPageState(page) {
         .filter(Boolean)
         .join(" | ")
         .slice(0, 300) || null;
-    return { hasPasswordField, hasOtpField, otpFieldNames, bodyText, blocked, errorText };
-  }, CHALLENGE_WIDGET_SEL);
+    return {
+      hasPasswordField,
+      hasIdentifierField,
+      hasOtpField,
+      otpFieldNames,
+      bodyText,
+      blocked,
+      errorText,
+    };
+  }, [CHALLENGE_WIDGET_SEL, IDENTIFIER_FIELD_SEL]);
 }
 
 // One line of page state for the trace: what the classifier saw, never any
@@ -284,15 +422,71 @@ async function typeOtp(page, code) {
     'input[inputmode="numeric"]';
   // The OTP code is low-sensitivity (single-use, seconds-lived) but still typed
   // with human cadence and the value-free error guard, for consistency.
+  const before = page.url();
   await typeSecret(page, sel, code);
-  // ADFS / Entra submit via a button; generic forms submit on Enter.
-  if (await page.locator("#submitButton").count()) {
-    await humanClick(page, "#submitButton").catch(() => {});
-  } else if (await page.locator("#idSubmit_SAOTCC_Continue").count()) {
-    await humanClick(page, "#idSubmit_SAOTCC_Continue").catch(() => {});
-  } else {
-    await page.locator(sel).first().press("Enter").catch(() => {});
+  // Many code screens submit themselves the moment the last box is filled. Then
+  // there is nothing left to click, and hunting for a button on the page we just
+  // landed on costs a full element-wait per candidate.
+  if (page.url() !== before) return;
+  await submitCode(page, sel);
+}
+
+// Buttons that advance a code screen, by their visible text. Deliberately excludes
+// the ones that undo the step — "resend", "send again", "use another method",
+// "back" — because clicking one of those discards a code the owner just typed.
+// Every probe in submitCode is bounded: the page may have navigated out from under
+// us the instant the code completed, and a missing control must cost a beat rather
+// than the 30s default element wait, ten times over.
+const SUBMIT_TIMEOUT = 3000;
+
+export const CODE_SUBMIT_TEXT_RE =
+  /^(verify|verify code|continue|submit|confirm|next|done|sign ?in|log ?in|check code)$/i;
+
+// Get a typed code accepted. Enter alone is not enough: Chrome only submits a form
+// implicitly when it has a submit button or a single field, and a code screen built
+// from six one-character boxes has neither — so on those the code sat there, typed
+// and unsent, until auto-login ran out of rounds. Found driving a real browser.
+async function submitCode(page, fieldSel) {
+  // Vendor-specific first: these have stable ids and no useful text.
+  for (const known of ["#submitButton", "#idSubmit_SAOTCC_Continue"]) {
+    const button = page.locator(known).first();
+    if ((await button.count()) && (await button.isVisible().catch(() => false))) {
+      await humanClick(page, known, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
+      return;
+    }
   }
+  // A real submit control belonging to the code field's OWN form. Page-wide would
+  // hand the click to a header search box or a newsletter footer, and the label
+  // branch below would never run.
+  const SUBMIT_SEL = 'button[type="submit"], input[type="submit"]';
+  const ownForm = page.locator(fieldSel).first().locator("xpath=ancestor::form[1]");
+  const ownSubmit = ownForm.locator(SUBMIT_SEL).first();
+  if ((await ownSubmit.count()) && (await ownSubmit.isVisible().catch(() => false))) {
+    await ownSubmit.click({ timeout: SUBMIT_TIMEOUT }).catch(() => {});
+    return;
+  }
+  // Otherwise a button whose label says it advances. Read the labels rather than
+  // guessing selectors — these screens differ everywhere.
+  const buttons = page.locator('button, [role="button"], a[href="#"]');
+  const count = Math.min(await buttons.count(), 20);
+  for (let i = 0; i < count; i++) {
+    const button = buttons.nth(i);
+    if (!(await button.isVisible().catch(() => false))) continue;
+    const label = (
+      (await button.textContent({ timeout: SUBMIT_TIMEOUT }).catch(() => "")) || ""
+    ).trim();
+    if (!CODE_SUBMIT_TEXT_RE.test(label)) continue;
+    await humanClick(page, button, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
+    return;
+  }
+  // Nothing to click: a single-field form, or a screen that submits on its own
+  // once the last box is filled. Enter is correct for the first and harmless for
+  // the second.
+  await page
+    .locator(fieldSel)
+    .first()
+    .press("Enter", { timeout: SUBMIT_TIMEOUT })
+    .catch(() => {});
 }
 
 // ── Microsoft ADFS / Entra (Azure AD) driver ──────────────────────────────────
@@ -356,11 +550,17 @@ export async function microsoftLogin(page, cred, log = () => {}) {
 export { detectMicrosoftFlow };
 
 // Heuristic fallback: fill a username/email field and the password field, submit.
-// Handles a simple two-step flow (username page → password page).
-async function heuristicLogin(page, { username, password }) {
+// Handles a simple two-step flow (username page → password page), and the
+// passwordless flow where submitting the identifier is the entire step.
+async function heuristicLogin(page, { username, password, passwordless }) {
+  // Ordered widest-signal-first, and it must cover everything IDENTIFIER_FIELD_SEL
+  // recognises — a screen the classifier calls an identifier step and this cannot
+  // fill is a stall, which is what phone-first sign-ins used to do.
   const userSel =
-    'input[type="email"], input[name*="user" i], input[name*="email" i], ' +
-    'input[id*="user" i], input[id*="email" i], input[autocomplete="username"], input[type="text"]';
+    'input[type="email"], input[type="tel"], input[autocomplete="username"], ' +
+    'input[autocomplete="email"], input[autocomplete^="tel"], ' +
+    'input[name*="user" i], input[name*="email" i], input[name*="phone" i], ' +
+    'input[id*="user" i], input[id*="email" i], input[id*="phone" i], input[type="text"]';
   const pwSel = 'input[type="password"]';
 
   const fillFirst = async (sel, value, secret = false) => {
@@ -373,6 +573,14 @@ async function heuristicLogin(page, { username, password }) {
   };
 
   await fillFirst(userSel, username);
+  // Passwordless: submitting the identifier IS the whole step — it is what makes
+  // the site send the code. Stop here deliberately rather than falling into the
+  // password hunt below, which would press Enter a second time and re-submit a
+  // form that has already advanced.
+  if (passwordless) {
+    await page.keyboard.press("Enter").catch(() => {});
+    return;
+  }
   // If the password field isn't on this page yet, advance (two-step IdP) and retry.
   if ((await page.locator(pwSel).count()) === 0) {
     await page.keyboard.press("Enter").catch(() => {});
@@ -422,7 +630,10 @@ async function awaitDeviceConfirmation(page, cred, { log, settleMs, budgetMs }) 
   const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
     await page.waitForTimeout(settleMs);
-    const state = classifyLogin(await detectPageState(page));
+    const state = classifyLogin({
+      ...(await detectPageState(page)),
+      onLoginPage: stillOnLoginPage(page.url(), cred.loginUrl),
+    });
     // Anything other than "still asking" ends the wait — including a block or a
     // denial, which the main loop then classifies on its own terms.
     if (state !== "confirm-on-device" && state !== "unknown") {
@@ -449,7 +660,11 @@ export async function autoLogin({
   cred,
   env = process.env,
   log = () => {},
-  maxRounds = 6,
+  // The identifier step now legitimately spends rounds: a screen asking only for
+  // an e-mail or phone classifies as "unknown" until the site advances, where it
+  // used to short-circuit to a (wrong) "logged-in" on the first look. Six rounds
+  // left ~9s for that transition, which a slow sign-in can outlast.
+  maxRounds = 10,
   settleMs = 1500,
   // A device-approval prompt is answered by a human reaching for their phone,
   // so it gets its own budget: the ordinary rounds are far too short, and
@@ -458,7 +673,27 @@ export async function autoLogin({
   confirmWaitMs = 180000,
 }) {
   if (!cred.loginUrl) throw new Error(`login '${cred.name}': loginUrl is required for auto-login`);
-  const getOtp = () => resolveOtp(cred, { env, log });
+  // The whole run — warmup, the login page, every recipe step — happens on the
+  // credential's own origins. Checked once here so a loginUrl pointing off the
+  // allowlist fails before a browser goes anywhere, not after.
+  assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
+  const getOtp = (retry) => resolveOtp(cred, { env, log, retry });
+  // One run answers a code challenge twice at most, and the second attempt is
+  // deliberately cheap.
+  //
+  // A six-digit code read off a phone under a thirty-second clock is mistyped or
+  // outrun often enough that one shot is the wrong budget — and the owner who
+  // just answered is demonstrably at the screen, so the retry card is a short one
+  // (2 min). That is what makes it affordable: 10 + 2 fits under the host's
+  // 16-minute ceiling where 10 + 10 does not.
+  //
+  // A GENERATED code needs the same second chance for a different reason. Within
+  // one period the seed produces identical digits, so an immediate retry
+  // resubmits the code just refused; the attempt that can succeed is across a
+  // period boundary — the race where a code is made at t+29s and checked at
+  // t+31s — so that one waits the window out first.
+  const maxOtpAsks = 2;
+  let otpAsks = 0;
 
   // Warm up before a deep login link. Some sites (e.g. Reddit) wall a COLD
   // deep-link straight to /login with a "blocked by network security" bot block,
@@ -484,7 +719,12 @@ export async function autoLogin({
   await page.waitForTimeout(settleMs);
 
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
-    await runRecipe(page, cred.recipe, { username: cred.username, password: cred.password, getOtp });
+    await runRecipe(page, cred.recipe, {
+      username: cred.username,
+      password: cred.password,
+      getOtp,
+      domains: cred.domains,
+    });
   } else if (await detectMicrosoftFlow(page)) {
     // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
     await microsoftLogin(page, cred, log);
@@ -495,18 +735,39 @@ export async function autoLogin({
 
   let errorText = null;
   for (let round = 0; round < maxRounds; round++) {
-    const state = await detectPageState(page);
+    const onLoginPage = stillOnLoginPage(page.url(), cred.loginUrl);
+    const state = { ...(await detectPageState(page)), onLoginPage };
     const outcome = classifyLogin(state);
     errorText = state.errorText || errorText;
     log(`auto-login: round ${round + 1}/${maxRounds} ${outcome} (${describeState(state)}) at ${page.url()}`);
     // A bot-block / human-verification wall never clears by waiting — stop and
     // report it (the caller advises a headed login, which a human can clear).
     if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url(), errorText };
+    // Neither of these can be finished from here at all: a mailed link
+    // authenticates whichever browser the owner opens it in — never this sealed
+    // profile — and a QR code is drawn inside a browser they cannot see. There is
+    // nothing to type either way, so waiting only burns the budget before
+    // reporting a timeout. Name it and let the caller hand the browser over.
+    if (outcome === "magic-link" || outcome === "qr-sign-in") {
+      return { ok: false, outcome, finalUrl: page.url(), errorText };
+    }
     if (outcome === "logged-in") {
+      // Never believe it on the first look. A heavy SPA a second into loading has
+      // no form, no code and no error, which is indistinguishable from success —
+      // caught live on web.whatsapp.com, whose sign-in lives at the origin root so
+      // stillOnLoginPage has no login-ish path to catch it with. The classifier
+      // cannot tell these apart from text alone (a real signed-in page can be just
+      // as terse), but a second look after a settle can: an unrendered page has
+      // moved on by then, a signed-in one says the same thing twice.
+      if (round === 0) {
+        log("auto-login: looks signed in on the first look — settling and re-checking");
+        await page.waitForTimeout(settleMs);
+        continue;
+      }
       // Positive confirmation: the form is gone AND we've left the login page.
       // Without this, a vanished password field on a block/challenge or SPA
       // re-render sealed an unauthenticated session while reporting success.
-      if (!stillOnLoginPage(page.url(), cred.loginUrl)) {
+      if (!onLoginPage) {
         return { ok: true, outcome, finalUrl: page.url() };
       }
       log("auto-login: form cleared but still on the login page — awaiting redirect");
@@ -530,7 +791,22 @@ export async function autoLogin({
       if (cred.otp === "none") {
         return { ok: false, outcome: "otp-unexpected", finalUrl: page.url() };
       }
-      await typeOtp(page, await getOtp());
+      if (otpAsks >= maxOtpAsks) {
+        // The site is still asking after we answered. Looping here re-asks the
+        // owner for a code the site has already refused once, and each ask is
+        // another ten minutes of a budget that does not have them to give.
+        // The page's own copy is the diagnosis here — "that code has expired" vs
+        // "incorrect code" is the difference between retrying and giving up.
+        return { ok: false, outcome: "otp-rejected", finalUrl: page.url(), errorText };
+      }
+      const retry = otpAsks > 0;
+      if (retry && cred.otp === "totp") {
+        // Land in the next period, so the retry is a different code than the one
+        // just refused. A human retry needs no wait: they read the current code.
+        await page.waitForTimeout(millisToNextTotpWindow(cred));
+      }
+      otpAsks += 1;
+      await typeOtp(page, await getOtp(retry));
       await page.waitForTimeout(settleMs);
       continue;
     }

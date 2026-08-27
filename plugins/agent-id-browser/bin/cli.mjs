@@ -923,7 +923,10 @@ runCli({
     // Secret injection by reference: the agent picks the element (ref) from a
     // snapshot; the vault supplies the value, which never returns to the agent.
     "fill-secret": actionCmd("fill-secret", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit === true })),
-    "fill-otp": actionCmd("fill-otp", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit !== false }), 360000),
+    // Must outlast the secure-prompt card this can raise (10 min): a shorter
+    // budget kills the child while the owner is still fetching the code from
+    // their mail, dropping a secret that was on its way back.
+    "fill-otp": actionCmd("fill-otp", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit !== false }), 11 * 60 * 1000),
     select: actionCmd("select", (f) => ({ ref: f.ref, values: csv(f.values) })),
     press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
     hover: actionCmd("hover", (f) => ({ ref: f.ref })),

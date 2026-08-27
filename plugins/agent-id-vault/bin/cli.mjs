@@ -285,7 +285,10 @@ function formFieldsForType(type, flags) {
     ];
     case "login": return [
       { name: "username", label: "Username / email", secret: false },
-      { name: "password", label: "Password" },
+      // A passwordless site has none to store — the only secret is the code that
+      // arrives out of band, collected at sign-in time rather than here. That
+      // leaves this form a single field, which is the whole point.
+      ...(flags.passwordless ? [] : [{ name: "password", label: "Password" }]),
       // Only ask for the 2FA seed up front when the policy is `totp`; otherwise
       // it's added later (when available) via `set-totp`.
       ...(flags.otp === "totp"
@@ -314,8 +317,10 @@ async function cmdAdd(flags) {
     // so it doesn't need a domain allowlist; everything else is default-deny.
     if (type === "secret") domains = ["*"];
     else if (type === "login") {
-      // `login` is browser-driven, not proxy-injected — domains is advisory. Default
-      // to the loginUrl host when given, else "*".
+      // `login` IS host-scoped — the browser gates fill-secret / fill-otp and every
+      // auto-login recipe step on this list. Default to the loginUrl host; falling
+      // back to ["*"] (as this did) minted a credential that could never be typed
+      // anywhere, because "*" is a not-applicable placeholder and matches no host.
       let host = null;
       if (flags["login-url"]) {
         try {
@@ -324,8 +329,32 @@ async function cmdAdd(flags) {
           /* invalid URL caught later by validateRecord */
         }
       }
-      domains = host ? [host] : ["*"];
+      if (!host) {
+        return outputError(
+          "login needs --domains <host[,host…]> or a --login-url to derive it from (default-deny)",
+        );
+      }
+      domains = [host];
     } else return outputError("--domains <host[,host…]> is required (default-deny)");
+  }
+
+  // Login-shape flags are checked before anything is collected: `--passwordless`
+  // decides how many fields the form has, so getting it wrong must fail here and
+  // not after the owner has typed into the wrong card.
+  let recipe = null;
+  if (type === "login") {
+    if (flags.passwordless && flags.otp !== "interactive" && flags.otp !== "totp") {
+      return outputError(
+        "--passwordless needs --otp interactive (a code mailed/SMSed at sign-in) or --otp totp",
+      );
+    }
+    if (flags.recipe != null) {
+      try {
+        recipe = JSON.parse(String(flags.recipe));
+      } catch (err) {
+        return outputError(`--recipe is not valid JSON: ${err.message}`);
+      }
+    }
   }
 
   // --form: collect the secret value(s) out of band via a one-shot localhost
@@ -472,9 +501,16 @@ async function cmdAdd(flags) {
       }
       case "login": {
         record.username = formValues ? formValues.username : flags.username;
-        record.password = await secret("password");
-        if (!record.username || !record.password) {
-          return outputError("--username and password input required for login");
+        if (!record.username) {
+          return outputError("--username input required for login");
+        }
+        if (flags.passwordless) {
+          record.passwordless = true;
+        } else {
+          record.password = await secret("password");
+          if (!record.password) {
+            return outputError("password input required for login (or pass --passwordless)");
+          }
         }
         const otp = flags.otp ? String(flags.otp) : "none";
         record.otp = otp;
@@ -502,6 +538,7 @@ async function cmdAdd(flags) {
           if (parsed.algorithm) record.algorithm = parsed.algorithm;
         }
         if (flags["login-url"]) record.loginUrl = String(flags["login-url"]);
+        if (recipe != null) record.recipe = recipe;
         if (flags.profile) {
           // The sealed browser-profile is a separate record sharing this name
           // namespace — it must not collide with the login credential's own name.
@@ -592,6 +629,71 @@ async function cmdSetTotp(flags) {
     await vault.save();
     stderr(`Set TOTP seed on '${name}' (${rec.type}).`);
     outputJson({ ok: true, name, type: rec.type, ...(rec.type === "login" ? { otp: "totp" } : {}) });
+  } finally {
+    vault.lock();
+  }
+}
+
+// Attach or replace the auto-login recipe on a `login` credential. Separate from
+// `add` because a recipe is usually derived from looking at the sign-in page, which
+// happens after the credential exists — and re-adding would re-prompt the owner for
+// the username they already entered.
+async function cmdSetRecipe(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  if (flags.recipe == null && !flags.clear) {
+    return outputError("--recipe '<JSON steps>' is required (or --clear to drop it)");
+  }
+  let recipe = null;
+  if (!flags.clear) {
+    try {
+      recipe = JSON.parse(String(flags.recipe));
+    } catch (err) {
+      return outputError(`--recipe is not valid JSON: ${err.message}`);
+    }
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "login") {
+      return outputError(`set-recipe works on 'login' credentials, not '${rec.type}'`);
+    }
+    if (flags.clear) delete rec.recipe;
+    else rec.recipe = recipe;
+    vault.add(rec); // re-validates the step vocabulary + upserts
+    await vault.save();
+    stderr(flags.clear ? `Cleared the recipe on '${name}'.` : `Set the recipe on '${name}'.`);
+    outputJson({ ok: true, name, steps: flags.clear ? 0 : recipe.length });
+  } finally {
+    vault.lock();
+  }
+}
+
+// Replace the host allowlist on an existing credential. Needed because `domains`
+// is load-bearing for a `login` — the browser refuses a secret anywhere off it, and
+// auto-login refuses to navigate off it — while a sign-in that redirects between
+// subdomains only reveals which hosts it needs once it has been driven. Without
+// this the only fix is remove + re-add, which asks the owner for the secret again.
+async function cmdSetDomains(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const domains = parseDomains(flags);
+  if (domains.length === 0) {
+    return outputError("--domains <host[,host…]> is required (wildcards like *.example.com are allowed)");
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    const previous = rec.domains;
+    rec.domains = domains;
+    vault.add(rec); // re-validates + upserts (createdAt preserved)
+    await vault.save();
+    stderr(`Set domains on '${name}': ${previous.join(", ")} -> ${domains.join(", ")}.`);
+    outputJson({ ok: true, name, domains });
   } finally {
     vault.lock();
   }
@@ -1240,8 +1342,16 @@ function printHelp() {
       "      oauth2: --token-endpoint URL --client-id ID [--client-secret-env V]",
       "              --refresh-token-file F [--scope S]   (auto-refreshes access tokens)",
       "      login:  --login-url URL [--otp none|totp|interactive] [--profile NAME]",
+      "              [--passwordless] [--recipe '<JSON steps>']",
       "              --form captures username/password (+ TOTP seed when --otp totp);",
+      "              --passwordless drops the password field: the site has none and",
+      "              mails/SMSes a code at sign-in (needs --otp interactive|totp)",
       "              driven by `agent-id-browser auto-login`, not the HTTP proxy",
+      "  set-domains --name N --domains H[,H…]   replace the host allowlist",
+      "              a sign-in that redirects between subdomains needs them all",
+      "  set-recipe --name N (--recipe '<JSON steps>' | --clear)",
+      "              attach/replace the auto-login recipe on a login cred; steps are",
+      "              navigate|fill|type|click|press|wait with {username}/{password}/{otp}",
       "  set-totp --name N [--form]   attach/update a 2FA seed on a login|totp cred",
       "              accepts a base32 secret or an otpauth:// URI (use when 2FA is",
       "              enabled after the login was stored); else --seed-file/-env/stdin",
@@ -1291,6 +1401,8 @@ const commands = {
   init: cmdInit,
   add: cmdAdd,
   "set-totp": cmdSetTotp,
+  "set-recipe": cmdSetRecipe,
+  "set-domains": cmdSetDomains,
   "set-access": cmdSetAccess,
   generate: cmdGenerate,
   show: cmdShow,

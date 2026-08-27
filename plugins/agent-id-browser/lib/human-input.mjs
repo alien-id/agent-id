@@ -108,6 +108,11 @@ export async function humanMove(page, x, y, { rng = Math.random } = {}) {
 // visible match; fall back to `.first()` if none turns up so `locate`'s own
 // waitFor still yields a normal "not visible" timeout. `root` is a Page OR Frame.
 async function firstVisible(root, selector, timeout) {
+  // An already-narrowed Locator passes through. A caller that walked the DOM
+  // itself — picking a button by its visible label, say — should not have to
+  // invent a selector string to get human-shaped input, and inventing one is how
+  // you end up clicking a different element than the one you inspected.
+  if (selector && typeof selector.isVisible === "function") return selector;
   const loc = root.locator(selector);
   const deadline = Date.now() + Math.max(0, timeout);
   for (;;) {
@@ -140,7 +145,10 @@ async function locate(root, selector, timeout) {
 // a coordinate would skip those checks and silently miss when anything covers
 // the point — so we keep the human motion but not the fragile raw click.
 export async function humanClick(page, selector, { rng = Math.random, timeout = 15000, root = page } = {}) {
-  if (!humanInputEnabled()) return void (await root.click(selector, { timeout }));
+  if (!humanInputEnabled()) {
+    if (typeof selector?.click === "function") return void (await selector.click({ timeout }));
+    return void (await root.click(selector, { timeout }));
+  }
   const el = await locate(root, selector, timeout);
   // boundingBox is relative to the main-frame viewport even for iframe elements,
   // so page.mouse can travel to it.

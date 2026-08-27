@@ -20,11 +20,11 @@
 
 import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
 import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
-import { hostMatchesAllowlist, validateAccessFields } from "./access.mjs";
+import { assertHostAllowed, hostMatchesAllowlist, validateAccessFields } from "./access.mjs";
 
 // Domain matching lives in access.mjs (access rules share the syntax); kept
 // exported here for the proxy/browser consumers that import it from store.
-export { hostMatchesAllowlist };
+export { assertHostAllowed, hostMatchesAllowlist };
 
 export const CREDENTIAL_TYPES = Object.freeze([
   "bearer",
@@ -44,6 +44,18 @@ export const CREDENTIAL_TYPES = Object.freeze([
 
 // Allowed `otp` policies on a `login` credential.
 export const LOGIN_OTP_MODES = Object.freeze(["none", "totp", "interactive"]);
+
+// The recipe step vocabulary auto-login can execute (runRecipe's switch). Kept in
+// step with it by hand — validation happens on write, so a drift shows up as a
+// recipe the vault accepts and runRecipe then rejects at the `default` arm.
+const LOGIN_RECIPE_ACTIONS = Object.freeze([
+  "navigate",
+  "fill",
+  "type",
+  "click",
+  "press",
+  "wait",
+]);
 
 // A token endpoint must be reached over TLS — the refresh token + client secret
 // travel in its request body. The only carve-out is loopback (local dev / tests),
@@ -241,15 +253,32 @@ export function validateRecord(rec) {
     }
     case "login": {
       // A direct service login the sealed browser (agent-id-browser) drives — NOT
-      // proxy-injected (`domains` is advisory for this type, like browser-profile /
-      // secret). `otp` chooses how a 2FA step is answered: `none` (no 2FA), `totp`
-      // (generate from a stored seed; requires `totpSecret`), or `interactive`
-      // (ask the human for the current code over the secure-prompt channel).
-      requireNonEmpty(rec, ["username", "password"]);
+      // proxy-injected. `otp` chooses how a one-time code is answered: `none` (no
+      // code step), `totp` (generate from a stored seed; requires `totpSecret`), or
+      // `interactive` (ask the human for the current code over the secure-prompt
+      // channel).
+      //
+      // `domains` is NOT advisory here, unlike browser-profile / secret: the browser
+      // gates fill-secret / fill-otp on it, and auto-login gates every recipe step
+      // and navigation on it. A login credential scoped to a host it will never be
+      // used on simply cannot be typed.
+      //
+      // `passwordless` marks a site with no password at all — an identifier is
+      // submitted and a code arrives out of band (mail, SMS). It is deliberately a
+      // separate axis from `otp`, so "password AND an e-mailed code" stays
+      // expressible; collapsing the two would make the pair indistinguishable.
+      requireNonEmpty(rec, ["username"]);
+      if (!rec.passwordless) requireNonEmpty(rec, ["password"]);
       const otp = rec.otp == null ? "none" : rec.otp;
       if (!LOGIN_OTP_MODES.includes(otp)) {
         throw new Error(
           `Credential ${rec.name}: otp must be one of ${LOGIN_OTP_MODES.join(", ")}`,
+        );
+      }
+      if (rec.passwordless && otp === "none") {
+        throw new Error(
+          `Credential ${rec.name}: a passwordless login needs otp=interactive or totp — ` +
+            "with no password and no code step there is nothing to sign in with",
         );
       }
       if (otp === "totp") requireNonEmpty(rec, ["totpSecret"]);
@@ -263,8 +292,24 @@ export function validateRecord(rec) {
       if (rec.profile != null && (typeof rec.profile !== "string" || rec.profile.length === 0)) {
         throw new Error(`Credential ${rec.name}: profile must be a non-empty string`);
       }
-      if (rec.recipe != null && !Array.isArray(rec.recipe)) {
-        throw new Error(`Credential ${rec.name}: recipe must be an array of steps`);
+      if (rec.recipe != null) {
+        if (!Array.isArray(rec.recipe)) {
+          throw new Error(`Credential ${rec.name}: recipe must be an array of steps`);
+        }
+        // Validated on the way IN, not on the way out: an unknown action used to
+        // surface as a mid-login throw from runRecipe, after the browser was open
+        // and possibly after the owner had typed a code.
+        rec.recipe.forEach((step, i) => {
+          if (!step || typeof step !== "object" || Array.isArray(step)) {
+            throw new Error(`Credential ${rec.name}: recipe step ${i} must be an object`);
+          }
+          if (!LOGIN_RECIPE_ACTIONS.includes(step.action)) {
+            throw new Error(
+              `Credential ${rec.name}: recipe step ${i} has action "${step.action}" — ` +
+                `must be one of ${LOGIN_RECIPE_ACTIONS.join(", ")}`,
+            );
+          }
+        });
       }
       if (
         rec.selectors != null &&
@@ -344,6 +389,19 @@ export function listMetadata(payload) {
     // so an agent can see which profile is which without opening the record.
     ...(c.account ? { account: c.account } : {}),
     ...(c.type === "browser-profile" ? { headless: c.headless !== false } : {}),
+    // login: the non-secret shape of the sign-in, so a caller can tell what a
+    // stored credential will ask for before driving it — whether a password
+    // exists at all, how a code is answered, where to start, and whether an
+    // explicit recipe is on file. Without these, re-using a stored login means
+    // guessing.
+    ...(c.type === "login"
+      ? {
+          otp: c.otp || "none",
+          passwordless: c.passwordless === true,
+          loginUrl: c.loginUrl || null,
+          hasRecipe: Array.isArray(c.recipe) && c.recipe.length > 0,
+        }
+      : {}),
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     lastUsedAt: c.lastUsedAt || null,

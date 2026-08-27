@@ -56,7 +56,7 @@ export const TOOLS = [
   {
     name: "vault_add",
     description:
-      "Store a credential in the Alien vault. You supply only name/type/domains/access (and login_url for logins); the owner types the secret values into a secure card — they never reach you. Types: bearer, basic, header, query, cookie, oauth2, login, totp.",
+      "Store a credential in the Alien vault. You supply only name/type/domains/access (and login_url for logins); the owner types the secret values into a secure card — they never reach you. If the site has NO password — it asks for an e-mail/phone and sends a code — pass passwordless=true with otp=\"interactive\": the card then has a single identifier field, and the code is asked for separately at sign-in time. Never invent a password for such a site and never ask the owner for one. Types: bearer, basic, header, query, cookie, oauth2, login, totp.",
     kind: "vault",
     inputSchema: {
       type: "object",
@@ -67,10 +67,22 @@ export const TOOLS = [
           enum: ["bearer", "basic", "header", "query", "cookie", "oauth2", "login", "totp"],
           description: "Credential type.",
         },
-        domains: strArr("Host allowlist this credential may be used on (e.g. api.github.com)."),
+        domains: strArr("Host allowlist this credential may be used on (e.g. api.github.com). For type=login it is enforced: sign-ins often hop subdomains, so cover the whole flow (e.g. *.example.com) rather than just the login page host."),
         access: { type: "string", enum: ["ro", "rw"], description: "Access level (default rw)." },
         description: str("Optional human-readable description."),
         login_url: str("For type=login only: the sign-in page URL (required for browser auto-login)."),
+        otp: {
+          type: "string",
+          enum: ["none", "totp", "interactive"],
+          description:
+            "For type=login: how a one-time code is answered. `interactive` asks the owner for the code at sign-in time.",
+        },
+        passwordless: {
+          type: "boolean",
+          description:
+            "For type=login: the site has no password — an identifier is submitted and a code arrives by mail/SMS. Requires otp=interactive (or totp, where a seed covers it). The owner's card then has a single field.",
+        },
+        recipe: str("For type=login: JSON array of sign-in steps (navigate|fill|type|click|press|wait) with {username}/{password}/{otp}."),
       },
       required: ["name", "type"],
       additionalProperties: false,
@@ -84,6 +96,9 @@ export const TOOLS = [
       ...(a.access === "ro" || a.access === "rw" ? ["--access", a.access] : []),
       ...(a.description ? ["--description", String(a.description)] : []),
       ...(a.login_url ? ["--login-url", String(a.login_url)] : []),
+      ...(a.otp ? ["--otp", String(a.otp)] : []),
+      ...(a.passwordless ? ["--passwordless"] : []),
+      ...(a.recipe ? ["--recipe", String(a.recipe)] : []),
     ],
   },
   {

@@ -56,6 +56,19 @@ test("an unexpected OTP tells you which credential field is missing", () => {
   assert.match(e.message, /set-totp|interactive/);
 });
 
+test("an unexpected OTP also names the case where the site has no password at all", () => {
+  // This outcome is where a passwordless site lands when it was stored as an
+  // ordinary login — the agent is here precisely because its first guess about
+  // the site was wrong, and this message is the only sentence it gets to correct
+  // itself from. It has to name `overwrite` too: re-adding an existing name
+  // without it returns the stored entry and the agent loops.
+  const e = escalationFor("otp-unexpected", ctx);
+  assert.match(e.message, /passwordless/);
+  assert.match(e.message, /overwrite/);
+  assert.match(e.message, /no password field/i);
+  assert.match(e.message, /do not retry as-is/i);
+});
+
 test("every outcome yields one of the three actions", () => {
   const actions = new Set([OWNER_MUST_DRIVE, OWNER_MUST_CONFIRM, FIX_CREDENTIAL]);
   for (const outcome of ["blocked", "confirm-timeout", "failed", "otp-unexpected", "weird", ""]) {
@@ -63,4 +76,34 @@ test("every outcome yields one of the three actions", () => {
     assert.ok(actions.has(e.action), `${outcome} → ${e.action}`);
     assert.ok(e.reason && e.message, `${outcome} needs a reason and a message`);
   }
+});
+
+test("magic-link tells the agent there is nothing to type, and where the link must be opened", () => {
+  const { action, reason, message } = escalationFor("magic-link", {
+    credName: "substack",
+    profile: "substack",
+  });
+  assert.equal(action, OWNER_MUST_DRIVE);
+  assert.equal(reason, "magic_link_sign_in");
+  // The generic fallback blames big-IdP automation, which is wrong here and sends
+  // the agent looking for a password or a code that does not exist.
+  assert.ok(!/Google, Microsoft/.test(message));
+  assert.match(message, /nothing to type/i);
+  assert.match(message, /do not raise a secure card/i);
+  // Clicking it anywhere else authenticates that browser, not the sealed profile.
+  assert.match(message, /browser view for profile 'substack'/);
+});
+
+test("qr-sign-in sends the owner to the browser view, because that is where the code is drawn", () => {
+  const { action, reason, message } = escalationFor("qr-sign-in", {
+    credName: "telegram",
+    profile: "telegram",
+  });
+  assert.equal(action, OWNER_MUST_DRIVE);
+  assert.equal(reason, "qr_code_sign_in");
+  assert.match(message, /nothing to type/i);
+  // The code is rendered inside a headless browser the owner cannot see, so the
+  // viewport is not a last resort here — it is the only way this signs in at all.
+  assert.match(message, /browser view for profile 'telegram'/);
+  assert.ok(!/Google, Microsoft/.test(message));
 });

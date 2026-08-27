@@ -32,7 +32,7 @@ import { sealProfile } from "./profile-store.mjs";
 import { startStreamServer } from "./stream-server.mjs";
 import { loadCodecConfig } from "./stream-encoder.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
-import { SECRET_FIELDS, hostMatchesAllowlist } from "@alien-id/agent-id-vault/lib/store.mjs";
+import { SECRET_FIELDS, assertHostAllowed } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { resolveOtp } from "./auto-login.mjs";
 import {
   applyAccessGuard,
@@ -687,13 +687,7 @@ export function assertFillAllowed(rec, host, field = null) {
       `"${field}" is sealed (generated in-vault) and cannot be typed into a page — use the proxy`,
     );
   }
-  if (!hostMatchesAllowlist(host, rec.domains)) {
-    throw new Error(
-      `refusing to type this credential on "${host || "(no host)"}" — not on its domain ` +
-        `allowlist (${(rec.domains || []).join(", ") || "none"}). Add the host to the ` +
-        "credential's domains (wildcards like *.example.com are allowed).",
-    );
-  }
+  assertHostAllowed(host, rec.domains, "refusing to type this credential on");
 }
 
 async function uploadFiles(page, target, ref, files) {

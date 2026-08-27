@@ -11,8 +11,15 @@
 //                    gone but we are NOT in — must not be mistaken for success.
 //   "confirm-on-device" — the owner must approve on another device (a push
 //                    prompt); nothing is typed here, so the caller waits
-//   "otp-required" — a second-factor affordance is present (a one-time-code input,
-//                    an OTP-ish field name, or body copy describing 2FA)
+//   "qr-sign-in"   — the sign-in completes by scanning a QR code rendered on THIS
+//                    page with the service's phone app. Nothing to type, and the
+//                    owner cannot see the code unless the browser view is opened.
+//   "magic-link"   — the sign-in completes by clicking a link in an e-mail. There
+//                    is no code to ask for and the link lands in whatever browser
+//                    the owner opens it in, not this profile — the caller cannot
+//                    finish it and must hand the browser over.
+//   "otp-required" — a one-time-code affordance is present (a one-time-code input,
+//                    an OTP-ish field name, or body copy naming a code)
 //   "failed"       — a credential error is shown and there is no OTP affordance
 //   "logged-in"    — no password field remains and nothing looks gated
 //   "unknown"      — indeterminate (page may not have advanced yet; caller waits)
@@ -33,9 +40,74 @@
 const OTP_FIELD_RE =
   /(otp|otc|totp|\bmfa\b|2fa|two[-_ ]?factor|one[-_ ]?time|verif(?:y|ication)|authenticator|auth[-_ ]?code|security[-_ ]?code|sms[-_ ]?code)/i;
 
-// Body copy that describes a 2FA / verification step.
-const OTP_BODY_RE =
-  /(verification code|one[- ]?time (?:code|password|passcode)|two[- ]?factor|2-step|authenticator app|enter the code|security code|\b6[- ]?digit\b|check your phone|approve.*sign)/i;
+// Body copy that describes a one-time-code step. Every alternative names the code
+// explicitly — a bare "code" would match promo/postal copy on an ordinary page.
+// The vocabulary is deliberately wide on the QUALIFIER because sites disagree on
+// what to call the same thing: Slack spells the digit count out ("six-digit"),
+// Notion says "login code", others say confirmation / access / one-time. Missing a
+// qualifier here is not a cosmetic gap — with no `autocomplete="one-time-code"` on
+// the field, this regex is the only thing standing between a code screen and a
+// false "logged-in".
+//
+// "code" is matched only with a qualifier attached, as something that was SENT to
+// you, or in the fixed phrase "enter the code" — never bare, which would fire on
+// the promo/postal/coupon copy that ordinary signed-in pages are full of.
+//
+// `access` is deliberately NOT a qualifier: "meeting access code", "access code at
+// checkout" are ordinary copy, and the sign-in sense of it is already covered by
+// the "sent to you" clauses below.
+const CODE_WORD =
+  "(?:verification|security|confirmation|login|sign[- ]?in|one[- ]?time|authentication|auth|otp|passcode|(?:\\d|four|five|six|seven|eight)[- ]?digit)";
+const OTP_BODY_RE = new RegExp(
+  [
+    `${CODE_WORD}[- ]?code`,
+    "one[- ]?time (?:code|password|passcode)",
+    // A code described by where it came from — no promo/postal copy says this.
+    "code (?:we |that we )?(?:just )?(?:sent|e-?mailed|texted)",
+    `(?:sent|e-?mailed|texted) (?:you )?an? (?:${CODE_WORD}[- ]?)?code`,
+    `check your (?:e-?mail|inbox|phone) for (?:a|the|your) (?:${CODE_WORD}[- ]?)?code`,
+    // Precise on its own: "enter your promo code" does not contain it. It was
+    // dropped once on the opposite (and wrong) assumption, which cost the
+    // unqualified code screens Notion and friends render.
+    "enter the code\\b",
+    "two[- ]?factor",
+    "2-step",
+    "authenticator app",
+    "\\b(?:\\d|four|five|six|seven|eight)[- ]digit\\b",
+    "check your phone",
+    "approve.*sign",
+  ].join("|"),
+  "i",
+);
+
+// Body copy for a sign-in that completes by clicking a link in an e-mail. Nothing
+// is typed on this page and there is no code to ask for, so it must never be
+// mistaken for either an OTP step or a finished login. The agent cannot finish it:
+// the link lands in whatever browser the owner opens it in, not this sealed
+// profile — so the honest outcome is to hand the browser over.
+// Every alternative ties the link to signing in. A bare "sent you a link" is
+// ordinary chatter on a signed-in page ("Alice sent you a link"), and so is
+// "open the link in a new tab" — matching either turns a successful login into a
+// handover, which is worse than the false success this outcome exists to prevent.
+const MAGIC_LINK_RE =
+  /((?:magic|login|sign[- ]?in|confirmation) link|link to (?:log|sign) ?in\b|(?:click|open) the (?:magic |login |sign[- ]?in )?link (?:in|we) [^.]{0,30}\b(?:e-?mail|inbox|message)\b)/i;
+
+// Body copy for a sign-in whose credential is a QR code on THIS screen, scanned
+// with the service's phone app (Telegram Web, WhatsApp Web, Discord). Like a magic
+// link there is nothing to type — but unlike it, the thing the owner needs is
+// rendered here, in a browser they cannot see unless the viewport is opened for
+// them. Found by running the classifier against telegram.org's real markup, where
+// a screen with NO input of any kind read as a finished login.
+//
+// Every alternative ties the code to signing in, on word boundaries: without them
+// "signin" is found inside "designing" and "assigning", so a storefront page about
+// QR codes classified as a sign-in screen.
+//
+// "…to sign in ON ANOTHER DEVICE" is excluded: that is the linked-devices panel of
+// an account you are ALREADY signed into (WhatsApp, Telegram settings), where the
+// QR signs in somewhere else. Same words, opposite meaning.
+const QR_SIGN_IN_RE =
+  /(\b(?:log|sign) ?in\b[^\n]{0,40}\bqr\b|\bqr\b[^\n]{0,40}\bto (?:log|sign) ?in\b(?! on (?:another|your|other|a second)\b)|\bscan (?:to|and) (?:log|sign) ?in\b|point your phone at this screen)/i;
 
 // Body copy for a challenge the owner answers on ANOTHER device: a push prompt
 // ("tap Yes on your phone"), a number match ("tap 42"), or an app notification.
@@ -70,19 +142,25 @@ const BLOCK_RE =
 /**
  * Classify a login attempt's current page state.
  *
- *   hasPasswordField — a visible password input is still present
- *   hasOtpField      — a strong one-time-code input is present
- *                      (e.g. autocomplete="one-time-code")
- *   otpFieldNames    — candidate field name/id/placeholder strings to test against
- *                      the OTP token regex
- *   bodyText         — visible page text
- *   errorText        — optional focused error text (role=alert etc.)
+ *   hasPasswordField   — a visible password input is still present
+ *   hasIdentifierField — a visible e-mail / username / phone input is still present
+ *   onLoginPage        — the browser is still sitting on the credential's sign-in
+ *                        page (the caller's `stillOnLoginPage`). Only there does an
+ *                        identifier field mean "the sign-in has not started"
+ *   hasOtpField        — a strong one-time-code input is present
+ *                        (e.g. autocomplete="one-time-code")
+ *   otpFieldNames      — candidate field name/id/placeholder strings to test against
+ *                        the OTP token regex
+ *   bodyText           — visible page text
+ *   errorText          — optional focused error text (role=alert etc.)
  *
- * Returns "blocked" | "confirm-on-device" | "otp-required" | "failed"
- *       | "logged-in" | "unknown".
+ * Returns "blocked" | "confirm-on-device" | "magic-link" | "qr-sign-in"
+ *       | "otp-required" | "failed" | "logged-in" | "unknown".
  */
 export function classifyLogin({
   hasPasswordField = false,
+  hasIdentifierField = false,
+  onLoginPage = false,
   hasOtpField = false,
   otpFieldNames = [],
   bodyText = "",
@@ -98,6 +176,15 @@ export function classifyLogin({
   // Device approval only when there is nothing to type: an SMS step can show
   // "check your phone" AND a code field, and that one is an ordinary OTP.
   const confirmAffordance = !codeInput && CONFIRM_BODY_RE.test(bodyText);
+  // Same "nothing to type here" guard as the device prompt: a page that offers a
+  // code input AND mentions a link (Slack does both) is an ordinary OTP step.
+  // Both of these mean "there is nothing on this page to type", so they must yield
+  // to any sign that a code is on offer — not merely to a strong code INPUT. A
+  // six-box code screen whose fields carry no autocomplete hint sets `codeInput`
+  // false, and those are exactly the screens this feature exists for: guarding on
+  // the input alone sent them to a handover instead of raising the code card.
+  const magicLinkAffordance = !otpAffordance && MAGIC_LINK_RE.test(bodyText);
+  const qrAffordance = !otpAffordance && QR_SIGN_IN_RE.test(bodyText);
   const hasError = ERROR_RE.test(String(errorText || "")) || ERROR_RE.test(bodyText);
 
   // A bot-block / human-verification wall: the form is gone but we are NOT in.
@@ -108,15 +195,34 @@ export function classifyLogin({
   // so treating it as "otp-required" sends the caller looking for a code that
   // will never appear and the login stalls until it times out.
   if (confirmAffordance) return "confirm-on-device";
+  // A mailed link, before the OTP check for the same reason: there is no code on
+  // this page to hunt for, and before "logged-in" because "we sent you a link" on
+  // a page with no form left is otherwise indistinguishable from being signed in
+  // — which would seal an unauthenticated profile and report success.
+  if (magicLinkAffordance) return "magic-link";
+  // A QR sign-in, for the same reason and in the same place: a page whose only
+  // affordance is a code to scan has no form left, so it is otherwise
+  // indistinguishable from being signed in.
+  if (qrAffordance) return "qr-sign-in";
   // An OTP affordance is the strongest signal the password step succeeded and a
   // second factor is now being requested — check it next.
   if (otpAffordance) return "otp-required";
   // No second factor, but a credential error → the password was rejected.
   if (hasError) return "failed";
+  // An identifier prompt with no password beside it is a sign-in that has not
+  // started, not one that finished: the e-mail-first step of a passwordless flow,
+  // or the first screen of a two-step IdP.
+  //
+  // Only while we are still ON the sign-in page, though. `input[type=email]` is
+  // also the newsletter box in the footer of an enormous number of ordinary
+  // signed-in pages, and without this qualifier every one of them classified as
+  // "the sign-in has not started" — turning a login that had actually succeeded,
+  // password ones included, into a ten-round wait and a `timeout`.
+  if (onLoginPage && hasIdentifierField && !hasPasswordField) return "unknown";
   // No password field left and nothing gated → we're through.
   if (!hasPasswordField) return "logged-in";
   // Password field still present, no error, no OTP → indeterminate.
   return "unknown";
 }
 
-export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, ERROR_RE, BLOCK_RE };
+export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, QR_SIGN_IN_RE, ERROR_RE, BLOCK_RE };
