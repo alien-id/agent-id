@@ -56,7 +56,7 @@ import { installCodecs, loadCodecConfig } from "../lib/stream-encoder.mjs";
 import { escalationFor } from "../lib/escalation.mjs";
 import { autoLogin } from "../lib/auto-login.mjs";
 import { looksLoggedOut } from "../lib/session.mjs";
-import { runSession, callSession, pruneDeadSessions } from "../lib/session-server.mjs";
+import { runSession, callSession, closeLiveSession, pruneDeadSessions } from "../lib/session-server.mjs";
 import { hasOwnerApproval, unlockViaOwnerApproval } from "../lib/unlock.mjs";
 import {
   ACCESS_LEVELS,
@@ -290,6 +290,10 @@ async function cmdLogin(flags) {
       // one cookie jar — sign into Google once and every "Sign in with Google" site
       // reuses it. `--fresh` discards the existing session and starts clean.
       const existing = vault.get(name);
+      // Same hazard as auto-login: a live daemon would re-seal its stale copy
+      // over this login on close. Close it first (and wait for its reseal) so
+      // the profile we unseal below is the latest one.
+      await closeLiveSession(stateDir, name, { log: stderr });
       const resuming =
         flags.fresh !== true &&
         existing &&
@@ -456,13 +460,29 @@ async function cmdAutoLogin(flags) {
     const dek = reuse ? reuse.dek : newDek();
     const headless = resolveHeadless(flags) ?? true;
 
+    // A live daemon on the target profile would keep serving its pre-login
+    // copy and re-seal it over ours on close. See closeLiveSession.
+    const closedLiveSession = await closeLiveSession(stateDir, targetProfile, { log: stderr });
+
     const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-autologin-"));
     try {
       const ctx = await launchContext({ profileDir: work, headless });
       let result;
+      // What the engine saw, round by round — the failure report carries it so
+      // a wrong password is distinguishable from a changed form or a redirect
+      // that was never awaited. Never includes a secret.
+      const trace = [];
       try {
         const page = ctx.pages()[0] || (await ctx.newPage());
-        result = await autoLogin({ page, cred, env: process.env, log: (m) => stderr(m) });
+        result = await autoLogin({
+          page,
+          cred,
+          env: process.env,
+          log: (m) => {
+            stderr(m);
+            trace.push(m);
+          },
+        });
       } finally {
         // Close so the context flushes cookies/storage to the work dir before sealing.
         await ctx.close().catch(() => {});
@@ -485,6 +505,8 @@ async function cmdAutoLogin(flags) {
           reason,
           profile: targetProfile,
           finalUrl: result ? result.finalUrl : null,
+          ...(result && result.errorText ? { pageError: result.errorText } : {}),
+          trace,
           message,
         });
         process.exitCode = 1;
@@ -520,7 +542,12 @@ async function cmdAutoLogin(flags) {
         finalUrl: result.finalUrl,
         access: sessionAccess,
         sealedBytes: bytes,
-        message: `Logged in and sealed session '${targetProfile}'. Reuse it: \`read --name ${targetProfile} --url …\`.`,
+        closedLiveSession,
+        message:
+          `Logged in and sealed session '${targetProfile}'. Reuse it: \`read --name ${targetProfile} --url …\`.` +
+          (closedLiveSession
+            ? ` The '${targetProfile}' session that was open has been closed; open it again to use the new login.`
+            : ""),
       });
     } finally {
       await fs.rm(work, { recursive: true, force: true });

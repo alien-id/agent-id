@@ -1852,6 +1852,58 @@ export async function runSession({
   return { port };
 }
 
+// Close a live session daemon for `name` (if any) and wait until it has
+// re-sealed its profile and exited. Returns true when a session was closed,
+// false when none was open.
+//
+// Every command that SEALS a profile (`login`, `auto-login`) must call this
+// first. A daemon holds an unsealed copy of the profile taken at `open` time,
+// and `finalize()` re-seals that copy on close — so sealing a fresh login
+// underneath a live daemon is lost twice over: the next `open` reuses the
+// running daemon (never re-reading the vault), and its eventual close writes
+// the stale, logged-out copy back over the new session. Observed end to end:
+// auto-login reported `logged-in`, `open` of the same profile showed the login
+// form, and the sealed login was gone after the close.
+//
+// Waiting for the session FILE to disappear is what makes this safe: finalize()
+// removes it only after the reseal, so once it is gone the profile file is
+// stable and ours to overwrite. A stale file (daemon died without finalize) is
+// removed so the next open does not keep trying to reach it.
+export async function closeLiveSession(stateDir, name, { log = () => {}, timeoutMs = 30000 } = {}) {
+  const file = sessionFilePath(stateDir, name);
+  let info = null;
+  try {
+    info = JSON.parse(await fs.readFile(file, "utf8"));
+  } catch {
+    return false;
+  }
+  log(`Closing the open '${name}' session (pid ${info.pid ?? "?"}) so the new login is not overwritten by its stale copy.`);
+  try {
+    await callSession(stateDir, name, "close", {}, timeoutMs);
+  } catch (err) {
+    if (err && err.code === "NO_SESSION") {
+      await fs.rm(file, { force: true }).catch(() => {});
+      return false;
+    }
+    throw err;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(file);
+    } catch {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const e = new Error(
+    `session '${name}' did not finish closing within ${Math.round(timeoutMs / 1000)}s — ` +
+      "its re-seal would race the new login; retry once it is gone (`sessions` lists it)",
+  );
+  e.code = "SESSION_BUSY";
+  throw e;
+}
+
 // Client: send one action to a running session, return its JSON reply.
 export async function callSession(stateDir, name, action, params = {}, timeoutMs = 35000) {
   let info = null;

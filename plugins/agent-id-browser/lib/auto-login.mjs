@@ -253,8 +253,27 @@ async function detectPageState(page) {
     // Language-independent block signal: a visible challenge widget. Fed to
     // classifyLogin via its `blocked` input so it wins over "logged-in".
     const blocked = all(challengeSel).some(visible);
-    return { hasPasswordField, hasOtpField, otpFieldNames, bodyText, blocked };
+    // The page's own error/alert copy, surfaced verbatim in a failure report so
+    // a rejection the classifier cannot read is still visible to the caller.
+    const errorText =
+      all('[role="alert"], [aria-live="assertive"], [class*="error" i], [class*="alert" i], [class*="invalid" i]')
+        .filter(visible)
+        .map((e) => (e.innerText || "").trim())
+        .filter(Boolean)
+        .join(" | ")
+        .slice(0, 300) || null;
+    return { hasPasswordField, hasOtpField, otpFieldNames, bodyText, blocked, errorText };
   }, CHALLENGE_WIDGET_SEL);
+}
+
+// One line of page state for the trace: what the classifier saw, never any
+// secret (field values are not read).
+function describeState(s) {
+  const bits = [`pw=${s.hasPasswordField ? "visible" : "gone"}`];
+  if (s.hasOtpField) bits.push("otp-field");
+  if (s.blocked) bits.push("challenge-widget");
+  if (s.errorText) bits.push(`error="${s.errorText.slice(0, 120)}"`);
+  return bits.join(" ");
 }
 
 // Best-effort fill of the OTP field, then submit.
@@ -474,12 +493,15 @@ export async function autoLogin({
   }
   await page.waitForTimeout(settleMs);
 
+  let errorText = null;
   for (let round = 0; round < maxRounds; round++) {
-    const outcome = classifyLogin(await detectPageState(page));
-    log(`auto-login: ${outcome}`);
+    const state = await detectPageState(page);
+    const outcome = classifyLogin(state);
+    errorText = state.errorText || errorText;
+    log(`auto-login: round ${round + 1}/${maxRounds} ${outcome} (${describeState(state)}) at ${page.url()}`);
     // A bot-block / human-verification wall never clears by waiting — stop and
     // report it (the caller advises a headed login, which a human can clear).
-    if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url() };
+    if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url(), errorText };
     if (outcome === "logged-in") {
       // Positive confirmation: the form is gone AND we've left the login page.
       // Without this, a vanished password field on a block/challenge or SPA
@@ -489,7 +511,7 @@ export async function autoLogin({
       }
       log("auto-login: form cleared but still on the login page — awaiting redirect");
     } else if (outcome === "failed") {
-      return { ok: false, outcome, finalUrl: page.url() };
+      return { ok: false, outcome, finalUrl: page.url(), errorText };
     } else if (outcome === "confirm-on-device") {
       // Nothing to type: the owner approves on their own device and the page
       // advances by itself. Tell them once, then poll until it does. This is
@@ -514,5 +536,5 @@ export async function autoLogin({
     }
     await page.waitForTimeout(settleMs); // unknown / unconfirmed — settle, re-check
   }
-  return { ok: false, outcome: "timeout", finalUrl: page.url() };
+  return { ok: false, outcome: "timeout", finalUrl: page.url(), errorText };
 }
