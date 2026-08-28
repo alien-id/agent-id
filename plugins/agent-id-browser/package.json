@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-browser",
-  "version": "7.14.0",
+  "version": "7.15.0",
   "publishConfig": {
     "access": "public"
   },
@@ -34,7 +34,7 @@
   "license": "MIT",
   "dependencies": {
     "@alien-id/agent-id-core": "^7.3.1",
-    "@alien-id/agent-id-vault": "^7.4.0"
+    "@alien-id/agent-id-vault": "^7.5.0"
   },
   "optionalDependencies": {
     "patchright": "^1.61.0",
