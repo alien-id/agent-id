@@ -37,8 +37,8 @@
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
-import { assertHostAllowed } from "@alien-id/agent-id-vault/lib/store.mjs";
-import { classifyLogin } from "./login-detect.mjs";
+import { assertHostAllowed, credentialHost } from "@alien-id/agent-id-vault/lib/store.mjs";
+import { classifyLogin, codeDestination } from "./login-detect.mjs";
 import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
 // Type a secret (password / OTP) with human cadence, guarding against a
@@ -279,28 +279,37 @@ export function otpCardBudgetMs(cred, { retry = false } = {}) {
   return cred.otp === "totp" ? OTP_GLANCE_RETRY_CARD_MS : OTP_MAILBOX_RETRY_CARD_MS;
 }
 
-export function otpPromptWording(cred, { retry = false } = {}) {
-  const host = cred.loginUrl ? hostOf(cred.loginUrl) : "";
+export function otpPromptWording(cred, { retry = false, destination = null } = {}) {
+  // The site, never the credential's name: `airbnb-passwordless-again` names the
+  // agent's second attempt, and the owner is looking at Airbnb.
+  const site = credentialHost({ loginUrl: cred.loginUrl, domains: cred.domains }) || cred.name;
   // A retry card has to say why it is there. Without it the owner sees the same
   // prompt twice and cannot tell a refused code from a lost one — and for a
   // time-based code the right move is to read the CURRENT one, not retype the
   // one they just sent.
   const retryNote = retry ? "That code was not accepted — enter the current one. " : "";
+  // Where the code went, in the site's own words, or nothing. Naming the wrong
+  // channel sends the owner to an inbox the code was never sent to and then
+  // convinces them it never arrived — so with no destination the copy claims no
+  // channel and names both places to look.
+  const sentence = destination
+    ? `${site} sent a code to ${destination} — enter it to finish signing in`
+    : `${site} sent you a code — check your email or messages, then enter it here`;
   if (cred.passwordless) {
     return {
-      title: `Sign-in code for ${cred.name}`,
-      description: host
-        ? `${retryNote}${host} just sent you a code — enter it to finish signing in`
-        : retryNote.trim(),
+      title: `Sign-in code for ${site}`,
+      description: `${retryNote}${sentence}`,
       label: "Sign-in code",
-      ask: `enter the sign-in code for "${cred.name}"`,
+      ask: `enter the sign-in code for ${site}`,
     };
   }
   return {
-    title: `2FA code for ${cred.name}`,
-    description: host ? `${retryNote}Sign-in to ${host} needs your current code` : retryNote.trim(),
+    title: `2FA code for ${site}`,
+    description: destination
+      ? `${retryNote}${site} sent a code to ${destination} — enter it to finish signing in`
+      : `${retryNote}Sign-in to ${site} needs your current code`,
     label: "Current 2FA code",
-    ask: `enter the 2FA code for "${cred.name}"`,
+    ask: `enter the 2FA code for ${site}`,
   };
 }
 
@@ -313,7 +322,10 @@ export function millisToNextTotpWindow(cred, now = Date.now()) {
 
 // Resolve the one-time code for a `login` credential: generate it from a stored
 // seed, or ask the human over the secure-prompt channel.
-export async function resolveOtp(cred, { env = process.env, log = () => {}, now, retry = false } = {}) {
+export async function resolveOtp(
+  cred,
+  { env = process.env, log = () => {}, now, retry = false, destination = null } = {},
+) {
   if (cred.otp === "totp") {
     if (!cred.totpSecret) throw new Error(`login '${cred.name}': otp=totp but no totpSecret stored`);
     return generateTotp({
@@ -324,7 +336,7 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now,
       ...(now != null ? { now } : {}),
     });
   }
-  const spec = otpCardSpec(cred, { retry });
+  const spec = otpCardSpec(cred, { retry, destination });
   log(`Waiting for the ${spec.fields[0].label.toLowerCase()} via the secure prompt…`);
   const { values } = await collectSecret(spec, { env });
 
@@ -335,8 +347,8 @@ export async function resolveOtp(cred, { env = process.env, log = () => {}, now,
 // exported for the same reason `otpPromptWording` is: what the owner is shown is
 // worth asserting without standing up a prompt provider, and this is the one card
 // both auto-login and `fill_otp` raise.
-export function otpCardSpec(cred, { retry = false } = {}) {
-  const wording = otpPromptWording(cred, { retry });
+export function otpCardSpec(cred, { retry = false, destination = null } = {}) {
+  const wording = otpPromptWording(cred, { retry, destination });
 
   return {
     title: wording.title,
@@ -734,7 +746,7 @@ export async function autoLogin({
   // credential's own origins. Checked once here so a loginUrl pointing off the
   // allowlist fails before a browser goes anywhere, not after.
   assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
-  const getOtp = (retry) => resolveOtpFn(cred, { env, log, retry });
+  const getOtp = (retry, destination) => resolveOtpFn(cred, { env, log, retry, destination });
   // One run answers a code challenge twice at most, and the second attempt is
   // deliberately cheap.
   //
@@ -875,7 +887,9 @@ export async function autoLogin({
       }
       otpAsks += 1;
       try {
-        await typeOtp(page, await getOtp(retry));
+        // The code screen has just told us where it sent the code; the card is
+        // the only place that says so to the owner.
+        await typeOtp(page, await getOtp(retry, codeDestination(state.bodyText)));
       } catch (err) {
         if (err?.code !== "FORM_TIMEOUT") throw err;
         return otpTimedOut();

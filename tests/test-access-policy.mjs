@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   ACCESS_LEVELS,
   classifyBodyRead,
+  credentialHost,
   effectiveAccess,
   evaluateAccess,
   isAccessRelaxation,
@@ -370,5 +371,28 @@ describe("browser guard (pure pieces)", () => {
       guardDecision(ro, { method: "GET", url: "data:text/plain,hi", postData: null }).allowed,
       true,
     );
+  });
+});
+
+describe("credentialHost", () => {
+  it("prefers the login page's own host", () => {
+    assert.equal(
+      credentialHost({ loginUrl: "https://www.airbnb.com/login", domains: ["*.airbnb.com"] }),
+      "airbnb.com",
+    );
+  });
+
+  it("falls back to the allowlist as written, skipping wildcards", () => {
+    // A wildcard names a family of hosts rather than a site, so it is never the
+    // title. Otherwise the list is taken in order: `domains` is written
+    // broadest-first, and the site reads better on a card than the subdomain a
+    // sign-in happens to redirect through.
+    assert.equal(credentialHost({ domains: ["*.example.com", "account.example.com"] }), "account.example.com");
+    assert.equal(credentialHost({ domains: ["example.com", "account.example.com"] }), "example.com");
+  });
+
+  it("has nothing to show when the allowlist names no site", () => {
+    assert.equal(credentialHost({ domains: ["*"] }), null);
+    assert.equal(credentialHost({}), null);
   });
 });
