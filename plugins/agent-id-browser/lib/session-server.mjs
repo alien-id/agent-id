@@ -324,9 +324,18 @@ export function formSnapshotInPage(arg) {
         el.getAttribute("name") || legend,
     );
   };
+  // A control the page has taken out of the accessibility tree is not part of
+  // what it is asking for, however solid it looks. Booking.com's e-mail step
+  // carries a fully styled password input — 162x26, `visibility: visible`,
+  // `opacity: 1`, inside the viewport — inside an `aria-hidden` wrapper, and an
+  // agent that inspected the form read that as "this site wants a password" and
+  // stored a credential the site has no use for. `inert` says the same thing in
+  // the modern spelling.
   const visibleOf = (el) => {
     const r = el.getBoundingClientRect();
     const st = window.getComputedStyle(el);
+    if (el.closest('[aria-hidden="true"], [inert]')) return false;
+
     return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
   };
 
