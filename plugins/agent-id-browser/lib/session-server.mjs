@@ -329,6 +329,29 @@ export function formSnapshotInPage(arg) {
     const st = window.getComputedStyle(el);
     return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
   };
+  // Laid out is not the same as being asked for. Booking.com's e-mail step carries
+  // a fully styled password input — 162x26, `visibility: visible`, `opacity: 1`,
+  // inside the viewport — in an `aria-hidden` wrapper, and an agent that inspected
+  // the form read it as "this site wants a password" and stored a credential the
+  // site has no use for. `inert` says the same in the modern spelling.
+  //
+  // The same attribute also masks a whole page behind a modal — a cookie banner, a
+  // consent dialog — and there every control under it is wanted, just covered. What
+  // separates the two is whether the page is asking for anything ELSE: a staged step
+  // sits beside a live field, a masked page has none. Buttons do not count towards
+  // that (a dialog's "Accept" would answer for the page it is covering).
+  //
+  // A staged control is reported and flagged rather than dropped: a page that hides
+  // a control it does in fact want is an authoring mistake we should still be able
+  // to fill, and dropping it would leave the agent no ref to fill it with.
+  //
+  // `detectPageState` in auto-login.mjs carries the same rule. Both run inside the
+  // page, so neither can import it; the duplication is the price of that.
+  const staged = (el) => !!el.closest('[aria-hidden="true"], [inert]');
+  const asksSomethingElse = Array.from(
+    document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]),select,textarea'),
+  ).some((el) => visibleOf(el) && !staged(el));
+  const stagedOf = (el) => staged(el) && asksSomethingElse;
 
   const controls = [];
   let i = 0;
@@ -346,9 +369,10 @@ export function formSnapshotInPage(arg) {
       el.getAttribute("type") || (tag === "input" ? el.type || "text" : tag === "select" ? "select" : tag),
       40,
     ).toLowerCase();
-    const visible = visibleOf(el);
+    const laidOut = visibleOf(el);
+    const visible = laidOut && !stagedOf(el);
     // Hidden native controls remain actionable through setChecked/setInputFiles.
-    if (!visible && !["checkbox", "radio", "file"].includes(type)) continue;
+    if (!laidOut && !["checkbox", "radio", "file"].includes(type)) continue;
     const form = el.closest("form");
     const role = el.getAttribute("role") || tag;
     const entry = {

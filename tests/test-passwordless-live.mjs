@@ -25,6 +25,7 @@ import http from "node:http";
 import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
 import { autoLogin, detectPageState } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { classifyLogin } from "../plugins/agent-id-browser/lib/login-detect.mjs";
+import { formSnapshotInPage } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 const patchrightAvailable = !!resolvePatchright();
 const skip = patchrightAvailable ? false : "patchright/Chrome not installed";
@@ -88,6 +89,39 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
       res.end(`<!doctype html><meta charset=utf-8><title>done</title>
 <h1>${code.length === 6 ? "Welcome back, Daniel" : "Something went wrong"}</h1>
 <p>code=${code}</p><p>My trips. Account settings. Saved lists.</p>`);
+      return;
+    }
+    if (url.pathname === "/masked") {
+      // The other thing `aria-hidden` on an ancestor means: a dialog masking the
+      // page behind it. Here the password IS what the page wants — it is covered,
+      // not staged — and nothing else is being asked for.
+      res.end(`<!doctype html><meta charset=utf-8><title>sign-in</title>
+<div id=root aria-hidden="true">
+  <h1>Welcome back</h1>
+  <form action="/done" method="get">
+    <label for=p>Password</label>
+    <input id=p name=password type=password>
+    <button type=submit>Sign in</button>
+  </form>
+</div>
+<div role="dialog"><p>We use cookies</p><button>Accept</button></div>`);
+      return;
+    }
+    if (url.pathname === "/staged") {
+      // Booking.com's shape: the password step is fully built and laid out on
+      // the e-mail screen — sized, opaque, inside the viewport — and taken out
+      // of the accessibility tree until it is the owner's turn to see it.
+      res.end(`<!doctype html><meta charset=utf-8><title>sign-in</title>
+<h1>Sign in or create an account</h1>
+<form action="/code" method="get">
+  <label for=u>Email address</label>
+  <input id=u name=username type=email autocomplete=username>
+  <div aria-hidden="true">
+    <label for=p>Password</label>
+    <input id=p name=password type=password style="width:162px;height:26px;opacity:1">
+  </div>
+  <button type=submit>Continue with email</button>
+</form>`);
       return;
     }
     // Step 1: an identifier and nothing else. No password input exists at all.
@@ -268,6 +302,81 @@ test(
       assert.equal(result.ok, true, `auto-login failed: ${result.outcome}`);
       assert.match(result.finalUrl, /code=\d{6}$/);
       assert.ok(!result.finalUrl.includes("/search"), "the decoy form must not win");
+    } finally {
+      server.close();
+    }
+  },
+);
+
+test(
+  "a password the page has hidden from the accessibility tree is not a password it wants",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(`http://127.0.0.1:${port}/staged`, { waitUntil: "domcontentloaded" });
+
+        // Every ordinary visibility test passes on this input: it has a box, it
+        // is opaque, it is in the viewport. Only the accessibility tree says it
+        // is not this step.
+        const naive = await page.evaluate(() => {
+          const el = document.querySelector('input[type="password"]');
+          const r = el.getBoundingClientRect();
+          const st = getComputedStyle(el);
+          return { laidOut: r.width > 0 && r.height > 0, opacity: st.opacity, offsetParent: !!el.offsetParent };
+        });
+        assert.deepEqual(naive, { laidOut: true, opacity: "1", offsetParent: true });
+
+        const state = await detectPageState(page);
+        assert.equal(state.hasPasswordField, false, "a staged password is not being asked for");
+        assert.equal(state.hasIdentifierField, true, "the identifier keeps the looser test");
+        assert.equal(classifyLogin({ ...state, onLoginPage: true }), "unknown");
+
+        // The same rule where the agent reads it. Seeing a password control here
+        // is what made one store an ordinary login for a site that has none.
+        const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
+        const password = snapshot.controls.find((c) => c.type === "password");
+        const email = snapshot.controls.find((c) => c.type === "email");
+        assert.equal(password?.hidden, true, "a staged control is reported as hidden");
+        assert.equal(email?.hidden, undefined, "the field being asked for carries no flag");
+        // Flagged rather than dropped: a page that hides a control it does want is an
+        // authoring mistake we should still be able to fill, and dropping it would
+        // leave no ref to fill it with.
+        assert.ok(password, "the control still reaches the agent");
+      });
+    } finally {
+      server.close();
+    }
+  },
+);
+
+test(
+  "a page masked behind a dialog is covered, not staged — its password still counts",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(`http://127.0.0.1:${port}/masked`, { waitUntil: "domcontentloaded" });
+
+        // Reading `aria-hidden` as "not asked for" without this distinction reported
+        // no password and no identifier, which is the shape of a finished login: the
+        // run sealed an unauthenticated profile and called it a success.
+        const state = await detectPageState(page);
+        assert.equal(state.hasPasswordField, true, "the page is asking for this password");
+        assert.notEqual(
+          classifyLogin({ ...state, onLoginPage: false }),
+          "logged-in",
+          "a masked sign-in page is not a finished one",
+        );
+
+        const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
+        const password = snapshot.controls.find((c) => c.type === "password");
+        assert.equal(password?.hidden, undefined, "covered is not staged");
+      });
     } finally {
       server.close();
     }
