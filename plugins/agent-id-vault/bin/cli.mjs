@@ -400,9 +400,18 @@ async function cmdAdd(flags) {
       // /dev/tty → hosted harness), so this works where no GUI browser is present.
       const out = await collectSecret({
         title: formTitle({ name, type, loginUrl: flags["login-url"], domains }),
-        // Show the access level so the human sees the grant they are making
-        // while typing the secret ("ro" = the agent can read, never write).
-        description: `${type} · ${domains.join(", ")}${access === "ro" ? " · access: READ-ONLY" : ""}`,
+        // The chat row renders this under the title, so it is the one line that
+        // can set an expectation. A passwordless card is step one of two and
+        // nothing visibly happens when it is submitted — without saying so, the
+        // owner enters an address and waits for a screen that is waiting for them.
+        // The access level stays: "ro" is a grant they are making while they type.
+        description: [
+          flags.passwordless ? "A sign-in code follows on the next card" : null,
+          `${type} · ${domains.join(", ")}`,
+          access === "ro" ? "access: READ-ONLY" : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
         fields: specs,
         label: `enter the "${name}" secret`,
         security:

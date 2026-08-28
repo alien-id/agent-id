@@ -29,3 +29,9 @@ Three things a live Airbnb sign-in showed the owner, none of them true or useful
   none, because it sends the owner somewhere the code is not and then convinces
   them it never came. Unrecognised, the copy claims no channel and names both
   places to look.
+- **The card never said a second one was coming.** The chat row renders the
+  description under the title, and for a passwordless login that line was
+  metadata (`login · www.airbnb.com`). Submitting the first card looks like
+  nothing happened — the site is off sending a code — so it now leads with "A
+  sign-in code follows on the next card". The access level stays on that line:
+  `ro` is a grant the owner is making while they type.
