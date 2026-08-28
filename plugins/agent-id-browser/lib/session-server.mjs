@@ -324,20 +324,21 @@ export function formSnapshotInPage(arg) {
         el.getAttribute("name") || legend,
     );
   };
-  // A control the page has taken out of the accessibility tree is not part of
-  // what it is asking for, however solid it looks. Booking.com's e-mail step
-  // carries a fully styled password input — 162x26, `visibility: visible`,
-  // `opacity: 1`, inside the viewport — inside an `aria-hidden` wrapper, and an
-  // agent that inspected the form read that as "this site wants a password" and
-  // stored a credential the site has no use for. `inert` says the same thing in
-  // the modern spelling.
   const visibleOf = (el) => {
     const r = el.getBoundingClientRect();
     const st = window.getComputedStyle(el);
-    if (el.closest('[aria-hidden="true"], [inert]')) return false;
-
     return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
   };
+  // Laid out is not the same as being asked for. Booking.com's e-mail step carries
+  // a fully styled password input — 162x26, `visibility: visible`, `opacity: 1`,
+  // inside the viewport — in an `aria-hidden` wrapper, and an agent that inspected
+  // the form read it as "this site wants a password" and stored a credential the
+  // site has no use for. `inert` says the same in the modern spelling.
+  //
+  // Such a control is reported and flagged rather than dropped: a page that hides
+  // a control it does in fact want is an authoring mistake we should still be able
+  // to fill, and dropping it would leave the agent no ref to fill it with.
+  const stagedOf = (el) => !!el.closest('[aria-hidden="true"], [inert]');
 
   const controls = [];
   let i = 0;
@@ -355,9 +356,10 @@ export function formSnapshotInPage(arg) {
       el.getAttribute("type") || (tag === "input" ? el.type || "text" : tag === "select" ? "select" : tag),
       40,
     ).toLowerCase();
-    const visible = visibleOf(el);
+    const laidOut = visibleOf(el);
+    const visible = laidOut && !stagedOf(el);
     // Hidden native controls remain actionable through setChecked/setInputFiles.
-    if (!visible && !["checkbox", "radio", "file"].includes(type)) continue;
+    if (!laidOut && !["checkbox", "radio", "file"].includes(type)) continue;
     const form = el.closest("form");
     const role = el.getAttribute("role") || tag;
     const entry = {

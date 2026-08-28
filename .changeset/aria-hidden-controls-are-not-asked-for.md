@@ -16,9 +16,11 @@ test answers "visible".
 Being asked for is narrower than being visible, so both places that judge a
 control now exclude `aria-hidden` (and `inert`) subtrees:
 
-- `form-inspect` no longer offers such a control, so the agent inspecting
-  Booking's first screen sees one field — the e-mail — and has what it needs to
-  store the credential as passwordless.
+- `form-inspect` flags such a control `hidden` instead of presenting it as one
+  of the fields on offer. It is flagged rather than dropped on purpose: a page
+  that hides a control it does in fact want is an authoring mistake we should
+  still be able to fill, and dropping it would leave the agent no ref to fill it
+  with.
 - `detectPageState` stops counting a staged password, so an identifier-first
   screen classifies as one.
 

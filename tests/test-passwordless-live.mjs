@@ -321,9 +321,14 @@ test(
         // The same rule where the agent reads it. Seeing a password control here
         // is what made one store an ordinary login for a site that has none.
         const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
-        const types = snapshot.controls.map((c) => c.type);
-        assert.ok(!types.includes("password"), `form-inspect must not offer it: ${types.join(", ")}`);
-        assert.ok(types.includes("email"), "the identifier is still offered");
+        const password = snapshot.controls.find((c) => c.type === "password");
+        const email = snapshot.controls.find((c) => c.type === "email");
+        assert.equal(password?.hidden, true, "a staged control is reported as hidden");
+        assert.equal(email?.hidden, undefined, "the field being asked for carries no flag");
+        // Flagged rather than dropped: a page that hides a control it does want is an
+        // authoring mistake we should still be able to fill, and dropping it would
+        // leave no ref to fill it with.
+        assert.ok(password, "the control still reaches the agent");
       });
     } finally {
       server.close();
