@@ -238,7 +238,12 @@ export function classifyLogin({
 // and the card falls back to wording that claims no channel at all.
 const SENT_TO_RE =
   /\b(?:sent|texted|e-?mailed|messaged)\b[^.\n]{0,40}?\bto\s+(.{2,38}?)(?=[,;!?\n]|\.(?:\s|$)|\s{2,}|$)/i;
-const EMAIL_DESTINATION_RE = /^[^\s@]{1,32}@[^\s@]{2,32}$/;
+const EMAIL_DESTINATION_RE = /^[\w.+•·*…-]{1,32}@[\w.•·*…-]{2,32}$/;
+// The captured text is written by the page and ends up in a card the owner trusts.
+// The loopback form escapes it, but the hosted prompt hands `description` on as it
+// is, so nothing that could be read as markup gets that far: a destination is an
+// address, a number or a named place, and none of those contain these.
+const MARKUP_RE = /[<>&"'\\]/;
 // Digits as a site masks them: bullets, stars, dots, dashes, parens, a leading +.
 const PHONE_DESTINATION_RE = /^[+()\d\s.*\u00b7\u2022\u2026-]{4,26}$/;
 const NAMED_DESTINATION_RE =
@@ -249,6 +254,8 @@ export function codeDestination(bodyText) {
   if (!match) return null;
 
   const target = match[1].trim().replace(/\s+/g, " ");
+  if (MARKUP_RE.test(target)) return null;
+
   const recognised =
     EMAIL_DESTINATION_RE.test(target) ||
     PHONE_DESTINATION_RE.test(target) ||

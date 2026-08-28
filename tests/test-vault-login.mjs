@@ -405,7 +405,7 @@ test("the card names the site, not the credential the agent invented", async () 
     assert.match(html, /Email or phone number/, "a passwordless identifier is not email-only");
     // The chat row renders the description under the title, and this card is step
     // one of two: submitting it looks like nothing happened unless it says so.
-    assert.match(html, /A sign-in code follows on the next card/);
+    assert.match(html, /Identifier only — the sign-in code is asked for at sign-in/);
 
     child.kill();
     await new Promise((r) => child.on("exit", r));

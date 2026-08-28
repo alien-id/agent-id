@@ -502,6 +502,10 @@ test("codeDestination says nothing rather than something wrong", () => {
     "We sent a code to help you get started with our newsletter",
     "Your order was sent to 221B Baker Street",
     "We emailed a link to reset your password",
+    // The page writes this text and the card the owner trusts prints it. The
+    // loopback form escapes; the hosted prompt hands `description` on as it is.
+    "We sent a code to <img/src=x/onerror=fetch(1)>@a.co",
+    "We sent a code to \"><script>alert(1)</script>@a.co",
     "",
     null,
   ]) {

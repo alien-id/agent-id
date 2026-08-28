@@ -401,12 +401,15 @@ async function cmdAdd(flags) {
       const out = await collectSecret({
         title: formTitle({ name, type, loginUrl: flags["login-url"], domains }),
         // The chat row renders this under the title, so it is the one line that
-        // can set an expectation. A passwordless card is step one of two and
-        // nothing visibly happens when it is submitted — without saying so, the
-        // owner enters an address and waits for a screen that is waiting for them.
+        // can set an expectation, and a passwordless card gives the owner nothing
+        // to type but an identifier. Saying WHEN the code is asked for rather than
+        // promising a card next: storing a credential and driving the sign-in are
+        // separate calls, and the second may be minutes away or never come.
         // The access level stays: "ro" is a grant they are making while they type.
         description: [
-          flags.passwordless ? "A sign-in code follows on the next card" : null,
+          type === "login" && flags.passwordless
+            ? "Identifier only — the sign-in code is asked for at sign-in"
+            : null,
           `${type} · ${domains.join(", ")}`,
           access === "ro" ? "access: READ-ONLY" : null,
         ]

@@ -287,14 +287,16 @@ test("isDeepLoginUrl: true for a real path, false for the bare origin root", () 
 
 test("otpPromptWording: a passwordless code is not presented as a second factor", () => {
   const w = otpPromptWording({
-    name: "booking",
+    // A name that shares nothing with the host, so its absence is a real assertion:
+    // "booking" would have been a substring of the site and passed either way.
+    name: "record-key-not-a-site",
     passwordless: true,
     loginUrl: "https://account.booking.example/sign-in",
   });
   // The site, not the record: the owner is looking at a sign-in page, and the
   // name is a key the agent chose.
   assert.match(w.title, /Sign-in code for account\.booking\.example/);
-  assert.ok(!w.title.includes("booking\u0022"), "the credential name is not a title");
+  assert.ok(!JSON.stringify(w).includes("record-key-not-a-site"), "the credential name is not a title");
   assert.ok(!/2FA/i.test(w.title), "the only factor must not be called 2FA");
   assert.ok(!/2FA/i.test(w.label));
   assert.match(w.description, /account\.booking\.example/);

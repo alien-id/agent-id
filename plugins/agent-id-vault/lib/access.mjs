@@ -84,9 +84,11 @@ export function assertHostAllowed(host, domains, what) {
 // owner was asked to "Add credential: airbnb-passwordless-again", which names the
 // agent's second attempt rather than the site they are signing in to.
 //
-// `loginUrl` wins because it is the exact page. Failing that, the narrowest thing
-// the allowlist offers: a wildcard entry names a family of hosts, not a site, so
-// it is skipped rather than shown with its star.
+// `loginUrl` wins because it is the exact page. Failing that, the allowlist's
+// first literal entry — a wildcard names a family of hosts rather than a site, so
+// it is skipped rather than shown with its star. First, not narrowest: `domains`
+// is written broadest-first by every caller that writes it, and a title reads
+// better as the site than as the subdomain a sign-in happens to redirect through.
 export function credentialHost({ loginUrl, domains } = {}) {
   if (loginUrl) {
     try {
