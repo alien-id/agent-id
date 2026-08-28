@@ -399,17 +399,32 @@ export async function detectPageState(page) {
   return page.evaluate(([challengeSel, identifierSel]) => {
     const all = (sel) => Array.from(document.querySelectorAll(sel));
     const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
-    // Asked-for is narrower than visible, and only the password reads it that
-    // way. Booking.com's e-mail step carries a fully styled password input
-    // inside an `aria-hidden` wrapper: laid out, opaque, in the viewport, and
-    // not part of the step. Counting it made an identifier-first screen look
-    // like an ordinary login.
+    // Asked-for is narrower than visible, and only the password reads it that way.
+    // Booking.com's e-mail step carries a fully styled password input inside an
+    // `aria-hidden` wrapper: laid out, opaque, in the viewport, and not part of
+    // the step. Counting it made an identifier-first screen look like an ordinary
+    // login.
     //
-    // The identifier deliberately keeps the looser test. Losing a password to
-    // this makes the page read as identifier-first, which is the cautious
-    // reading; losing the identifier too would leave a page with no form at
-    // all, and "no form" is the shape a finished login has.
-    const asked = (e) => visible(e) && !e.closest('[aria-hidden="true"], [inert]');
+    // But `aria-hidden` on an ancestor has a second, commoner meaning: a modal —
+    // a cookie banner, a consent dialog — masking the whole page behind it. There
+    // the password IS what the page wants; it is merely covered. Telling the two
+    // apart is what the page asks for ALONGSIDE it: a staged step sits next to the
+    // field that is live (Booking's e-mail), while a masked page has no live field
+    // at all. So a control only stops counting when something else is being asked.
+    //
+    // Without that clause a password step behind a cookie dialog reported no
+    // password and no identifier — which reads as a finished login, and sealed an
+    // unauthenticated profile while reporting success.
+    //
+    // The identifier keeps the looser test. Losing a password makes the page read
+    // as identifier-first, which is the cautious reading; losing the identifier too
+    // would leave a page with no form at all, and "no form" is a finished login.
+    const staged = (e) => !!e.closest('[aria-hidden="true"], [inert]');
+    const askableFields = all(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]),select,textarea',
+    );
+    const asksSomethingElse = askableFields.some((e) => visible(e) && !staged(e));
+    const asked = (e) => visible(e) && !(staged(e) && asksSomethingElse);
     const hasPasswordField = all('input[type="password"]').some(asked);
     const hasIdentifierField = all(identifierSel).some(visible);
     const hasOtpField = all('input[autocomplete="one-time-code"]').some(visible);

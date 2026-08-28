@@ -91,6 +91,22 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
 <p>code=${code}</p><p>My trips. Account settings. Saved lists.</p>`);
       return;
     }
+    if (url.pathname === "/masked") {
+      // The other thing `aria-hidden` on an ancestor means: a dialog masking the
+      // page behind it. Here the password IS what the page wants — it is covered,
+      // not staged — and nothing else is being asked for.
+      res.end(`<!doctype html><meta charset=utf-8><title>sign-in</title>
+<div id=root aria-hidden="true">
+  <h1>Welcome back</h1>
+  <form action="/done" method="get">
+    <label for=p>Password</label>
+    <input id=p name=password type=password>
+    <button type=submit>Sign in</button>
+  </form>
+</div>
+<div role="dialog"><p>We use cookies</p><button>Accept</button></div>`);
+      return;
+    }
     if (url.pathname === "/staged") {
       // Booking.com's shape: the password step is fully built and laid out on
       // the e-mail screen — sized, opaque, inside the viewport — and taken out
@@ -329,6 +345,37 @@ test(
         // authoring mistake we should still be able to fill, and dropping it would
         // leave no ref to fill it with.
         assert.ok(password, "the control still reaches the agent");
+      });
+    } finally {
+      server.close();
+    }
+  },
+);
+
+test(
+  "a page masked behind a dialog is covered, not staged — its password still counts",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(`http://127.0.0.1:${port}/masked`, { waitUntil: "domcontentloaded" });
+
+        // Reading `aria-hidden` as "not asked for" without this distinction reported
+        // no password and no identifier, which is the shape of a finished login: the
+        // run sealed an unauthenticated profile and called it a success.
+        const state = await detectPageState(page);
+        assert.equal(state.hasPasswordField, true, "the page is asking for this password");
+        assert.notEqual(
+          classifyLogin({ ...state, onLoginPage: false }),
+          "logged-in",
+          "a masked sign-in page is not a finished one",
+        );
+
+        const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
+        const password = snapshot.controls.find((c) => c.type === "password");
+        assert.equal(password?.hidden, undefined, "covered is not staged");
       });
     } finally {
       server.close();

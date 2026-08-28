@@ -28,3 +28,11 @@ Only the password reads it this way. The identifier keeps the looser test on
 purpose: losing a password makes the page read as identifier-first, which is the
 cautious reading, while losing the identifier as well would leave a page with no
 form at all — and "no form" is the shape a finished login has.
+
+The rule fires only when the page is asking for something else at the same time.
+`aria-hidden` on an ancestor has a second, commoner meaning — a dialog masking
+the whole page behind it — and there the control IS wanted, merely covered. A
+staged step sits beside a live field; a masked page has none. Without that
+clause a password step behind a cookie banner reported no password and no
+identifier, which reads as a finished login, and would have sealed an
+unauthenticated profile while reporting success.
