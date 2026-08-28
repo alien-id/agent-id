@@ -291,7 +291,10 @@ test("otpPromptWording: a passwordless code is not presented as a second factor"
     passwordless: true,
     loginUrl: "https://account.booking.example/sign-in",
   });
-  assert.match(w.title, /Sign-in code for booking/);
+  // The site, not the record: the owner is looking at a sign-in page, and the
+  // name is a key the agent chose.
+  assert.match(w.title, /Sign-in code for account\.booking\.example/);
+  assert.ok(!w.title.includes("booking\u0022"), "the credential name is not a title");
   assert.ok(!/2FA/i.test(w.title), "the only factor must not be called 2FA");
   assert.ok(!/2FA/i.test(w.label));
   assert.match(w.description, /account\.booking\.example/);
@@ -299,13 +302,18 @@ test("otpPromptWording: a passwordless code is not presented as a second factor"
 
 test("otpPromptWording: an ordinary second factor keeps the 2FA wording", () => {
   const w = otpPromptWording({ name: "gh", loginUrl: "https://github.example/login" });
-  assert.match(w.title, /2FA code for gh/);
+  assert.match(w.title, /2FA code for github\.example/);
   assert.match(w.label, /2FA/);
 });
 
-test("otpPromptWording: no loginUrl leaves the description empty rather than half-built", () => {
-  assert.equal(otpPromptWording({ name: "x", passwordless: true }).description, "");
-  assert.equal(otpPromptWording({ name: "x" }).description, "");
+test("otpPromptWording: nothing to name the site by still says what to do", () => {
+  // The description used to come out empty here, which told the owner nothing at
+  // all in the one place they had to act. With no host to show, the record's own
+  // name is the last thing left — worse than a site, better than silence.
+  const passwordless = otpPromptWording({ name: "x", passwordless: true });
+  assert.match(passwordless.description, /x sent you a code/);
+  assert.match(passwordless.description, /email or messages/i);
+  assert.match(otpPromptWording({ name: "x" }).description, /needs your current code/);
 });
 
 // ─── multi-host sign-ins refuse safely, not silently ──────────────────────────────
@@ -535,4 +543,26 @@ test("the code card never says '2FA' to someone who has no first factor", () => 
   const passwordless = otpCardSpec({ name: "booking", otp: "interactive", passwordless: true, loginUrl: "https://x.test/in" });
   assert.ok(!/2fa|two-factor/i.test(JSON.stringify(passwordless)), "this code IS the sign-in, not a second step");
   assert.match(passwordless.fields[0].label, /sign-in code/i);
+});
+
+test("the code card names the site and where the code went", () => {
+  const cred = {
+    name: "airbnb-passwordless-again",
+    passwordless: true,
+    otp: "interactive",
+    loginUrl: "https://www.airbnb.com/login",
+    domains: ["*.airbnb.com", "airbnb.com"],
+  };
+
+  const named = otpCardSpec(cred, { destination: "+1 ••• ••• 4817" });
+  // The owner is looking at Airbnb, not at whatever the agent called its record.
+  assert.ok(!JSON.stringify(named).includes("airbnb-passwordless-again"));
+  assert.match(named.title, /airbnb\.com/);
+  assert.match(named.description, /\+1 ••• ••• 4817/);
+
+  // With no destination the card must not pick a channel for the owner: the one
+  // this came from texted a code while the copy implied a mailbox.
+  const blind = otpCardSpec(cred, {});
+  assert.match(blind.description, /email or messages/i);
+  assert.ok(!/sent a code to/.test(blind.description));
 });

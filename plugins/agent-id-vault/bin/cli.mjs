@@ -73,6 +73,7 @@ import {
 import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../lib/store.mjs";
 import {
   ACCESS_LEVELS,
+  credentialHost,
   effectiveAccess,
   isAccessRelaxation,
   isAccessRestricted,
@@ -266,6 +267,18 @@ async function cmdInit(flags) {
 // Secret fields each type needs from the out-of-band form (--form). Non-secret
 // metadata (header/param/cookie name, token endpoint, client id) still comes from
 // flags; only the secret VALUE is typed by the human into the browser form.
+// What the owner reads at the top of the secure card. Never the credential's
+// `name`: that is an internal key the agent picks, and it reached the screen
+// verbatim — someone was asked to "Add credential: airbnb-passwordless-again",
+// which names the agent's second attempt rather than the site in front of them.
+// With no host to show, the name is still better than nothing.
+function formTitle({ name, type, loginUrl, domains }) {
+  const host = credentialHost({ loginUrl, domains });
+  if (!host) return `Add credential: ${name}`;
+
+  return type === "login" ? `Sign in to ${host}` : `Add credential for ${host}`;
+}
+
 function formFieldsForType(type, flags) {
   switch (type) {
     case "bearer": return [{ name: "value", label: "Token / bearer value" }];
@@ -284,7 +297,16 @@ function formFieldsForType(type, flags) {
       { name: "refresh-token", label: "Refresh token" },
     ];
     case "login": return [
-      { name: "username", label: "Username / email", secret: false },
+      // A passwordless site takes whatever it can mail or text a code to, and
+      // Airbnb's first screen says so outright ("Phone number or email"). The
+      // owner read "Username / email", entered a mail address, and waited for a
+      // letter the site had sent as an SMS. A password site keeps the old label:
+      // there the field really can be a username.
+      {
+        name: "username",
+        label: flags.passwordless ? "Email or phone number" : "Username / email",
+        secret: false,
+      },
       // A passwordless site has none to store — the only secret is the code that
       // arrives out of band, collected at sign-in time rather than here. That
       // leaves this form a single field, which is the whole point.
@@ -377,7 +399,7 @@ async function cmdAdd(flags) {
       // collectSecret routes through the secure-prompt resolver (browser form →
       // /dev/tty → hosted harness), so this works where no GUI browser is present.
       const out = await collectSecret({
-        title: `Add credential: ${name}`,
+        title: formTitle({ name, type, loginUrl: flags["login-url"], domains }),
         // Show the access level so the human sees the grant they are making
         // while typing the secret ("ro" = the agent can read, never write).
         description: `${type} · ${domains.join(", ")}${access === "ro" ? " · access: READ-ONLY" : ""}`,

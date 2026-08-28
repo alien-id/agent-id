@@ -77,6 +77,37 @@ export function assertHostAllowed(host, domains, what) {
   );
 }
 
+// ─── Naming a credential on screen ────────────────────────────────────────────
+// The site a credential belongs to. There is exactly one place a human reads it:
+// the title of the secure card they are about to type into. The stored `name` is
+// an internal key the agent invents, and it reached that title verbatim — an
+// owner was asked to "Add credential: airbnb-passwordless-again", which names the
+// agent's second attempt rather than the site they are signing in to.
+//
+// `loginUrl` wins because it is the exact page. Failing that, the narrowest thing
+// the allowlist offers: a wildcard entry names a family of hosts, not a site, so
+// it is skipped rather than shown with its star.
+export function credentialHost({ loginUrl, domains } = {}) {
+  if (loginUrl) {
+    try {
+      const host = new URL(loginUrl).hostname;
+      if (host) return withoutWww(host);
+    } catch {
+      // Not a URL we can read — fall through to the allowlist.
+    }
+  }
+
+  const literal = (domains || []).find((entry) => typeof entry === "string" && entry && !entry.includes("*"));
+
+  return literal ? withoutWww(literal) : null;
+}
+
+// `www.` names the same site and only costs the reader a word. Every other
+// subdomain stays: `account.booking.com` is where the sign-in actually lives.
+function withoutWww(host) {
+  return host.replace(/^www\./i, "");
+}
+
 // The level in force for a record — absent means unrestricted ("rw").
 export function effectiveAccess(rec) {
   return rec && rec.access != null ? rec.access : "rw";

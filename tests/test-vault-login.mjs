@@ -370,3 +370,43 @@ test("listMetadata surfaces a login's shape without surfacing its secrets", () =
   assert.equal(meta.password, undefined);
   assert.equal(meta.recipe, undefined, "the steps themselves stay in the record");
 });
+
+test("the card names the site, not the credential the agent invented", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-cardtitle-"));
+  try {
+    await makeVault(dir);
+
+    const child = spawn(
+      "node",
+      [
+        CLI, "add", "--name", "airbnb-passwordless-again", "--type", "login",
+        "--passwordless", "--otp", "interactive",
+        "--login-url", "https://www.airbnb.com/login",
+        "--form", "--state-dir", dir,
+      ],
+      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1", AGENT_ID_SECURE_PROMPT: "browser" } },
+    );
+    child.stdout.on("data", () => {});
+    child.stderr.on("data", () => {});
+
+    const u = new URL(await waitForUrl(child));
+    const html = await (await fetch(u)).text();
+
+    // The name is the vault's key and the agent's to choose; it named its own
+    // second attempt, and the owner was asked to "Add credential:
+    // airbnb-passwordless-again" while looking at Airbnb's sign-in page.
+    assert.ok(!html.includes("airbnb-passwordless-again"), "the credential's name must not reach the card");
+    assert.match(html, /Sign in to airbnb\.com/, "the card names the site");
+    // `www.` names the same site and only costs the reader a word. The domain
+    // list below the title still shows the allowlist verbatim, which is right.
+    assert.ok(!html.includes("Sign in to www."), "www. is noise in a title");
+    // Airbnb's own first screen says "Phone number or email"; the old label
+    // promised a mailbox and the code arrived as an SMS.
+    assert.match(html, /Email or phone number/, "a passwordless identifier is not email-only");
+
+    child.kill();
+    await new Promise((r) => child.on("exit", r));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -225,4 +225,36 @@ export function classifyLogin({
   return "unknown";
 }
 
+// ─── Where the code went ──────────────────────────────────────────────────────
+// The card asking for a code has to say where to look for it. Airbnb texted one
+// to a phone while the card said only "airbnb.com sent you a code"; the owner
+// watched a mail inbox and concluded nothing had arrived.
+//
+// The page has already said it — "We sent a code to +1 ••• ••• 4817" — so this
+// reads that back instead of guessing. And it reads it back ONLY when the
+// captured text is recognisably a destination: naming the wrong channel is worse
+// than naming none, because it sends the owner somewhere the code is not and
+// then convinces them it never came. Anything unrecognised fails closed to null,
+// and the card falls back to wording that claims no channel at all.
+const SENT_TO_RE =
+  /\b(?:sent|texted|e-?mailed|messaged)\b[^.\n]{0,40}?\bto\s+(.{2,38}?)(?=[,;!?\n]|\.(?:\s|$)|\s{2,}|$)/i;
+const EMAIL_DESTINATION_RE = /^[^\s@]{1,32}@[^\s@]{2,32}$/;
+// Digits as a site masks them: bullets, stars, dots, dashes, parens, a leading +.
+const PHONE_DESTINATION_RE = /^[+()\d\s.*\u00b7\u2022\u2026-]{4,26}$/;
+const NAMED_DESTINATION_RE =
+  /^your\s+(?:e-?mail(?:\s+address)?|phone(?:\s+number)?|mobile|messages|device)$/i;
+
+export function codeDestination(bodyText) {
+  const match = SENT_TO_RE.exec(String(bodyText || ""));
+  if (!match) return null;
+
+  const target = match[1].trim().replace(/\s+/g, " ");
+  const recognised =
+    EMAIL_DESTINATION_RE.test(target) ||
+    PHONE_DESTINATION_RE.test(target) ||
+    NAMED_DESTINATION_RE.test(target);
+
+  return recognised ? target : null;
+}
+
 export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, QR_SIGN_IN_RE, ERROR_RE, BLOCK_RE };

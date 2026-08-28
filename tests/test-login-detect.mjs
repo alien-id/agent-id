@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyLogin } from "../plugins/agent-id-browser/lib/login-detect.mjs";
+import { classifyLogin, codeDestination } from "../plugins/agent-id-browser/lib/login-detect.mjs";
 
 test("logged-in: no password field, no otp, no error", () => {
   assert.equal(classifyLogin({ hasPasswordField: false, bodyText: "Welcome back, alice" }), "logged-in");
@@ -473,4 +473,38 @@ test("Russian body copy without a rejection does not trip the error match", () =
     "unknown",
   );
   assert.equal(classifyLogin({ hasPasswordField: false, bodyText: "Добро пожаловать, Иван" }), "logged-in");
+});
+
+// ── Where the code went ─────────────────────────────────────────────────────────
+
+test("codeDestination reads back the destination the page itself printed", () => {
+  const cases = [
+    ["We sent a code to +1 ••• ••• 4817. Enter it below.", "+1 ••• ••• 4817"],
+    ["Enter the code we texted to +1 (415) 555-0134", "+1 (415) 555-0134"],
+    // The masking dot and the domain dot are the same character; only a dot that
+    // ends a sentence may end the capture.
+    ["We just emailed a code to d••@gmail.com", "d••@gmail.com"],
+    ["A verification code was sent to daniel@eti.co.", "daniel@eti.co"],
+    ["We sent a code to your phone", "your phone"],
+    ["Check your inbox — we sent a code to your email address.", "your email address"],
+  ];
+  for (const [body, expected] of cases) {
+    assert.equal(codeDestination(body), expected, body);
+  }
+});
+
+test("codeDestination says nothing rather than something wrong", () => {
+  // A destination on the card is a promise about where to look. Naming the wrong
+  // place is worse than naming none: the owner watches an empty inbox and
+  // concludes the code never came — which is exactly the report this came from.
+  for (const body of [
+    "Enter the 6-digit code",
+    "We sent a code to help you get started with our newsletter",
+    "Your order was sent to 221B Baker Street",
+    "We emailed a link to reset your password",
+    "",
+    null,
+  ]) {
+    assert.equal(codeDestination(body), null, String(body));
+  }
 });
