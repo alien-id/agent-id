@@ -228,7 +228,8 @@ than one LLM turn per field, and it verifies what the page retained:
 CLI form-inspect
 # → { controls:[{ref:"e1",type:"text",label:"First name",required:true},
 #               {ref:"e2",type:"checkbox",label:"Agree",checked:false},
-#               {ref:"e3",type:"file",label:"Resume",accept:".pdf"}] }
+#               {ref:"e3",type:"file",label:"Resume",accept:".pdf"},
+#               {ref:"e4",type:"password",label:"Password",hidden:true}] }
 CLI form-fill --spec '{
   "fields":[{"ref":"e1","value":"Ada"}],
   "checks":[{"ref":"e2","checked":true}],
@@ -236,6 +237,13 @@ CLI form-fill --spec '{
   "uploads":[{"ref":"e3","files":["/workspace/resume.pdf"]}]
 }'
 ```
+
+`hidden:true` means the page is not asking for that control right now — it is
+staged for a later step, behind `aria-hidden` or `inert`. It is still fillable by
+ref when you genuinely need it, but it does not count when you are reading what a
+screen wants. For a `login` credential that is the whole question: a sign-in whose
+only unmarked field is an identifier has no password to store, so it is
+`passwordless`. Booking.com's first screen is exactly that shape.
 
 One bad control does not stop the rest: the result reports per-control success,
 failed refs, and native required/validity errors. It never returns text/password
