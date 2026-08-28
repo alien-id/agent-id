@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-vault",
-  "version": "7.4.0",
+  "version": "7.5.0",
   "type": "module",
   "description": "Alien Agent ID vault: portable encrypted credential vault with LUKS-style slots and typed/domain-scoped credential records.",
   "bin": {
