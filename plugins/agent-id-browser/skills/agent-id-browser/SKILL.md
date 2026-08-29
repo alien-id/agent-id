@@ -228,8 +228,7 @@ than one LLM turn per field, and it verifies what the page retained:
 CLI form-inspect
 # → { controls:[{ref:"e1",type:"text",label:"First name",required:true},
 #               {ref:"e2",type:"checkbox",label:"Agree",checked:false},
-#               {ref:"e3",type:"file",label:"Resume",accept:".pdf"},
-#               {ref:"e4",type:"password",label:"Password",hidden:true}] }
+#               {ref:"e3",type:"file",label:"Resume",accept:".pdf"}] }
 CLI form-fill --spec '{
   "fields":[{"ref":"e1","value":"Ada"}],
   "checks":[{"ref":"e2","checked":true}],
@@ -238,12 +237,20 @@ CLI form-fill --spec '{
 }'
 ```
 
-`hidden:true` means the page is not asking for that control right now — it is
-staged for a later step, behind `aria-hidden` or `inert`. It is still fillable by
-ref when you genuinely need it, but it does not count when you are reading what a
-screen wants. For a `login` credential that is the whole question: a sign-in whose
-only unmarked field is an identifier has no password to store, so it is
-`passwordless`. Booking.com's first screen is exactly that shape.
+A control the page has staged for a later step — one it has taken out of the
+accessibility tree with `aria-hidden` or `inert` while asking for something else —
+is left out of `controls` entirely, because it is not part of what this screen
+wants. Booking.com's e-mail screen carries a fully built password input that way.
+
+On a sign-in page the answer comes back stated rather than implied:
+
+```
+# → { controls:[...], signIn:{ identifier:true, passwordAsked:false } }
+```
+
+`passwordAsked:false` with an identifier present means the site has no password to
+store: the credential is `vault_add(type="login", passwordless=true,
+otp="interactive")`, and the code is collected later, at sign-in.
 
 One bad control does not stop the rest: the result reports per-control success,
 failed refs, and native required/validity errors. It never returns text/password

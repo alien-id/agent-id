@@ -1008,7 +1008,7 @@ runCli({
         "  snapshot --name N             accessibility tree with element refs; iframe\n" +
         "          elements get frame-prefixed refs (f1e3); reports open tabs when >1\n" +
         "  form-inspect --name N           compact form controls + labels/types/requirements;\n" +
-        "          hidden:true = present but not what the page is asking for now\n" +
+        "          on a sign-in page adds signIn:{identifier,passwordAsked}\n" +
         "  form-fill --name N --spec '{\"fields\":[{\"ref\":\"e1\",\"value\":\"A\"}],\n" +
         "          \"checks\":[{\"ref\":\"e2\",\"checked\":true}],\"selects\":[...],\n" +
         "          \"uploads\":[{\"ref\":\"e3\",\"files\":[\"/a.pdf\"]}]}'\n" +

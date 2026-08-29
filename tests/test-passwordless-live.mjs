@@ -337,14 +337,15 @@ test(
         // The same rule where the agent reads it. Seeing a password control here
         // is what made one store an ordinary login for a site that has none.
         const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
-        const password = snapshot.controls.find((c) => c.type === "password");
-        const email = snapshot.controls.find((c) => c.type === "email");
-        assert.equal(password?.hidden, true, "a staged control is reported as hidden");
-        assert.equal(email?.hidden, undefined, "the field being asked for carries no flag");
-        // Flagged rather than dropped: a page that hides a control it does want is an
-        // authoring mistake we should still be able to fill, and dropping it would
-        // leave no ref to fill it with.
-        assert.ok(password, "the control still reaches the agent");
+        assert.ok(
+          !snapshot.controls.some((c) => c.type === "password"),
+          "a staged control is not one of the fields on offer",
+        );
+        assert.ok(snapshot.controls.some((c) => c.type === "email"), "the identifier is");
+        // The conclusion, not the evidence. Reporting the password flagged was tried
+        // and read straight past: an agent said it saw "a technical password field in
+        // the markup" and stored a credential the site has no use for.
+        assert.deepEqual(snapshot.signIn, { identifier: true, passwordAsked: false });
       });
     } finally {
       server.close();
@@ -374,8 +375,10 @@ test(
         );
 
         const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
-        const password = snapshot.controls.find((c) => c.type === "password");
-        assert.equal(password?.hidden, undefined, "covered is not staged");
+        assert.ok(snapshot.controls.some((c) => c.type === "password"), "covered is not staged");
+        // Nothing here asks for an identifier, so no verdict is offered. Claiming one
+        // on every page would make the field worthless where it matters.
+        assert.equal(snapshot.signIn, undefined, "a page with no identifier gets no verdict");
       });
     } finally {
       server.close();

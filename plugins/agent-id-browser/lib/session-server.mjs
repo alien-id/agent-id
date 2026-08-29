@@ -373,6 +373,13 @@ export function formSnapshotInPage(arg) {
     const visible = laidOut && !stagedOf(el);
     // Hidden native controls remain actionable through setChecked/setInputFiles.
     if (!laidOut && !["checkbox", "radio", "file"].includes(type)) continue;
+    // A staged control leaves the listing entirely. Reporting it flagged was tried
+    // first and read straight past: an agent looking at Booking's e-mail screen saw
+    // a password control, said so ("I saw a technical password field in the markup")
+    // and stored a credential the site has no use for. `asksSomethingElse` is what
+    // makes dropping safe — a page hiding its only form is not staged, so its
+    // controls still arrive and stay fillable.
+    if (stagedOf(el)) continue;
     const form = el.closest("form");
     const role = el.getAttribute("role") || tag;
     const entry = {
@@ -405,7 +412,23 @@ export function formSnapshotInPage(arg) {
     }
     controls.push(entry);
   }
-  return { url: location.href, title: document.title, controls };
+  // The conclusion, not the evidence. An agent deciding what kind of credential a
+  // site needs was left to infer it from the control list, and inferred wrong on
+  // the first real site it met: Booking stages a password on its e-mail screen, and
+  // "there is a password control" won over everything else. Saying it outright is
+  // what a caller acts on; a flag on one control is something it has to interpret.
+  //
+  // Only claimed where it means something — a page with an identifier field and a
+  // submit. `passwordAsked` is about what the page ASKS for, so a staged password
+  // is not one, the same rule the listing above follows.
+  const identifier = controls.find(
+    (c) => c.type === "email" || c.type === "tel" || (c.type === "text" && /user|email|phone|login/i.test(c.label || "")),
+  );
+  const signIn = identifier
+    ? { identifier: true, passwordAsked: controls.some((c) => c.type === "password") }
+    : null;
+
+  return { url: location.href, title: document.title, controls, ...(signIn ? { signIn } : {}) };
 }
 
 const sel = (ref) => `[data-aibref="${String(ref).replace(/["\\]/g, "")}"]`;

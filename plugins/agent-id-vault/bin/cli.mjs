@@ -267,16 +267,46 @@ async function cmdInit(flags) {
 // Secret fields each type needs from the out-of-band form (--form). Non-secret
 // metadata (header/param/cookie name, token endpoint, client id) still comes from
 // flags; only the secret VALUE is typed by the human into the browser form.
-// What the owner reads at the top of the secure card. Never the credential's
-// `name`: that is an internal key the agent picks, and it reached the screen
-// verbatim — someone was asked to "Add credential: airbnb-passwordless-again",
+// The card the owner reads, in three parts. None of them is the credential's
+// `name` — that is an internal key the agent picks, and it reached the screen
+// verbatim: someone was asked to "Add credential: airbnb-passwordless-again",
 // which names the agent's second attempt rather than the site in front of them.
-// With no host to show, the name is still better than nothing.
-function formTitle({ name, type, loginUrl, domains }) {
-  const host = credentialHost({ loginUrl, domains });
-  if (!host) return `Add credential: ${name}`;
+//
+// The title says what is being asked of them and nothing else. What it is FOR
+// goes in the line below, where there is room to say it in words: the site, and
+// what happens to what they type. The type and the domain allowlist are gone
+// from both — they are how the agent addresses a credential, and `*.booking.com`
+// reads to a person as a typo.
+const CARD_TITLE = "Enter it securely";
 
-  return type === "login" ? `Sign in to ${host}` : `Add credential for ${host}`;
+function formDescription({ name, type, loginUrl, domains, access, passwordless }) {
+  const site = siteName(credentialHost({ loginUrl, domains }));
+  const lead = type === "login"
+    ? `${site ? `${site} sign-in` : `Sign-in for ${name}`}. You type it on a sealed screen.`
+    : `${site ? `A credential for ${site}` : `Credential ${name}`}. You type it on a sealed screen.`;
+  // A passwordless card asks for an identifier and stops; nothing visibly happens
+  // when it is submitted, because the site has yet to send anything.
+  const step = type === "login" && passwordless ? " The code comes at sign-in." : "";
+  // `ro` is a grant being made in the moment of typing, so it stays on the card
+  // even though the rest of the metadata does not.
+  const grant = access === "ro" ? " The agent can read this, never change it." : "";
+
+  return `${lead}${step}${grant}`;
+}
+
+// `account.booking.com` is where the sign-in lives; `Booking.com` is what the owner
+// calls it. Only a sign-in subdomain is dropped, and only from the front: working
+// out the registrable domain needs a public-suffix list, and guessing it turns
+// `example.co.uk` into `co.uk`.
+const SIGN_IN_LABELS = new Set(["www", "account", "accounts", "login", "signin", "sign-in", "auth", "id", "secure", "my"]);
+
+function siteName(host) {
+  if (!host) return null;
+  const labels = host.split(".");
+  while (labels.length > 1 && SIGN_IN_LABELS.has(labels[0].toLowerCase())) labels.shift();
+  const site = labels.join(".");
+
+  return `${site.charAt(0).toUpperCase()}${site.slice(1)}`;
 }
 
 function formFieldsForType(type, flags) {
@@ -399,26 +429,21 @@ async function cmdAdd(flags) {
       // collectSecret routes through the secure-prompt resolver (browser form →
       // /dev/tty → hosted harness), so this works where no GUI browser is present.
       const out = await collectSecret({
-        title: formTitle({ name, type, loginUrl: flags["login-url"], domains }),
-        // The chat row renders this under the title, so it is the one line that
-        // can set an expectation, and a passwordless card gives the owner nothing
-        // to type but an identifier. Saying WHEN the code is asked for rather than
-        // promising a card next: storing a credential and driving the sign-in are
-        // separate calls, and the second may be minutes away or never come.
-        // The access level stays: "ro" is a grant they are making while they type.
-        description: [
-          type === "login" && flags.passwordless
-            ? "Identifier only — the sign-in code is asked for at sign-in"
-            : null,
-          `${type} · ${domains.join(", ")}`,
-          access === "ro" ? "access: READ-ONLY" : null,
-        ]
-          .filter(Boolean)
-          .join(" · "),
+        title: CARD_TITLE,
+        description: formDescription({
+          name,
+          type,
+          loginUrl: flags["login-url"],
+          domains,
+          access,
+          passwordless: flags.passwordless,
+        }),
         fields: specs,
         label: `enter the "${name}" secret`,
-        security:
-          "Sealed with <code>AES-256-GCM</code> (key via <code>HKDF-SHA256</code>). Never shown to the agent.",
+        // What the owner needs from this line is the promise, not the primitive:
+        // the algorithm names told them nothing they could act on and read as a
+        // warning label on a screen meant to reassure.
+        security: "I never see it and it isn't saved anywhere",
       });
       formValues = out.values;
     } catch (err) {
