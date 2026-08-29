@@ -91,6 +91,41 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
 <p>code=${code}</p><p>My trips. Account settings. Saved lists.</p>`);
       return;
     }
+    if (url.pathname === "/masked-checkbox") {
+      // The ordinary cookie banner: a dialog masking the page that carries an input
+      // of its own. "The page asks for something else" is satisfied by that
+      // checkbox, so the sign-in form below counted as staged.
+      res.end(`<!doctype html><meta charset=utf-8><title>sign-in</title>
+<div id=root aria-hidden="true">
+  <form action="/done" method="get">
+    <label for=u>Email address</label><input id=u name=username type=email autocomplete=username>
+    <label for=p>Password</label><input id=p name=password type=password>
+    <button type=submit>Sign in</button>
+  </form>
+</div>
+<div role="dialog"><p>We use cookies</p><label for=an>Analytics</label><input id=an type=checkbox><button>Accept</button></div>`);
+      return;
+    }
+    if (url.pathname === "/staged-with-search") {
+      // A search box in the header is enough to make everything under `aria-hidden`
+      // count as staged — and there is no dialog to dismiss to get it back.
+      res.end(`<!doctype html><meta charset=utf-8><title>sign-in</title>
+<form><input name=q type=search placeholder="Search"></form>
+<div aria-hidden="true">
+  <form action="/done" method="get">
+    <label for=u>Email</label><input id=u name=username type=email autocomplete=username>
+    <label for=p>Password</label><input id=p name=password type=password>
+    <button type=submit>Sign in</button>
+  </form>
+</div>`);
+      return;
+    }
+    if (url.pathname === "/newsletter") {
+      res.end(`<!doctype html><meta charset=utf-8><title>home</title>
+<h1>Our blog</h1>
+<footer><form><label for=n>Get our newsletter</label><input id=n name=email type=email></form></footer>`);
+      return;
+    }
     if (url.pathname === "/masked") {
       // The other thing `aria-hidden` on an ancestor means: a dialog masking the
       // page behind it. Here the password IS what the page wants — it is covered,
@@ -379,6 +414,66 @@ test(
         // Nothing here asks for an identifier, so no verdict is offered. Claiming one
         // on every page would make the field worthless where it matters.
         assert.equal(snapshot.signIn, undefined, "a page with no identifier gets no verdict");
+      });
+    } finally {
+      server.close();
+    }
+  },
+);
+
+test(
+  "a staged control leaves the fields on offer but stays reachable",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+
+        // Dropping staged controls read "the page asks for something else" as ANY
+        // live input on the page. A cookie banner's own checkbox satisfies that, and
+        // took the sign-in form with it — with no ref left to fill it by.
+        for (const route of ["/masked-checkbox", "/staged-with-search"]) {
+          await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "domcontentloaded" });
+          const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
+          const staged = snapshot.staged ?? [];
+
+          assert.ok(
+            !snapshot.controls.some((c) => c.type === "password"),
+            `${route}: a staged control is not one of the fields on offer`,
+          );
+          assert.ok(
+            staged.some((c) => c.type === "password") && staged.some((c) => c.type === "email"),
+            `${route}: the form must still be reachable, got ${JSON.stringify(staged.map((c) => c.type))}`,
+          );
+          assert.ok(staged.every((c) => c.ref), `${route}: reachable means it has a ref`);
+        }
+      });
+    } finally {
+      server.close();
+    }
+  },
+);
+
+test(
+  "a page is only called a sign-in when something submits it",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+
+        // A newsletter box answering `passwordAsked: false` tells the caller the site
+        // has no password — the same wrong conclusion this file exists to prevent,
+        // reached from the other end.
+        await page.goto(`http://127.0.0.1:${port}/newsletter`, { waitUntil: "domcontentloaded" });
+        const footer = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
+        assert.equal(footer.signIn, undefined, "an e-mail field alone is not a sign-in");
+
+        await page.goto(`http://127.0.0.1:${port}/staged`, { waitUntil: "domcontentloaded" });
+        const signIn = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
+        assert.deepEqual(signIn.signIn, { identifier: true, passwordAsked: false });
       });
     } finally {
       server.close();

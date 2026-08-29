@@ -295,16 +295,18 @@ test("otpPromptWording: a passwordless code is not presented as a second factor"
   });
   // The site, not the record: the owner is looking at a sign-in page, and the
   // name is a key the agent chose.
-  assert.match(w.title, /Sign-in code for account\.booking\.example/);
+  // The same site name the vault card used when it collected the identifier —
+  // both cards belong to one sign-in, so a service subdomain is dropped on both.
+  assert.match(w.title, /Sign-in code for Booking\.example/);
   assert.ok(!JSON.stringify(w).includes("record-key-not-a-site"), "the credential name is not a title");
   assert.ok(!/2FA/i.test(w.title), "the only factor must not be called 2FA");
   assert.ok(!/2FA/i.test(w.label));
-  assert.match(w.description, /account\.booking\.example/);
+  assert.match(w.description, /Booking\.example/);
 });
 
 test("otpPromptWording: an ordinary second factor keeps the 2FA wording", () => {
   const w = otpPromptWording({ name: "gh", loginUrl: "https://github.example/login" });
-  assert.match(w.title, /2FA code for github\.example/);
+  assert.match(w.title, /2FA code for Github\.example/);
   assert.match(w.label, /2FA/);
 });
 
@@ -559,7 +561,7 @@ test("the code card names the site and where the code went", () => {
   const named = otpCardSpec(cred, { destination: "+1 ••• ••• 4817" });
   // The owner is looking at Airbnb, not at whatever the agent called its record.
   assert.ok(!JSON.stringify(named).includes("airbnb-passwordless-again"));
-  assert.match(named.title, /airbnb\.com/);
+  assert.match(named.title, /Airbnb\.com/);
   assert.match(named.description, /\+1 ••• ••• 4817/);
 
   // With no destination the card must not pick a channel for the owner: the one

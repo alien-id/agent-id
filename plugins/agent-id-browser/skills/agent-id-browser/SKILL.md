@@ -239,8 +239,13 @@ CLI form-fill --spec '{
 
 A control the page has staged for a later step — one it has taken out of the
 accessibility tree with `aria-hidden` or `inert` while asking for something else —
-is left out of `controls` entirely, because it is not part of what this screen
-wants. Booking.com's e-mail screen carries a fully built password input that way.
+comes back under `staged` rather than among `controls`, because it is not part of
+what this screen wants. Booking.com's e-mail screen carries a fully built password
+input that way. Refs there work like any other, so a page that hides a control it
+does want is still fillable.
+
+`hidden:true` on an entry means something different: a native control outside the
+layout, still actionable through `setChecked` / `setInputFiles`.
 
 On a sign-in page the answer comes back stated rather than implied:
 

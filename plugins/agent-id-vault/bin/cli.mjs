@@ -74,6 +74,7 @@ import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../lib/store.mj
 import {
   ACCESS_LEVELS,
   credentialHost,
+  siteName,
   effectiveAccess,
   isAccessRelaxation,
   isAccessRestricted,
@@ -267,10 +268,12 @@ async function cmdInit(flags) {
 // Secret fields each type needs from the out-of-band form (--form). Non-secret
 // metadata (header/param/cookie name, token endpoint, client id) still comes from
 // flags; only the secret VALUE is typed by the human into the browser form.
-// The card the owner reads, in three parts. None of them is the credential's
-// `name` — that is an internal key the agent picks, and it reached the screen
-// verbatim: someone was asked to "Add credential: airbnb-passwordless-again",
-// which names the agent's second attempt rather than the site in front of them.
+// The card the owner reads, in three parts. The credential's `name` is not among
+// them while there is a host to show — it is an internal key the agent picks, and
+// it reached the screen verbatim: someone was asked to "Add credential:
+// airbnb-passwordless-again", which names the agent's second attempt rather than
+// the site in front of them. With no host derivable the name is still the last
+// thing left, and better than a card that names nothing at all.
 //
 // The title says what is being asked of them and nothing else. What it is FOR
 // goes in the line below, where there is room to say it in words: the site, and
@@ -294,20 +297,6 @@ function formDescription({ name, type, loginUrl, domains, access, passwordless }
   return `${lead}${step}${grant}`;
 }
 
-// `account.booking.com` is where the sign-in lives; `Booking.com` is what the owner
-// calls it. Only a sign-in subdomain is dropped, and only from the front: working
-// out the registrable domain needs a public-suffix list, and guessing it turns
-// `example.co.uk` into `co.uk`.
-const SIGN_IN_LABELS = new Set(["www", "account", "accounts", "login", "signin", "sign-in", "auth", "id", "secure", "my"]);
-
-function siteName(host) {
-  if (!host) return null;
-  const labels = host.split(".");
-  while (labels.length > 1 && SIGN_IN_LABELS.has(labels[0].toLowerCase())) labels.shift();
-  const site = labels.join(".");
-
-  return `${site.charAt(0).toUpperCase()}${site.slice(1)}`;
-}
 
 function formFieldsForType(type, flags) {
   switch (type) {
@@ -440,10 +429,12 @@ async function cmdAdd(flags) {
         }),
         fields: specs,
         label: `enter the "${name}" secret`,
-        // What the owner needs from this line is the promise, not the primitive:
-        // the algorithm names told them nothing they could act on and read as a
-        // warning label on a screen meant to reassure.
-        security: "I never see it and it isn't saved anywhere",
+        // The promise, not the primitive: the algorithm names told the owner nothing
+        // they could act on and read as a warning label on a screen meant to
+        // reassure. It has to stay true, though — this card's whole purpose is to
+        // store the value, so "isn't saved anywhere" would be a lie told on the one
+        // screen where trust is the point.
+        security: "I never see it. It goes straight into your encrypted vault.",
       });
       formValues = out.values;
     } catch (err) {

@@ -1,5 +1,5 @@
 ---
-"@alien-id/agent-id-browser": minor
+"@alien-id/agent-id-browser": major
 "@alien-id/agent-id-vault": minor
 ---
 
@@ -8,17 +8,25 @@ Say what a sign-in page asks for, and write the card for the person reading it.
 Both halves are corrections to the previous release, which shipped and did not
 work.
 
+**`form-inspect`'s output shape changed**, which is why the browser package takes a
+major: a control the page has staged now arrives under `staged` instead of among
+`controls`, and a sign-in page answers with `signIn`. lethe reads this contract in
+its `vault_add` description, so the two move together.
+
 **The staged password came back as a flag, and the flag was read straight past.**
 `form-inspect` was reporting a control the page had taken out of the
 accessibility tree with `hidden: true` rather than leaving it out. An agent
 inspecting Booking.com's e-mail screen saw a password control, said as much —
 "I saw a technical password field in the markup" — and stored a credential the
-site has no use for. It is left out again, which is safe now that a control only
-counts as staged while the page is asking for something else: a page hiding its
-only form is not staged, so its controls still arrive and stay fillable.
+site has no use for. It moves to `staged` — not left among the fields on offer, and not dropped either.
+Dropping was tried and was worse: "the page is asking for something else" is
+satisfied by ANY live input anywhere, so a cookie banner carrying a checkbox took a
+whole sign-in form out of reach with no ref left to recover it.
 
 And the conclusion is stated rather than implied. On a page with an identifier
-field, `form-inspect` now answers with `signIn: { identifier, passwordAsked }`.
+field and a submit beside it, `form-inspect` now answers with
+`signIn: { identifier, passwordAsked }`. The submit is what keeps a newsletter box
+in a footer from being reported as a site with no password.
 A caller acts on a statement; a flag on one control among ten is something it
 has to interpret, and interpretation is what failed.
 

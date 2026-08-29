@@ -37,7 +37,7 @@
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
-import { assertHostAllowed, credentialHost } from "@alien-id/agent-id-vault/lib/store.mjs";
+import { assertHostAllowed, credentialHost, siteName } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { classifyLogin, codeDestination } from "./login-detect.mjs";
 import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
@@ -280,9 +280,12 @@ export function otpCardBudgetMs(cred, { retry = false } = {}) {
 }
 
 export function otpPromptWording(cred, { retry = false, destination = null } = {}) {
-  // The site, never the credential's name: `airbnb-passwordless-again` names the
-  // agent's second attempt, and the owner is looking at Airbnb.
-  const site = credentialHost({ loginUrl: cred.loginUrl, domains: cred.domains }) || cred.name;
+  // Named the way the first card named it. The two arrive a minute apart, and this
+  // one saying `account.booking.com` where the other said `Booking.com` reads as a
+  // different site at the moment the owner is deciding whether to type a code into
+  // it. The credential's name is the last resort, for the same reason as there: a
+  // card naming nothing is worse than one naming a key the agent chose.
+  const site = siteName(credentialHost({ loginUrl: cred.loginUrl, domains: cred.domains })) || cred.name;
   // A retry card has to say why it is there. Without it the owner sees the same
   // prompt twice and cannot tell a refused code from a lost one — and for a
   // time-based code the right move is to read the CURRENT one, not retype the

@@ -407,7 +407,10 @@ test("the card names the site, not the credential the agent invented", async () 
     // The primitive told the owner nothing they could act on, and read as a warning
     // label on a screen meant to reassure.
     assert.ok(!/AES-256-GCM|HKDF/.test(html), "no cipher names on a card");
-    assert.match(html, /I never see it and it isn't saved anywhere/);
+    // "isn't saved anywhere" was false on the one card whose whole purpose is to
+    // save it. What is true is where it goes, and that is the reassuring part.
+    assert.match(html, /I never see it\. It goes straight into your encrypted vault\./);
+    assert.ok(!/isn't saved anywhere/.test(html), "the card must not deny what it is doing");
     // Airbnb's own first screen says "Phone number or email"; the old label
     // promised a mailbox and the code arrived as an SMS.
     assert.match(html, /Email or phone number/, "a passwordless identifier is not email-only");
