@@ -74,6 +74,7 @@ import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../lib/store.mj
 import {
   ACCESS_LEVELS,
   credentialHost,
+  siteName,
   effectiveAccess,
   isAccessRelaxation,
   isAccessRestricted,
@@ -267,17 +268,35 @@ async function cmdInit(flags) {
 // Secret fields each type needs from the out-of-band form (--form). Non-secret
 // metadata (header/param/cookie name, token endpoint, client id) still comes from
 // flags; only the secret VALUE is typed by the human into the browser form.
-// What the owner reads at the top of the secure card. Never the credential's
-// `name`: that is an internal key the agent picks, and it reached the screen
-// verbatim — someone was asked to "Add credential: airbnb-passwordless-again",
-// which names the agent's second attempt rather than the site in front of them.
-// With no host to show, the name is still better than nothing.
-function formTitle({ name, type, loginUrl, domains }) {
-  const host = credentialHost({ loginUrl, domains });
-  if (!host) return `Add credential: ${name}`;
+// The card the owner reads, in three parts. The credential's `name` is not among
+// them while there is a host to show — it is an internal key the agent picks, and
+// it reached the screen verbatim: someone was asked to "Add credential:
+// airbnb-passwordless-again", which names the agent's second attempt rather than
+// the site in front of them. With no host derivable the name is still the last
+// thing left, and better than a card that names nothing at all.
+//
+// The title says what is being asked of them and nothing else. What it is FOR
+// goes in the line below, where there is room to say it in words: the site, and
+// what happens to what they type. The type and the domain allowlist are gone
+// from both — they are how the agent addresses a credential, and `*.booking.com`
+// reads to a person as a typo.
+const CARD_TITLE = "Enter it securely";
 
-  return type === "login" ? `Sign in to ${host}` : `Add credential for ${host}`;
+function formDescription({ name, type, loginUrl, domains, access, passwordless }) {
+  const site = siteName(credentialHost({ loginUrl, domains }));
+  const lead = type === "login"
+    ? `${site ? `${site} sign-in` : `Sign-in for ${name}`}. You type it on a sealed screen.`
+    : `${site ? `A credential for ${site}` : `Credential ${name}`}. You type it on a sealed screen.`;
+  // A passwordless card asks for an identifier and stops; nothing visibly happens
+  // when it is submitted, because the site has yet to send anything.
+  const step = type === "login" && passwordless ? " The code comes at sign-in." : "";
+  // `ro` is a grant being made in the moment of typing, so it stays on the card
+  // even though the rest of the metadata does not.
+  const grant = access === "ro" ? " The agent can read this, never change it." : "";
+
+  return `${lead}${step}${grant}`;
 }
+
 
 function formFieldsForType(type, flags) {
   switch (type) {
@@ -399,26 +418,23 @@ async function cmdAdd(flags) {
       // collectSecret routes through the secure-prompt resolver (browser form →
       // /dev/tty → hosted harness), so this works where no GUI browser is present.
       const out = await collectSecret({
-        title: formTitle({ name, type, loginUrl: flags["login-url"], domains }),
-        // The chat row renders this under the title, so it is the one line that
-        // can set an expectation, and a passwordless card gives the owner nothing
-        // to type but an identifier. Saying WHEN the code is asked for rather than
-        // promising a card next: storing a credential and driving the sign-in are
-        // separate calls, and the second may be minutes away or never come.
-        // The access level stays: "ro" is a grant they are making while they type.
-        description: [
-          type === "login" && flags.passwordless
-            ? "Identifier only — the sign-in code is asked for at sign-in"
-            : null,
-          `${type} · ${domains.join(", ")}`,
-          access === "ro" ? "access: READ-ONLY" : null,
-        ]
-          .filter(Boolean)
-          .join(" · "),
+        title: CARD_TITLE,
+        description: formDescription({
+          name,
+          type,
+          loginUrl: flags["login-url"],
+          domains,
+          access,
+          passwordless: flags.passwordless,
+        }),
         fields: specs,
         label: `enter the "${name}" secret`,
-        security:
-          "Sealed with <code>AES-256-GCM</code> (key via <code>HKDF-SHA256</code>). Never shown to the agent.",
+        // The promise, not the primitive: the algorithm names told the owner nothing
+        // they could act on and read as a warning label on a screen meant to
+        // reassure. It has to stay true, though — this card's whole purpose is to
+        // store the value, so "isn't saved anywhere" would be a lie told on the one
+        // screen where trust is the point.
+        security: "I never see it. It goes straight into your encrypted vault.",
       });
       formValues = out.values;
     } catch (err) {

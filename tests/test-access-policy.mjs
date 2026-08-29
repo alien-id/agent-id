@@ -17,6 +17,7 @@ import {
   isAccessRelaxation,
   isAccessRestricted,
   pathMatchesGlob,
+  siteName,
   strictestAccess,
 } from "../plugins/agent-id-vault/lib/access.mjs";
 import { validateRecord } from "../plugins/agent-id-vault/lib/store.mjs";
@@ -394,5 +395,29 @@ describe("credentialHost", () => {
   it("has nothing to show when the allowlist names no site", () => {
     assert.equal(credentialHost({ domains: ["*"] }), null);
     assert.equal(credentialHost({}), null);
+  });
+});
+
+describe("siteName", () => {
+  it("drops the sign-in subdomain and keeps the site", () => {
+    // Both cards of one sign-in run through this, so the owner sees the same name
+    // when the identifier is collected and again when the code arrives.
+    assert.equal(siteName("account.booking.com"), "Booking.com");
+    assert.equal(siteName("www.airbnb.com"), "Airbnb.com");
+    assert.equal(siteName("auth.example.co.uk"), "Example.co.uk");
+    assert.equal(siteName("secure.login.example.com"), "Example.com");
+  });
+
+  it("keeps a two-label host whole, even when a label reads like a service", () => {
+    // Stripping by name alone turned the site itself into "Gov" and "Me": the whole
+    // point of those sites is that the sign-in IS the site.
+    assert.equal(siteName("login.gov"), "Login.gov");
+    assert.equal(siteName("id.me"), "Id.me");
+    assert.equal(siteName("account.co"), "Account.co");
+  });
+
+  it("has nothing to say about nothing", () => {
+    assert.equal(siteName(null), null);
+    assert.equal(siteName(""), null);
   });
 });

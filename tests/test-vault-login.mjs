@@ -396,16 +396,26 @@ test("the card names the site, not the credential the agent invented", async () 
     // second attempt, and the owner was asked to "Add credential:
     // airbnb-passwordless-again" while looking at Airbnb's sign-in page.
     assert.ok(!html.includes("airbnb-passwordless-again"), "the credential's name must not reach the card");
-    assert.match(html, /Sign in to airbnb\.com/, "the card names the site");
-    // `www.` names the same site and only costs the reader a word. The domain
-    // list below the title still shows the allowlist verbatim, which is right.
-    assert.ok(!html.includes("Sign in to www."), "www. is noise in a title");
+    // The title says what is being asked, the line below says what it is for.
+    assert.match(html, /Enter it securely/);
+    assert.match(html, /Airbnb\.com sign-in/, "the site, as the owner calls it");
+    assert.ok(!html.includes("www.Airbnb"), "a sign-in subdomain is noise");
+    // Metadata for addressing a credential, not for a person: `*.airbnb.com` reads
+    // as a typo, and the type is the agent's vocabulary.
+    assert.ok(!html.includes("login ·"), "the type does not belong on the card");
+    assert.ok(!/\*\.airbnb\.com/.test(html), "the allowlist does not belong on the card");
+    // The primitive told the owner nothing they could act on, and read as a warning
+    // label on a screen meant to reassure.
+    assert.ok(!/AES-256-GCM|HKDF/.test(html), "no cipher names on a card");
+    // "isn't saved anywhere" was false on the one card whose whole purpose is to
+    // save it. What is true is where it goes, and that is the reassuring part.
+    assert.match(html, /I never see it\. It goes straight into your encrypted vault\./);
+    assert.ok(!/isn't saved anywhere/.test(html), "the card must not deny what it is doing");
     // Airbnb's own first screen says "Phone number or email"; the old label
     // promised a mailbox and the code arrived as an SMS.
     assert.match(html, /Email or phone number/, "a passwordless identifier is not email-only");
-    // The chat row renders the description under the title, and this card is step
-    // one of two: submitting it looks like nothing happened unless it says so.
-    assert.match(html, /Identifier only — the sign-in code is asked for at sign-in/);
+    // Step one of two: submitting it looks like nothing happened unless it says so.
+    assert.match(html, /The code comes at sign-in/);
 
     child.kill();
     await new Promise((r) => child.on("exit", r));

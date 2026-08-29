@@ -110,6 +110,22 @@ function withoutWww(host) {
   return host.replace(/^www\./i, "");
 }
 
+// What a person calls the site, for a card they are reading. `account.booking.com`
+// is where the sign-in lives, not what the owner thinks they are signing in to, so
+// the service label in front comes off — but only while a site is left underneath:
+// login.gov and id.me ARE the site, and stripping by name alone left "Gov" and "Me".
+const SIGN_IN_LABELS = new Set(["account", "accounts", "login", "signin", "sign-in", "auth", "id", "secure", "my"]);
+
+export function siteName(host) {
+  if (!host) return null;
+
+  const labels = withoutWww(host).split(".");
+  while (labels.length > 2 && SIGN_IN_LABELS.has(labels[0].toLowerCase())) labels.shift();
+  const site = labels.join(".");
+
+  return `${site.charAt(0).toUpperCase()}${site.slice(1)}`;
+}
+
 // The level in force for a record — absent means unrestricted ("rw").
 export function effectiveAccess(rec) {
   return rec && rec.access != null ? rec.access : "rw";

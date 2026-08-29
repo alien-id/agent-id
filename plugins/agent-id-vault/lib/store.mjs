@@ -20,11 +20,11 @@
 
 import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
 import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
-import { assertHostAllowed, credentialHost, hostMatchesAllowlist, validateAccessFields } from "./access.mjs";
+import { assertHostAllowed, credentialHost, hostMatchesAllowlist, siteName, validateAccessFields } from "./access.mjs";
 
 // Domain matching lives in access.mjs (access rules share the syntax); kept
 // exported here for the proxy/browser consumers that import it from store.
-export { assertHostAllowed, credentialHost, hostMatchesAllowlist };
+export { assertHostAllowed, credentialHost, hostMatchesAllowlist, siteName };
 
 export const CREDENTIAL_TYPES = Object.freeze([
   "bearer",

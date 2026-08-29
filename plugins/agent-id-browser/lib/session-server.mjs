@@ -341,9 +341,13 @@ export function formSnapshotInPage(arg) {
   // sits beside a live field, a masked page has none. Buttons do not count towards
   // that (a dialog's "Accept" would answer for the page it is covering).
   //
-  // A staged control is reported and flagged rather than dropped: a page that hides
-  // a control it does in fact want is an authoring mistake we should still be able
-  // to fill, and dropping it would leave the agent no ref to fill it with.
+  // A staged control moves to `staged`, it is not dropped and it is not left among
+  // the fields on offer. Flagging it inside `controls` was read straight past — an
+  // agent saw a password entry, said "I saw a technical password field in the
+  // markup", and stored a credential the site has no use for. Dropping it was worse:
+  // `asksSomethingElse` is satisfied by ANY live input anywhere, so a cookie banner
+  // carrying a checkbox took a whole sign-in form out of reach, with no ref left to
+  // recover it. A separate list says the same thing without either failure.
   //
   // `detectPageState` in auto-login.mjs carries the same rule. Both run inside the
   // page, so neither can import it; the duplication is the price of that.
@@ -354,6 +358,7 @@ export function formSnapshotInPage(arg) {
   const stagedOf = (el) => staged(el) && asksSomethingElse;
 
   const controls = [];
+  const stagedControls = [];
   let i = 0;
   const seen = new Set();
   for (const el of document.querySelectorAll(SEL)) {
@@ -373,6 +378,7 @@ export function formSnapshotInPage(arg) {
     const visible = laidOut && !stagedOf(el);
     // Hidden native controls remain actionable through setChecked/setInputFiles.
     if (!laidOut && !["checkbox", "radio", "file"].includes(type)) continue;
+    const isStaged = stagedOf(el);
     const form = el.closest("form");
     const role = el.getAttribute("role") || tag;
     const entry = {
@@ -381,10 +387,14 @@ export function formSnapshotInPage(arg) {
       type,
       label: labelOf(el),
       ...(el.getAttribute("name") ? { name: clip(el.getAttribute("name"), 100) } : {}),
+      // What a sign-in page states about a field, and the one signal it gives that
+      // no wording heuristic can match: `autocomplete="username"` is never a
+      // newsletter box.
+      ...(el.getAttribute("autocomplete") ? { autocomplete: clip(el.getAttribute("autocomplete"), 40) } : {}),
       ...(el.required ? { required: true } : {}),
       ...(el.disabled || el.getAttribute("aria-disabled") === "true" ? { disabled: true } : {}),
       ...(el.readOnly ? { readonly: true } : {}),
-      ...(!visible ? { hidden: true } : {}),
+      ...(!laidOut ? { hidden: true } : {}),
       ...(form ? { form: clip(form.getAttribute("name") || form.id || form.getAttribute("action") || "form", 160) } : {}),
     };
     if (type === "checkbox" || type === "radio" || role === "checkbox" || role === "radio") {
@@ -403,9 +413,46 @@ export function formSnapshotInPage(arg) {
       entry.multiple = !!el.multiple;
       if (el.accept) entry.accept = clip(el.accept, 200);
     }
-    controls.push(entry);
+    (isStaged ? stagedControls : controls).push(entry);
   }
-  return { url: location.href, title: document.title, controls };
+  // The conclusion, not the evidence. An agent deciding what kind of credential a
+  // site needs was left to infer it from the control list, and inferred wrong on
+  // the first real site it met: Booking stages a password on its e-mail screen, and
+  // "there is a password control" won over everything else. Saying it outright is
+  // what a caller acts on; a flag on one control is something it has to interpret.
+  //
+  // Only claimed where it means something. An identifier field alone is not a
+  // sign-in: a newsletter box in a footer is one, and answering
+  // `passwordAsked: false` for it tells the caller a site has no password — the same
+  // wrong conclusion from the other end. So a submit in the same form is required,
+  // and the identifier has to look like one: `autocomplete` is the strong signal a
+  // sign-in page gives, `name` and the label are the fallback, and a search box is
+  // excluded by type rather than left to the label to rule out.
+  //
+  // `passwordAsked` is about what the page ASKS for, so a staged password is not
+  // one — the same rule `controls` follows above.
+  const identifierish = (c) => {
+    if (c.type === "search") return false;
+    if (/username|email|tel/i.test(c.autocomplete || "")) return true;
+    if (c.type !== "email" && c.type !== "tel" && c.type !== "text") return false;
+
+    return /user|email|e-mail|phone|mobile|login/i.test(`${c.name || ""} ${c.label || ""}`);
+  };
+  const identifier = controls.find(identifierish);
+  const submits = controls.some(
+    (c) => (c.type === "submit" || c.role === "button" || c.type === "button") && c.form === identifier?.form,
+  );
+  const signIn = identifier && submits
+    ? { identifier: true, passwordAsked: controls.some((c) => c.type === "password") }
+    : null;
+
+  return {
+    url: location.href,
+    title: document.title,
+    controls,
+    ...(stagedControls.length ? { staged: stagedControls } : {}),
+    ...(signIn ? { signIn } : {}),
+  };
 }
 
 const sel = (ref) => `[data-aibref="${String(ref).replace(/["\\]/g, "")}"]`;
