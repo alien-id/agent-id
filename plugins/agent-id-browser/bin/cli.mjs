@@ -334,11 +334,10 @@ async function cmdLogin(flags) {
         /* about:blank or slow page — fine, the user drives from here */
       }
       await waitForUserClose(ctx, Number(flags["timeout-sec"] || 600) * 1000);
-      try {
-        await ctx.close();
-      } catch {
-        /* already closed by the user */
-      }
+      await Promise.race([
+        ctx.close().catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
 
       const { bytes } = await sealProfile({ stateDir, file, dekHex: dek, sourceDir: work });
       vault.add({
