@@ -84,7 +84,7 @@ export async function loadChromium() {
 
 // Chrome hard-refuses to start as root with the sandbox on ("Running as root
 // without --no-sandbox is not supported"), which is exactly the situation in a
-// containerized deployment (e.g. lethe-hosted per-user containers run as root;
+// containerized deployment (e.g. hosted per-user agent containers run as root;
 // the container itself is the isolation boundary there). This explicit opt-in
 // KEEPS patchright's injected --no-sandbox instead of stripping it. Default
 // (unset) preserves the stealth-validated sandbox-on launch. Not fingerprintable
