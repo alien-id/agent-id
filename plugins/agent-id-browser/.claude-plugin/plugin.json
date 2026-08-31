@@ -1,6 +1,6 @@
 {
   "name": "agent-id-browser",
-  "version": "8.0.1",
+  "version": "8.1.0",
   "description": "Alien Browser with anonymous L0 public browsing, vault-sealed login profiles, and compact verified form filling.",
   "author": {
     "name": "Alien",
