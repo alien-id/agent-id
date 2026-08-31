@@ -265,10 +265,10 @@ export async function runRecipe(
 // Measured on a live Booking.com run, where a two-minute retry expired with the
 // owner still fetching the mail.
 //
-// Both budgets are bounded by the same thing — lethe's 16-minute HUMAN_TIMEOUT
-// (`src/agent_id/cli.rs`) kills the whole auto-login subprocess, cards, navigation
-// and settles included. That is what rules out a second full-length card: 10 + 4
-// leaves room for the page work either side, where 10 + 10 does not.
+// Both budgets are bounded by the same thing — the caller's own 16-minute ceiling
+// kills the whole auto-login run, cards, navigation and settles included. That is
+// what rules out a second full-length card: 10 + 4 leaves room for the page work
+// either side, where 10 + 10 does not.
 const OTP_CARD_MS = 10 * 60 * 1000;
 const OTP_GLANCE_RETRY_CARD_MS = 2 * 60 * 1000;
 const OTP_MAILBOX_RETRY_CARD_MS = 4 * 60 * 1000;

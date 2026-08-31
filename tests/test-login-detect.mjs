@@ -448,8 +448,8 @@ test("a code screen that also mentions a link is a code step, however weak its f
 });
 
 test("failed: a Russian rejection is read as a bad credential, not `unknown`", () => {
-  // lk.eneva.ru — without this the password field stays, every round is
-  // `unknown`, and the result is a `timeout` blamed on the owner.
+  // Without this the password field stays, every round is `unknown`, and the
+  // result is a `timeout` blamed on the owner.
   assert.equal(
     classifyLogin({
       hasPasswordField: true,

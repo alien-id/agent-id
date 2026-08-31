@@ -123,8 +123,8 @@ const CONFIRM_BODY_RE =
 // Russian: a datacenter-hosted browser gets the page in the site's language,
 // and a rejection it cannot read degrades to `unknown` → `timeout` →
 // `owner_must_drive`, which sends the owner to a browser for what is really a
-// wrong password (seen on lk.eneva.ru: «Пользователь не найден или неверный
-// пароль»). Keep each phrase specific to a failed sign-in.
+// wrong password — seen on a live Russian-language sign-in. Keep each phrase
+// specific to a failed sign-in.
 const ERROR_RE =
   /(incorrect|invalid|wrong password|that password|couldn.?t (?:sign|log) ?you in|try again|doesn.?t match|not recognized|too many attempts|account.*lock|неверн[а-яё]*\s+(?:логин|парол|имя|номер|данные|код)|неправильн[а-яё]*\s+(?:логин|парол|имя|номер|данные)|пользователь не найден|не найден или неверн|ошибка (?:входа|авторизации|аутентификации)|попробуйте (?:ещё|еще) раз|слишком много попыток|учетн[а-яё]* запись заблокирована)/i;
 
