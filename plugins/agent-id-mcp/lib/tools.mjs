@@ -1,5 +1,5 @@
 // The MCP tool surface, each mapped to an agent-id-* CLI subcommand. Mirrors the
-// surface Lethe exposes (src/tools/agent_id.rs). Increment 1: identity + vault.
+// surface the desktop host exposes. Increment 1: identity + vault.
 // Browser tools (browser_open/act/close/…) are added in increment 2 once the
 // server-side sealed-browser daemon relay is wired (see docs/COWORK-MCP.md).
 //

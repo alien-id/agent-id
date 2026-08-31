@@ -1,8 +1,8 @@
 // Resolve and run the agent-id-* CLIs as subprocesses, returning their JSON.
 //
 // The MCP server is a THIN adapter: every tool maps to a CLI subcommand (the same
-// battle-tested surface Lethe shells out to), so there is no re-implementation of
-// command logic. Resolution mirrors lethe's `find_bin`: an explicit
+// battle-tested surface the desktop host shells out to), so there is no
+// re-implementation of command logic. Resolution mirrors the host's: an explicit
 // AGENT_ID_{CORE,VAULT,BROWSER}_BIN override, else the CLI on PATH, else the dev
 // workspace sibling. A `.mjs`/`.js` target is run with the current node.
 

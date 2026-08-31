@@ -45,7 +45,7 @@ the `SessionStart` hook the CLI plugins rely on.
   bundled alongside.
 - **`runtime: cowork-vm`** (or chrome missing / localhost blocked) → the local
   browser can't run there; use the **hosted** transport (Streamable-HTTP connector
-  backed by the lethe-hosted service, browser server-side). Identity + vault may
+  backed by the hosted runtime, browser server-side). Identity + vault may
   still work locally if the CLIs are bundled.
 
 ## Rebuilding the bundle

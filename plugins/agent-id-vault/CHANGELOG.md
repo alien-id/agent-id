@@ -11,7 +11,7 @@
 
   **`form-inspect`'s output shape changed**, which is why the browser package takes a
   major: a control the page has staged now arrives under `staged` instead of among
-  `controls`, and a sign-in page answers with `signIn`. lethe reads this contract in
+  `controls`, and a sign-in page answers with `signIn`. The desktop host reads this contract in
   its `vault_add` description, so the two move together.
 
   **The staged password came back as a flag, and the flag was read straight past.**
