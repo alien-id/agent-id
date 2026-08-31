@@ -144,6 +144,46 @@ test("an element the snapshot gives no ref for is refused, not clicked at a gues
   }
 });
 
+test("acting on a selector prefers the first VISIBLE match", async () => {
+  const stub = await stubBrowser({
+    ...BASE,
+    "Runtime.evaluate": { result: { value: { count: 2, stamped: true, visible: true } } },
+    "Session.dom.snapshot": { lines: 1, text: 'page https://site.test/login\n4 input "Email" type=email' },
+  });
+  try {
+    const page = await openRpcPage(stub.rpc);
+    await page.fill('input[type="email"]', "ada@example.test");
+
+    const expression = stub.of("Runtime.evaluate").at(-1).params.expression;
+    const chain = JSON.parse(/\.apply\(null, (\[.*\])\)$/s.exec(expression)[1])[0];
+    assert.deepEqual(
+      chain,
+      [{ css: 'input[type="email"]' }, { firstVisible: true }],
+      "a page rendering a hidden duplicate of a field first must not swallow the fill",
+    );
+  } finally {
+    await stub.close();
+  }
+});
+
+test("a locator narrowed by hand is taken exactly as spelled", async () => {
+  const stub = await stubBrowser({
+    ...BASE,
+    "Runtime.evaluate": { result: { value: { count: 3, stamped: true, visible: true } } },
+    "Session.dom.snapshot": { lines: 1, text: 'page https://site.test/login\n9 button "Verify"' },
+  });
+  try {
+    const page = await openRpcPage(stub.rpc);
+    await page.locator("button").nth(2).click();
+
+    const expression = stub.of("Runtime.evaluate").at(-1).params.expression;
+    const chain = JSON.parse(/\.apply\(null, (\[.*\])\)$/s.exec(expression)[1])[0];
+    assert.deepEqual(chain, [{ css: "button" }, { nth: 2 }], "nth is a choice, not a hint");
+  } finally {
+    await stub.close();
+  }
+});
+
 test("a locator chain travels to the page as steps, xpath included", async () => {
   const stub = await stubBrowser({
     ...BASE,

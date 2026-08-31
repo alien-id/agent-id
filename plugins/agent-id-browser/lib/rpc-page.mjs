@@ -88,8 +88,13 @@ const RESOLVER = `(function (chain, stamp, attr) {
         var found = nodes[j2].querySelectorAll(step.css);
         for (var k2 = 0; k2 < found.length; k2++) next.push(found[k2]);
       }
-    } else if (step.visible) {
-      next = nodes.filter(function (e) { return e !== document && visible(e); });
+    } else if (step.firstVisible) {
+      // A page can render a HIDDEN duplicate of a field before the real one —
+      // acting on the first match then times out against something nobody can
+      // see. Prefer the first visible match; fall back to the first, so the
+      // caller still gets a normal "not visible" wait rather than nothing.
+      var shown = nodes.filter(function (e) { return e !== document && visible(e); });
+      next = shown.length ? [shown[0]] : nodes.slice(0, 1);
     } else if (step.nth != null) {
       var idx = step.nth < 0 ? nodes.length + step.nth : step.nth;
       if (nodes[idx]) next = [nodes[idx]];
@@ -138,6 +143,20 @@ class Locator {
     return this.page._resolve(this.chain);
   }
 
+  /** The chain an ACTION resolves through. A locator narrowed by hand (`nth`,
+   *  `first`) is taken exactly as spelled; anything else prefers the first
+   *  visible match, which is what makes a hidden duplicate harmless. Querying
+   *  (`count`, `isVisible`) stays positional either way — a caller asking
+   *  whether the first match is visible must get that answer. */
+  #actionChain() {
+    const last = this.chain[this.chain.length - 1];
+    return last && last.nth != null ? this.chain : [...this.chain, { firstVisible: true }];
+  }
+
+  async #resolveForAction() {
+    return this.page._resolve(this.#actionChain());
+  }
+
   async count() {
     return (await this.#resolve()).count;
   }
@@ -157,11 +176,12 @@ class Locator {
     return info.stamped && info.box.width > 0 ? info.box : null;
   }
 
-  /** Wait for the element to exist and (by default) be visible. */
+  /** Wait for the element to exist and (by default) be visible — resolved the
+   *  way an action on it would resolve, so the wait and the act agree. */
   async waitFor({ state = "visible", timeout = 15000 } = {}) {
     const deadline = Date.now() + timeout;
     for (;;) {
-      const info = await this.#resolve();
+      const info = await this.#resolveForAction();
       if (info.stamped && (state !== "visible" || info.visible)) return;
       if (Date.now() >= deadline) {
         throw new Error(`locator ${describe(this.chain)} was not ${state} within ${timeout}ms`);
@@ -202,7 +222,7 @@ class Locator {
 
   /** Tick a checkbox that is not already ticked. */
   async check({ timeout = 15000 } = {}) {
-    const info = await this.#resolve();
+    const info = await this.#resolveForAction();
     if (!info.stamped) throw new Error(`locator ${describe(this.chain)} matched nothing`);
     const checked = await this.page.evaluate(
       `(function (sel) { var e = document.querySelector(sel); return !!(e && e.checked); })`,
@@ -212,7 +232,7 @@ class Locator {
   }
 
   async scrollIntoViewIfNeeded() {
-    await this.#resolve();
+    await this.#resolveForAction();
     await this.page.evaluate(
       `(function (sel) { var e = document.querySelector(sel); if (e) e.scrollIntoView({ block: "center" }); return true; })`,
       this.page._stampSelector(),
@@ -327,7 +347,7 @@ class RpcPage {
   }
 
   async waitForSelector(selector, { state = "visible", timeout = 15000 } = {}) {
-    await this.locator(selector).first().waitFor({ state, timeout });
+    await this.locator(selector).waitFor({ state, timeout });
   }
 
   locator(selector) {
@@ -335,19 +355,19 @@ class RpcPage {
   }
 
   async click(selector, opts) {
-    await this.locator(selector).first().click(opts);
+    await this.locator(selector).click(opts);
   }
 
   async fill(selector, value, opts) {
-    await this.locator(selector).first().fill(value, opts);
+    await this.locator(selector).fill(value, opts);
   }
 
   async press(selector, key, opts) {
-    await this.locator(selector).first().press(key, opts);
+    await this.locator(selector).press(key, opts);
   }
 
   async hover(selector) {
-    const box = await this.locator(selector).first().boundingBox();
+    const box = await this.locator(selector).boundingBox();
     if (!box) return;
     await this._call("Session.input.dispatchMouseEvent", {
       type: "mouseMoved",
