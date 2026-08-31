@@ -524,6 +524,40 @@ export function otpModeCorrection(cred) {
   return cred?.otp === "none" ? "interactive" : null;
 }
 
+// The row of single-character boxes a code screen is built from, in document
+// order — empty when the page uses one ordinary field. Same test as the cell
+// count in `otpCardHints`: a box qualifies by taking a code.
+export const OTP_BOX_SEL =
+  'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]';
+
+export async function otpBoxes(target) {
+  const all = target.locator(OTP_BOX_SEL);
+  const count = await all.count().catch(() => 0);
+  const boxes = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const box = all.nth(index);
+    const [visible, maxLength, autocomplete, inputMode, type] =
+      await Promise.all([
+        box.isVisible().catch(() => false),
+        box.getAttribute("maxlength").catch(() => null),
+        box.getAttribute("autocomplete").catch(() => null),
+        box.getAttribute("inputmode").catch(() => null),
+        box.getAttribute("type").catch(() => null),
+      ]);
+    const boxish =
+      Number(maxLength) === 1 ||
+      autocomplete === "one-time-code" ||
+      inputMode === "numeric" ||
+      type === "tel" ||
+      type === "number";
+
+    if (visible && boxish) boxes.push(box);
+  }
+
+  return boxes.length >= 4 ? boxes : [];
+}
+
 export async function otpCardHints(page) {
   const [length, bodyText] = await page.evaluate(() => {
     const visible = (e) =>
@@ -548,9 +582,13 @@ export async function otpCardHints(page) {
       e.getAttribute("inputmode") === "numeric" ||
       e.type === "tel" ||
       e.type === "number";
+    // Only an exact count. A row of boxes is one — there are as many as the code
+    // has characters. A single field's maxlength is NOT: it says "no more than",
+    // and a site is free to allow eight for a six-character code. Drawing eight
+    // cells for a six-character code is the one failure this screen cannot
+    // recover from, because it submits on the last cell and carries no button.
     const boxes = fields.filter(boxish).length;
-    const count =
-      boxes >= 4 ? boxes : fields.length === 1 ? declared(fields[0]) : null;
+    const count = boxes >= 4 ? boxes : null;
     const text =
       document.body && document.body.innerText ? document.body.innerText : "";
 
@@ -612,23 +650,6 @@ export async function detectPageState(page) {
           }`.trim()
         )
         .filter(Boolean);
-      // How many characters the code has, as the page itself constrains it. A row of
-      // one-character boxes IS the count; a single field states it in maxlength. The
-      // card draws exactly this many cells and submits when they fill, so a number
-      // that is merely plausible is worse than none — an unconstrained text input
-      // (maxlength 32, or absent) says nothing about a code and must not be read as
-      // if it did.
-      const lengthOf = (e) => {
-        const declared = Number(e.getAttribute("maxlength"));
-        return Number.isInteger(declared) && declared > 0 ? declared : null;
-      };
-      const singleCharBoxes = otpFields.filter((e) => lengthOf(e) === 1).length;
-      const otpLength =
-        singleCharBoxes >= 4
-          ? singleCharBoxes
-          : otpFields.length === 1
-          ? lengthOf(otpFields[0])
-          : null;
       const bodyText = (
         document.body && document.body.innerText ? document.body.innerText : ""
       ).slice(0, 4000);
@@ -651,7 +672,6 @@ export async function detectPageState(page) {
         hasIdentifierField,
         hasOtpField,
         otpFieldNames,
-        otpLength,
         bodyText,
         blocked,
         errorText,
@@ -1166,7 +1186,7 @@ export async function autoLogin({
         // What the page enforces beats what it says: an input constrained to six
         // characters is a fact, "6-digit code" is copy that may describe the last
         // step rather than this one.
-        const length = state.otpLength ?? codeLengthFromText(state.bodyText);
+        const { length } = await otpCardHints(page);
         await typeOtp(
           page,
           await getOtp(retry, codeDestination(state.bodyText), length)

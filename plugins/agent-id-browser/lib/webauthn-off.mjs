@@ -66,7 +66,8 @@ export async function suppressWebAuthn(ctx, env = process.env) {
         /* locked down — the reject path below still prevents the hang */
       }
     }
-    const proto = window.CredentialsContainer && window.CredentialsContainer.prototype;
+    const proto =
+      window.CredentialsContainer && window.CredentialsContainer.prototype;
     if (!proto) return;
     for (const name of ["get", "create"]) {
       const native = proto[name];
@@ -77,12 +78,16 @@ export async function suppressWebAuthn(ctx, env = process.env) {
       proto[name] = new Proxy(native, {
         apply(target, thisArg, argList) {
           const options = argList[0];
-          if (options && typeof options === "object" && "publicKey" in options) {
+          if (
+            options &&
+            typeof options === "object" &&
+            "publicKey" in options
+          ) {
             return Promise.reject(
               new DOMException(
                 "The operation either timed out or was not allowed.",
-                "NotAllowedError",
-              ),
+                "NotAllowedError"
+              )
             );
           }
           return Reflect.apply(target, thisArg, argList);

@@ -28,7 +28,7 @@ export function sessionReplyError(result, { name, action } = {}) {
   if (/unknown action/i.test(message)) {
     const error = new Error(
       `the open session '${name}' predates the '${action}' action — ` +
-        `run \`close --name ${name}\` then \`open --name ${name}\` to pick it up`,
+        `run \`close --name ${name}\` then \`open --name ${name}\` to pick it up`
     );
     error.code = "SESSION_TOO_OLD";
     return error;

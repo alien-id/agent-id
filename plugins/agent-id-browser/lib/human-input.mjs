@@ -34,7 +34,11 @@ export function randBetween(min, max, rng = Math.random) {
 // so the cursor arcs like a hand rather than sliding on a rail. Returns the
 // ordered waypoints AFTER `from` (the cursor is assumed already at `from`); the
 // final point is exactly `to`. Step count scales with distance.
-export function bezierPath(from, to, { rng = Math.random, maxSteps = 26 } = {}) {
+export function bezierPath(
+  from,
+  to,
+  { rng = Math.random, maxSteps = 26 } = {}
+) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const dist = Math.hypot(dx, dy) || 1;
@@ -144,9 +148,14 @@ async function locate(root, selector, timeout) {
 // retries under overlays / sticky headers). Doing the click by raw page.mouse at
 // a coordinate would skip those checks and silently miss when anything covers
 // the point — so we keep the human motion but not the fragile raw click.
-export async function humanClick(page, selector, { rng = Math.random, timeout = 15000, root = page } = {}) {
+export async function humanClick(
+  page,
+  selector,
+  { rng = Math.random, timeout = 15000, root = page } = {}
+) {
   if (!humanInputEnabled()) {
-    if (typeof selector?.click === "function") return void (await selector.click({ timeout }));
+    if (typeof selector?.click === "function")
+      return void (await selector.click({ timeout }));
     return void (await root.click(selector, { timeout }));
   }
   const el = await locate(root, selector, timeout);
@@ -169,7 +178,7 @@ export async function humanType(
   page,
   selector,
   text,
-  { rng = Math.random, timeout = 15000, submit = false, root = page } = {},
+  { rng = Math.random, timeout = 15000, submit = false, root = page } = {}
 ) {
   const value = String(text ?? "");
   if (!humanInputEnabled()) {
@@ -193,7 +202,49 @@ export async function humanType(
 // came from a click-xy rather than a locator. No click, no clear: it appends at
 // the caret. `submit` presses Enter after a short dwell. With human input
 // disabled the keystrokes are sent back-to-back (still real key events).
-export async function humanTypeFocused(page, text, { rng = Math.random, submit = false } = {}) {
+// Type a one-time code that the page has split across a row of single-character
+// boxes. Typing into the first one and letting the site advance the focus is what
+// most of them expect, and it is what `humanType` does — but it depends on script
+// the site runs on every keystroke, and where that script is picky (Booking.com's
+// six boxes among them) the code lands half-entered and the submit stays dead.
+//
+// So: type, then look. Boxes that stayed empty are filled one at a time, each
+// with its own character, which needs no cooperation from the page at all.
+// Returns whether the row ended up holding the whole code.
+export async function typeCodeAcrossBoxes(
+  page,
+  boxes,
+  code,
+  { rng = Math.random } = {}
+) {
+  const characters = Array.from(String(code ?? ""));
+  if (boxes.length === 0 || characters.length === 0) return false;
+
+  await humanClick(page, boxes[0]);
+  await boxes[0].fill("");
+  await humanTypeFocused(page, code, { rng });
+
+  const filled = async () =>
+    Promise.all(boxes.map((box) => box.inputValue().catch(() => "")));
+  if ((await filled()).join("").length >= characters.length) return true;
+
+  for (const [index, box] of boxes.entries()) {
+    const character = characters[index];
+    if (character === undefined) break;
+    // `fill` rather than keystrokes: the page's own key handling is what fell
+    // short, and a per-box value assignment still raises the input events a
+    // controlled component listens for.
+    await box.fill(character).catch(() => {});
+  }
+
+  return (await filled()).join("").length >= characters.length;
+}
+
+export async function humanTypeFocused(
+  page,
+  text,
+  { rng = Math.random, submit = false } = {}
+) {
   const value = String(text ?? "");
   if (!humanInputEnabled()) {
     await page.keyboard.type(value);
@@ -211,8 +262,13 @@ export async function humanTypeFocused(page, text, { rng = Math.random, submit =
   }
 }
 
-export async function humanHover(page, selector, { rng = Math.random, timeout = 15000, root = page } = {}) {
-  if (!humanInputEnabled()) return void (await root.hover(selector, { timeout }));
+export async function humanHover(
+  page,
+  selector,
+  { rng = Math.random, timeout = 15000, root = page } = {}
+) {
+  if (!humanInputEnabled())
+    return void (await root.hover(selector, { timeout }));
   const el = await locate(root, selector, timeout);
   const box = await el.boundingBox();
   if (!box) return void (await el.hover({ timeout }));
@@ -227,7 +283,10 @@ export async function humanScroll(page, dx, dy, { rng = Math.random } = {}) {
   if (!humanInputEnabled() || (totalY === 0 && totalX === 0)) {
     return void (await page.mouse.wheel(totalX, totalY));
   }
-  const steps = Math.max(2, Math.min(6, Math.round(Math.abs(totalY || totalX) / 220) + 2));
+  const steps = Math.max(
+    2,
+    Math.min(6, Math.round(Math.abs(totalY || totalX) / 220) + 2)
+  );
   let sentX = 0;
   let sentY = 0;
   for (let i = 1; i <= steps; i++) {
@@ -242,7 +301,12 @@ export async function humanScroll(page, dx, dy, { rng = Math.random } = {}) {
 }
 
 // A small pre-press dwell, then the key. For submitting a field, etc.
-export async function humanPress(page, selector, key, { rng = Math.random, timeout = 15000 } = {}) {
+export async function humanPress(
+  page,
+  selector,
+  key,
+  { rng = Math.random, timeout = 15000 } = {}
+) {
   await wait(page, 40 + rng() * 120);
   if (selector) await page.press(selector, key, { timeout });
   else await page.keyboard.press(key);
@@ -254,7 +318,8 @@ export async function humanPress(page, selector, key, { rng = Math.random, timeo
 // runRecipe stays testable (tests pass a recording driver) while production uses
 // real human motion.
 export const humanDriver = {
-  navigate: (page, url) => page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }),
+  navigate: (page, url) =>
+    page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }),
   fill: (page, selector, value) => humanType(page, selector, value),
   type: (page, selector, value) => humanType(page, selector, value),
   click: (page, selector) => humanClick(page, selector),

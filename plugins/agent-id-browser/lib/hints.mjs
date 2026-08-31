@@ -9,7 +9,9 @@ export const DEFAULT_PROFILE = "main";
 export function profileName(value = DEFAULT_PROFILE) {
   const name = String(value || DEFAULT_PROFILE);
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
-    const error = new Error("browser profile name must be 1-64 letters, digits, '_' or '-'");
+    const error = new Error(
+      "browser profile name must be 1-64 letters, digits, '_' or '-'"
+    );
     error.code = "INVALID_PROFILE_NAME";
     throw error;
   }

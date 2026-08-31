@@ -39,7 +39,12 @@ import {
   SECRET_FIELDS,
   assertHostAllowed,
 } from "@alien-id/agent-id-vault/lib/store.mjs";
-import { otpCardHints, otpModeCorrection, resolveOtp } from "./auto-login.mjs";
+import {
+  otpBoxes,
+  otpCardHints,
+  otpModeCorrection,
+  resolveOtp,
+} from "./auto-login.mjs";
 import {
   applyAccessGuard,
   assertActionAllowed,
@@ -53,6 +58,7 @@ import {
   humanMove,
   humanScroll,
   humanType,
+  typeCodeAcrossBoxes,
   humanTypeFocused,
 } from "./human-input.mjs";
 
@@ -1651,11 +1657,25 @@ export async function dispatch(state, msg, policy = null) {
         }
         // Same leak guard as fill-secret: never surface the value-bearing error.
         try {
-          await humanType(page, sel(p.ref), code, {
-            timeout: ACTION_TIMEOUT,
-            submit: p.submit !== false,
-            root: target,
-          });
+          // A row of boxes needs the code spread across it, and the ref names only
+          // the first one. Typing into that one and trusting the page to advance
+          // the focus is what leaves the row half-entered and the submit dead.
+          const boxes = await otpBoxes(target);
+          if (boxes.length > 0) {
+            const complete = await typeCodeAcrossBoxes(page, boxes, code);
+            if (!complete) {
+              throw new Error(
+                `fill-otp: the code did not land in all ${boxes.length} boxes (re-snapshot and retry)`
+              );
+            }
+            if (p.submit !== false) await page.keyboard.press("Enter");
+          } else {
+            await humanType(page, sel(p.ref), code, {
+              timeout: ACTION_TIMEOUT,
+              submit: p.submit !== false,
+              root: target,
+            });
+          }
         } catch {
           throw new Error(
             `fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`

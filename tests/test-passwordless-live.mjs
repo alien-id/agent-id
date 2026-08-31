@@ -29,8 +29,10 @@ import {
 import {
   autoLogin,
   detectPageState,
+  otpBoxes,
   otpCardHints,
 } from "../plugins/agent-id-browser/lib/auto-login.mjs";
+import { typeCodeAcrossBoxes } from "../plugins/agent-id-browser/lib/human-input.mjs";
 import { classifyLogin } from "../plugins/agent-id-browser/lib/login-detect.mjs";
 import { formSnapshotInPage } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
@@ -111,18 +113,35 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
       ).join("")}</form>`);
       return;
     }
+    if (url.pathname === "/otp-boxes-stubborn") {
+      // Boxes that do NOT advance the focus themselves. Typing into the first one
+      // leaves five empty and the submit dead — which is what a live sign-in was
+      // reporting, and what typing key-by-key cannot fix on its own.
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form>${Array.from(
+        { length: 6 },
+        (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`
+      ).join("")}</form>`);
+      return;
+    }
     if (url.pathname === "/otp-boxes-unmarked") {
       // What Booking.com actually renders: a row of boxes with no maxlength at
       // all, constrained in script. Counting only maxlength="1" missed it — on
       // the very site this was built for.
       res.end(`<!doctype html><meta charset=utf-8><title>code</title>
 <h1>Enter the code we sent you</h1>
-<form>${Array.from({ length: 6 }, (_, i) => `<input name=d${i} type=text inputmode=numeric>`).join("")}</form>`);
+<form>${Array.from(
+        { length: 6 },
+        (_, i) => `<input name=d${i} type=text inputmode=numeric>`
+      ).join("")}</form>`);
       return;
     }
     if (url.pathname === "/otp-not-a-code") {
       res.end(`<!doctype html><meta charset=utf-8><title>address</title>
-<form>${["street", "city", "state", "zip", "country"].map((n) => `<input name=${n} type=text>`).join("")}</form>`);
+<form>${["street", "city", "state", "zip", "country"]
+        .map((n) => `<input name=${n} type=text>`)
+        .join("")}</form>`);
       return;
     }
     if (url.pathname === "/otp-single") {
@@ -637,13 +656,17 @@ test(
           await page.goto(`http://127.0.0.1:${port}${route}`, {
             waitUntil: "domcontentloaded",
           });
-          return (await detectPageState(page)).otpLength;
+          return (await otpCardHints(page)).length;
         };
 
         // A row of one-character boxes IS the count.
         assert.equal(await lengthAt("/otp-boxes"), 6);
         // One field states it outright.
-        assert.equal(await lengthAt("/otp-single"), 8);
+        assert.equal(
+          await lengthAt("/otp-single"),
+          null,
+          "a maxlength is an upper bound, not the length of the code"
+        );
         // And an unconstrained input states nothing — which must not be read as a
         // count, because the screen submits itself once the cells it drew are full.
         assert.equal(await lengthAt("/otp-unbounded"), null);
@@ -683,10 +706,14 @@ test(
         assert.equal(
           (await hintsAt("/otp-not-a-code")).length,
           null,
-          "several text inputs are a form, not a row of code boxes",
+          "several text inputs are a form, not a row of code boxes"
         );
+        // `maxlength` says "no more than", not "exactly": a site may allow eight
+        // for a six-character code. Cells drawn from it would submit on the eighth
+        // and strand a correct six-character answer, so this states no count and
+        // the request goes out as a plain field with a button.
         assert.deepEqual(await hintsAt("/otp-single"), {
-          length: 8,
+          length: null,
           destination: null,
         });
 
@@ -778,6 +805,63 @@ test(
       });
 
       assert.deepEqual(corrections, [], "nothing to correct");
+    } finally {
+      server.close();
+    }
+  }
+);
+
+test(
+  "a code lands in every box, even when the page will not move the focus",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(`http://127.0.0.1:${port}/otp-boxes-stubborn`, {
+          waitUntil: "domcontentloaded",
+        });
+
+        const boxes = await otpBoxes(page);
+        assert.equal(boxes.length, 6, "the row is recognised");
+
+        const complete = await typeCodeAcrossBoxes(page, boxes, "423124");
+        assert.equal(complete, true, "and it reports the row as filled");
+
+        const values = await page.evaluate(() =>
+          Array.from(document.querySelectorAll("input")).map((i) => i.value)
+        );
+        assert.deepEqual(
+          values,
+          ["4", "2", "3", "1", "2", "4"],
+          `got ${values.join("|")}`
+        );
+      });
+    } finally {
+      server.close();
+    }
+  }
+);
+
+test(
+  "an ordinary single code field is not mistaken for a row",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(`http://127.0.0.1:${port}/otp-single`, {
+          waitUntil: "domcontentloaded",
+        });
+
+        assert.deepEqual(
+          await otpBoxes(page),
+          [],
+          "one field is not a row to spread across"
+        );
+      });
     } finally {
       server.close();
     }

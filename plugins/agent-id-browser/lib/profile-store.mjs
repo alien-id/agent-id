@@ -132,12 +132,18 @@ export async function sealProfile({ stateDir, file, dekHex, sourceDir }) {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-bprof-"));
   const tarPath = path.join(tmp, "p.tar");
   try {
-    await pExecFile("tar", ["-cf", tarPath, "-C", sourceDir, ...CACHE_EXCLUDES, "."], {
-      timeout: 120000,
-    });
+    await pExecFile(
+      "tar",
+      ["-cf", tarPath, "-C", sourceDir, ...CACHE_EXCLUDES, "."],
+      {
+        timeout: 120000,
+      }
+    );
     const plaintext = await fs.readFile(tarPath);
     const blob = sealBytes(dekHex, plaintext);
-    await fs.writeFile(sealedProfilePath(stateDir, file), blob, { mode: 0o600 });
+    await fs.writeFile(sealedProfilePath(stateDir, file), blob, {
+      mode: 0o600,
+    });
     return { bytes: blob.length };
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
@@ -153,7 +159,9 @@ export async function unsealProfile({ stateDir, file, dekHex, destDir }) {
   try {
     await fs.writeFile(tarPath, tar, { mode: 0o600 });
     await fs.mkdir(destDir, { recursive: true, mode: 0o700 });
-    await pExecFile("tar", ["-xf", tarPath, "-C", destDir], { timeout: 120000 });
+    await pExecFile("tar", ["-xf", tarPath, "-C", destDir], {
+      timeout: 120000,
+    });
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

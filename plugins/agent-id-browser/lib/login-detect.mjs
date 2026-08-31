@@ -77,7 +77,7 @@ const OTP_BODY_RE = new RegExp(
     "check your phone",
     "approve.*sign",
   ].join("|"),
-  "i",
+  "i"
 );
 
 // Body copy for a sign-in that completes by clicking a link in an e-mail. Nothing
@@ -168,10 +168,13 @@ export function classifyLogin({
   blocked = false,
 } = {}) {
   const isBlocked =
-    blocked === true || BLOCK_RE.test(bodyText) || BLOCK_RE.test(String(errorText || ""));
+    blocked === true ||
+    BLOCK_RE.test(bodyText) ||
+    BLOCK_RE.test(String(errorText || ""));
   const codeInput =
     hasOtpField ||
-    (Array.isArray(otpFieldNames) && otpFieldNames.some((n) => OTP_FIELD_RE.test(String(n || ""))));
+    (Array.isArray(otpFieldNames) &&
+      otpFieldNames.some((n) => OTP_FIELD_RE.test(String(n || ""))));
   const otpAffordance = codeInput || OTP_BODY_RE.test(bodyText);
   // Device approval only when there is nothing to type: an SMS step can show
   // "check your phone" AND a code field, and that one is an ordinary OTP.
@@ -185,7 +188,8 @@ export function classifyLogin({
   // the input alone sent them to a handover instead of raising the code card.
   const magicLinkAffordance = !otpAffordance && MAGIC_LINK_RE.test(bodyText);
   const qrAffordance = !otpAffordance && QR_SIGN_IN_RE.test(bodyText);
-  const hasError = ERROR_RE.test(String(errorText || "")) || ERROR_RE.test(bodyText);
+  const hasError =
+    ERROR_RE.test(String(errorText || "")) || ERROR_RE.test(bodyText);
 
   // A bot-block / human-verification wall: the form is gone but we are NOT in.
   // Checked FIRST — otherwise the missing password field reads as success and an
@@ -298,7 +302,17 @@ export function codeDestination(bodyText) {
 
   const [, article, kind, tail] = ending;
 
-  return `${(article || "your").toLowerCase()} ${kind.toLowerCase()} ending in ${tail}`;
+  return `${(
+    article || "your"
+  ).toLowerCase()} ${kind.toLowerCase()} ending in ${tail}`;
 }
 
-export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, QR_SIGN_IN_RE, ERROR_RE, BLOCK_RE };
+export {
+  OTP_FIELD_RE,
+  OTP_BODY_RE,
+  CONFIRM_BODY_RE,
+  MAGIC_LINK_RE,
+  QR_SIGN_IN_RE,
+  ERROR_RE,
+  BLOCK_RE,
+};

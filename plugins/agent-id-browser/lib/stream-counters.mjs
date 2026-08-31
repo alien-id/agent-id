@@ -27,12 +27,20 @@ const V = 1;
  * when it reaches 0 cannot be told apart from an emitter that never had it.
  */
 export function createHopCounters(hop, { nal = false, local = [] } = {}) {
-  const freshLocal = () => (local.length ? Object.fromEntries(local.map((k) => [k, 0])) : null);
+  const freshLocal = () =>
+    local.length ? Object.fromEntries(local.map((k) => [k, 0])) : null;
   const total = { fi: 0, fo: 0, bi: 0, bo: 0, drop: 0, idr: 0, perr: 0 };
   const c = {
     hop,
-    fi: 0, fo: 0, bi: 0, bo: 0, drop: 0,
-    idr: 0, sps: 0, pps: 0, perr: 0,
+    fi: 0,
+    fo: 0,
+    bi: 0,
+    bo: 0,
+    drop: 0,
+    idr: 0,
+    sps: 0,
+    pps: 0,
+    perr: 0,
     dr: null,
     x: freshLocal(),
     seq: null,
@@ -89,7 +97,11 @@ export function createHopCounters(hop, { nal = false, local = [] } = {}) {
         hop,
         t: Math.floor(c.since / 1000),
         win_ms: Math.max(1, now - c.since),
-        fi: c.fi, fo: c.fo, bi: c.bi, bo: c.bo, drop: c.drop,
+        fi: c.fi,
+        fo: c.fo,
+        bi: c.bi,
+        bo: c.bo,
+        drop: c.drop,
       };
       if (c.dr) line.dr = c.dr;
       if (nal) {
@@ -111,7 +123,13 @@ export function createHopCounters(hop, { nal = false, local = [] } = {}) {
       total.perr += c.perr;
       // Cumulative twins survive a lost line: two non-adjacent lines still
       // yield an exact total.
-      line.c = { fi: total.fi, fo: total.fo, bi: total.bi, bo: total.bo, drop: total.drop };
+      line.c = {
+        fi: total.fi,
+        fo: total.fo,
+        bi: total.bi,
+        bo: total.bo,
+        drop: total.drop,
+      };
       if (nal) {
         line.c.idr = total.idr;
         line.c.perr = total.perr;

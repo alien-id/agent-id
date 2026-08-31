@@ -22,16 +22,34 @@ import { createH264Encoder } from "./stream-encoder.mjs";
 const H264_FMTP =
   "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 
-export async function createWebRtcStreamer({ addSink, removeSink, send, log = () => {}, ffmpegPath = null }) {
+export async function createWebRtcStreamer({
+  addSink,
+  removeSink,
+  send,
+  log = () => {},
+  ffmpegPath = null,
+}) {
   const werift = await import("werift");
   const peers = new Map(); // client → {pc, udp, enc}
 
   async function teardown(peer) {
     if (!peer) return;
     if (peer.enc) removeSink(peer.enc);
-    try { peer.enc?.close(); } catch { /* already dead */ }
-    try { peer.udp.close(); } catch { /* already closed */ }
-    try { await peer.pc.close(); } catch { /* already closed */ }
+    try {
+      peer.enc?.close();
+    } catch {
+      /* already dead */
+    }
+    try {
+      peer.udp.close();
+    } catch {
+      /* already closed */
+    }
+    try {
+      await peer.pc.close();
+    } catch {
+      /* already closed */
+    }
   }
 
   async function startPeer(client, offerSdp) {
@@ -59,7 +77,11 @@ export async function createWebRtcStreamer({ addSink, removeSink, send, log = ()
       send(client, { type: "webrtc_ice", candidate: candidate.toJSON() });
     });
     udp.on("message", (rtp) => {
-      try { track.writeRtp(rtp); } catch { /* peer torn down mid-packet */ }
+      try {
+        track.writeRtp(rtp);
+      } catch {
+        /* peer torn down mid-packet */
+      }
     });
 
     await pc.setRemoteDescription({ type: "offer", sdp: offerSdp });

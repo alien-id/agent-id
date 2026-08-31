@@ -128,10 +128,10 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           `The site asked '${credName}' for a one-time code, but the credential is set to ` +
           "`otp: none`. If the sign-in page has NO password field — it takes an e-mail or " +
           "phone number and sends a code — the credential is the wrong shape: re-add it with " +
-          "`passwordless: true` and `otp: \"interactive\"`, passing `overwrite: true` (without " +
+          '`passwordless: true` and `otp: "interactive"`, passing `overwrite: true` (without ' +
           "that the call returns the stored entry and nothing changes). If the site does have " +
           "a password and this code is a second factor, keep the credential and set " +
-          "`otp: \"interactive\"` so the owner can be asked, or attach a seed with " +
+          '`otp: "interactive"` so the owner can be asked, or attach a seed with ' +
           "`vault set-totp`. Do not retry as-is; it will ask again.",
       };
     case "failed":
