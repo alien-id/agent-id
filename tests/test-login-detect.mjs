@@ -8,7 +8,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyLogin, codeDestination } from "../plugins/agent-id-browser/lib/login-detect.mjs";
+import {
+  classifyLogin,
+  codeDestination,
+  codeLengthFromText,
+} from "../plugins/agent-id-browser/lib/login-detect.mjs";
 
 test("logged-in: no password field, no otp, no error", () => {
   assert.equal(classifyLogin({ hasPasswordField: false, bodyText: "Welcome back, alice" }), "logged-in");
@@ -493,6 +497,30 @@ test("codeDestination reads back the destination the page itself printed", () =>
   }
 });
 
+test("codeDestination also reads the shape that names no `to`", () => {
+  // The `sent … to X` shape misses how a lot of sites actually word it, and the
+  // miss is not harmless: the card then says "check your email or messages" for a
+  // code that went to a phone number the owner had forgotten was on the account.
+  const cases = [
+    ["We texted your phone ending in 4817", "your phone ending in 4817"],
+    ["Enter the code we sent to your phone ending in 4817.", "your phone ending in 4817"],
+    ["A code was sent to the number ending 4817", "the number ending in 4817"],
+    // Said after a `to`, the page's own words go through verbatim — "with" stays
+    // "with". Only the shape we assemble ourselves is normalised to "ending in".
+    ["Enter the code sent to your mobile ending with ••4817", "your mobile ending with ••4817"],
+    ["We messaged your mobile ending with ••4817", "your mobile ending in ••4817"],
+  ];
+  for (const [body, expected] of cases) {
+    assert.equal(codeDestination(body), expected, body);
+  }
+
+  // An address the page states outright still wins over the ending it repeats.
+  assert.equal(
+    codeDestination("We sent a code to d••@gmail.com — the address ending in 4817 is your old one"),
+    "d••@gmail.com",
+  );
+});
+
 test("codeDestination says nothing rather than something wrong", () => {
   // A destination on the card is a promise about where to look. Naming the wrong
   // place is worse than naming none: the owner watches an empty inbox and
@@ -502,6 +530,10 @@ test("codeDestination says nothing rather than something wrong", () => {
     "We sent a code to help you get started with our newsletter",
     "Your order was sent to 221B Baker Street",
     "We emailed a link to reset your password",
+    // `ending in` is ordinary English. Only a word that names a channel in front
+    // of it makes it a destination.
+    "The meeting is ending in 5 minutes",
+    "Your trial is ending in 3 days",
     // The page writes this text and the card the owner trusts prints it. The
     // loopback form escapes; the hosted prompt hands `description` on as it is.
     "We sent a code to <img/src=x/onerror=fetch(1)>@a.co",
@@ -511,4 +543,19 @@ test("codeDestination says nothing rather than something wrong", () => {
   ]) {
     assert.equal(codeDestination(body), null, String(body));
   }
+});
+
+test("codeLengthFromText reads a stated digit count, and only a plausible one", () => {
+  assert.equal(codeLengthFromText("Enter the 6-digit code we sent you"), 6);
+  assert.equal(codeLengthFromText("We sent a six-digit code"), 6);
+  assert.equal(codeLengthFromText("Enter your 4 digit PIN"), 4);
+  assert.equal(codeLengthFromText("Enter the eight-digit code"), 8);
+
+  // Outside 4-8 the number is describing something that is not this code, and a
+  // wrong cell count is worse than none: the screen submits when the cells fill.
+  assert.equal(codeLengthFromText("a 3-digit code"), null);
+  assert.equal(codeLengthFromText("your 12-digit reference number"), null);
+  assert.equal(codeLengthFromText("Enter the code we sent you"), null);
+  assert.equal(codeLengthFromText(""), null);
+  assert.equal(codeLengthFromText(null), null);
 });
