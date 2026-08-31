@@ -26,13 +26,21 @@ import {
   guardDecision,
 } from "../plugins/agent-id-browser/lib/access-guard.mjs";
 
-const base = { name: "t", type: "bearer", value: "x", domains: ["api.example.com"] };
+const base = {
+  name: "t",
+  type: "bearer",
+  value: "x",
+  domains: ["api.example.com"],
+};
 
 describe("schema validation", () => {
   it("accepts access ro/rw and rejects junk", () => {
     validateRecord({ ...base, access: "ro" });
     validateRecord({ ...base, access: "rw" });
-    assert.throws(() => validateRecord({ ...base, access: "readonly" }), /access must be one of/);
+    assert.throws(
+      () => validateRecord({ ...base, access: "readonly" }),
+      /access must be one of/
+    );
     assert.deepEqual(ACCESS_LEVELS, ["ro", "rw"]);
   });
 
@@ -45,25 +53,48 @@ describe("schema validation", () => {
         { effect: "deny", hosts: ["*.example.com"] },
       ],
     });
-    assert.throws(() => validateRecord({ ...base, accessRules: [] }), /non-empty array/);
-    assert.throws(() => validateRecord({ ...base, accessRules: [{ effect: "block" }] }), /effect/);
     assert.throws(
-      () => validateRecord({ ...base, accessRules: [{ effect: "allow", methods: [] }] }),
-      /methods/,
+      () => validateRecord({ ...base, accessRules: [] }),
+      /non-empty array/
     );
     assert.throws(
-      () => validateRecord({ ...base, accessRules: [{ effect: "allow", path: "no-slash" }] }),
-      /path/,
+      () => validateRecord({ ...base, accessRules: [{ effect: "block" }] }),
+      /effect/
+    );
+    assert.throws(
+      () =>
+        validateRecord({
+          ...base,
+          accessRules: [{ effect: "allow", methods: [] }],
+        }),
+      /methods/
+    );
+    assert.throws(
+      () =>
+        validateRecord({
+          ...base,
+          accessRules: [{ effect: "allow", path: "no-slash" }],
+        }),
+      /path/
     );
   });
 });
 
 describe("evaluateAccess", () => {
-  const req = (over = {}) => ({ method: "GET", host: "api.example.com", path: "/v1/x", ...over });
+  const req = (over = {}) => ({
+    method: "GET",
+    host: "api.example.com",
+    path: "/v1/x",
+    ...over,
+  });
 
   it("rw (and absent) allows everything", () => {
     assert.equal(evaluateAccess(base, req({ method: "DELETE" })).allowed, true);
-    assert.equal(evaluateAccess({ ...base, access: "rw" }, req({ method: "POST" })).allowed, true);
+    assert.equal(
+      evaluateAccess({ ...base, access: "rw" }, req({ method: "POST" }))
+        .allowed,
+      true
+    );
   });
 
   it("ro allows read methods, blocks writes", () => {
@@ -83,11 +114,22 @@ describe("evaluateAccess", () => {
     const readBody = '{"query":"{ __typename }"}';
     for (const m of ["DELETE", "PUT", "PATCH"]) {
       const d = evaluateAccess(ro, req({ method: m, body: readBody }));
-      assert.equal(d.allowed, false, `${m} with read-shaped body must stay blocked`);
-      assert.equal(d.needsBody, undefined, `${m} must not even ask for the body`);
+      assert.equal(
+        d.allowed,
+        false,
+        `${m} with read-shaped body must stay blocked`
+      );
+      assert.equal(
+        d.needsBody,
+        undefined,
+        `${m} must not even ask for the body`
+      );
     }
     // POST with the same read body is the only one that passes.
-    assert.equal(evaluateAccess(ro, req({ method: "POST", body: readBody })).allowed, true);
+    assert.equal(
+      evaluateAccess(ro, req({ method: "POST", body: readBody })).allowed,
+      true
+    );
   });
 
   it("asks for the body once, when only the body can decide", () => {
@@ -95,7 +137,10 @@ describe("evaluateAccess", () => {
     const first = evaluateAccess(ro, req({ method: "POST" }));
     assert.equal(first.allowed, false);
     assert.equal(first.needsBody, true);
-    const second = evaluateAccess(ro, req({ method: "POST", body: '{"query":"query { me }"}' }));
+    const second = evaluateAccess(
+      ro,
+      req({ method: "POST", body: '{"query":"query { me }"}' })
+    );
     assert.equal(second.allowed, true);
     assert.equal(second.reason, "read_classified");
   });
@@ -109,10 +154,20 @@ describe("evaluateAccess", () => {
         { effect: "allow", methods: ["POST"], path: "/search" },
       ],
     };
-    assert.equal(evaluateAccess(rec, req({ path: "/admin/users" })).allowed, false);
-    assert.equal(evaluateAccess(rec, req({ method: "POST", path: "/search" })).allowed, true);
+    assert.equal(
+      evaluateAccess(rec, req({ path: "/admin/users" })).allowed,
+      false
+    );
+    assert.equal(
+      evaluateAccess(rec, req({ method: "POST", path: "/search" })).allowed,
+      true
+    );
     // unmatched POST falls through to the ro default
-    assert.equal(evaluateAccess(rec, req({ method: "POST", path: "/other", body: null })).allowed, false);
+    assert.equal(
+      evaluateAccess(rec, req({ method: "POST", path: "/other", body: null }))
+        .allowed,
+      false
+    );
   });
 
   it("rule hosts use the domains wildcard syntax", () => {
@@ -122,7 +177,7 @@ describe("evaluateAccess", () => {
     };
     assert.equal(
       evaluateAccess(rec, req({ host: "db.internal.example.com" })).allowed,
-      false,
+      false
     );
     assert.equal(evaluateAccess(rec, req()).allowed, true);
   });
@@ -137,9 +192,12 @@ describe("body classification (POST-tunneled reads)", () => {
     // batched: one mutation poisons the batch
     assert.equal(
       classifyBodyRead('[{"query":"query{a}"},{"query":"mutation{b}"}]'),
-      "write",
+      "write"
     );
-    assert.equal(classifyBodyRead('[{"query":"query{a}"},{"query":"{b}"}]'), "read");
+    assert.equal(
+      classifyBodyRead('[{"query":"query{a}"},{"query":"{b}"}]'),
+      "read"
+    );
   });
 
   it("GraphQL: a multi-operation doc with a mutation is a write even if it leads with query", () => {
@@ -149,12 +207,15 @@ describe("body classification (POST-tunneled reads)", () => {
         JSON.stringify({
           query: "query GetMe { me { id } }\nmutation DoBad { sendMail }",
           operationName: "DoBad",
-        }),
+        })
       ),
-      "write",
+      "write"
     );
     // a `#`-comment must not hide a real mutation, nor fake a leading query
-    assert.equal(classifyBodyRead('{"query":"# query\\nmutation { x }"}'), "write");
+    assert.equal(
+      classifyBodyRead('{"query":"# query\\nmutation { x }"}'),
+      "write"
+    );
     assert.equal(classifyBodyRead('{"query":"query Foo { a }"}'), "read");
     // leading comment before a genuine query stays a read
     assert.equal(classifyBodyRead('{"query":"# hi\\nquery { a }"}'), "read");
@@ -163,42 +224,74 @@ describe("body classification (POST-tunneled reads)", () => {
   it("JMAP: get/query read, set writes", () => {
     assert.equal(
       classifyBodyRead(
-        '{"methodCalls":[["Email/query",{},"0"],["Email/get",{},"1"]]}',
+        '{"methodCalls":[["Email/query",{},"0"],["Email/get",{},"1"]]}'
       ),
-      "read",
+      "read"
     );
     assert.equal(
-      classifyBodyRead('{"methodCalls":[["Email/get",{},"0"],["EmailSubmission/set",{},"1"]]}'),
-      "write",
+      classifyBodyRead(
+        '{"methodCalls":[["Email/get",{},"0"],["EmailSubmission/set",{},"1"]]}'
+      ),
+      "write"
     );
     // an empty batch is a no-op → unknown (blocked under ro), not vacuously read
     assert.equal(classifyBodyRead('{"methodCalls":[]}'), "unknown");
   });
 
   it("JSON-RPC: recognized reads pass, sends write", () => {
-    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"eth_getBalance"}'), "read");
-    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"eth_call"}'), "read");
-    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"getBalance"}'), "read");
-    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"simulateTransaction"}'), "read");
     assert.equal(
-      classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction"}'),
-      "write",
+      classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"eth_getBalance"}'),
+      "read"
     );
-    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"sendTransaction"}'), "write");
-    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"requestAirdrop"}'), "write");
+    assert.equal(
+      classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"eth_call"}'),
+      "read"
+    );
+    assert.equal(
+      classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"getBalance"}'),
+      "read"
+    );
+    assert.equal(
+      classifyBodyRead(
+        '{"jsonrpc":"2.0","id":1,"method":"simulateTransaction"}'
+      ),
+      "read"
+    );
+    assert.equal(
+      classifyBodyRead(
+        '{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction"}'
+      ),
+      "write"
+    );
+    assert.equal(
+      classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"sendTransaction"}'),
+      "write"
+    );
+    assert.equal(
+      classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"requestAirdrop"}'),
+      "write"
+    );
   });
 
   it("JSON-RPC is default-DENY: unrecognized methods are unknown (blocked), not read", () => {
     // Writes on non-EVM/Solana RPC services that the old denylist let through as
     // reads — now unknown (→ blocked). `wallet_sendCalls` is explicitly a write.
-    for (const method of ["deleteUser", "sendtoaddress", "starknet_addInvokeTransaction", "admin_addPeer"]) {
+    for (const method of [
+      "deleteUser",
+      "sendtoaddress",
+      "starknet_addInvokeTransaction",
+      "admin_addPeer",
+    ]) {
       assert.equal(
         classifyBodyRead(`{"jsonrpc":"2.0","id":1,"method":"${method}"}`),
         "unknown",
-        `${method} must not classify as a read`,
+        `${method} must not classify as a read`
       );
     }
-    assert.equal(classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"wallet_sendCalls"}'), "write");
+    assert.equal(
+      classifyBodyRead('{"jsonrpc":"2.0","id":1,"method":"wallet_sendCalls"}'),
+      "write"
+    );
   });
 
   it("unknown shapes stay unknown (blocked under ro)", () => {
@@ -238,24 +331,42 @@ describe("relaxation detection", () => {
     const allow = { effect: "allow", methods: ["POST"], path: "/x" };
     const deny = { effect: "deny", hosts: ["a.com"] };
     // adding an allow rule = relax; adding a deny = tighten
-    assert.equal(isAccessRelaxation({ access: "ro" }, { access: "ro", accessRules: [allow] }), true);
-    assert.equal(isAccessRelaxation({ access: "ro" }, { access: "ro", accessRules: [deny] }), false);
-    // dropping a deny rule = relax; dropping an allow = tighten
     assert.equal(
-      isAccessRelaxation({ access: "ro", accessRules: [deny] }, { access: "ro" }),
-      true,
+      isAccessRelaxation(
+        { access: "ro" },
+        { access: "ro", accessRules: [allow] }
+      ),
+      true
     );
     assert.equal(
-      isAccessRelaxation({ access: "ro", accessRules: [allow] }, { access: "ro" }),
-      false,
+      isAccessRelaxation(
+        { access: "ro" },
+        { access: "ro", accessRules: [deny] }
+      ),
+      false
+    );
+    // dropping a deny rule = relax; dropping an allow = tighten
+    assert.equal(
+      isAccessRelaxation(
+        { access: "ro", accessRules: [deny] },
+        { access: "ro" }
+      ),
+      true
+    );
+    assert.equal(
+      isAccessRelaxation(
+        { access: "ro", accessRules: [allow] },
+        { access: "ro" }
+      ),
+      false
     );
     // identical rules = no relax
     assert.equal(
       isAccessRelaxation(
         { access: "ro", accessRules: [allow, deny] },
-        { access: "ro", accessRules: [allow, deny] },
+        { access: "ro", accessRules: [allow, deny] }
       ),
-      false,
+      false
     );
   });
 
@@ -266,9 +377,9 @@ describe("relaxation detection", () => {
     assert.equal(
       isAccessRelaxation(
         { access: "ro", accessRules: [deny, allow] },
-        { access: "ro", accessRules: [allow, deny] },
+        { access: "ro", accessRules: [allow, deny] }
       ),
-      true,
+      true
     );
   });
 
@@ -281,33 +392,33 @@ describe("relaxation detection", () => {
     assert.equal(
       isAccessRelaxation(
         { access: "ro", accessRules: [allow, deny] },
-        { access: "ro", accessRules: [deny, allow] },
+        { access: "ro", accessRules: [deny, allow] }
       ),
-      false,
+      false
     );
     // reordering two denies among themselves → neutral
     assert.equal(
       isAccessRelaxation(
         { access: "ro", accessRules: [deny, denyGet] },
-        { access: "ro", accessRules: [denyGet, deny] },
+        { access: "ro", accessRules: [denyGet, deny] }
       ),
-      false,
+      false
     );
     // reordering two allows among themselves → neutral
     assert.equal(
       isAccessRelaxation(
         { access: "ro", accessRules: [allow, allowOpt] },
-        { access: "ro", accessRules: [allowOpt, allow] },
+        { access: "ro", accessRules: [allowOpt, allow] }
       ),
-      false,
+      false
     );
     // an allow moving ahead of a NON-overlapping deny (different method) → neutral
     assert.equal(
       isAccessRelaxation(
         { access: "ro", accessRules: [denyGet, allow] },
-        { access: "ro", accessRules: [allow, denyGet] },
+        { access: "ro", accessRules: [allow, denyGet] }
       ),
-      false,
+      false
     );
   });
 });
@@ -315,8 +426,14 @@ describe("relaxation detection", () => {
 describe("isAccessRestricted", () => {
   it("true for ro and for any accessRules, false for plain rw", () => {
     assert.equal(isAccessRestricted({ access: "ro" }), true);
-    assert.equal(isAccessRestricted({ access: "rw", accessRules: [{ effect: "deny" }] }), true);
-    assert.equal(isAccessRestricted({ accessRules: [{ effect: "deny" }] }), true);
+    assert.equal(
+      isAccessRestricted({ access: "rw", accessRules: [{ effect: "deny" }] }),
+      true
+    );
+    assert.equal(
+      isAccessRestricted({ accessRules: [{ effect: "deny" }] }),
+      true
+    );
     assert.equal(isAccessRestricted({ access: "rw" }), false);
     assert.equal(isAccessRestricted({}), false);
   });
@@ -326,7 +443,13 @@ describe("browser guard (pure pieces)", () => {
   const ro = { access: "ro" };
 
   it("assertActionAllowed refuses secret/file/form writes on ro only", () => {
-    for (const action of ["eval", "fill-secret", "fill-otp", "upload", "form-fill"]) {
+    for (const action of [
+      "eval",
+      "fill-secret",
+      "fill-otp",
+      "upload",
+      "form-fill",
+    ]) {
       assert.throws(() => assertActionAllowed(ro, action), /read-only session/);
       assertActionAllowed({ access: "rw" }, action); // no throw
       assertActionAllowed({}, action);
@@ -334,9 +457,25 @@ describe("browser guard (pure pieces)", () => {
     // Observational / DOM-interactive actions (incl. the tab/frame/dialog
     // additions) stay available — the network gate is the write boundary.
     for (const action of [
-      "navigate", "click", "type", "snapshot", "text", "screenshot",
-      "dblclick", "check", "drag", "get", "is", "tabs", "tab-switch",
-      "dialog", "downloads", "console", "cookies", "wait", "batch",
+      "navigate",
+      "click",
+      "type",
+      "snapshot",
+      "text",
+      "screenshot",
+      "dblclick",
+      "check",
+      "drag",
+      "get",
+      "is",
+      "tabs",
+      "tab-switch",
+      "dialog",
+      "downloads",
+      "console",
+      "cookies",
+      "wait",
+      "batch",
     ]) {
       assertActionAllowed(ro, action);
     }
@@ -344,8 +483,12 @@ describe("browser guard (pure pieces)", () => {
 
   it("guardDecision: reads pass, writes abort, non-http passes", () => {
     assert.equal(
-      guardDecision(ro, { method: "GET", url: "https://x.com/home", postData: null }).allowed,
-      true,
+      guardDecision(ro, {
+        method: "GET",
+        url: "https://x.com/home",
+        postData: null,
+      }).allowed,
+      true
     );
     assert.equal(
       guardDecision(ro, {
@@ -353,7 +496,7 @@ describe("browser guard (pure pieces)", () => {
         url: "https://x.com/i/api/graphql/abc/HomeTimeline",
         postData: '{"query":"query{home}"}',
       }).allowed,
-      true,
+      true
     );
     assert.equal(
       guardDecision(ro, {
@@ -361,16 +504,23 @@ describe("browser guard (pure pieces)", () => {
         url: "https://x.com/i/api/graphql/abc/CreateTweet",
         postData: '{"variables":{},"queryId":"abc"}',
       }).allowed,
-      false,
+      false
     );
     assert.equal(
-      guardDecision(ro, { method: "POST", url: "https://mail.google.com/sync", postData: "junk" })
-        .allowed,
-      false,
+      guardDecision(ro, {
+        method: "POST",
+        url: "https://mail.google.com/sync",
+        postData: "junk",
+      }).allowed,
+      false
     );
     assert.equal(
-      guardDecision(ro, { method: "GET", url: "data:text/plain,hi", postData: null }).allowed,
-      true,
+      guardDecision(ro, {
+        method: "GET",
+        url: "data:text/plain,hi",
+        postData: null,
+      }).allowed,
+      true
     );
   });
 });
@@ -378,8 +528,11 @@ describe("browser guard (pure pieces)", () => {
 describe("credentialHost", () => {
   it("prefers the login page's own host", () => {
     assert.equal(
-      credentialHost({ loginUrl: "https://www.airbnb.com/login", domains: ["*.airbnb.com"] }),
-      "airbnb.com",
+      credentialHost({
+        loginUrl: "https://www.airbnb.com/login",
+        domains: ["*.airbnb.com"],
+      }),
+      "airbnb.com"
     );
   });
 
@@ -388,8 +541,14 @@ describe("credentialHost", () => {
     // title. Otherwise the list is taken in order: `domains` is written
     // broadest-first, and the site reads better on a card than the subdomain a
     // sign-in happens to redirect through.
-    assert.equal(credentialHost({ domains: ["*.example.com", "account.example.com"] }), "account.example.com");
-    assert.equal(credentialHost({ domains: ["example.com", "account.example.com"] }), "example.com");
+    assert.equal(
+      credentialHost({ domains: ["*.example.com", "account.example.com"] }),
+      "account.example.com"
+    );
+    assert.equal(
+      credentialHost({ domains: ["example.com", "account.example.com"] }),
+      "example.com"
+    );
   });
 
   it("has nothing to show when the allowlist names no site", () => {

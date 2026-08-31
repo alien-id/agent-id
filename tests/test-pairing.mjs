@@ -75,46 +75,80 @@ describe("pairing payload round-trip", () => {
 
   it("requires a fingerprint for an https control URL", () => {
     assert.throws(
-      () => buildPairingPayload({ controlUrl: "https://x:1", token: "t", publicKey: PK }),
-      /fingerprint/,
+      () =>
+        buildPairingPayload({
+          controlUrl: "https://x:1",
+          token: "t",
+          publicKey: PK,
+        }),
+      /fingerprint/
     );
     assert.throws(
-      () => parsePairingPayload(`${PAIRING_SCHEME}://pair?v=1&control=${encodeURIComponent("https://x:1")}&token=t&pk=${PK}`),
-      /missing the cert fingerprint/,
+      () =>
+        parsePairingPayload(
+          `${PAIRING_SCHEME}://pair?v=1&control=${encodeURIComponent(
+            "https://x:1"
+          )}&token=t&pk=${PK}`
+        ),
+      /missing the cert fingerprint/
     );
   });
 
   it("requires controlUrl, token, and publicKey to build", () => {
-    assert.throws(() => buildPairingPayload({ controlUrl: "http://x:1", publicKey: PK }), /required/);
-    assert.throws(() => buildPairingPayload({ token: "t", publicKey: PK }), /required/);
-    assert.throws(() => buildPairingPayload({ controlUrl: "http://x:1", token: "t" }), /publicKey/);
+    assert.throws(
+      () => buildPairingPayload({ controlUrl: "http://x:1", publicKey: PK }),
+      /required/
+    );
+    assert.throws(
+      () => buildPairingPayload({ token: "t", publicKey: PK }),
+      /required/
+    );
+    assert.throws(
+      () => buildPairingPayload({ controlUrl: "http://x:1", token: "t" }),
+      /publicKey/
+    );
   });
 
   it("rejects a non-pairing URI", () => {
-    assert.throws(() => parsePairingPayload("https://example.com/pair"), /not an/);
-    assert.throws(() => parsePairingPayload("not a uri"), /invalid pairing payload/);
+    assert.throws(
+      () => parsePairingPayload("https://example.com/pair"),
+      /not an/
+    );
+    assert.throws(
+      () => parsePairingPayload("not a uri"),
+      /invalid pairing payload/
+    );
   });
 
   it("rejects a payload missing control or token", () => {
     assert.throws(
-      () => parsePairingPayload(`${PAIRING_SCHEME}://pair?v=1&token=t&pk=${PK}`),
-      /missing control or token/,
+      () =>
+        parsePairingPayload(`${PAIRING_SCHEME}://pair?v=1&token=t&pk=${PK}`),
+      /missing control or token/
     );
     assert.throws(
-      () => parsePairingPayload(`${PAIRING_SCHEME}://pair?v=1&control=http%3A%2F%2Fx%3A1&pk=${PK}`),
-      /missing control or token/,
+      () =>
+        parsePairingPayload(
+          `${PAIRING_SCHEME}://pair?v=1&control=http%3A%2F%2Fx%3A1&pk=${PK}`
+        ),
+      /missing control or token/
     );
   });
 
   it("rejects a payload missing the control-plane public key", () => {
     assert.throws(
-      () => parsePairingPayload(`${PAIRING_SCHEME}://pair?v=1&control=http%3A%2F%2Fx%3A1&token=t`),
-      /missing control-plane public key/,
+      () =>
+        parsePairingPayload(
+          `${PAIRING_SCHEME}://pair?v=1&control=http%3A%2F%2Fx%3A1&token=t`
+        ),
+      /missing control-plane public key/
     );
   });
 
   it("rejects a payload whose control URL is not http(s)", () => {
-    const bad = `${PAIRING_SCHEME}://pair?v=1&control=${encodeURIComponent("ftp://x/y")}&token=t&pk=${PK}`;
+    const bad = `${PAIRING_SCHEME}://pair?v=1&control=${encodeURIComponent(
+      "ftp://x/y"
+    )}&token=t&pk=${PK}`;
     assert.throws(() => parsePairingPayload(bad), /invalid control URL/);
   });
 });

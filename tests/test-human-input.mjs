@@ -28,7 +28,10 @@ describe("bezierPath", () => {
     const pts = bezierPath(from, to, { rng: seq([0.5]) });
     assert.ok(pts.length >= 3, "should have several waypoints");
     const last = pts[pts.length - 1];
-    assert.ok(Math.abs(last.x - to.x) < 1e-6 && Math.abs(last.y - to.y) < 1e-6, "last point is the target");
+    assert.ok(
+      Math.abs(last.x - to.x) < 1e-6 && Math.abs(last.y - to.y) < 1e-6,
+      "last point is the target"
+    );
     // first waypoint is past the origin, not the origin itself
     assert.ok(pts[0].x !== from.x || pts[0].y !== from.y);
   });
@@ -43,8 +46,16 @@ describe("bezierPath", () => {
   });
 
   it("scales waypoint count with distance and is finite", () => {
-    const short = bezierPath({ x: 0, y: 0 }, { x: 20, y: 0 }, { rng: seq([0.5]) });
-    const long = bezierPath({ x: 0, y: 0 }, { x: 600, y: 0 }, { rng: seq([0.5]) });
+    const short = bezierPath(
+      { x: 0, y: 0 },
+      { x: 20, y: 0 },
+      { rng: seq([0.5]) }
+    );
+    const long = bezierPath(
+      { x: 0, y: 0 },
+      { x: 600, y: 0 },
+      { rng: seq([0.5]) }
+    );
     assert.ok(long.length > short.length, "longer move → more waypoints");
     for (const p of [...short, ...long]) {
       assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y));
@@ -52,8 +63,13 @@ describe("bezierPath", () => {
   });
 
   it("handles a zero-length move without NaN", () => {
-    const pts = bezierPath({ x: 10, y: 10 }, { x: 10, y: 10 }, { rng: seq([0.5]) });
-    for (const p of pts) assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y));
+    const pts = bezierPath(
+      { x: 10, y: 10 },
+      { x: 10, y: 10 },
+      { rng: seq([0.5]) }
+    );
+    for (const p of pts)
+      assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y));
     const last = pts[pts.length - 1];
     assert.deepEqual({ x: last.x, y: last.y }, { x: 10, y: 10 });
   });
@@ -74,7 +90,7 @@ describe("keystrokeDelays", () => {
     const d = keystrokeDelays(20, { rng: () => 0.01 });
     assert.ok(
       d.every((ms) => ms > 120),
-      "think-pause branch should push delays past the base range",
+      "think-pause branch should push delays past the base range"
     );
   });
 
@@ -92,8 +108,17 @@ describe("pointInBox / randBetween", () => {
   });
 
   it("randBetween respects bounds", () => {
-    assert.equal(randBetween(10, 20, () => 0), 10);
-    assert.equal(randBetween(10, 20, () => 1), 20);
-    assert.equal(randBetween(10, 20, () => 0.5), 15);
+    assert.equal(
+      randBetween(10, 20, () => 0),
+      10
+    );
+    assert.equal(
+      randBetween(10, 20, () => 1),
+      20
+    );
+    assert.equal(
+      randBetween(10, 20, () => 0.5),
+      15
+    );
   });
 });

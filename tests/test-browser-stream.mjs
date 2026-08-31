@@ -40,8 +40,13 @@ function makeFakeSession(screenshotData = REFINE_B64) {
       if (method === "Page.captureScreenshot") return { data: screenshotData };
       return {};
     },
-    async detach() { session.detached = true; },
-    emitFrame(data, metadata = { deviceWidth: 640, deviceHeight: 480, timestamp: Date.now() }) {
+    async detach() {
+      session.detached = true;
+    },
+    emitFrame(
+      data,
+      metadata = { deviceWidth: 640, deviceHeight: 480, timestamp: Date.now() }
+    ) {
       handlers.get("Page.screencastFrame")?.({ data, metadata, sessionId: 1 });
     },
   };
@@ -53,13 +58,24 @@ function makeFakeState({ screenshot } = {}) {
   const page = {
     isClosed: () => false,
     viewportSize: () => ({ width: 640, height: 480 }),
-    mouse: { move: async () => {}, down: async () => {}, up: async () => {}, wheel: async () => {} },
-    keyboard: { down: async () => {}, up: async () => {}, insertText: async () => {} },
+    mouse: {
+      move: async () => {},
+      down: async () => {},
+      up: async () => {},
+      wheel: async () => {},
+    },
+    keyboard: {
+      down: async () => {},
+      up: async () => {},
+      insertText: async () => {},
+    },
   };
   return {
     current: page,
     invalidated: [],
-    invalidateRefs(reason) { this.invalidated.push(reason); },
+    invalidateRefs(reason) {
+      this.invalidated.push(reason);
+    },
     ctx: {
       // resume() detaches and re-attaches; hand out a fresh fake each time
       newCDPSession: async () => {
@@ -67,7 +83,9 @@ function makeFakeState({ screenshot } = {}) {
         return session;
       },
     },
-    get session() { return session; },
+    get session() {
+      return session;
+    },
   };
 }
 
@@ -78,7 +96,8 @@ function maskedFrame(opcode, payload) {
   const masked = Buffer.from(payload);
   for (let i = 0; i < masked.length; i++) masked[i] ^= mask[i & 3];
   let header;
-  if (payload.length < 126) header = Buffer.from([0x80 | opcode, 0x80 | payload.length]);
+  if (payload.length < 126)
+    header = Buffer.from([0x80 | opcode, 0x80 | payload.length]);
   else {
     header = Buffer.alloc(4);
     header[0] = 0x80 | opcode;
@@ -94,7 +113,7 @@ async function connectStream(port, token, params = "") {
   const key = crypto.randomBytes(16).toString("base64");
   sock.write(
     `GET /?token=${token}${params} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n` +
-      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
   );
   const queue = [];
   const waiters = [];
@@ -125,7 +144,10 @@ async function connectStream(port, token, params = "") {
     next(timeout = 2000) {
       if (queue.length) return Promise.resolve(queue.shift());
       return new Promise((resolve, reject) => {
-        const waiter = (m) => { clearTimeout(t); resolve(m); };
+        const waiter = (m) => {
+          clearTimeout(t);
+          resolve(m);
+        };
         const t = setTimeout(() => {
           // Un-register, or the next real message would feed a dead promise.
           const i = waiters.indexOf(waiter);
@@ -156,12 +178,20 @@ async function connectStream(port, token, params = "") {
     },
     idle(ms) {
       return this.next(ms).then(
-        (m) => { throw new Error(`expected silence, got: ${m.payload.toString().slice(0, 80)}`); },
-        () => {},
+        (m) => {
+          throw new Error(
+            `expected silence, got: ${m.payload.toString().slice(0, 80)}`
+          );
+        },
+        () => {}
       );
     },
-    sendJson(obj) { sock.write(maskedFrame(0x1, Buffer.from(JSON.stringify(obj)))); },
-    close() { sock.destroy(); },
+    sendJson(obj) {
+      sock.write(maskedFrame(0x1, Buffer.from(JSON.stringify(obj))));
+    },
+    close() {
+      sock.destroy();
+    },
   };
 }
 
@@ -176,12 +206,26 @@ async function startServer(opts = {}, stateOpts = {}) {
 
 test("parseStreamParams: defaults match the v1 wire protocol", () => {
   const p = parseStreamParams(new URL("http://x/?token=t"));
-  assert.deepEqual(p, { strict: false, binary: false, codec: "jpeg", pacing: "push", maxFps: 0 });
+  assert.deepEqual(p, {
+    strict: false,
+    binary: false,
+    codec: "jpeg",
+    pacing: "push",
+    maxFps: 0,
+  });
 });
 
 test("parseStreamParams: clamps and coerces", () => {
-  const p = parseStreamParams(new URL("http://x/?binary=1&pacing=ack&maxFps=500"));
-  assert.deepEqual(p, { strict: false, binary: true, codec: "jpeg", pacing: "ack", maxFps: 120 });
+  const p = parseStreamParams(
+    new URL("http://x/?binary=1&pacing=ack&maxFps=500")
+  );
+  assert.deepEqual(p, {
+    strict: false,
+    binary: true,
+    codec: "jpeg",
+    pacing: "ack",
+    maxFps: 120,
+  });
   assert.equal(parseStreamParams(new URL("http://x/?maxFps=junk")).maxFps, 0);
 });
 
@@ -200,7 +244,12 @@ test("parseStreamParams: codec=auto is kept for join-time resolution, binary", (
 
 test("binary frame message roundtrips", () => {
   const payload = crypto.randomBytes(70000); // >64KB — exercises long WS frames
-  const header = { type: "frame", seq: 7, codec: "jpeg", metadata: { deviceWidth: 1 } };
+  const header = {
+    type: "frame",
+    seq: 7,
+    codec: "jpeg",
+    metadata: { deviceWidth: 1 },
+  };
   const decoded = decodeFrameBinary(encodeFrameBinary(header, payload));
   assert.deepEqual(decoded.header, header);
   assert.deepEqual(decoded.payload, payload);
@@ -250,14 +299,19 @@ test("binary=1: frames arrive as binary messages with decoded jpeg payload", asy
 
 test("ack pacing: one frame in flight, stale frames are replaced not queued", async () => {
   const { state, server } = await startServer();
-  const c = await connectStream(server.port, server.token, "&binary=1&pacing=ack");
+  const c = await connectStream(
+    server.port,
+    server.token,
+    "&binary=1&pacing=ack"
+  );
   await c.nextJson(); // status
   await sleep(20);
   state.session.emitFrame(Buffer.from("f1").toString("base64"));
   const first = await c.nextBinary();
   assert.equal(first.payload.toString(), "f1");
   // Three more frames while the ack is outstanding — none may be delivered…
-  for (const s of ["f2", "f3", "f4"]) state.session.emitFrame(Buffer.from(s).toString("base64"));
+  for (const s of ["f2", "f3", "f4"])
+    state.session.emitFrame(Buffer.from(s).toString("base64"));
   await c.idle(150);
   // …and the ack releases exactly ONE frame: the latest.
   c.sendJson({ type: "ack", seq: first.header.seq });
@@ -270,14 +324,30 @@ test("ack pacing: one frame in flight, stale frames are replaced not queued", as
 
 test("maxFps caps delivery and coalesces to the latest frame", async () => {
   const { state, server } = await startServer();
-  const c = await connectStream(server.port, server.token, "&binary=1&maxFps=5");
+  const c = await connectStream(
+    server.port,
+    server.token,
+    "&binary=1&maxFps=5"
+  );
   await c.nextJson();
   await sleep(20);
-  for (let i = 1; i <= 10; i++) state.session.emitFrame(Buffer.from(`f${i}`).toString("base64"));
+  for (let i = 1; i <= 10; i++)
+    state.session.emitFrame(Buffer.from(`f${i}`).toString("base64"));
   const got = [await c.nextBinary()];
-  try { for (;;) got.push(await c.nextBinary(400)); } catch { /* drained */ }
-  assert.ok(got.length <= 4, `expected ≤4 deliveries at 5fps, got ${got.length}`);
-  assert.equal(got.at(-1).payload.toString(), "f10", "must end on the latest frame");
+  try {
+    for (;;) got.push(await c.nextBinary(400));
+  } catch {
+    /* drained */
+  }
+  assert.ok(
+    got.length <= 4,
+    `expected ≤4 deliveries at 5fps, got ${got.length}`
+  );
+  assert.equal(
+    got.at(-1).payload.toString(),
+    "f10",
+    "must end on the latest frame"
+  );
   c.close();
   server.close();
 });
@@ -299,7 +369,11 @@ test("config message switches pacing at runtime", async () => {
 
 test("suspend blacks out frames, drops staged ones, and resumes with restart", async () => {
   const { state, server } = await startServer();
-  const c = await connectStream(server.port, server.token, "&binary=1&pacing=ack");
+  const c = await connectStream(
+    server.port,
+    server.token,
+    "&binary=1&pacing=ack"
+  );
   await c.nextJson();
   await sleep(20);
   state.session.emitFrame(Buffer.from("pre").toString("base64"));
@@ -333,7 +407,9 @@ test("idle refinement: one high-quality captureScreenshot after quiet", async ()
   const refined = await c.nextBinary(2000);
   assert.equal(refined.header.refinement, true);
   assert.deepEqual(refined.payload, Buffer.from(REFINE_B64, "base64"));
-  const shot = state.session.sent.find((s) => s.method === "Page.captureScreenshot");
+  const shot = state.session.sent.find(
+    (s) => s.method === "Page.captureScreenshot"
+  );
   assert.ok(shot, "refinement uses Page.captureScreenshot");
   assert.equal(shot.params.quality, 90);
   await c.idle(500); // no second refinement without a new screencast frame
@@ -343,7 +419,11 @@ test("idle refinement: one high-quality captureScreenshot after quiet", async ()
 
 test("status_request is answered", async () => {
   const { server } = await startServer();
-  const c = await connectStream(server.port, server.token, "&pacing=ack&maxFps=10");
+  const c = await connectStream(
+    server.port,
+    server.token,
+    "&pacing=ack&maxFps=10"
+  );
   await c.nextJson();
   c.sendJson({ type: "status_request" });
   const st = await c.nextJson();
@@ -381,10 +461,14 @@ test("codec=auto on an unprovisioned host resolves to jpeg", async () => {
 });
 
 test("codec=auto on a provisioned host resolves to h264", async (t) => {
-  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  const { detectH264Encoder } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
   const encoder = await detectH264Encoder();
   if (!encoder) return t.skip("no ffmpeg h264 encoder on this machine");
-  const { server } = await startServer({ h264Config: { ffmpegPath: "ffmpeg", encoder } });
+  const { server } = await startServer({
+    h264Config: { ffmpegPath: "ffmpeg", encoder },
+  });
   const c = await connectStream(server.port, server.token, "&codec=auto");
   const st = await c.nextJson();
   assert.equal(st.codec, "h264");
@@ -394,9 +478,11 @@ test("codec=auto on a provisioned host resolves to h264", async (t) => {
 });
 
 test("install-codecs records a probed system ffmpeg", async (t) => {
-  const { detectH264Encoder, installCodecs, loadCodecConfig } =
-    await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
-  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { detectH264Encoder, installCodecs, loadCodecConfig } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
+  if (!(await detectH264Encoder()))
+    return t.skip("no ffmpeg h264 encoder on this machine");
   const os = await import("node:os");
   const path = await import("node:path");
   const fsSync = await import("node:fs");
@@ -407,16 +493,20 @@ test("install-codecs records a probed system ffmpeg", async (t) => {
   const loaded = await loadCodecConfig(stateDir);
   assert.equal(loaded.ffmpegPath, cfg.ffmpegPath);
   // A bogus recorded binary must NOT validate (stale config self-heals)
-  fsSync.writeFileSync(path.join(stateDir, "browser-codecs.json"),
-    JSON.stringify({ ffmpegPath: "/nonexistent/ffmpeg", encoder: "libx264" }));
+  fsSync.writeFileSync(
+    path.join(stateDir, "browser-codecs.json"),
+    JSON.stringify({ ffmpegPath: "/nonexistent/ffmpeg", encoder: "libx264" })
+  );
   assert.equal(await loadCodecConfig(stateDir), null);
   fsSync.rmSync(stateDir, { recursive: true, force: true });
 });
 
 test("loadCodecConfig falls back to AGENT_ID_FFMPEG when no record exists", async (t) => {
-  const { detectH264Encoder, loadCodecConfig } =
-    await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
-  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { detectH264Encoder, loadCodecConfig } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
+  if (!(await detectH264Encoder()))
+    return t.skip("no ffmpeg h264 encoder on this machine");
   const os = await import("node:os");
   const path = await import("node:path");
   const fsSync = await import("node:fs");
@@ -430,7 +520,10 @@ test("loadCodecConfig falls back to AGENT_ID_FFMPEG when no record exists", asyn
     assert.ok(cfg.encoder);
     // The env override is per-process truth — it must NOT be written back as
     // a per-tenant record that would outlive an image whose ffmpeg moved.
-    assert.equal(fsSync.existsSync(path.join(stateDir, "browser-codecs.json")), false);
+    assert.equal(
+      fsSync.existsSync(path.join(stateDir, "browser-codecs.json")),
+      false
+    );
   } finally {
     if (prevEnv === undefined) delete process.env.AGENT_ID_FFMPEG;
     else process.env.AGENT_ID_FFMPEG = prevEnv;
@@ -439,8 +532,9 @@ test("loadCodecConfig falls back to AGENT_ID_FFMPEG when no record exists", asyn
 });
 
 test("loadCodecConfig stays null when neither record nor env provisions", async () => {
-  const { loadCodecConfig } =
-    await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
+  const { loadCodecConfig } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
   const os = await import("node:os");
   const path = await import("node:path");
   const fsSync = await import("node:fs");
@@ -461,8 +555,11 @@ test("loadCodecConfig stays null when neither record nor env provisions", async 
 });
 
 test("codec=h264 end-to-end: Annex-B chunks with AUD/SPS/IDR arrive", async (t) => {
-  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
-  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { detectH264Encoder } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
+  if (!(await detectH264Encoder()))
+    return t.skip("no ffmpeg h264 encoder on this machine");
   // Real JPEGs (the encoder decodes them): ffmpeg testsrc, 10 distinct frames.
   const { execFileSync } = await import("node:child_process");
   const os = await import("node:os");
@@ -470,11 +567,22 @@ test("codec=h264 end-to-end: Annex-B chunks with AUD/SPS/IDR arrive", async (t) 
   const fsSync = await import("node:fs");
   const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-h264-"));
   execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
-    "-hide_banner", "-loglevel", "error",
-    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
-    "-frames:v", "10", "-q:v", "5", path.join(dir, "f%02d.jpg"),
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc=size=320x240:rate=10",
+    "-frames:v",
+    "10",
+    "-q:v",
+    "5",
+    path.join(dir, "f%02d.jpg"),
   ]);
-  const jpegs = fsSync.readdirSync(dir).sort()
+  const jpegs = fsSync
+    .readdirSync(dir)
+    .sort()
     .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
 
   const { state, server } = await startServer();
@@ -487,7 +595,10 @@ test("codec=h264 end-to-end: Annex-B chunks with AUD/SPS/IDR arrive", async (t) 
   const chunks = [];
   try {
     const deadline = Date.now() + 8000;
-    while (Date.now() < deadline && chunks.reduce((n, b) => n + b.length, 0) < 2000) {
+    while (
+      Date.now() < deadline &&
+      chunks.reduce((n, b) => n + b.length, 0) < 2000
+    ) {
       const { header, payload } = await c.nextBinary(3000);
       assert.equal(header.codec, "h264");
       chunks.push(payload);
@@ -500,7 +611,8 @@ test("codec=h264 end-to-end: Annex-B chunks with AUD/SPS/IDR arrive", async (t) 
   for (let i = 0; i + 4 < stream.length; i++) {
     if (stream[i] === 0 && stream[i + 1] === 0) {
       if (stream[i + 2] === 1) nalTypes.add(stream[i + 3] & 0x1f);
-      else if (stream[i + 2] === 0 && stream[i + 3] === 1) nalTypes.add(stream[i + 4] & 0x1f);
+      else if (stream[i + 2] === 0 && stream[i + 3] === 1)
+        nalTypes.add(stream[i + 4] & 0x1f);
     }
   }
   assert.ok(nalTypes.has(9), `AUD present (got NAL types ${[...nalTypes]})`);
@@ -520,26 +632,41 @@ function nalTypesInOrder(stream) {
   for (let i = 0; i + 4 < stream.length; i++) {
     if (stream[i] === 0 && stream[i + 1] === 0) {
       if (stream[i + 2] === 1) out.push(stream[i + 3] & 0x1f);
-      else if (stream[i + 2] === 0 && stream[i + 3] === 1) out.push(stream[i + 4] & 0x1f);
+      else if (stream[i + 2] === 0 && stream[i + 3] === 1)
+        out.push(stream[i + 4] & 0x1f);
     }
   }
   return out;
 }
 
 test("a reconnecting h264 viewer's first chunks carry SPS PPS and an IDR", async (t) => {
-  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
-  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { detectH264Encoder } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
+  if (!(await detectH264Encoder()))
+    return t.skip("no ffmpeg h264 encoder on this machine");
   const { execFileSync } = await import("node:child_process");
   const os = await import("node:os");
   const path = await import("node:path");
   const fsSync = await import("node:fs");
   const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-rejoin-"));
   execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
-    "-hide_banner", "-loglevel", "error",
-    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
-    "-frames:v", "10", "-q:v", "5", path.join(dir, "f%02d.jpg"),
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc=size=320x240:rate=10",
+    "-frames:v",
+    "10",
+    "-q:v",
+    "5",
+    path.join(dir, "f%02d.jpg"),
   ]);
-  const jpegs = fsSync.readdirSync(dir).sort()
+  const jpegs = fsSync
+    .readdirSync(dir)
+    .sort()
     .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
 
   // The refinement capture must return a REAL jpeg: the feed keeps running
@@ -560,7 +687,10 @@ test("a reconnecting h264 viewer's first chunks carry SPS PPS and an IDR", async
       const { header, payload } = await a.nextBinary(3000);
       if (header.codec === "h264") aBytes += payload.length;
     }
-    assert.ok(aBytes >= 500, `first viewer received h264 (got ${aBytes} bytes)`);
+    assert.ok(
+      aBytes >= 500,
+      `first viewer received h264 (got ${aBytes} bytes)`
+    );
     a.close();
     await sleep(300); // the departed viewer's encoder teardown settles
 
@@ -580,11 +710,21 @@ test("a reconnecting h264 viewer's first chunks carry SPS PPS and an IDR", async
     // A reconnecting viewer starts a fresh decoder: SPS (7), PPS (8) and an
     // IDR (5) must all arrive before any non-IDR slice (1).
     const firstNonIdr = ordered.indexOf(1);
-    for (const [type, name] of [[7, "SPS"], [8, "PPS"], [5, "IDR"]]) {
+    for (const [type, name] of [
+      [7, "SPS"],
+      [8, "PPS"],
+      [5, "IDR"],
+    ]) {
       const at = ordered.indexOf(type);
-      assert.ok(at >= 0, `${name} present in the reconnected stream (got ${ordered.join(",")})`);
+      assert.ok(
+        at >= 0,
+        `${name} present in the reconnected stream (got ${ordered.join(",")})`
+      );
       if (firstNonIdr >= 0) {
-        assert.ok(at < firstNonIdr, `${name} arrives before the first non-IDR slice`);
+        assert.ok(
+          at < firstNonIdr,
+          `${name} arrives before the first non-IDR slice`
+        );
       }
     }
     b.close();
@@ -596,19 +736,33 @@ test("a reconnecting h264 viewer's first chunks carry SPS PPS and an IDR", async
 });
 
 test("codec=h264 on a STATIC page: refinement primes the encoder", async (t) => {
-  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
-  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { detectH264Encoder } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
+  if (!(await detectH264Encoder()))
+    return t.skip("no ffmpeg h264 encoder on this machine");
   const { execFileSync } = await import("node:child_process");
   const os = await import("node:os");
   const path = await import("node:path");
   const fsSync = await import("node:fs");
   const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-static-"));
   execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
-    "-hide_banner", "-loglevel", "error",
-    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=1",
-    "-frames:v", "1", "-q:v", "5", path.join(dir, "shot.jpg"),
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc=size=320x240:rate=1",
+    "-frames:v",
+    "1",
+    "-q:v",
+    "5",
+    path.join(dir, "shot.jpg"),
   ]);
-  const shot = fsSync.readFileSync(path.join(dir, "shot.jpg")).toString("base64");
+  const shot = fsSync
+    .readFileSync(path.join(dir, "shot.jpg"))
+    .toString("base64");
 
   // The screenshot fake returns a REAL jpeg — it is what feeds the encoder.
   const { state, server } = await startServer({}, { screenshot: shot });
@@ -624,9 +778,14 @@ test("codec=h264 on a STATIC page: refinement primes the encoder", async (t) => 
     try {
       const { header, payload } = await c.nextBinary(2500);
       if (header.codec === "h264") h264Bytes += payload.length;
-    } catch { break; }
+    } catch {
+      break;
+    }
   }
-  assert.ok(h264Bytes >= 500, `h264 output on a static page (got ${h264Bytes} bytes)`);
+  assert.ok(
+    h264Bytes >= 500,
+    `h264 output on a static page (got ${h264Bytes} bytes)`
+  );
   c.close();
   server.close();
   fsSync.rmSync(dir, { recursive: true, force: true });
@@ -657,7 +816,11 @@ test("a strict h264 request on an unprovisioned host closes 4002", async () => {
   process.env.AGENT_ID_FFMPEG = "/nonexistent/ffmpeg";
   try {
     const { server } = await startServer(); // no h264Config: unprovisioned
-    const c = await connectStream(server.port, server.token, "&codec=h264&strict=1");
+    const c = await connectStream(
+      server.port,
+      server.token,
+      "&codec=h264&strict=1"
+    );
     // The refusal is typed and immediate — at join time, before any encoder
     // work, and instead of the join status. Words first for a viewer that
     // logs text…
@@ -697,13 +860,17 @@ test("a joining viewer always restarts the screencast", async () => {
   await sleep(50);
   assert.ok(
     sessionA.sent.some((s) => s.method === "Page.stopScreencast"),
-    "the join stops the running screencast",
+    "the join stops the running screencast"
   );
   const sessionB = state.session;
-  assert.notEqual(sessionB, sessionA, "the join attaches a fresh capture session");
+  assert.notEqual(
+    sessionB,
+    sessionA,
+    "the join attaches a fresh capture session"
+  );
   assert.ok(
     sessionB.sent.some((s) => s.method === "Page.startScreencast"),
-    "the join starts a new screencast",
+    "the join starts a new screencast"
   );
   // The restarted cast feeds BOTH viewers.
   state.session.emitFrame(FRAME_B64);
@@ -717,19 +884,33 @@ test("a joining viewer always restarts the screencast", async () => {
 });
 
 test("a joining h264 viewer always restarts the screencast and encoder", async (t) => {
-  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
-  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { detectH264Encoder } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
+  if (!(await detectH264Encoder()))
+    return t.skip("no ffmpeg h264 encoder on this machine");
   const { execFileSync } = await import("node:child_process");
   const os = await import("node:os");
   const path = await import("node:path");
   const fsSync = await import("node:fs");
   const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-join-"));
   execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
-    "-hide_banner", "-loglevel", "error",
-    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
-    "-frames:v", "10", "-q:v", "5", path.join(dir, "f%02d.jpg"),
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc=size=320x240:rate=10",
+    "-frames:v",
+    "10",
+    "-q:v",
+    "5",
+    path.join(dir, "f%02d.jpg"),
   ]);
-  const jpegs = fsSync.readdirSync(dir).sort()
+  const jpegs = fsSync
+    .readdirSync(dir)
+    .sort()
     .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
 
   const { state, server } = await startServer({}, { screenshot: jpegs[0] });
@@ -747,7 +928,10 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
     const pre = [];
     let ordered = [];
     const deadline = Date.now() + 8000;
-    while (Date.now() < deadline && !(ordered.includes(7) && ordered.includes(5))) {
+    while (
+      Date.now() < deadline &&
+      !(ordered.includes(7) && ordered.includes(5))
+    ) {
       const { header, payload } = await a.nextBinary(3000);
       if (header.codec !== "h264") continue;
       pre.push(payload);
@@ -755,7 +939,7 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
     }
     assert.ok(
       ordered.includes(7) && ordered.includes(8) && ordered.includes(5),
-      "the first viewer is decoding a live h264 stream before the join",
+      "the first viewer is decoding a live h264 stream before the join"
     );
   } finally {
     clearInterval(feeder);
@@ -764,7 +948,11 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
   // frame), so the pre-join stream is fully quiet and everything observed
   // next is caused by the join.
   for (;;) {
-    try { await a.next(900); } catch { break; }
+    try {
+      await a.next(900);
+    } catch {
+      break;
+    }
   }
   const sessionA = state.session;
   assert.ok(!sessionA.sent.some((s) => s.method === "Page.stopScreencast"));
@@ -775,13 +963,17 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
   await sleep(50);
   assert.ok(
     sessionA.sent.some((s) => s.method === "Page.stopScreencast"),
-    "the join stops the running screencast",
+    "the join stops the running screencast"
   );
   const sessionB = state.session;
-  assert.notEqual(sessionB, sessionA, "the join attaches a fresh capture session");
+  assert.notEqual(
+    sessionB,
+    sessionA,
+    "the join attaches a fresh capture session"
+  );
   assert.ok(
     sessionB.sent.some((s) => s.method === "Page.startScreencast"),
-    "the join starts a new screencast",
+    "the join starts a new screencast"
   );
   // The restarted cast makes Chrome emit fresh frames; mimic that with
   // IDENTICAL images so a surviving encoder could never be pushed over a
@@ -805,16 +997,19 @@ test("a joining h264 viewer always restarts the screencast and encoder", async (
   }
   const firstSlice = ordered.find((n) => n === 1 || n === 5);
   assert.equal(
-    firstSlice, 5,
-    `first slice after the join is an IDR — the encoder was replaced, not reused (got NAL order ${ordered.join(",")})`,
+    firstSlice,
+    5,
+    `first slice after the join is an IDR — the encoder was replaced, not reused (got NAL order ${ordered.join(
+      ","
+    )})`
   );
   assert.ok(
     ordered.indexOf(7) >= 0 && ordered.indexOf(7) < ordered.indexOf(5),
-    "fresh SPS precedes the post-join IDR",
+    "fresh SPS precedes the post-join IDR"
   );
   assert.ok(
     ordered.indexOf(8) >= 0 && ordered.indexOf(8) < ordered.indexOf(5),
-    "fresh PPS precedes the post-join IDR",
+    "fresh PPS precedes the post-join IDR"
   );
   a.close();
   b.close();
@@ -835,7 +1030,8 @@ function spsDimensions(nal) {
   let bit = 0;
   const u = (n) => {
     let v = 0;
-    for (; n > 0; n--) v = (v << 1) | ((rbsp[bit >> 3] >> (7 - (bit & 7))) & 1), bit++;
+    for (; n > 0; n--)
+      (v = (v << 1) | ((rbsp[bit >> 3] >> (7 - (bit & 7))) & 1)), bit++;
     return v;
   };
   const ue = () => {
@@ -850,7 +1046,11 @@ function spsDimensions(nal) {
   const profile = u(8);
   u(16); // constraint flags + reserved + level
   ue(); // sps id
-  if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(profile)) {
+  if (
+    [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(
+      profile
+    )
+  ) {
     throw new Error("high-profile SPS unexpected from the baseline encoder");
   }
   ue(); // log2_max_frame_num_minus4
@@ -891,12 +1091,20 @@ function nalPayloads(stream) {
     else if (stream[i + 2] === 0 && stream[i + 3] === 1) s = i + 4;
     if (s !== null && starts[starts.length - 1] !== s) starts.push(s);
   }
-  return starts.map((s, k) => stream.subarray(s, k + 1 < starts.length ? starts[k + 1] - 3 : stream.length));
+  return starts.map((s, k) =>
+    stream.subarray(
+      s,
+      k + 1 < starts.length ? starts[k + 1] - 3 : stream.length
+    )
+  );
 }
 
 test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensions", async (t) => {
-  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
-  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { detectH264Encoder } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
+  if (!(await detectH264Encoder()))
+    return t.skip("no ffmpeg h264 encoder on this machine");
   const { execFileSync } = await import("node:child_process");
   const os = await import("node:os");
   const path = await import("node:path");
@@ -909,13 +1117,26 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
   // 2× pixels ride the screenshot fake.
   for (const size of ["320x240", "640x480"]) {
     execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
-      "-hide_banner", "-loglevel", "error",
-      "-f", "lavfi", "-i", `testsrc=size=${size}:rate=10`,
-      "-frames:v", "10", "-q:v", "5", path.join(dir, `${size}-f%02d.jpg`),
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      `testsrc=size=${size}:rate=10`,
+      "-frames:v",
+      "10",
+      "-q:v",
+      "5",
+      path.join(dir, `${size}-f%02d.jpg`),
     ]);
   }
-  const framesAt = (size) => fsSync.readdirSync(dir).filter((f) => f.startsWith(`${size}-`)).sort()
-    .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
+  const framesAt = (size) =>
+    fsSync
+      .readdirSync(dir)
+      .filter((f) => f.startsWith(`${size}-`))
+      .sort()
+      .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
   const small = framesAt("320x240");
   const big = framesAt("640x480");
 
@@ -925,7 +1146,7 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
       // override lifecycle has its own fake-CDP coverage.
       resize: async (w, h) => ({ width: w, height: h }),
     },
-    { screenshot: big[0] },
+    { screenshot: big[0] }
   );
   const c = await connectStream(server.port, server.token, "&codec=h264");
   await c.nextJson(); // status (codec h264)
@@ -944,7 +1165,10 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
       const { header, payload } = decodeFrameBinary(m.payload);
       if (header.codec === "h264") bytes += payload.length;
     }
-    assert.ok(bytes >= 500, `1× h264 flowed before the resize (got ${bytes} bytes)`);
+    assert.ok(
+      bytes >= 500,
+      `1× h264 flowed before the resize (got ${bytes} bytes)`
+    );
 
     // Phase 2: the viewer asks for the HiDPI stream; the delivered source
     // flips to device-pixel captures (the cast keeps ticking at CSS size as
@@ -973,8 +1197,16 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
       // cast reports 640×480 (device-pixel-shaped) metadata, and the h264
       // envelope builder used to pass it through raw — doubling scaled
       // viewers' tap coordinates.
-      assert.equal(header.metadata.deviceWidth, 320, "h264 envelope metadata is CSS width");
-      assert.equal(header.metadata.deviceHeight, 240, "h264 envelope metadata is CSS height");
+      assert.equal(
+        header.metadata.deviceWidth,
+        320,
+        "h264 envelope metadata is CSS width"
+      );
+      assert.equal(
+        header.metadata.deviceHeight,
+        240,
+        "h264 envelope metadata is CSS height"
+      );
       post.push(payload);
       const stream = Buffer.concat(post);
       const nals = nalPayloads(stream);
@@ -983,13 +1215,21 @@ test("a scale change respawns the encoder with SPS/PPS/IDR at the scaled dimensi
       // Decoder-priming order across the respawn, like on a join.
       const order = nalTypesInOrder(stream);
       const firstSlice = order.find((x) => x === 1 || x === 5);
-      assert.equal(firstSlice, 5, `post-resize stream leads with an IDR (got ${order.join(",")})`);
+      assert.equal(
+        firstSlice,
+        5,
+        `post-resize stream leads with an IDR (got ${order.join(",")})`
+      );
       assert.ok(order.indexOf(7) < order.indexOf(5), "SPS precedes the IDR");
       assert.ok(order.indexOf(8) < order.indexOf(5), "PPS precedes the IDR");
       dims = spsDimensions(sps);
     }
     assert.ok(dims, "a fresh SPS arrived after the scaled resize");
-    assert.deepEqual(dims, { width: 640, height: 480 }, "the fresh SPS codes viewport × scale");
+    assert.deepEqual(
+      dims,
+      { width: 640, height: 480 },
+      "the fresh SPS codes viewport × scale"
+    );
   } finally {
     clearInterval(feeder);
   }

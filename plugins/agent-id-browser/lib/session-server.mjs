@@ -1668,7 +1668,11 @@ export async function dispatch(state, msg, policy = null) {
                 `fill-otp: the code did not land in all ${boxes.length} boxes (re-snapshot and retry)`
               );
             }
-            if (p.submit !== false) await page.keyboard.press("Enter");
+            // A row that submitted itself has already moved the page on; pressing
+            // Enter then lands on whatever screen came next.
+            const stillHere = await boxes[0].isVisible().catch(() => false);
+            if (p.submit !== false && stillHere)
+              await page.keyboard.press("Enter");
           } else {
             await humanType(page, sel(p.ref), code, {
               timeout: ACTION_TIMEOUT,

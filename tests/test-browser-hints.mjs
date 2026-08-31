@@ -11,7 +11,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DEFAULT_PROFILE, loginHint, noProfileHint, profileName } from "../plugins/agent-id-browser/lib/hints.mjs";
+import {
+  DEFAULT_PROFILE,
+  loginHint,
+  noProfileHint,
+  profileName,
+} from "../plugins/agent-id-browser/lib/hints.mjs";
 
 test("profileName accepts safe slugs and rejects traversal", () => {
   assert.equal(profileName(), DEFAULT_PROFILE);

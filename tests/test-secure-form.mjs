@@ -54,14 +54,15 @@ test("serves a token-gated form and returns the submitted value", async () => {
 
 test("collects multiple fields (e.g. basic auth) in one submit", async () => {
   const { urlReady, done } = startForm({
-    fields: [
-      { name: "username", secret: false },
-      { name: "password" },
-    ],
+    fields: [{ name: "username", secret: false }, { name: "password" }],
   });
   const u = new URL(await urlReady);
   const token = u.searchParams.get("t");
-  const body = new URLSearchParams({ _token: token, username: "admin", password: "s3cr3t" });
+  const body = new URLSearchParams({
+    _token: token,
+    username: "admin",
+    password: "s3cr3t",
+  });
   await fetch(`http://127.0.0.1:${u.port}/submit`, { method: "POST", body });
   const { values } = await done;
   assert.deepEqual(values, { username: "admin", password: "s3cr3t" });
@@ -88,7 +89,11 @@ test("webauthn register: serves the passkey UI on localhost, returns the ceremon
     webauthn: { mode: "register", rpName: "Alien Vault", prfSalt: "00ff" },
   });
   const u = new URL(await urlReady);
-  assert.equal(u.hostname, "localhost", "WebAuthn must be served on localhost, not an IP");
+  assert.equal(
+    u.hostname,
+    "localhost",
+    "WebAuthn must be served on localhost, not an IP"
+  );
   const token = u.searchParams.get("t");
   const origin = `http://localhost:${u.port}`;
 
@@ -99,20 +104,39 @@ test("webauthn register: serves the passkey UI on localhost, returns the ceremon
   assert.doesNotMatch(html, /<input[^>]*type="password"/); // no text field
 
   // Simulate the browser completing the ceremony.
-  const body = new URLSearchParams({ _token: token, credentialId: "Y3JlZA", rpId: "localhost", prfSecret: "deadbeef" });
-  assert.equal((await fetch(`${origin}/submit`, { method: "POST", body })).status, 200);
+  const body = new URLSearchParams({
+    _token: token,
+    credentialId: "Y3JlZA",
+    rpId: "localhost",
+    prfSecret: "deadbeef",
+  });
+  assert.equal(
+    (await fetch(`${origin}/submit`, { method: "POST", body })).status,
+    200
+  );
 
   const { values } = await done;
-  assert.deepEqual(values, { credentialId: "Y3JlZA", rpId: "localhost", prfSecret: "deadbeef" });
+  assert.deepEqual(values, {
+    credentialId: "Y3JlZA",
+    rpId: "localhost",
+    prfSecret: "deadbeef",
+  });
 });
 
 test("webauthn authenticate: returns just the PRF secret", async () => {
   const { urlReady, done } = startForm({
-    webauthn: { mode: "authenticate", credentialId: "Y3JlZA", rpId: "localhost", prfSalt: "00ff" },
+    webauthn: {
+      mode: "authenticate",
+      credentialId: "Y3JlZA",
+      rpId: "localhost",
+      prfSalt: "00ff",
+    },
   });
   const u = new URL(await urlReady);
   const token = u.searchParams.get("t");
-  const html = await (await fetch(`http://localhost:${u.port}/?t=${token}`)).text();
+  const html = await (
+    await fetch(`http://localhost:${u.port}/?t=${token}`)
+  ).text();
   assert.match(html, /navigator\.credentials\.get/);
   await fetch(`http://localhost:${u.port}/submit`, {
     method: "POST",
@@ -149,7 +173,10 @@ test("the wait budget printed to the human is the caller's, not a constant", asy
       const u = new URL(url);
       await fetch(`http://127.0.0.1:${u.port}/submit`, {
         method: "POST",
-        body: new URLSearchParams({ _token: u.searchParams.get("t"), otp: "483920" }),
+        body: new URLSearchParams({
+          _token: u.searchParams.get("t"),
+          otp: "483920",
+        }),
       });
       const { values } = await done;
       assert.equal(values.otp, "483920");

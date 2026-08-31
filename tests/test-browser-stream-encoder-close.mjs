@@ -85,7 +85,7 @@ test("no chunk reaches the caller after close() returns", async () => {
     assert.equal(
       after.chunks,
       0,
-      `no onChunk after close (got ${after.chunks} chunks, ${after.bytes} bytes)`,
+      `no onChunk after close (got ${after.chunks} chunks, ${after.bytes} bytes)`
     );
 
     // Idempotent: a second close must not throw or resurrect delivery.

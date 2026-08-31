@@ -49,9 +49,9 @@ function proxyRequest({ port, target, headers = {} }) {
             status: res.statusCode,
             headers: res.headers,
             body: Buffer.concat(chunks).toString("utf8"),
-          }),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     req.end();

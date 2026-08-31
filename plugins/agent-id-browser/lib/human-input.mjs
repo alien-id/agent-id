@@ -220,12 +220,20 @@ export async function typeCodeAcrossBoxes(
   const characters = Array.from(String(code ?? ""));
   if (boxes.length === 0 || characters.length === 0) return false;
 
+  // A row that submits itself on the last character takes the page with it, and
+  // then there is nothing left to read back. Navigating away IS the code landing:
+  // reading empty boxes on the next screen and calling that a failure would fail
+  // the one case that worked perfectly.
+  const startedAt = page.url();
+  const navigated = () => page.url() !== startedAt;
+  const filled = async () =>
+    Promise.all(boxes.map((box) => box.inputValue().catch(() => "")));
+
   await humanClick(page, boxes[0]);
   await boxes[0].fill("");
   await humanTypeFocused(page, code, { rng });
 
-  const filled = async () =>
-    Promise.all(boxes.map((box) => box.inputValue().catch(() => "")));
+  if (navigated()) return true;
   if ((await filled()).join("").length >= characters.length) return true;
 
   for (const [index, box] of boxes.entries()) {
@@ -236,6 +244,8 @@ export async function typeCodeAcrossBoxes(
     // controlled component listens for.
     await box.fill(character).catch(() => {});
   }
+
+  if (navigated()) return true;
 
   return (await filled()).join("").length >= characters.length;
 }

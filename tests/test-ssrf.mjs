@@ -12,7 +12,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { blockedAddressReason, makeUpstreamLookup } from "../plugins/agent-id-proxy/lib/ssrf.mjs";
+import {
+  blockedAddressReason,
+  makeUpstreamLookup,
+} from "../plugins/agent-id-proxy/lib/ssrf.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 
@@ -36,9 +39,20 @@ describe("blockedAddressReason", () => {
   });
 
   it("loopback/private only blocked under blockPrivate", () => {
-    for (const ip of ["127.0.0.1", "10.0.0.5", "172.16.0.1", "192.168.1.1", "100.64.0.1", "::1", "fd00::1"]) {
+    for (const ip of [
+      "127.0.0.1",
+      "10.0.0.5",
+      "172.16.0.1",
+      "192.168.1.1",
+      "100.64.0.1",
+      "::1",
+      "fd00::1",
+    ]) {
       assert.equal(blockedAddressReason(ip), null, `${ip} default-allowed`);
-      assert.ok(blockedAddressReason(ip, { blockPrivate: true }), `${ip} blocked under blockPrivate`);
+      assert.ok(
+        blockedAddressReason(ip, { blockPrivate: true }),
+        `${ip} blocked under blockPrivate`
+      );
     }
   });
 });
@@ -102,12 +116,22 @@ describe("proxy refuses a link-local upstream (403 upstream_blocked)", () => {
 
     const res = await new Promise((resolve, reject) => {
       const req = http.request(
-        { host: "127.0.0.1", port, method: "GET", path: "/leaky/169.254.169.254/latest/meta-data/" },
+        {
+          host: "127.0.0.1",
+          port,
+          method: "GET",
+          path: "/leaky/169.254.169.254/latest/meta-data/",
+        },
         (r) => {
           const chunks = [];
           r.on("data", (c) => chunks.push(c));
-          r.on("end", () => resolve({ status: r.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
-        },
+          r.on("end", () =>
+            resolve({
+              status: r.statusCode,
+              body: Buffer.concat(chunks).toString("utf8"),
+            })
+          );
+        }
       );
       req.on("error", reject);
       req.end();

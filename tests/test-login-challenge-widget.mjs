@@ -16,7 +16,10 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 
-import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
+import {
+  resolvePatchright,
+  launchContext,
+} from "../plugins/agent-id-browser/lib/launch.mjs";
 import { CHALLENGE_WIDGET_SEL } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 
 const patchrightAvailable = !!resolvePatchright();
@@ -26,7 +29,8 @@ const skip = patchrightAvailable ? false : "patchright/Chrome not installed";
 // invisible token widget doesn't count as a challenge.
 async function visibleChallengeCount(page) {
   return page.evaluate((sel) => {
-    const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
+    const visible = (e) =>
+      !!(e.offsetParent !== null || e.getClientRects().length);
     return Array.from(document.querySelectorAll(sel)).filter(visible).length;
   }, CHALLENGE_WIDGET_SEL);
 }
@@ -44,23 +48,38 @@ async function withPage(fn) {
   }
 }
 
-test("challenge widgets (Arkose / reCAPTCHA / hCaptcha) are detected, in any language", { skip }, async () => {
-  await withPage(async (page) => {
-    // Vendor markers only — no English text anywhere on the page.
-    await page.setContent(
-      `<div class="g-recaptcha" data-sitekey="x" style="width:300px;height:78px"></div>` +
-        `<iframe title="Vérification de sécurité" src="https://client-api.arkoselabs.com/x"` +
-        ` style="width:300px;height:200px"></iframe>`,
-    );
-    assert.ok((await visibleChallengeCount(page)) >= 1, "a visible challenge widget is found regardless of page language");
-  });
-});
+test(
+  "challenge widgets (Arkose / reCAPTCHA / hCaptcha) are detected, in any language",
+  { skip },
+  async () => {
+    await withPage(async (page) => {
+      // Vendor markers only — no English text anywhere on the page.
+      await page.setContent(
+        `<div class="g-recaptcha" data-sitekey="x" style="width:300px;height:78px"></div>` +
+          `<iframe title="Vérification de sécurité" src="https://client-api.arkoselabs.com/x"` +
+          ` style="width:300px;height:200px"></iframe>`
+      );
+      assert.ok(
+        (await visibleChallengeCount(page)) >= 1,
+        "a visible challenge widget is found regardless of page language"
+      );
+    });
+  }
+);
 
-test("an ordinary login form is NOT flagged as a challenge", { skip }, async () => {
-  await withPage(async (page) => {
-    await page.setContent(
-      `<form><input type="email"><input type="password"><button>Se connecter</button></form>`,
-    );
-    assert.equal(await visibleChallengeCount(page), 0, "a plain login form has no challenge widget");
-  });
-});
+test(
+  "an ordinary login form is NOT flagged as a challenge",
+  { skip },
+  async () => {
+    await withPage(async (page) => {
+      await page.setContent(
+        `<form><input type="email"><input type="password"><button>Se connecter</button></form>`
+      );
+      assert.equal(
+        await visibleChallengeCount(page),
+        0,
+        "a plain login form has no challenge widget"
+      );
+    });
+  }
+);

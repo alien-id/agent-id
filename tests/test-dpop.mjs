@@ -75,7 +75,10 @@ describe("ed25519PublicKeyToJwk()", () => {
     // x must decode back to 32 bytes that match the raw public key extracted from the PEM.
     const rawFromJwk = fromB64url(jwk.x);
     assert.equal(rawFromJwk.length, 32);
-    const der = createPublicKey(publicKeyPem).export({ format: "der", type: "spki" });
+    const der = createPublicKey(publicKeyPem).export({
+      format: "der",
+      type: "spki",
+    });
     const rawFromPem = der.subarray(der.length - 32);
     assert.deepEqual(rawFromJwk, rawFromPem);
   });
@@ -86,7 +89,7 @@ describe("ed25519PublicKeyToJwk()", () => {
     assert.throws(
       () => ed25519PublicKeyToJwk(pem),
       /Ed25519/,
-      "expected Ed25519-only key acceptance, got silent X25519 acceptance",
+      "expected Ed25519-only key acceptance, got silent X25519 acceptance"
     );
   });
 
@@ -114,7 +117,12 @@ describe("jwkThumbprint()", () => {
   });
 
   it("ignores extra fields in the JWK (canonicalises only crv/kty/x)", () => {
-    const tp = jwkThumbprint({ ...RFC8037_JWK, alg: "EdDSA", use: "sig", kid: "ignored" });
+    const tp = jwkThumbprint({
+      ...RFC8037_JWK,
+      alg: "EdDSA",
+      use: "sig",
+      kid: "ignored",
+    });
     assert.equal(tp, RFC8037_THUMBPRINT);
   });
 
@@ -184,12 +192,30 @@ describe("createDPoPProof()", () => {
   it("canonicalizes htu (lowercase scheme+host, default port stripped) per RFC 3986 §6.2", () => {
     const { privateKeyPem } = generateEd25519PemPair();
     const cases = [
-      ["HTTPS://sso.example.com/oauth/token", "https://sso.example.com/oauth/token"],
-      ["https://SSO.EXAMPLE.COM/oauth/token", "https://sso.example.com/oauth/token"],
-      ["https://sso.example.com:443/oauth/token", "https://sso.example.com/oauth/token"],
-      ["http://sso.example.com:80/oauth/token", "http://sso.example.com/oauth/token"],
-      ["HTTPS://SSO.example.com:443/oauth/token?x=1#f", "https://sso.example.com/oauth/token"],
-      ["https://sso.example.com:8443/oauth/token", "https://sso.example.com:8443/oauth/token"], // non-default port preserved
+      [
+        "HTTPS://sso.example.com/oauth/token",
+        "https://sso.example.com/oauth/token",
+      ],
+      [
+        "https://SSO.EXAMPLE.COM/oauth/token",
+        "https://sso.example.com/oauth/token",
+      ],
+      [
+        "https://sso.example.com:443/oauth/token",
+        "https://sso.example.com/oauth/token",
+      ],
+      [
+        "http://sso.example.com:80/oauth/token",
+        "http://sso.example.com/oauth/token",
+      ],
+      [
+        "HTTPS://SSO.example.com:443/oauth/token?x=1#f",
+        "https://sso.example.com/oauth/token",
+      ],
+      [
+        "https://sso.example.com:8443/oauth/token",
+        "https://sso.example.com:8443/oauth/token",
+      ], // non-default port preserved
     ];
     for (const [input, expected] of cases) {
       const proof = createDPoPProof({
@@ -240,7 +266,7 @@ describe("createDPoPProof()", () => {
             iat: 1,
           }),
         /htm/i,
-        `expected throw for htm=${JSON.stringify(bad)}`,
+        `expected throw for htm=${JSON.stringify(bad)}`
       );
     }
   });
@@ -289,7 +315,12 @@ describe("createDPoPProof()", () => {
     const [h, p, s] = proof.split(".");
     const signingInput = Buffer.from(`${h}.${p}`);
     const signature = fromB64url(s);
-    const ok = cryptoVerify(null, signingInput, createPublicKey(publicKeyPem), signature);
+    const ok = cryptoVerify(
+      null,
+      signingInput,
+      createPublicKey(publicKeyPem),
+      signature
+    );
     assert.equal(ok, true);
   });
 
@@ -305,7 +336,9 @@ describe("createDPoPProof()", () => {
       iat: 1,
     });
     const payload = decodePart(proof.split(".")[1]);
-    const expected = b64url(crypto.createHash("sha256").update(accessToken).digest());
+    const expected = b64url(
+      crypto.createHash("sha256").update(accessToken).digest()
+    );
     assert.equal(payload.ath, expected);
   });
 
@@ -370,7 +403,7 @@ describe("getUserInfo client", () => {
       assert.equal(payload.htm, "GET");
       assert.equal(payload.htu, `${mock.baseUrl}/oauth/userinfo`);
       const expectedATH = b64url(
-        crypto.createHash("sha256").update("the-access-token").digest(),
+        crypto.createHash("sha256").update("the-access-token").digest()
       );
       assert.equal(payload.ath, expectedATH);
     } finally {
@@ -396,7 +429,7 @@ describe("getUserInfo client", () => {
             accessToken: "expired",
             agentPrivateKeyPem: pair.privateKeyPem,
           }),
-        /401|userinfo|invalid_token/i,
+        /401|userinfo|invalid_token/i
       );
     } finally {
       mock.server.close();
@@ -413,8 +446,7 @@ describe("getUserInfo client", () => {
       if (calls === 1) {
         res.writeHead(401, {
           "Content-Type": "application/json",
-          "WWW-Authenticate":
-            `DPoP realm="use_dpop_nonce blocklist", error="invalid_token"`,
+          "WWW-Authenticate": `DPoP realm="use_dpop_nonce blocklist", error="invalid_token"`,
           "DPoP-Nonce": "would-be-nonce-if-this-were-a-real-challenge",
         });
         res.end(JSON.stringify({ error: "Invalid token" }));
@@ -434,10 +466,13 @@ describe("getUserInfo client", () => {
             accessToken: "at",
             agentPrivateKeyPem: pair.privateKeyPem,
           }),
-        /401|invalid_token/i,
+        /401|invalid_token/i
       );
-      assert.equal(calls, 1,
-        "must NOT retry: use_dpop_nonce is not the error code");
+      assert.equal(
+        calls,
+        1,
+        "must NOT retry: use_dpop_nonce is not the error code"
+      );
     } finally {
       mock.server.close();
     }
@@ -461,7 +496,9 @@ describe("getUserInfo client", () => {
         res.end(JSON.stringify({ error: "use a fresh nonce" }));
         return;
       }
-      secondProofPayload = JSON.parse(fromB64url(dpop.split(".")[1]).toString("utf8"));
+      secondProofPayload = JSON.parse(
+        fromB64url(dpop.split(".")[1]).toString("utf8")
+      );
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ sub: "user-456" }));
     });
@@ -475,8 +512,11 @@ describe("getUserInfo client", () => {
       });
       assert.deepEqual(claims, { sub: "user-456" });
       assert.equal(calls, 2, "must retry once after §9 nonce challenge");
-      assert.equal(secondProofPayload.nonce, SERVER_NONCE,
-        "retry proof must echo the server-issued nonce");
+      assert.equal(
+        secondProofPayload.nonce,
+        SERVER_NONCE,
+        "retry proof must echo the server-issued nonce"
+      );
     } finally {
       mock.server.close();
     }
@@ -500,7 +540,7 @@ function createMockServer(handler) {
           JSON.stringify({
             issuer: `http://127.0.0.1:${port}`,
             jwks_uri: `http://127.0.0.1:${port}/jwks`,
-          }),
+          })
         );
         return;
       }
@@ -526,13 +566,15 @@ describe("beginOidcAuthorization with DPoP", () => {
           deep_link: "alien://x",
           polling_code: "p",
           expired_at: Date.now() + 60000,
-        }),
+        })
       );
     });
 
     try {
       const pair = generateEd25519PemPair();
-      const expectedThumbprint = jwkThumbprint(ed25519PublicKeyToJwk(pair.publicKeyPem));
+      const expectedThumbprint = jwkThumbprint(
+        ed25519PublicKeyToJwk(pair.publicKeyPem)
+      );
 
       await beginOidcAuthorization({
         ssoBaseUrl: mock.baseUrl,
@@ -561,7 +603,7 @@ describe("beginOidcAuthorization with DPoP", () => {
           deep_link: "alien://x",
           polling_code: "p",
           expired_at: Date.now() + 60000,
-        }),
+        })
       );
     });
 
@@ -601,7 +643,7 @@ describe("beginOidcAuthorization with DPoP", () => {
           deep_link: "alien://x",
           polling_code: "p",
           expired_at: Date.now() + 60000,
-        }),
+        })
       );
     });
 
@@ -614,8 +656,16 @@ describe("beginOidcAuthorization with DPoP", () => {
         ssoBaseUrl: mock.baseUrl,
         providerAddress: "test-provider",
       });
-      assert.notEqual(a.state, b.state, "state must be unguessable per request");
-      assert.notEqual(a.nonce, b.nonce, "nonce must be unguessable per request");
+      assert.notEqual(
+        a.state,
+        b.state,
+        "state must be unguessable per request"
+      );
+      assert.notEqual(
+        a.nonce,
+        b.nonce,
+        "nonce must be unguessable per request"
+      );
     } finally {
       mock.server.close();
     }
@@ -636,13 +686,15 @@ describe("exchangeAuthorizationCode with DPoP", () => {
           token_type: "DPoP",
           id_token: "it",
           refresh_token: "rt",
-        }),
+        })
       );
     });
 
     try {
       const pair = generateEd25519PemPair();
-      const expectedThumbprint = jwkThumbprint(ed25519PublicKeyToJwk(pair.publicKeyPem));
+      const expectedThumbprint = jwkThumbprint(
+        ed25519PublicKeyToJwk(pair.publicKeyPem)
+      );
 
       await exchangeAuthorizationCode({
         ssoBaseUrl: mock.baseUrl,
@@ -684,7 +736,14 @@ describe("exchangeAuthorizationCode with DPoP", () => {
       }
       secondProofPayload = decodePart(dpop.split(".")[1]);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ access_token: "at", token_type: "DPoP", id_token: "it", refresh_token: "rt" }));
+      res.end(
+        JSON.stringify({
+          access_token: "at",
+          token_type: "DPoP",
+          id_token: "it",
+          refresh_token: "rt",
+        })
+      );
     });
 
     try {
@@ -718,7 +777,9 @@ describe("refreshSession with DPoP", () => {
 
     try {
       const pair = generateEd25519PemPair();
-      const expectedThumbprint = jwkThumbprint(ed25519PublicKeyToJwk(pair.publicKeyPem));
+      const expectedThumbprint = jwkThumbprint(
+        ed25519PublicKeyToJwk(pair.publicKeyPem)
+      );
 
       await refreshSession({
         ssoBaseUrl: mock.baseUrl,
@@ -756,7 +817,11 @@ describe("refreshSession with DPoP", () => {
         refreshToken: "rt",
       });
       assert.equal(result.access_token, "at");
-      assert.equal(receivedDpop, undefined, "no DPoP header when keys not supplied");
+      assert.equal(
+        receivedDpop,
+        undefined,
+        "no DPoP header when keys not supplied"
+      );
     } finally {
       mock.server.close();
     }
@@ -848,8 +913,11 @@ describe("refreshSession with DPoP", () => {
       });
       // 1st call: 400 (no nonce) + 200 (nonce). 2nd call: 200 only.
       assert.deepEqual(statuses, [400, 200, 200]);
-      assert.equal(proofs[2].nonce, SERVER_NONCE,
-        "second call's first request must already carry the cached nonce");
+      assert.equal(
+        proofs[2].nonce,
+        SERVER_NONCE,
+        "second call's first request must already carry the cached nonce"
+      );
     } finally {
       mock.server.close();
     }
@@ -865,13 +933,12 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
     const { default: fs } = await import("node:fs/promises");
     const { default: os } = await import("node:os");
     const { default: pathMod } = await import("node:path");
-    const { SignatureEngine } = await import("../plugins/agent-id-core/lib/signature-engine.mjs");
-    const {
-      ensureDir,
-      readJsonFile,
-      statePaths,
-      writeJsonFile,
-    } = await import("../plugins/agent-id-core/lib/state.mjs");
+    const { SignatureEngine } = await import(
+      "../plugins/agent-id-core/lib/signature-engine.mjs"
+    );
+    const { ensureDir, readJsonFile, statePaths, writeJsonFile } = await import(
+      "../plugins/agent-id-core/lib/state.mjs"
+    );
     const {
       canonicalJSONString,
       fingerprintPublicKeyPem,
@@ -881,7 +948,10 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
       signEd25519Base64Url,
     } = await import("../plugins/agent-id-core/lib/crypto.mjs");
 
-    const stateDir = pathMod.join(os.tmpdir(), `agent-id-dpop-${crypto.randomUUID()}`);
+    const stateDir = pathMod.join(
+      os.tmpdir(),
+      `agent-id-dpop-${crypto.randomUUID()}`
+    );
     await fs.mkdir(stateDir, { recursive: true });
 
     let receivedDpop = null;
@@ -894,7 +964,7 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
         JSON.stringify({
           sub: "test-owner-sub",
           exp: Math.floor(Date.now() / 1000) + 3600,
-        }),
+        })
       );
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
@@ -902,7 +972,7 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
           access_token: `${header}.${payload}.sig`,
           token_type: "DPoP",
           refresh_token: "new-rt",
-        }),
+        })
       );
     });
 
@@ -910,7 +980,9 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
       const paths = statePaths(stateDir);
       const pair = generateEd25519PemPair();
       const fingerprint = fingerprintPublicKeyPem(pair.publicKeyPem);
-      const expectedThumbprint = jwkThumbprint(ed25519PublicKeyToJwk(pair.publicKeyPem));
+      const expectedThumbprint = jwkThumbprint(
+        ed25519PublicKeyToJwk(pair.publicKeyPem)
+      );
 
       await ensureDir(pathMod.dirname(paths.mainKey));
       await writeJsonFile(paths.mainKey, {
@@ -927,9 +999,14 @@ describe("SignatureEngine.ensureValidSession() forwards DPoP key", () => {
       // and parses jti/sub for the audit-log anchor.
 
       // Expired access token so refresh fires.
-      const expiredHeader = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+      const expiredHeader = b64url(
+        JSON.stringify({ alg: "HS256", typ: "JWT" })
+      );
       const expiredPayload = b64url(
-        JSON.stringify({ sub: "test-owner-sub", exp: Math.floor(Date.now() / 1000) - 600 }),
+        JSON.stringify({
+          sub: "test-owner-sub",
+          exp: Math.floor(Date.now() / 1000) - 600,
+        })
       );
       await writeJsonFile(paths.ownerSession, {
         version: 1,

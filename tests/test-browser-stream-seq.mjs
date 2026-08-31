@@ -40,8 +40,13 @@ function makeFakeSession(screenshotData) {
       if (method === "Page.captureScreenshot") return { data: screenshotData };
       return {};
     },
-    async detach() { session.detached = true; },
-    emitFrame(data, metadata = { deviceWidth: 640, deviceHeight: 480, timestamp: Date.now() }) {
+    async detach() {
+      session.detached = true;
+    },
+    emitFrame(
+      data,
+      metadata = { deviceWidth: 640, deviceHeight: 480, timestamp: Date.now() }
+    ) {
       handlers.get("Page.screencastFrame")?.({ data, metadata, sessionId: 1 });
     },
   };
@@ -53,8 +58,17 @@ function makeFakeState({ screenshot } = {}) {
   const page = {
     isClosed: () => false,
     viewportSize: () => ({ width: 640, height: 480 }),
-    mouse: { move: async () => {}, down: async () => {}, up: async () => {}, wheel: async () => {} },
-    keyboard: { down: async () => {}, up: async () => {}, insertText: async () => {} },
+    mouse: {
+      move: async () => {},
+      down: async () => {},
+      up: async () => {},
+      wheel: async () => {},
+    },
+    keyboard: {
+      down: async () => {},
+      up: async () => {},
+      insertText: async () => {},
+    },
   };
   return {
     current: page,
@@ -65,7 +79,9 @@ function makeFakeState({ screenshot } = {}) {
         return session;
       },
     },
-    get session() { return session; },
+    get session() {
+      return session;
+    },
   };
 }
 
@@ -77,7 +93,7 @@ async function connectStream(port, token, params = "") {
   const key = crypto.randomBytes(16).toString("base64");
   sock.write(
     `GET /?token=${token}${params} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n` +
-      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
   );
   const queue = [];
   const waiters = [];
@@ -105,7 +121,10 @@ async function connectStream(port, token, params = "") {
     next(timeout = 2000) {
       if (queue.length) return Promise.resolve(queue.shift());
       return new Promise((resolve, reject) => {
-        const waiter = (m) => { clearTimeout(t); resolve(m); };
+        const waiter = (m) => {
+          clearTimeout(t);
+          resolve(m);
+        };
         const t = setTimeout(() => {
           const i = waiters.indexOf(waiter);
           if (i >= 0) waiters.splice(i, 1);
@@ -124,7 +143,9 @@ async function connectStream(port, token, params = "") {
       assert.equal(m.opcode, 0x2, "expected a binary frame");
       return decodeFrameBinary(m.payload);
     },
-    close() { sock.destroy(); },
+    close() {
+      sock.destroy();
+    },
   };
 }
 
@@ -171,7 +192,11 @@ async function nextSeq(c, codec, timeout = 4000) {
 
 function assertConsecutive(seqs, what) {
   for (let i = 1; i < seqs.length; i++) {
-    assert.equal(seqs[i] - seqs[i - 1], 1, `consecutive ${what} (got ${seqs.join(",")})`);
+    assert.equal(
+      seqs[i] - seqs[i - 1],
+      1,
+      `consecutive ${what} (got ${seqs.join(",")})`
+    );
   }
 }
 
@@ -184,7 +209,7 @@ test("h264 seq is contiguous while jpeg frames are delivered", async () => {
   const jpeg = Buffer.from("jpeg-payload").toString("base64");
   const { state, server } = await startServer(
     { h264Config: { ffmpegPath: stub, encoder: "libx264" } },
-    { screenshot: jpeg },
+    { screenshot: jpeg }
   );
   const c = await connectStream(server.port, server.token, "&codec=h264");
   await c.nextJson(); // join status — this is the only client on the server
@@ -195,7 +220,11 @@ test("h264 seq is contiguous while jpeg frames are delivered", async () => {
   const warmup = Date.now() + 10000;
   while (seqs.length === 0 && Date.now() < warmup) {
     state.session.emitFrame(jpeg);
-    try { seqs.push(await nextSeq(c, "h264", 300)); } catch { /* encoder not up yet */ }
+    try {
+      seqs.push(await nextSeq(c, "h264", 300));
+    } catch {
+      /* encoder not up yet */
+    }
   }
   assert.equal(seqs.length, 1, "the stub encoder produced a chunk");
   for (let i = 0; i < 5; i++) {
@@ -219,7 +248,7 @@ test("jpeg and h264 viewers each get their own contiguous seq", async () => {
   const jpeg = Buffer.from("jpeg-payload").toString("base64");
   const { state, server } = await startServer(
     { h264Config: { ffmpegPath: stub, encoder: "libx264" } },
-    { screenshot: jpeg },
+    { screenshot: jpeg }
   );
   const h = await connectStream(server.port, server.token, "&codec=h264");
   await h.nextJson();
@@ -232,7 +261,11 @@ test("jpeg and h264 viewers each get their own contiguous seq", async () => {
   while (h264.length === 0 && Date.now() < warmup) {
     state.session.emitFrame(jpeg);
     jpegs.push(await nextSeq(j, "jpeg"));
-    try { h264.push(await nextSeq(h, "h264", 300)); } catch { /* encoder not up yet */ }
+    try {
+      h264.push(await nextSeq(h, "h264", 300));
+    } catch {
+      /* encoder not up yet */
+    }
   }
   assert.equal(h264.length, 1, "the stub encoder produced a chunk");
   for (let i = 0; i < 5; i++) {
@@ -249,19 +282,33 @@ test("jpeg and h264 viewers each get their own contiguous seq", async () => {
 });
 
 test("h264 seq stays contiguous under real encoding", async (t) => {
-  const { detectH264Encoder } = await import("../plugins/agent-id-browser/lib/stream-encoder.mjs");
-  if (!(await detectH264Encoder())) return t.skip("no ffmpeg h264 encoder on this machine");
+  const { detectH264Encoder } = await import(
+    "../plugins/agent-id-browser/lib/stream-encoder.mjs"
+  );
+  if (!(await detectH264Encoder()))
+    return t.skip("no ffmpeg h264 encoder on this machine");
   const { execFileSync } = await import("node:child_process");
   const os = await import("node:os");
   const path = await import("node:path");
   const fsSync = await import("node:fs");
   const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "stream-seq-"));
   execFileSync(process.env.AGENT_ID_FFMPEG || "ffmpeg", [
-    "-hide_banner", "-loglevel", "error",
-    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
-    "-frames:v", "10", "-q:v", "5", path.join(dir, "f%02d.jpg"),
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc=size=320x240:rate=10",
+    "-frames:v",
+    "10",
+    "-q:v",
+    "5",
+    path.join(dir, "f%02d.jpg"),
   ]);
-  const jpegs = fsSync.readdirSync(dir).sort()
+  const jpegs = fsSync
+    .readdirSync(dir)
+    .sort()
     .map((f) => fsSync.readFileSync(path.join(dir, f)).toString("base64"));
 
   // Real jpeg for the refinement capture — the quiet phase below arms it, and
@@ -287,7 +334,10 @@ test("h264 seq stays contiguous under real encoding", async (t) => {
   } finally {
     clearInterval(feeder);
   }
-  assert.ok(seqs.length >= 8, `collected h264 chunks under motion (got ${seqs.length})`);
+  assert.ok(
+    seqs.length >= 8,
+    `collected h264 chunks under motion (got ${seqs.length})`
+  );
   // Burst then silence: the encoder drains its backlog.
   await sleep(200);
   for (let i = 0; i < 30; i++) state.session.emitFrame(jpegs[i % jpegs.length]);
@@ -322,7 +372,11 @@ test("a jpeg viewer's seq increments by one per delivered frame", async () => {
   // A keeping-up jpeg viewer sees consecutive values; a viewer that falls
   // behind skips frames outright (latest-frame-wins), it does not see holes.
   for (let i = 1; i < seqs.length; i++) {
-    assert.equal(seqs[i] - seqs[i - 1], 1, `consecutive frames (got ${seqs.join(",")})`);
+    assert.equal(
+      seqs[i] - seqs[i - 1],
+      1,
+      `consecutive frames (got ${seqs.join(",")})`
+    );
   }
   c.close();
   server.close();

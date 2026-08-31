@@ -62,7 +62,10 @@ describe("owner-approval slot (format)", () => {
   it("round-trips the master key with the right KEK", () => {
     const mk = generateMasterKey();
     const kek = ownerApprovalKekBytes();
-    const slot = buildOwnerApprovalSlot(2, mk, kek, { keyRef: "oa-abc", ssoBaseUrl: "https://sso.example" });
+    const slot = buildOwnerApprovalSlot(2, mk, kek, {
+      keyRef: "oa-abc",
+      ssoBaseUrl: "https://sso.example",
+    });
     const recovered = unwrapSlotWithOwnerApproval(slot, kek);
     assert.ok(masterKeyEquals(mk, recovered));
     assert.equal(slot.type, "owner-approval");
@@ -75,18 +78,26 @@ describe("owner-approval slot (format)", () => {
 
   it("rejects a different KEK", () => {
     const mk = generateMasterKey();
-    const slot = buildOwnerApprovalSlot(2, mk, ownerApprovalKekBytes(), { keyRef: "oa-1" });
-    assert.throws(() => unwrapSlotWithOwnerApproval(slot, ownerApprovalKekBytes()));
+    const slot = buildOwnerApprovalSlot(2, mk, ownerApprovalKekBytes(), {
+      keyRef: "oa-1",
+    });
+    assert.throws(() =>
+      unwrapSlotWithOwnerApproval(slot, ownerApprovalKekBytes())
+    );
   });
 
   it("requires a keyRef", () => {
     const mk = generateMasterKey();
-    assert.throws(() => buildOwnerApprovalSlot(2, mk, ownerApprovalKekBytes(), {}));
+    assert.throws(() =>
+      buildOwnerApprovalSlot(2, mk, ownerApprovalKekBytes(), {})
+    );
   });
 
   it("requires a 32-byte KEK", () => {
     const mk = generateMasterKey();
-    assert.throws(() => buildOwnerApprovalSlot(2, mk, Buffer.alloc(16), { keyRef: "oa-1" }));
+    assert.throws(() =>
+      buildOwnerApprovalSlot(2, mk, Buffer.alloc(16), { keyRef: "oa-1" })
+    );
   });
 
   it("openVault opens via the ownerApprovalKek path", async () => {
@@ -96,15 +107,30 @@ describe("owner-approval slot (format)", () => {
       // the same master key, then confirm the KEK alone opens it.
       const mk = generateMasterKey();
       const kek = ownerApprovalKekBytes();
-      const { buildPassphraseSlot } = await import("../plugins/agent-id-vault/lib/format.mjs");
+      const { buildPassphraseSlot } = await import(
+        "../plugins/agent-id-vault/lib/format.mjs"
+      );
       const slots = [
         buildPassphraseSlot(0, mk, "recovery-pass"),
-        buildOwnerApprovalSlot(1, mk, kek, { keyRef: "oa-xyz", ssoBaseUrl: "https://sso.example" }),
+        buildOwnerApprovalSlot(1, mk, kek, {
+          keyRef: "oa-xyz",
+          ssoBaseUrl: "https://sso.example",
+        }),
       ];
-      const file = newVaultFile({ masterKey: mk, slots, payloadPlaintext: '{"version":1,"credentials":[]}' });
+      const file = newVaultFile({
+        masterKey: mk,
+        slots,
+        payloadPlaintext: '{"version":1,"credentials":[]}',
+      });
       assert.ok(findOwnerApprovalSlot(file.slots));
-      const paths = (await import("../plugins/agent-id-core/lib/state.mjs")).statePaths(stateDir);
-      await fs.writeFile(paths.vaultFile, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
+      const paths = (
+        await import("../plugins/agent-id-core/lib/state.mjs")
+      ).statePaths(stateDir);
+      await fs.writeFile(
+        paths.vaultFile,
+        JSON.stringify(file, null, 2) + "\n",
+        { mode: 0o600 }
+      );
 
       const vault = await openVault({ stateDir, ownerApprovalKek: kek });
       assert.deepEqual(vault.list(), []);
@@ -194,7 +220,9 @@ describe("owner-approval unlock (e2e against dev-sso)", () => {
   });
 
   it("enroll → start → poll recovers the KEK and opens the vault", async () => {
-    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-id-oa-e2e-"));
+    const stateDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "agent-id-oa-e2e-")
+    );
     try {
       await initVault({ stateDir, passphrase: "recovery-pass" });
 
@@ -210,8 +238,17 @@ describe("owner-approval unlock (e2e against dev-sso)", () => {
       assert.match(keyRef, /^oa-/);
 
       const vault = await openVault({ stateDir, passphrase: "recovery-pass" });
-      vault.add({ name: "gh", type: "bearer", value: "secret-token", domains: ["api.github.com"] });
-      vault.addOwnerApprovalSlot(kek, { keyRef, ssoBaseUrl, providerAddress: PROVIDER });
+      vault.add({
+        name: "gh",
+        type: "bearer",
+        value: "secret-token",
+        domains: ["api.github.com"],
+      });
+      vault.addOwnerApprovalSlot(kek, {
+        keyRef,
+        ssoBaseUrl,
+        providerAddress: PROVIDER,
+      });
       await vault.save();
       vault.lock();
 
@@ -225,10 +262,18 @@ describe("owner-approval unlock (e2e against dev-sso)", () => {
         keyRef,
         pollIntervalMs: 50,
         timeoutSec: 5,
-        onPrompt: (p) => { prompted = p; },
+        onPrompt: (p) => {
+          prompted = p;
+        },
       });
-      assert.ok(prompted && prompted.deepLink, "onPrompt should receive a deep link");
-      assert.ok(masterKeyEquals(secret, kek), "released secret must equal the enrolled KEK");
+      assert.ok(
+        prompted && prompted.deepLink,
+        "onPrompt should receive a deep link"
+      );
+      assert.ok(
+        masterKeyEquals(secret, kek),
+        "released secret must equal the enrolled KEK"
+      );
 
       const reopened = await openVault({ stateDir, ownerApprovalKek: secret });
       const cred = reopened.get("gh");
@@ -261,7 +306,7 @@ describe("owner-approval unlock (e2e against dev-sso)", () => {
         pollIntervalMs: 50,
         timeoutSec: 3,
       }),
-      /403|forbidden|HTTP 403/i,
+      /403|forbidden|HTTP 403/i
     );
   });
 
@@ -275,7 +320,7 @@ describe("owner-approval unlock (e2e against dev-sso)", () => {
         pollIntervalMs: 50,
         timeoutSec: 3,
       }),
-      /404|unknown_key_ref|HTTP 404/i,
+      /404|unknown_key_ref|HTTP 404/i
     );
   });
 });
@@ -307,14 +352,22 @@ function startUpstream(record) {
 function rewriteRequest({ port, cred, upstream, path: p = "/x" }) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "127.0.0.1", port, method: "GET", path: `/${cred}/${upstream}${p}` },
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: `/${cred}/${upstream}${p}`,
+      },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
+          resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     req.end();
@@ -325,12 +378,19 @@ function controlGet(port, p, token) {
   return new Promise((resolve, reject) => {
     http
       .get(
-        { host: "127.0.0.1", port, path: p, headers: token ? { Authorization: `Bearer ${token}` } : {} },
+        {
+          host: "127.0.0.1",
+          port,
+          path: p,
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        },
         (res) => {
           const chunks = [];
           res.on("data", (c) => chunks.push(c));
-          res.on("end", () => resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
-        },
+          res.on("end", () =>
+            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")))
+          );
+        }
       )
       .on("error", reject);
   });
@@ -339,7 +399,10 @@ function controlGet(port, p, token) {
 function controlPost(port, p, body, token) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
-    const headers = { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) };
+    const headers = {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(payload),
+    };
     if (token) headers.Authorization = `Bearer ${token}`;
     const req = http.request(
       {
@@ -353,9 +416,12 @@ function controlPost(port, p, body, token) {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }),
+          resolve({
+            status: res.statusCode,
+            body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     req.end(payload);
@@ -364,12 +430,24 @@ function controlPost(port, p, body, token) {
 
 // Background owner-approval approver: handles each pending unlock once by
 // driving the SSO release and posting the recovered master key.
-function startApprover({ controlPort, stateDir, ssoBaseUrl, accessToken, agentPrivateKeyPem, controlToken, controlPublicKey }) {
+function startApprover({
+  controlPort,
+  stateDir,
+  ssoBaseUrl,
+  accessToken,
+  agentPrivateKeyPem,
+  controlToken,
+  controlPublicKey,
+}) {
   const state = { stop: false, handled: 0, prompts: 0, seen: new Set() };
   (async function loop() {
     while (!state.stop) {
       try {
-        const { pending } = await controlGet(controlPort, "/pending", controlToken);
+        const { pending } = await controlGet(
+          controlPort,
+          "/pending",
+          controlToken
+        );
         for (const entry of pending) {
           if (state.seen.has(entry.id)) continue;
           if (entry.action !== "unlock" || !entry.ownerApproval) continue;
@@ -381,13 +459,20 @@ function startApprover({ controlPort, stateDir, ssoBaseUrl, accessToken, agentPr
             keyRef: entry.ownerApproval.keyRef,
             pollIntervalMs: 50,
             timeoutSec: 5,
-            onPrompt: () => { state.prompts++; },
+            onPrompt: () => {
+              state.prompts++;
+            },
           });
           let mk;
           try {
             mk = await recoverMasterKeyViaOwnerApproval(stateDir, secret);
             const sealedMasterKey = sealToPublicKey(mk, controlPublicKey);
-            await controlPost(controlPort, "/approve", { id: entry.id, sealedMasterKey }, controlToken);
+            await controlPost(
+              controlPort,
+              "/approve",
+              { id: entry.id, sealedMasterKey },
+              controlToken
+            );
             state.handled++;
           } finally {
             secret.fill(0);
@@ -422,7 +507,9 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
   });
 
   it("a request to a locked proxy parks, unlocks via owner approval, then completes", async () => {
-    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-id-oa-ctl-"));
+    const stateDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "agent-id-oa-ctl-")
+    );
     const record = { value: null };
     const upstream = await startUpstream(record);
     let proxy;
@@ -444,7 +531,11 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         upstreamScheme: "http",
         value: "SECRET-TOKEN",
       });
-      vault.addOwnerApprovalSlot(kek, { keyRef, ssoBaseUrl, providerAddress: PROVIDER });
+      vault.addOwnerApprovalSlot(kek, {
+        keyRef,
+        ssoBaseUrl,
+        providerAddress: PROVIDER,
+      });
       await vault.save();
       vault.lock();
       kek.fill(0);
@@ -455,7 +546,10 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         stateDir,
         logPath: statePaths(stateDir).proxyLog,
         idleTimeoutMs: Infinity,
-        control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
+        control: {
+          listen: { port: 0, host: "127.0.0.1" },
+          approvalTimeoutMs: 5000,
+        },
       });
       const dataPort = (await proxy.listen()).port;
       const controlPort = proxy.controlAddress.port;
@@ -471,12 +565,19 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         controlPublicKey: proxy.controlPublicKey,
       });
 
-      const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: upstream.host });
+      const r = await rewriteRequest({
+        port: dataPort,
+        cred: "tok",
+        upstream: upstream.host,
+      });
       assert.equal(r.status, 200);
       assert.equal(proxy.locked, false);
       assert.equal(record.value.authorization, "Bearer SECRET-TOKEN");
       assert.ok(approver.handled >= 1, "approver should have unlocked once");
-      assert.ok(approver.prompts >= 1, "approver should have received an SSO prompt");
+      assert.ok(
+        approver.prompts >= 1,
+        "approver should have received an SSO prompt"
+      );
     } finally {
       if (approver) approver.stop = true;
       if (proxy) await proxy.close();
@@ -486,7 +587,9 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
   });
 
   it("after idle force-lock, the next request re-unlocks via owner approval", async () => {
-    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-id-oa-ctl2-"));
+    const stateDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "agent-id-oa-ctl2-")
+    );
     const record = { value: null };
     const upstream = await startUpstream(record);
     let proxy;
@@ -508,7 +611,11 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         upstreamScheme: "http",
         value: "SECRET-TOKEN",
       });
-      vault.addOwnerApprovalSlot(kek, { keyRef, ssoBaseUrl, providerAddress: PROVIDER });
+      vault.addOwnerApprovalSlot(kek, {
+        keyRef,
+        ssoBaseUrl,
+        providerAddress: PROVIDER,
+      });
       await vault.save();
       kek.fill(0);
 
@@ -518,7 +625,10 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
         stateDir,
         logPath: statePaths(stateDir).proxyLog,
         idleTimeoutMs: Infinity,
-        control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
+        control: {
+          listen: { port: 0, host: "127.0.0.1" },
+          approvalTimeoutMs: 5000,
+        },
       });
       const dataPort = (await proxy.listen()).port;
       const controlPort = proxy.controlAddress.port;
@@ -538,7 +648,11 @@ describe("proxy: owner-approval re-unlock over the control plane", () => {
       proxy.forceLock("idle_timeout");
       assert.equal(proxy.locked, true);
 
-      const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: upstream.host });
+      const r = await rewriteRequest({
+        port: dataPort,
+        cred: "tok",
+        upstream: upstream.host,
+      });
       assert.equal(r.status, 200);
       assert.equal(proxy.locked, false);
       assert.equal(record.value.authorization, "Bearer SECRET-TOKEN");

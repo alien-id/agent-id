@@ -24,8 +24,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
-import { webauthnKept, suppressWebAuthn } from "../plugins/agent-id-browser/lib/webauthn-off.mjs";
+import {
+  resolvePatchright,
+  launchContext,
+} from "../plugins/agent-id-browser/lib/launch.mjs";
+import {
+  webauthnKept,
+  suppressWebAuthn,
+} from "../plugins/agent-id-browser/lib/webauthn-off.mjs";
 
 const patchrightAvailable = !!resolvePatchright();
 
@@ -50,7 +56,10 @@ test("suppressWebAuthn installs one init script and reports it", async () => {
 test("suppressWebAuthn is a no-op when the env keeps WebAuthn", async () => {
   const installed = [];
   const ctx = { addInitScript: async (fn) => installed.push(fn) };
-  assert.equal(await suppressWebAuthn(ctx, { AGENT_ID_BROWSER_KEEP_WEBAUTHN: "1" }), false);
+  assert.equal(
+    await suppressWebAuthn(ctx, { AGENT_ID_BROWSER_KEEP_WEBAUTHN: "1" }),
+    false
+  );
   assert.equal(installed.length, 0);
 });
 
@@ -88,53 +97,72 @@ async function probeWebAuthn(launchExtras = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "webauthn-off-"));
   let ctx;
   try {
-    ctx = await launchContext({ profileDir: dir, headless: true, ...launchExtras });
+    ctx = await launchContext({
+      profileDir: dir,
+      headless: true,
+      ...launchExtras,
+    });
     const page = ctx.pages()[0] || (await ctx.newPage());
     await page.goto(`${base}/`, { waitUntil: "domcontentloaded" });
-    return await page.evaluate(async () => {
-      const out = {
-        pkc: typeof window.PublicKeyCredential,
-        attestationResponse: typeof window.AuthenticatorAttestationResponse,
-        assertionResponse: typeof window.AuthenticatorAssertionResponse,
-        authenticatorResponse: typeof window.AuthenticatorResponse,
-        getNative: navigator.credentials.get.toString().includes("[native code]"),
-        createNative: navigator.credentials.create.toString().includes("[native code]"),
-        // Function.prototype.toString is the reflection path an anti-bot script
-        // uses to defeat a per-function toString override — the Proxy must
-        // forward it to the native target too.
-        getNativeViaFnProto: Function.prototype.toString
-          .call(navigator.credentials.get)
-          .includes("[native code]"),
-        getName: navigator.credentials.get.name,
-      };
-      const timing = async (label, run) => {
-        const t0 = Date.now();
-        try {
-          const value = await run();
-          out[label] = { outcome: "resolved", value: value === null ? null : typeof value };
-        } catch (e) {
-          out[label] = { outcome: "rejected", name: e.name };
-        }
-        out[label].ms = Date.now() - t0;
-      };
-      await timing("get", () =>
-        navigator.credentials.get({ publicKey: { challenge: new Uint8Array(16) } }),
-      );
-      await timing("create", () =>
-        navigator.credentials.create({
-          publicKey: {
-            challenge: new Uint8Array(16),
-            rp: { name: "t" },
-            user: { id: new Uint8Array(8), name: "t", displayName: "t" },
-            pubKeyCredParams: [{ type: "public-key", alg: -7 }],
-          },
-        }),
-      );
-      // Non-publicKey credential types must pass through to the native
-      // implementation (no stored password → resolves null).
-      await timing("passwordGet", () => navigator.credentials.get({ password: true }));
-      return out;
-    }, undefined, false);
+    return await page.evaluate(
+      async () => {
+        const out = {
+          pkc: typeof window.PublicKeyCredential,
+          attestationResponse: typeof window.AuthenticatorAttestationResponse,
+          assertionResponse: typeof window.AuthenticatorAssertionResponse,
+          authenticatorResponse: typeof window.AuthenticatorResponse,
+          getNative: navigator.credentials.get
+            .toString()
+            .includes("[native code]"),
+          createNative: navigator.credentials.create
+            .toString()
+            .includes("[native code]"),
+          // Function.prototype.toString is the reflection path an anti-bot script
+          // uses to defeat a per-function toString override — the Proxy must
+          // forward it to the native target too.
+          getNativeViaFnProto: Function.prototype.toString
+            .call(navigator.credentials.get)
+            .includes("[native code]"),
+          getName: navigator.credentials.get.name,
+        };
+        const timing = async (label, run) => {
+          const t0 = Date.now();
+          try {
+            const value = await run();
+            out[label] = {
+              outcome: "resolved",
+              value: value === null ? null : typeof value,
+            };
+          } catch (e) {
+            out[label] = { outcome: "rejected", name: e.name };
+          }
+          out[label].ms = Date.now() - t0;
+        };
+        await timing("get", () =>
+          navigator.credentials.get({
+            publicKey: { challenge: new Uint8Array(16) },
+          })
+        );
+        await timing("create", () =>
+          navigator.credentials.create({
+            publicKey: {
+              challenge: new Uint8Array(16),
+              rp: { name: "t" },
+              user: { id: new Uint8Array(8), name: "t", displayName: "t" },
+              pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+            },
+          })
+        );
+        // Non-publicKey credential types must pass through to the native
+        // implementation (no stored password → resolves null).
+        await timing("passwordGet", () =>
+          navigator.credentials.get({ password: true })
+        );
+        return out;
+      },
+      undefined,
+      false
+    );
   } finally {
     if (ctx) await ctx.close().catch(() => {});
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -147,30 +175,72 @@ test(
   async () => {
     const s = await probeWebAuthn();
 
-    assert.equal(s.pkc, "undefined", "PublicKeyCredential must be gone (feature detection)");
+    assert.equal(
+      s.pkc,
+      "undefined",
+      "PublicKeyCredential must be gone (feature detection)"
+    );
     // The response types must go with it — a real browser never exposes them
     // without PublicKeyCredential, and that mismatch is its own automation tell.
-    assert.equal(s.attestationResponse, "undefined", "AuthenticatorAttestationResponse must be gone");
-    assert.equal(s.assertionResponse, "undefined", "AuthenticatorAssertionResponse must be gone");
-    assert.equal(s.authenticatorResponse, "undefined", "AuthenticatorResponse must be gone");
+    assert.equal(
+      s.attestationResponse,
+      "undefined",
+      "AuthenticatorAttestationResponse must be gone"
+    );
+    assert.equal(
+      s.assertionResponse,
+      "undefined",
+      "AuthenticatorAssertionResponse must be gone"
+    );
+    assert.equal(
+      s.authenticatorResponse,
+      "undefined",
+      "AuthenticatorResponse must be gone"
+    );
     // The override must read as native, or it is itself a detectable JS patch —
     // defeating the byte-for-byte-native surface the rest of launch.mjs builds.
-    assert.equal(s.getNative, true, "credentials.get must report [native code]");
-    assert.equal(s.createNative, true, "credentials.create must report [native code]");
-    assert.equal(s.getNativeViaFnProto, true, "Function.prototype.toString must also see native");
-    assert.equal(s.getName, "get", "the override must keep the native function name");
+    assert.equal(
+      s.getNative,
+      true,
+      "credentials.get must report [native code]"
+    );
+    assert.equal(
+      s.createNative,
+      true,
+      "credentials.create must report [native code]"
+    );
+    assert.equal(
+      s.getNativeViaFnProto,
+      true,
+      "Function.prototype.toString must also see native"
+    );
+    assert.equal(
+      s.getName,
+      "get",
+      "the override must keep the native function name"
+    );
     assert.equal(s.get.outcome, "rejected");
-    assert.equal(s.get.name, "NotAllowedError", "a publicKey get must look like a cancelled ceremony");
-    assert.ok(s.get.ms < 2000, `the rejection must be immediate, not a hang (took ${s.get.ms}ms)`);
+    assert.equal(
+      s.get.name,
+      "NotAllowedError",
+      "a publicKey get must look like a cancelled ceremony"
+    );
+    assert.ok(
+      s.get.ms < 2000,
+      `the rejection must be immediate, not a hang (took ${s.get.ms}ms)`
+    );
     assert.equal(s.create.outcome, "rejected");
     assert.equal(s.create.name, "NotAllowedError");
-    assert.ok(s.create.ms < 2000, `the rejection must be immediate, not a hang (took ${s.create.ms}ms)`);
+    assert.ok(
+      s.create.ms < 2000,
+      `the rejection must be immediate, not a hang (took ${s.create.ms}ms)`
+    );
     assert.deepEqual(
       { outcome: s.passwordGet.outcome, value: s.passwordGet.value },
       { outcome: "resolved", value: null },
-      "non-publicKey credential calls must reach the native implementation",
+      "non-publicKey credential calls must reach the native implementation"
     );
-  },
+  }
 );
 
 test(
@@ -190,13 +260,21 @@ test(
       await page.goto("data:text/html,<title>t</title><h1>x</h1>", {
         waitUntil: "domcontentloaded",
       });
-      const pkc = await page.evaluate(() => typeof window.PublicKeyCredential, undefined, false);
-      assert.equal(pkc, "undefined", "the off-switch must cover a no-network document");
+      const pkc = await page.evaluate(
+        () => typeof window.PublicKeyCredential,
+        undefined,
+        false
+      );
+      assert.equal(
+        pkc,
+        "undefined",
+        "the off-switch must cover a no-network document"
+      );
     } finally {
       if (ctx) await ctx.close().catch(() => {});
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
-  },
+  }
 );
 
 test(
@@ -204,8 +282,12 @@ test(
   { skip: patchrightAvailable ? false : "patchright/Chrome not installed" },
   async () => {
     const s = await probeWebAuthn({ nativeWebAuthn: true });
-    assert.equal(s.pkc, "function", "the owner's headed login must keep WebAuthn native");
-  },
+    assert.equal(
+      s.pkc,
+      "function",
+      "the owner's headed login must keep WebAuthn native"
+    );
+  }
 );
 
 test(
@@ -219,5 +301,5 @@ test(
     } finally {
       delete process.env.AGENT_ID_BROWSER_KEEP_WEBAUTHN;
     }
-  },
+  }
 );

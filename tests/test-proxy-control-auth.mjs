@@ -20,14 +20,23 @@ import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 function req(port, p, { method = "GET", token = null } = {}) {
   return new Promise((resolve, reject) => {
     const r = http.request(
-      { host: "127.0.0.1", port, path: p, method, headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      {
+        host: "127.0.0.1",
+        port,
+        path: p,
+        method,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
+          resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          })
         );
-      },
+      }
     );
     r.on("error", reject);
     r.end();
@@ -49,7 +58,10 @@ describe("control-plane auth", () => {
       stateDir,
       logPath: path.join(stateDir, "proxy.log"),
       idleTimeoutMs: Infinity,
-      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
+      control: {
+        listen: { port: 0, host: "127.0.0.1" },
+        approvalTimeoutMs: 5000,
+      },
     });
     await proxy.listen();
     controlPort = proxy.controlAddress.port;

@@ -15,15 +15,23 @@ import { spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
-import { writeJsonFile, statePaths } from "../plugins/agent-id-core/lib/state.mjs";
+import {
+  writeJsonFile,
+  statePaths,
+} from "../plugins/agent-id-core/lib/state.mjs";
 import { fingerprintPublicKeyPem } from "../plugins/agent-id-core/lib/crypto.mjs";
 
-const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url).pathname;
+const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url)
+  .pathname;
 
 async function makeVault(dir) {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
-  const privateKeyPem = privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+  const publicKeyPem = publicKey
+    .export({ format: "pem", type: "spki" })
+    .toString();
+  const privateKeyPem = privateKey
+    .export({ format: "pem", type: "pkcs8" })
+    .toString();
   await writeJsonFile(statePaths(dir).mainKey, {
     version: 1,
     agentId: "main",
@@ -49,7 +57,9 @@ function waitForUrl(child) {
       }
     };
     child.stderr.on("data", onData);
-    child.on("exit", () => reject(new Error(`CLI exited before printing a URL:\n${buf}`)));
+    child.on("exit", () =>
+      reject(new Error(`CLI exited before printing a URL:\n${buf}`))
+    );
   });
 }
 
@@ -61,10 +71,28 @@ test("add --form stores the value typed in the form; the value never hits stdout
 
     const child = spawn(
       "node",
-      [CLI, "add", "--name", "gh", "--type", "bearer", "--domains", "api.github.com", "--form", "--state-dir", dir],
+      [
+        CLI,
+        "add",
+        "--name",
+        "gh",
+        "--type",
+        "bearer",
+        "--domains",
+        "api.github.com",
+        "--form",
+        "--state-dir",
+        dir,
+      ],
       // Pin the browser backend (the resolver would otherwise pick /dev/tty when a
       // terminal is present); AGENT_ID_NO_BROWSER makes it print the URL, not open one.
-      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1", AGENT_ID_SECURE_PROMPT: "browser" } },
+      {
+        env: {
+          ...process.env,
+          AGENT_ID_NO_BROWSER: "1",
+          AGENT_ID_SECURE_PROMPT: "browser",
+        },
+      }
     );
     let stdout = "";
     let stderr = "";
@@ -94,7 +122,9 @@ test("add --form stores the value typed in the form; the value never hits stdout
     assert.equal(out.name, "gh");
 
     // The value really landed in the vault.
-    const { privateKeyPem } = JSON.parse(await readFile(statePaths(dir).mainKey, "utf8"));
+    const { privateKeyPem } = JSON.parse(
+      await readFile(statePaths(dir).mainKey, "utf8")
+    );
     const vault = await openVault({ stateDir: dir, privateKeyPem });
     assert.equal(vault.get("gh").value, SECRET);
     vault.lock();

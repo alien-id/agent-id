@@ -26,7 +26,7 @@ function startMock({ issuer, authorize, poll }) {
           JSON.stringify({
             issuer: issuer === undefined ? `http://127.0.0.1:${port}` : issuer,
             jwks_uri: `http://127.0.0.1:${port}/jwks`,
-          }),
+          })
         );
         return;
       }
@@ -71,7 +71,7 @@ describe("RFC 9207 §2.4 — iss check on authorize response", () => {
             ssoBaseUrl: mock.baseUrl,
             providerAddress: "0xprovider",
           }),
-        /Authorize response issuer mismatch/,
+        /Authorize response issuer mismatch/
       );
     } finally {
       mock.server.close();
@@ -145,7 +145,7 @@ describe("RFC 9207 §2.4 — iss check on poll response", () => {
             pollIntervalMs: 5,
             timeoutSec: 1,
           }),
-        /Authorization response issuer mismatch/,
+        /Authorization response issuer mismatch/
       );
     } finally {
       mock.server.close();

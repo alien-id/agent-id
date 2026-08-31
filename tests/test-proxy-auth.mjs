@@ -14,7 +14,10 @@ import os from "node:os";
 import path from "node:path";
 
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
-import { createProxy, PROXY_AUTH_HEADER } from "../plugins/agent-id-proxy/lib/proxy.mjs";
+import {
+  createProxy,
+  PROXY_AUTH_HEADER,
+} from "../plugins/agent-id-proxy/lib/proxy.mjs";
 import { prepareUpstreamHeaders } from "../plugins/agent-id-proxy/lib/rewrite.mjs";
 
 const TOKEN = "s3cret-proxy-token";
@@ -61,9 +64,9 @@ function proxyRequest({ port, target, method = "GET", headers = {} }) {
             status: res.statusCode,
             headers: res.headers,
             body: Buffer.concat(chunks).toString("utf8"),
-          }),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     req.end();
@@ -144,7 +147,10 @@ describe("data-plane auth: stub-injection mode", () => {
     const r = await proxyRequest({
       port: proxyPort,
       target: `${upstream.url}/b`,
-      headers: { Authorization: "AgentVault tok", [PROXY_AUTH_HEADER]: `${TOKEN}x` },
+      headers: {
+        Authorization: "AgentVault tok",
+        [PROXY_AUTH_HEADER]: `${TOKEN}x`,
+      },
     });
     assert.equal(r.status, 401);
     assert.equal(JSON.parse(r.body).error, "unauthorized");
@@ -330,7 +336,10 @@ describe("auth_failed logging is bounded", () => {
 
   async function flood(tag) {
     for (let i = 0; i < BURST; i++) {
-      const r = await proxyRequest({ port: proxyPort, target: `${upstream.url}/${tag}${i}` });
+      const r = await proxyRequest({
+        port: proxyPort,
+        target: `${upstream.url}/${tag}${i}`,
+      });
       assert.equal(r.status, 401);
     }
     // logAccess is fire-and-forget on the request path — let the writes settle.
@@ -371,7 +380,7 @@ describe("auth_failed logging is bounded", () => {
     assert.ok(lines.length >= 1, "the refusals must leave at least one record");
     assert.ok(
       lines.length <= 3,
-      `expected the ${BURST} refusals to coalesce, got ${lines.length} lines`,
+      `expected the ${BURST} refusals to coalesce, got ${lines.length} lines`
     );
   });
 
@@ -382,13 +391,15 @@ describe("auth_failed logging is bounded", () => {
     const lines = await authFailedLines();
     assert.ok(
       lines.length <= before + 3,
-      `expected the second burst to coalesce, got ${lines.length - before} new lines`,
+      `expected the second burst to coalesce, got ${
+        lines.length - before
+      } new lines`
     );
     const rolled = lines[before];
     assert.ok(rolled, "the rolled-over window must emit a line");
     assert.ok(
       rolled.suppressed >= BURST - 2,
-      `expected the suppressed count of the first burst, got ${rolled.suppressed}`,
+      `expected the suppressed count of the first burst, got ${rolled.suppressed}`
     );
   });
 });
@@ -444,10 +455,16 @@ describe("no authToken configured", () => {
     const r = await proxyRequest({
       port: proxyPort,
       target: `${upstream.url}/a`,
-      headers: { Authorization: "AgentVault tok", [PROXY_AUTH_HEADER]: "leftover" },
+      headers: {
+        Authorization: "AgentVault tok",
+        [PROXY_AUTH_HEADER]: "leftover",
+      },
     });
     assert.equal(r.status, 200);
-    assert.equal(upstream.requests.at(-1).headers[PROXY_AUTH_HEADER], undefined);
+    assert.equal(
+      upstream.requests.at(-1).headers[PROXY_AUTH_HEADER],
+      undefined
+    );
   });
 });
 
@@ -471,7 +488,10 @@ describe("the last window's suppressed count is never dropped", () => {
     const proxyPort = (await proxy.listen()).port;
     for (let i = 0; i < BURST; i++) {
       clock += 1000;
-      const r = await proxyRequest({ port: proxyPort, target: `${upstream.url}/${i}` });
+      const r = await proxyRequest({
+        port: proxyPort,
+        target: `${upstream.url}/${i}`,
+      });
       assert.equal(r.status, 401);
     }
     return {
@@ -497,9 +517,13 @@ describe("the last window's suppressed count is never dropped", () => {
     try {
       await ctx.proxy.close();
       const flushed = (await logLines(ctx.logFile)).filter(
-        (e) => e.event === "auth_failed_suppressed",
+        (e) => e.event === "auth_failed_suppressed"
       );
-      assert.equal(flushed.length, 1, "the tail of the window must leave exactly one record");
+      assert.equal(
+        flushed.length,
+        1,
+        "the tail of the window must leave exactly one record"
+      );
       assert.equal(flushed[0].suppressed, BURST - 1);
     } finally {
       await ctx.teardown();
@@ -512,15 +536,20 @@ describe("the last window's suppressed count is never dropped", () => {
       ctx.proxy.forceLock("manual");
       await ctx.proxy.close();
       const lines = await logLines(ctx.logFile);
-      const flushedAt = lines.findIndex((e) => e.event === "auth_failed_suppressed");
+      const flushedAt = lines.findIndex(
+        (e) => e.event === "auth_failed_suppressed"
+      );
       const lockedAt = lines.findIndex((e) => e.event === "vault_locked");
       assert.notEqual(flushedAt, -1, "the suppressed count must be recorded");
       assert.equal(lines[flushedAt].suppressed, BURST - 1);
-      assert.ok(lockedAt !== -1 && flushedAt < lockedAt, "the debt is paid before the next entry");
+      assert.ok(
+        lockedAt !== -1 && flushedAt < lockedAt,
+        "the debt is paid before the next entry"
+      );
       assert.equal(
         lines.filter((e) => e.event === "auth_failed_suppressed").length,
         1,
-        "close() must not record the same count twice",
+        "close() must not record the same count twice"
       );
     } finally {
       await ctx.teardown();

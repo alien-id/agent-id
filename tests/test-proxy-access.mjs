@@ -45,7 +45,14 @@ function startUpstream() {
 // an explicit Content-Length (as real JSON clients do) rather than chunked —
 // Node's own http client mis-reports the status when the server closes the
 // connection mid-chunked-upload, which is a client quirk, not proxy behavior.
-function rewriteRequest({ proxyPort, credname, upstream, pathq, method = "GET", body = null }) {
+function rewriteRequest({
+  proxyPort,
+  credname,
+  upstream,
+  pathq,
+  method = "GET",
+  body = null,
+}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -65,9 +72,12 @@ function rewriteRequest({ proxyPort, credname, upstream, pathq, method = "GET", 
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
+          resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     req.end(body != null ? body : undefined);
@@ -79,14 +89,23 @@ function stubRequest({ proxyPort, target, method = "GET", headers = {} }) {
   return new Promise((resolve, reject) => {
     const url = new URL(target);
     const req = http.request(
-      { host: "127.0.0.1", port: proxyPort, method, path: target, headers: { Host: url.host, ...headers } },
+      {
+        host: "127.0.0.1",
+        port: proxyPort,
+        method,
+        path: target,
+        headers: { Host: url.host, ...headers },
+      },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
+          resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     req.end();
@@ -102,7 +121,9 @@ describe("proxy access-level enforcement", () => {
   let logPath;
 
   before(async () => {
-    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-id-access-test-"));
+    stateDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "agent-id-access-test-")
+    );
     await initVault({ stateDir, passphrase: "test-pass-1234" });
     vault = await openVault({ stateDir, passphrase: "test-pass-1234" });
 
@@ -151,7 +172,12 @@ describe("proxy access-level enforcement", () => {
 
   it("ro: GET passes and injects", async () => {
     upstreamSeen.value = null;
-    const r = await rewriteRequest({ proxyPort, credname: "mail-ro", upstream, pathq: "/v1/messages" });
+    const r = await rewriteRequest({
+      proxyPort,
+      credname: "mail-ro",
+      upstream,
+      pathq: "/v1/messages",
+    });
     assert.equal(r.status, 200);
     assert.equal(upstreamSeen.value.auth, "Bearer tok_READONLY");
   });
@@ -170,7 +196,11 @@ describe("proxy access-level enforcement", () => {
     const err = JSON.parse(r.body);
     assert.equal(err.error, "access_denied");
     assert.equal(err.access, "ro");
-    assert.equal(upstreamSeen.value, null, "upstream must not see the blocked write");
+    assert.equal(
+      upstreamSeen.value,
+      null,
+      "upstream must not see the blocked write"
+    );
   });
 
   it("ro: a GraphQL query POST is classified as a read and passes", async () => {
@@ -184,7 +214,10 @@ describe("proxy access-level enforcement", () => {
       body: JSON.stringify({ query: "query { inbox { subject } }" }),
     });
     assert.equal(r.status, 200);
-    assert.ok(upstreamSeen.value.body.includes("inbox"), "body forwarded intact");
+    assert.ok(
+      upstreamSeen.value.body.includes("inbox"),
+      "body forwarded intact"
+    );
   });
 
   it("ro: a DELETE with a read-shaped body is still blocked (only POST tunnels reads)", async () => {
@@ -199,7 +232,11 @@ describe("proxy access-level enforcement", () => {
     });
     assert.equal(r.status, 403);
     assert.equal(JSON.parse(r.body).error, "access_denied");
-    assert.equal(upstreamSeen.value, null, "the DELETE must never reach upstream");
+    assert.equal(
+      upstreamSeen.value,
+      null,
+      "the DELETE must never reach upstream"
+    );
   });
 
   it("ro: a GraphQL mutation POST is blocked", async () => {
@@ -274,7 +311,10 @@ describe("proxy access-level enforcement", () => {
 
   it("denials are audited, and the secret never reaches the log", async () => {
     const log = await fs.readFile(logPath, "utf8");
-    assert.ok(log.includes('"event":"access_denied"'), "access_denied event logged");
+    assert.ok(
+      log.includes('"event":"access_denied"'),
+      "access_denied event logged"
+    );
     assert.ok(log.includes('"credential":"mail-ro"'));
     assert.ok(!log.includes("tok_READONLY"), "log leaked the secret");
   });

@@ -33,15 +33,25 @@ test("the encoder passes frames through instead of resampling them to a fixed ra
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentid-fps-"));
   const sink = path.join(dir, "argv.json");
   process.env.ARGV_SINK = sink;
-  const enc = await createH264Encoder({ onChunk: () => {}, ffmpegPath: stub(dir) });
+  const enc = await createH264Encoder({
+    onChunk: () => {},
+    ffmpegPath: stub(dir),
+  });
   try {
     for (let i = 0; i < 100 && !fs.existsSync(sink); i++) {
       await new Promise((r) => setTimeout(r, 20));
     }
     const argv = JSON.parse(fs.readFileSync(sink, "utf8"));
     const mode = argv[argv.indexOf("-fps_mode") + 1];
-    assert.equal(mode, "passthrough", `frame-rate conversion is on: ${argv.join(" ")}`);
-    assert.ok(argv.indexOf("-fps_mode") > argv.indexOf("-i"), "must be an output option");
+    assert.equal(
+      mode,
+      "passthrough",
+      `frame-rate conversion is on: ${argv.join(" ")}`
+    );
+    assert.ok(
+      argv.indexOf("-fps_mode") > argv.indexOf("-i"),
+      "must be an output option"
+    );
   } finally {
     enc.close();
     fs.rmSync(dir, { recursive: true, force: true });

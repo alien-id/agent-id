@@ -44,7 +44,13 @@ function startUpstream() {
   });
 }
 
-function callProxy({ port, path: pathArg, method = "GET", body = null, headers = {} }) {
+function callProxy({
+  port,
+  path: pathArg,
+  method = "GET",
+  body = null,
+  headers = {},
+}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -62,9 +68,9 @@ function callProxy({ port, path: pathArg, method = "GET", body = null, headers =
             status: res.statusCode,
             headers: res.headers,
             body: Buffer.concat(chunks).toString("utf8"),
-          }),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     if (body) req.write(body);
@@ -276,7 +282,10 @@ describe("URL-rewrite end-to-end", () => {
       path: `/geo/${upstream.host}:${upstream.port}/v1/lookup?addr=1`,
     });
     assert.equal(r.status, 200);
-    assert.match(lastSeen.url, /\?addr=1&api_key=QUERY-VAL|\?api_key=QUERY-VAL&addr=1/);
+    assert.match(
+      lastSeen.url,
+      /\?addr=1&api_key=QUERY-VAL|\?api_key=QUERY-VAL&addr=1/
+    );
   });
 
   it("cookie credential: upstream sees Cookie header", async () => {
@@ -405,25 +414,32 @@ describe("resolveCredential (unit)", () => {
   const lookup = (n) => (n === "x" ? cred : null);
 
   it("returns cred when host matches", () => {
-    assert.equal(resolveCredential({ credname: "x", host: "api.example.com", lookup }), cred);
+    assert.equal(
+      resolveCredential({ credname: "x", host: "api.example.com", lookup }),
+      cred
+    );
   });
 
   it("wildcard subdomain matches", () => {
     assert.equal(
       resolveCredential({ credname: "x", host: "api.github.com:443", lookup }),
-      cred,
+      cred
     );
   });
 
   it("throws on missing", () => {
     assert.throws(() =>
-      resolveCredential({ credname: "missing", host: "api.example.com", lookup }),
+      resolveCredential({
+        credname: "missing",
+        host: "api.example.com",
+        lookup,
+      })
     );
   });
 
   it("throws on host mismatch", () => {
     assert.throws(() =>
-      resolveCredential({ credname: "x", host: "evil.example.com", lookup }),
+      resolveCredential({ credname: "x", host: "evil.example.com", lookup })
     );
   });
 });

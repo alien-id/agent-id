@@ -1063,6 +1063,16 @@ export async function autoLogin({
     finalUrl: page.url(),
     errorText,
   });
+  // Dismissing the card is a decision, and a different one from walking away: the
+  // owner saw what was being asked and said no. Running again puts the same card
+  // straight back in front of them, so this outcome exists to say "they answered,
+  // and the answer was no".
+  const otpDeclined = () => ({
+    ok: false,
+    outcome: "otp-declined",
+    finalUrl: page.url(),
+    errorText,
+  });
 
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
     try {
@@ -1073,6 +1083,7 @@ export async function autoLogin({
         domains: cred.domains,
       });
     } catch (err) {
+      if (err?.code === "FORM_CANCELLED") return otpDeclined();
       if (err?.code !== "FORM_TIMEOUT") throw err;
       return otpTimedOut();
     }
@@ -1192,6 +1203,7 @@ export async function autoLogin({
           await getOtp(retry, codeDestination(state.bodyText), length)
         );
       } catch (err) {
+        if (err?.code === "FORM_CANCELLED") return otpDeclined();
         if (err?.code !== "FORM_TIMEOUT") throw err;
         return otpTimedOut();
       }

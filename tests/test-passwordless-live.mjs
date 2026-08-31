@@ -113,6 +113,27 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
       ).join("")}</form>`);
       return;
     }
+    if (url.pathname === "/otp-boxes-self-submitting") {
+      // A row that navigates on the last character, the way many code screens do.
+      // The boxes are gone before anything can be read back, so a read-back that
+      // calls that a failure fails the case that worked.
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form>${Array.from(
+        { length: 6 },
+        (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`
+      ).join("")}</form>
+<script>
+ var boxes = Array.from(document.querySelectorAll("input"));
+ boxes.forEach(function (box, i) {
+   box.addEventListener("input", function () {
+     if (box.value && boxes[i + 1]) boxes[i + 1].focus();
+     if (boxes.every(function (b) { return b.value; })) location.href = "/done?code=" + boxes.map(function (b) { return b.value; }).join("");
+   });
+ });
+</script>`);
+      return;
+    }
     if (url.pathname === "/otp-boxes-stubborn") {
       // Boxes that do NOT advance the focus themselves. Typing into the first one
       // leaves five empty and the submit dead — which is what a live sign-in was
@@ -861,6 +882,34 @@ test(
           [],
           "one field is not a row to spread across"
         );
+      });
+    } finally {
+      server.close();
+    }
+  }
+);
+
+test(
+  "a row that submits itself is not reported as a code that failed to land",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(`http://127.0.0.1:${port}/otp-boxes-self-submitting`, {
+          waitUntil: "domcontentloaded",
+        });
+
+        const boxes = await otpBoxes(page);
+        const complete = await typeCodeAcrossBoxes(page, boxes, "423124");
+
+        assert.equal(
+          complete,
+          true,
+          "navigating away is the code landing, not losing it"
+        );
+        await page.waitForURL(/code=423124/, { timeout: 5000 });
       });
     } finally {
       server.close();

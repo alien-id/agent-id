@@ -60,7 +60,10 @@ describe("base58", () => {
 
   it("known vector: system program id", () => {
     assert.equal(base58Encode(Buffer.alloc(32)), "1".repeat(32));
-    assert.deepEqual(base58Decode("11111111111111111111111111111111"), Buffer.alloc(32));
+    assert.deepEqual(
+      base58Decode("11111111111111111111111111111111"),
+      Buffer.alloc(32)
+    );
   });
 
   it("known vector: 'hello world'", () => {
@@ -99,11 +102,17 @@ describe("keypair generation", () => {
     assert.match(secretSeedHex, /^[0-9a-f]{64}$/);
     const raw = base58Decode(publicKey);
     assert.equal(raw.length, 32);
-    assert.deepEqual(solanaPublicKeyBytesFromSeed(Buffer.from(secretSeedHex, "hex")), raw);
+    assert.deepEqual(
+      solanaPublicKeyBytesFromSeed(Buffer.from(secretSeedHex, "hex")),
+      raw
+    );
   });
 
   it("generates distinct keys", () => {
-    assert.notEqual(generateSolanaKeypair().publicKey, generateSolanaKeypair().publicKey);
+    assert.notEqual(
+      generateSolanaKeypair().publicKey,
+      generateSolanaKeypair().publicKey
+    );
   });
 });
 
@@ -144,7 +153,13 @@ describe("transaction signing (legacy message)", () => {
     const { wire } = signSolanaTransactionWire(noSigs, seed);
     const [numSigs] = decodeCompactU16(wire, 0);
     assert.equal(numSigs, 1);
-    assert.ok(verifySignature(messageOf(wire), wire.subarray(1, 65), base58Decode(publicKey)));
+    assert.ok(
+      verifySignature(
+        messageOf(wire),
+        wire.subarray(1, 65),
+        base58Decode(publicKey)
+      )
+    );
   });
 
   it("rejects a transaction the credential cannot sign", () => {
@@ -154,7 +169,10 @@ describe("transaction signing (legacy message)", () => {
       lamports: 5,
       recentBlockhash: blockhash,
     });
-    assert.throws(() => signSolanaTransactionWire(unsigned, seed), /not among the required signers/);
+    assert.throws(
+      () => signSolanaTransactionWire(unsigned, seed),
+      /not among the required signers/
+    );
   });
 
   it("preserves co-signatures in a 2-of-2 (partial signing)", () => {
@@ -175,15 +193,24 @@ describe("transaction signing (legacy message)", () => {
       data,
     ]);
     const coSig = crypto.randomBytes(64); // pretend the other party already signed
-    const tx = Buffer.concat([encodeCompactU16(2), coSig, Buffer.alloc(64), message]);
+    const tx = Buffer.concat([
+      encodeCompactU16(2),
+      coSig,
+      Buffer.alloc(64),
+      message,
+    ]);
 
     const { wire } = signSolanaTransactionWire(tx, seed);
     const [numSigs, n] = decodeCompactU16(wire, 0);
     assert.equal(numSigs, 2);
     assert.deepEqual(wire.subarray(n, n + 64), coSig, "co-signature preserved");
     assert.ok(
-      verifySignature(messageOf(wire), wire.subarray(n + 64, n + 128), base58Decode(publicKey)),
-      "our slot signed",
+      verifySignature(
+        messageOf(wire),
+        wire.subarray(n + 64, n + 128),
+        base58Decode(publicKey)
+      ),
+      "our slot signed"
     );
   });
 
@@ -196,10 +223,20 @@ describe("transaction signing (legacy message)", () => {
     });
     const legacyMsg = messageOf(legacy);
     // v0 = 0x80 prefix + same static layout + empty address-table lookups.
-    const v0msg = Buffer.concat([Buffer.from([0x80]), legacyMsg, encodeCompactU16(0)]);
+    const v0msg = Buffer.concat([
+      Buffer.from([0x80]),
+      legacyMsg,
+      encodeCompactU16(0),
+    ]);
     const tx = Buffer.concat([encodeCompactU16(1), Buffer.alloc(64), v0msg]);
     const { wire } = signSolanaTransactionWire(tx, seed);
-    assert.ok(verifySignature(messageOf(wire), wire.subarray(1, 65), base58Decode(publicKey)));
+    assert.ok(
+      verifySignature(
+        messageOf(wire),
+        wire.subarray(1, 65),
+        base58Decode(publicKey)
+      )
+    );
   });
 
   it("rejects unsupported message versions", () => {
@@ -211,7 +248,10 @@ describe("transaction signing (legacy message)", () => {
     });
     const v1msg = Buffer.concat([Buffer.from([0x81]), messageOf(legacy)]);
     const tx = Buffer.concat([encodeCompactU16(1), Buffer.alloc(64), v1msg]);
-    assert.throws(() => signSolanaTransactionWire(tx, seed), /unsupported message version/);
+    assert.throws(
+      () => signSolanaTransactionWire(tx, seed),
+      /unsupported message version/
+    );
   });
 });
 
@@ -231,15 +271,25 @@ describe("JSON-RPC body transform", () => {
       jsonrpc: "2.0",
       id: 1,
       method: "sendTransaction",
-      params: [unsigned.toString("base64"), { encoding: "base64", skipPreflight: false }],
+      params: [
+        unsigned.toString("base64"),
+        { encoding: "base64", skipPreflight: false },
+      ],
     });
-    const { body: out, signed, signatures } = signSolanaRpcBody(body, secretSeedHex);
+    const {
+      body: out,
+      signed,
+      signatures,
+    } = signSolanaRpcBody(body, secretSeedHex);
     assert.ok(signed);
     assert.equal(signatures.length, 1);
     const parsed = JSON.parse(out);
     const wire = Buffer.from(parsed.params[0], "base64");
     assert.equal(base58Encode(wire.subarray(1, 65)), signatures[0]);
-    assert.deepEqual(parsed.params[1], { encoding: "base64", skipPreflight: false });
+    assert.deepEqual(parsed.params[1], {
+      encoding: "base64",
+      skipPreflight: false,
+    });
   });
 
   it("signs sendTransaction (default base58 encoding)", () => {
@@ -252,11 +302,20 @@ describe("JSON-RPC body transform", () => {
     const { body: out, signed } = signSolanaRpcBody(body, secretSeedHex);
     assert.ok(signed);
     const wire = base58Decode(JSON.parse(out).params[0]);
-    assert.notDeepEqual(wire.subarray(1, 65), Buffer.alloc(64), "signature slot filled");
+    assert.notDeepEqual(
+      wire.subarray(1, 65),
+      Buffer.alloc(64),
+      "signature slot filled"
+    );
   });
 
   it("passes other methods through byte-identical", () => {
-    const body = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "getLatestBlockhash", params: [] });
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "getLatestBlockhash",
+      params: [],
+    });
     const r = signSolanaRpcBody(body, secretSeedHex);
     assert.equal(r.signed, false);
     assert.deepEqual(JSON.parse(r.body), JSON.parse(body));
@@ -282,7 +341,11 @@ describe("JSON-RPC body transform", () => {
     assert.equal(signatures.length, 1);
     const parsed = JSON.parse(out);
     assert.equal(parsed[0].params[0], publicKey, "getBalance untouched");
-    assert.notEqual(parsed[1].params[0], unsigned.toString("base64"), "sendTransaction signed");
+    assert.notEqual(
+      parsed[1].params[0],
+      unsigned.toString("base64"),
+      "sendTransaction signed"
+    );
   });
 
   it("surfaces malformed transactions as errors", () => {
@@ -290,7 +353,10 @@ describe("JSON-RPC body transform", () => {
       jsonrpc: "2.0",
       id: 3,
       method: "sendTransaction",
-      params: [Buffer.from("garbage").toString("base64"), { encoding: "base64" }],
+      params: [
+        Buffer.from("garbage").toString("base64"),
+        { encoding: "base64" },
+      ],
     });
     assert.throws(() => signSolanaRpcBody(body, secretSeedHex));
   });

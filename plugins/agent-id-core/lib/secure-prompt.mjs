@@ -33,7 +33,12 @@ import { statSync } from "node:fs";
 import http from "node:http";
 
 import { collectViaForm } from "./secure-form.mjs";
-import { promptSecret, promptText, hasTty, notifyTty } from "./trusted-input.mjs";
+import {
+  promptSecret,
+  promptText,
+  hasTty,
+  notifyTty,
+} from "./trusted-input.mjs";
 
 // ─── Browser loopback form (the existing mechanism, wrapped) ─────────────────────
 
@@ -84,7 +89,8 @@ export class TtyProvider {
       const label = f.label || f.name;
       const opt = f.required === false ? " (optional)" : "";
       const prompt = `  ${label}${opt}: `;
-      values[f.name] = f.secret === false ? promptText(prompt) : promptSecret(prompt);
+      values[f.name] =
+        f.secret === false ? promptText(prompt) : promptSecret(prompt);
     }
     return { values };
   }
@@ -131,7 +137,10 @@ export class HostedHarnessProvider {
   }
   collect(spec) {
     const socketPath = hostedSocketPath(this._env);
-    if (!socketPath) return Promise.reject(new Error("hosted secure prompt is not configured"));
+    if (!socketPath)
+      return Promise.reject(
+        new Error("hosted secure prompt is not configured")
+      );
     const payload = JSON.stringify({
       title: spec.title || "",
       description: spec.description || "",
@@ -157,26 +166,47 @@ export class HostedHarnessProvider {
           res.on("data", (c) => chunks.push(c));
           res.on("end", () => {
             if (res.statusCode !== 200) {
-              reject(new Error(`hosted secure prompt: HTTP ${res.statusCode}`));
+              // 409 is the owner closing the card, not a fault: the host says so
+              // explicitly. Without a code of its own it arrives as a bare HTTP
+              // error, and a caller that cannot tell "they declined" from "it
+              // broke" retries — putting the same card back in front of someone
+              // who has just dismissed it.
+              const error = new Error(
+                res.statusCode === 409
+                  ? "hosted secure prompt: the owner dismissed the card"
+                  : `hosted secure prompt: HTTP ${res.statusCode}`
+              );
+              if (res.statusCode === 409) error.code = "FORM_CANCELLED";
+              reject(error);
               return;
             }
             try {
               const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-              if (!body || typeof body.values !== "object" || body.values == null) {
-                reject(new Error("hosted secure prompt: response missing { values }"));
+              if (
+                !body ||
+                typeof body.values !== "object" ||
+                body.values == null
+              ) {
+                reject(
+                  new Error("hosted secure prompt: response missing { values }")
+                );
                 return;
               }
               resolve({ values: body.values });
             } catch (err) {
-              reject(new Error(`hosted secure prompt: bad JSON response (${err.message})`));
+              reject(
+                new Error(
+                  `hosted secure prompt: bad JSON response (${err.message})`
+                )
+              );
             }
           });
-        },
+        }
       );
       req.on("error", reject);
       if (spec.timeoutMs) {
         req.setTimeout(spec.timeoutMs, () =>
-          req.destroy(new Error("hosted secure prompt timed out")),
+          req.destroy(new Error("hosted secure prompt timed out"))
         );
       }
       req.end(payload);
@@ -202,7 +232,11 @@ function specNeeds(spec) {
  *                    provider) inserted right after `hosted`
  *   need           — { multiline? } capability requirements
  */
-export function resolveSecurePrompt({ env = process.env, extraProviders = [], need = {} } = {}) {
+export function resolveSecurePrompt({
+  env = process.env,
+  extraProviders = [],
+  need = {},
+} = {}) {
   const browser = new BrowserFormProvider({ env });
   // Explicit operator override: AGENT_ID_SECURE_PROMPT=browser|tty|hosted (or the
   // name of an extraProvider, e.g. "mobile") forces that backend regardless of the
@@ -215,7 +249,12 @@ export function resolveSecurePrompt({ env = process.env, extraProviders = [], ne
     if (forced === "tty") return new TtyProvider();
     if (forced === "hosted") return new HostedHarnessProvider({ env });
   }
-  const chain = [new HostedHarnessProvider({ env }), ...extraProviders, browser, new TtyProvider()];
+  const chain = [
+    new HostedHarnessProvider({ env }),
+    ...extraProviders,
+    browser,
+    new TtyProvider(),
+  ];
   for (const p of chain) {
     if (!p.isAvailable || !p.isAvailable()) continue;
     const caps = (p.capabilities && p.capabilities()) || {};
@@ -230,7 +269,14 @@ export function resolveSecurePrompt({ env = process.env, extraProviders = [], ne
  * collect the values. The ergonomic entry point for call sites that previously
  * called collectViaForm directly. Returns { values: { <fieldName>: string } }.
  */
-export function collectSecret(spec, { env = process.env, extraProviders = [] } = {}) {
-  const provider = resolveSecurePrompt({ env, extraProviders, need: specNeeds(spec) });
+export function collectSecret(
+  spec,
+  { env = process.env, extraProviders = [] } = {}
+) {
+  const provider = resolveSecurePrompt({
+    env,
+    extraProviders,
+    need: specNeeds(spec),
+  });
   return provider.collect(spec);
 }

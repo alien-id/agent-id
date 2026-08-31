@@ -550,7 +550,11 @@ test("only a credential that denies codes is corrected, and it is corrected once
   assert.equal(otpModeCorrection(denies), null, "nothing left to correct");
 
   assert.equal(otpModeCorrection({ otp: "interactive" }), null);
-  assert.equal(otpModeCorrection({ otp: "totp" }), null, "a seed is not a wrong answer");
+  assert.equal(
+    otpModeCorrection({ otp: "totp" }),
+    null,
+    "a seed is not a wrong answer"
+  );
   assert.equal(otpModeCorrection(undefined), null);
 });
 
@@ -795,6 +799,29 @@ test("autoLogin reports an expired code card as an outcome, so the caller learns
   assert.equal(result.ok, false);
   assert.equal(result.outcome, "otp-timeout");
   assert.equal(result.finalUrl, "https://x.test/otp");
+});
+
+test("a card the owner dismissed is reported as their answer, not as a fault", async () => {
+  // The hosted host answers 409 when the owner closes the card. Arriving as a
+  // bare HTTP error it read as "something broke", and the sensible response to
+  // that is a retry — which puts the card back in front of someone who has just
+  // said no.
+  const cancelled = () => {
+    const err = new Error("hosted secure prompt: the owner dismissed the card");
+    err.code = "FORM_CANCELLED";
+    return err;
+  };
+  const result = await autoLogin({
+    page: recipePage("https://x.test/otp"),
+    cred: PWLESS_CRED,
+    resolveOtpFn: async () => {
+      throw cancelled();
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "otp-declined");
+  assert.notEqual(result.outcome, "otp-timeout", "nobody ran out of time");
 });
 
 test("autoLogin does not dress every OTP failure up as a timeout", async () => {

@@ -18,7 +18,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
+import {
+  resolvePatchright,
+  launchContext,
+} from "../plugins/agent-id-browser/lib/launch.mjs";
 import {
   applyAccessGuard,
   contextOptionsForAccess,
@@ -74,7 +77,11 @@ test(
         contextOptions: contextOptionsForAccess(roProfile),
       });
       const active = await applyAccessGuard(ctx, roProfile, { log: () => {} });
-      assert.equal(active, true, "the access guard should be active for a ro profile");
+      assert.equal(
+        active,
+        true,
+        "the access guard should be active for a ro profile"
+      );
 
       const page = ctx.pages()[0] || (await ctx.newPage());
       await page.goto(`${base}/`, { waitUntil: "domcontentloaded" });
@@ -92,7 +99,10 @@ test(
           }
         };
         await tryFetch("read", b + "/message/inbox", {});
-        await tryFetch("write", b + "/api/compose", { method: "POST", body: "to=x&text=hi" });
+        await tryFetch("write", b + "/api/compose", {
+          method: "POST",
+          body: "to=x&text=hi",
+        });
         await tryFetch("gqlQuery", b + "/svc/gql", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -110,20 +120,38 @@ test(
 
       // Reads pass and actually reach the server.
       assert.match(results.read, /^reached:200/, "read GET should succeed");
-      assert.ok(hit("GET", "/message/inbox"), "read GET should reach the server");
-      assert.match(results.gqlQuery, /^reached:200/, "GraphQL query POST should succeed");
+      assert.ok(
+        hit("GET", "/message/inbox"),
+        "read GET should reach the server"
+      );
+      assert.match(
+        results.gqlQuery,
+        /^reached:200/,
+        "GraphQL query POST should succeed"
+      );
 
       // Writes are aborted at the wire and NEVER reach the server.
-      assert.match(results.write, /^BLOCKED/, "write POST should be blocked in the page");
-      assert.ok(!hit("POST", "/api/compose"), "write POST must never reach the server");
-      assert.match(results.gqlMutation, /^BLOCKED/, "GraphQL mutation should be blocked");
+      assert.match(
+        results.write,
+        /^BLOCKED/,
+        "write POST should be blocked in the page"
+      );
+      assert.ok(
+        !hit("POST", "/api/compose"),
+        "write POST must never reach the server"
+      );
+      assert.match(
+        results.gqlMutation,
+        /^BLOCKED/,
+        "GraphQL mutation should be blocked"
+      );
       assert.ok(
         !seen.some((s) => s.body && s.body.includes("mutation")),
-        "no mutation body may reach the server",
+        "no mutation body may reach the server"
       );
     } finally {
       if (ctx) await ctx.close().catch(() => {});
       await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
-  },
+  }
 );

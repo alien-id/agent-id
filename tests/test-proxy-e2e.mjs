@@ -31,7 +31,10 @@ function startUpstream() {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       upstreamHeaders.value = { ...req.headers, _url: req.url };
-      const body = JSON.stringify({ ok: true, sawAuth: req.headers.authorization || null });
+      const body = JSON.stringify({
+        ok: true,
+        sawAuth: req.headers.authorization || null,
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(body);
     });
@@ -61,9 +64,9 @@ function proxyRequest({ proxyPort, target, headers = {}, method = "GET" }) {
             status: res.statusCode,
             headers: res.headers,
             body: Buffer.concat(chunks).toString("utf8"),
-          }),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     req.end();
@@ -138,9 +141,14 @@ describe("proxy end-to-end", () => {
       headers: { Authorization: "AgentVault github-pat" },
     });
     assert.equal(r.status, 200);
-    assert.equal(upstreamHeaders.value.authorization, "Bearer ghp_SECRET_TOKEN");
+    assert.equal(
+      upstreamHeaders.value.authorization,
+      "Bearer ghp_SECRET_TOKEN"
+    );
     // The agent transcript would only see the response, not the secret.
-    assert.ok(!r.body.includes("ghp_SECRET_TOKEN") || JSON.parse(r.body).sawAuth);
+    assert.ok(
+      !r.body.includes("ghp_SECRET_TOKEN") || JSON.parse(r.body).sawAuth
+    );
   });
 
   it("header stub → upstream sees raw value", async () => {
@@ -161,7 +169,10 @@ describe("proxy end-to-end", () => {
       target: `${upstream.url}/foo?k=AgentVault%20qkey`,
     });
     assert.equal(r.status, 200);
-    assert.match(upstreamHeaders.value._url, /\?k=decoded\+value|\?k=decoded%20value/);
+    assert.match(
+      upstreamHeaders.value._url,
+      /\?k=decoded\+value|\?k=decoded%20value/
+    );
   });
 
   it("unknown credential → 400 credential_not_found", async () => {
@@ -203,7 +214,13 @@ describe("proxy end-to-end", () => {
     const logPath = path.join(stateDir, "proxy.log");
     const raw = await fs.readFile(logPath, "utf8").catch(() => "");
     assert.ok(raw.includes("github-pat"), "log should mention credential name");
-    assert.ok(!raw.includes("ghp_SECRET_TOKEN"), "log must NOT contain secret value");
-    assert.ok(!raw.includes("raw-key-value"), "log must NOT contain header value");
+    assert.ok(
+      !raw.includes("ghp_SECRET_TOKEN"),
+      "log must NOT contain secret value"
+    );
+    assert.ok(
+      !raw.includes("raw-key-value"),
+      "log must NOT contain header value"
+    );
   });
 });

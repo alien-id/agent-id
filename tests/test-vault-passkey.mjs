@@ -28,7 +28,12 @@ import {
 } from "../plugins/agent-id-vault/lib/vault.mjs";
 
 const PRF = () => randomBytes(32); // stands in for the authenticator's PRF output
-const DESC = (prfSalt) => ({ credentialId: "Y3JlZA", rpId: "localhost", prfSalt, deviceLabel: "Touch ID" });
+const DESC = (prfSalt) => ({
+  credentialId: "Y3JlZA",
+  rpId: "localhost",
+  prfSalt,
+  deviceLabel: "Touch ID",
+});
 
 test("passkey slot wraps + unwraps the master key with the PRF secret", () => {
   const mk = generateMasterKey();
@@ -50,7 +55,10 @@ test("init a passkey-only vault (no agent key) and unlock it with the PRF secret
   try {
     const prf = PRF();
     const salt = generatePasskeyPrfSalt();
-    const res = await initVault({ stateDir: dir, passkey: { prfSecret: prf, ...DESC(salt) } });
+    const res = await initVault({
+      stateDir: dir,
+      passkey: { prfSecret: prf, ...DESC(salt) },
+    });
     assert.equal(res.mode, "user");
     assert.equal(res.slots, 1);
 
@@ -59,7 +67,10 @@ test("init a passkey-only vault (no agent key) and unlock it with the PRF secret
     assert.equal(challenges.length, 1);
     assert.equal(challenges[0].rpId, "localhost");
     assert.equal(challenges[0].prfSalt, salt);
-    assert.ok(!("wrap" in challenges[0]), "challenge must not expose the wrapped key");
+    assert.ok(
+      !("wrap" in challenges[0]),
+      "challenge must not expose the wrapped key"
+    );
 
     // Unlock with the PRF secret.
     const v = await openVault({ stateDir: dir, passkeyPrfSecret: prf });
@@ -68,7 +79,10 @@ test("init a passkey-only vault (no agent key) and unlock it with the PRF secret
     v.lock();
 
     // A wrong PRF secret cannot open it (and agent-key/passphrase aren't present).
-    await assert.rejects(openVault({ stateDir: dir, passkeyPrfSecret: PRF() }), /unlock/i);
+    await assert.rejects(
+      openVault({ stateDir: dir, passkeyPrfSecret: PRF() }),
+      /unlock/i
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -77,7 +91,9 @@ test("init a passkey-only vault (no agent key) and unlock it with the PRF secret
 test("addPasskeySlot adds a second unlock path to an existing vault", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pk-vault-"));
   try {
-    const { privateKey } = generateKeyPairSync("ed25519", { privateKeyEncoding: { type: "pkcs8", format: "pem" } });
+    const { privateKey } = generateKeyPairSync("ed25519", {
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
     await initVault({ stateDir: dir, privateKeyPem: privateKey }); // agent-key vault
     const v = await openVault({ stateDir: dir, privateKeyPem: privateKey });
     const prf = PRF();
@@ -87,7 +103,10 @@ test("addPasskeySlot adds a second unlock path to an existing vault", async () =
     v.lock();
 
     // Now openable by EITHER the agent key or the passkey PRF secret.
-    const viaPasskey = await openVault({ stateDir: dir, passkeyPrfSecret: prf });
+    const viaPasskey = await openVault({
+      stateDir: dir,
+      passkeyPrfSecret: prf,
+    });
     assert.ok(viaPasskey.slots.some((s) => s.type === "passkey"));
     viaPasskey.lock();
   } finally {

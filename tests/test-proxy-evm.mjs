@@ -22,7 +22,10 @@ import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
 
 const execFileAsync = promisify(execFile);
-const VAULT_CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url).pathname;
+const VAULT_CLI = new URL(
+  "../plugins/agent-id-vault/bin/cli.mjs",
+  import.meta.url
+).pathname;
 const PASSPHRASE = "test-pass-evm-1234";
 
 const upstreamSeen = { value: null };
@@ -43,7 +46,8 @@ function startMockRpc() {
         upstreamSeen.value = { body, method: msg.method, params: msg.params };
         let result = null;
         if (msg.method === "eth_getTransactionCount") result = "0x7";
-        if (msg.method === "eth_sendRawTransaction") result = "0x" + "ab".repeat(32);
+        if (msg.method === "eth_sendRawTransaction")
+          result = "0x" + "ab".repeat(32);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id ?? null, result }));
       });
@@ -64,15 +68,21 @@ function rpcViaProxy({ proxyPort, credname, host, body }) {
         port: proxyPort,
         method: "POST",
         path: `/${credname}/${host}/`,
-        headers: { "content-type": "application/json", "content-length": payload.length },
+        headers: {
+          "content-type": "application/json",
+          "content-length": payload.length,
+        },
       },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
+          resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          })
         );
-      },
+      }
     );
     req.on("error", reject);
     req.write(payload);
@@ -165,11 +175,20 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
       proxyPort,
       credname: "evm-hot",
       host: upstream.host,
-      body: { jsonrpc: "2.0", id: 1, method: "eth_getTransactionCount", params: [walletAddress, "latest"] },
+      body: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_getTransactionCount",
+        params: [walletAddress, "latest"],
+      },
     });
     assert.equal(nonceRes.status, 200);
     assert.equal(JSON.parse(nonceRes.body).result, "0x7");
-    assert.equal(upstreamSeen.value.method, "eth_getTransactionCount", "passthrough intact");
+    assert.equal(
+      upstreamSeen.value.method,
+      "eth_getTransactionCount",
+      "passthrough intact"
+    );
 
     // Now the unsigned tx object.
     const sendRes = await rpcViaProxy({
@@ -195,10 +214,21 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
       },
     });
     assert.equal(sendRes.status, 200);
-    assert.equal(upstreamSeen.value.method, "eth_sendRawTransaction", "method rewritten");
-    assert.match(upstreamSeen.value.params[0], /^0x02/, "EIP-1559 typed raw tx");
+    assert.equal(
+      upstreamSeen.value.method,
+      "eth_sendRawTransaction",
+      "method rewritten"
+    );
+    assert.match(
+      upstreamSeen.value.params[0],
+      /^0x02/,
+      "EIP-1559 typed raw tx"
+    );
     const rec2 = vault.get("evm-hot");
-    assert.ok(!upstreamSeen.value.body.includes(rec2.privateKey), "upstream never sees the key");
+    assert.ok(
+      !upstreamSeen.value.body.includes(rec2.privateKey),
+      "upstream never sees the key"
+    );
   });
 
   it("proxy: refuses signing for non-allowlisted host", async () => {
@@ -206,7 +236,12 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
       proxyPort,
       credname: "evm-hot",
       host: "polygon-rpc.example.com",
-      body: { jsonrpc: "2.0", id: 3, method: "eth_sendTransaction", params: [{}] },
+      body: {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "eth_sendTransaction",
+        params: [{}],
+      },
     });
     assert.equal(r.status, 403);
     assert.equal(JSON.parse(r.body).error, "host_not_allowed");
@@ -217,7 +252,12 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
       proxyPort,
       credname: "evm-hot",
       host: upstream.host,
-      body: { jsonrpc: "2.0", id: 4, method: "eth_sendTransaction", params: [{ to: "0xdead" }] },
+      body: {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "eth_sendTransaction",
+        params: [{ to: "0xdead" }],
+      },
     });
     assert.equal(r.status, 400);
     assert.equal(JSON.parse(r.body).error, "evm_sign_failed");

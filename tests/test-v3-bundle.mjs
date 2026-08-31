@@ -49,8 +49,12 @@ const HERMETIC_GIT_ENV = {
 };
 const execRaw = promisify(execFileCb);
 const exec = (file, args, opts = {}) =>
-  execRaw(file, args, { ...opts, env: { ...HERMETIC_GIT_ENV, ...(opts.env || {}) } });
-const CLI_PATH = new URL("../plugins/agent-id-git/bin/cli.mjs", import.meta.url).pathname;
+  execRaw(file, args, {
+    ...opts,
+    env: { ...HERMETIC_GIT_ENV, ...(opts.env || {}) },
+  });
+const CLI_PATH = new URL("../plugins/agent-id-git/bin/cli.mjs", import.meta.url)
+  .pathname;
 
 // ─── Fixture helpers ─────────────────────────────────────────────────────────────
 
@@ -59,7 +63,12 @@ function generateRsaKeyPair() {
     modulusLength: 2048,
   });
   return {
-    publicKeyJwk: { ...publicKey.export({ format: "jwk" }), use: "sig", alg: "RS256", kid: "test-sso-kid" },
+    publicKeyJwk: {
+      ...publicKey.export({ format: "jwk" }),
+      use: "sig",
+      alg: "RS256",
+      kid: "test-sso-kid",
+    },
     privateKey,
   };
 }
@@ -82,7 +91,7 @@ function startSsoMock({ jwk }) {
           JSON.stringify({
             issuer: `http://127.0.0.1:${server.address().port}`,
             jwks_uri: `http://127.0.0.1:${server.address().port}/jwks`,
-          }),
+          })
         );
         return;
       }
@@ -124,7 +133,13 @@ async function cleanup(dir) {
  * with a valid id_token that pins cnf.jkt to the agent key. The emit side
  * reads these; the verify side fetches JWKS from `ssoBaseUrl`.
  */
-async function buildAgentState({ stateDir, ssoBaseUrl, ownerSub, rsa, providerAddress }) {
+async function buildAgentState({
+  stateDir,
+  ssoBaseUrl,
+  ownerSub,
+  rsa,
+  providerAddress,
+}) {
   const agent = generateEd25519PemPair();
   const agentJwk = ed25519PublicKeyToJwk(agent.publicKeyPem);
   const agentJkt = jwkThumbprint(agentJwk);
@@ -172,11 +187,14 @@ async function buildAgentState({ stateDir, ssoBaseUrl, ownerSub, rsa, providerAd
 }
 
 async function runCli(args, opts = {}) {
-  const { stdout = "", stderr: errOut = "", code } = await execRaw(
-    "node",
-    [CLI_PATH, ...args],
-    { env: { ...HERMETIC_GIT_ENV, ...(opts.env || {}) }, cwd: opts.cwd },
-  ).catch((err) => ({
+  const {
+    stdout = "",
+    stderr: errOut = "",
+    code,
+  } = await execRaw("node", [CLI_PATH, ...args], {
+    env: { ...HERMETIC_GIT_ENV, ...(opts.env || {}) },
+    cwd: opts.cwd,
+  }).catch((err) => ({
     stdout: err.stdout || "",
     stderr: err.stderr || "",
     code: typeof err.code === "number" ? err.code : 1,
@@ -187,7 +205,12 @@ async function runCli(args, opts = {}) {
   } catch {
     // ignore — caller inspects raw fields
   }
-  return { stdout, stderr: errOut, code: typeof code === "number" ? code : 0, parsed };
+  return {
+    stdout,
+    stderr: errOut,
+    code: typeof code === "number" ? code : 0,
+    parsed,
+  };
 }
 
 // ─── Tracer bullet: emit → verify round trip ─────────────────────────────────────
@@ -216,19 +239,27 @@ describe("v3 bundle emit → verify round trip", () => {
    * commit hash so the caller can run git-verify against it.
    */
   async function tamperGitNote(commitHash, mutate) {
-    const { stdout: noteRaw } = await exec(
-      "git", ["-C", repoDir, "notes", "--ref=agent-id", "show", commitHash],
-    );
+    const { stdout: noteRaw } = await exec("git", [
+      "-C",
+      repoDir,
+      "notes",
+      "--ref=agent-id",
+      "show",
+      commitHash,
+    ]);
     const bundle = JSON.parse(noteRaw.trim());
     const mutated = mutate(bundle);
-    await exec(
-      "git",
-      [
-        "-C", repoDir,
-        "notes", "--ref=agent-id",
-        "add", "-f", "-m", JSON.stringify(mutated), commitHash,
-      ],
-    );
+    await exec("git", [
+      "-C",
+      repoDir,
+      "notes",
+      "--ref=agent-id",
+      "add",
+      "-f",
+      "-m",
+      JSON.stringify(mutated),
+      commitHash,
+    ]);
   }
 
   it("git-commit emits a v3 bundle that git-verify accepts", async () => {
@@ -244,29 +275,45 @@ describe("v3 bundle emit → verify round trip", () => {
 
     // Emit a v3 commit.
     const commit = await runCli(
-      ["commit", "--state-dir", stateDir, "--message", "tracer bullet", "--allow-empty"],
-      { cwd: repoDir },
+      [
+        "commit",
+        "--state-dir",
+        stateDir,
+        "--message",
+        "tracer bullet",
+        "--allow-empty",
+      ],
+      { cwd: repoDir }
     );
     assert.equal(
       commit.code,
       0,
-      `git-commit failed: stdout=${commit.stdout} stderr=${commit.stderr}`,
+      `git-commit failed: stdout=${commit.stdout} stderr=${commit.stderr}`
     );
     assert.equal(commit.parsed?.ok, true);
     assert.equal(commit.parsed?.proofAttached, true);
 
     // Trailers and bundle should be v3 shape.
-    const { stdout: commitMsg } = await exec(
-      "git", ["-C", repoDir, "log", "-1", "--format=%B"],
-    );
+    const { stdout: commitMsg } = await exec("git", [
+      "-C",
+      repoDir,
+      "log",
+      "-1",
+      "--format=%B",
+    ]);
     assert.match(commitMsg, new RegExp(`^Agent-ID-JKT: ${agentJkt}$`, "m"));
     assert.match(commitMsg, new RegExp(`^Agent-ID-Owner: ${ownerSub}$`, "m"));
     assert.doesNotMatch(commitMsg, /^Agent-ID-Fingerprint:/m);
     assert.doesNotMatch(commitMsg, /^Agent-ID-Binding:/m);
 
-    const { stdout: noteRaw } = await exec(
-      "git", ["-C", repoDir, "notes", "--ref=agent-id", "show", "HEAD"],
-    );
+    const { stdout: noteRaw } = await exec("git", [
+      "-C",
+      repoDir,
+      "notes",
+      "--ref=agent-id",
+      "show",
+      "HEAD",
+    ]);
     const bundle = JSON.parse(noteRaw.trim());
     assert.equal(bundle.version, 3);
     assert.equal(typeof bundle.id_token, "string");
@@ -280,13 +327,20 @@ describe("v3 bundle emit → verify round trip", () => {
     const verify = await runCli(
       [
         "verify",
-        "--state-dir", stateDir,
-        "--commit", "HEAD",
-        "--sso-url", sso.baseUrl,
+        "--state-dir",
+        stateDir,
+        "--commit",
+        "HEAD",
+        "--sso-url",
+        sso.baseUrl,
       ],
-      { cwd: repoDir },
+      { cwd: repoDir }
     );
-    assert.equal(verify.code, 0, `git-verify failed: ${verify.stderr || verify.stdout}`);
+    assert.equal(
+      verify.code,
+      0,
+      `git-verify failed: ${verify.stderr || verify.stdout}`
+    );
     assert.equal(verify.parsed?.ok, true);
     assert.equal(verify.parsed?.jkt, agentJkt);
     assert.equal(verify.parsed?.ownerSub, ownerSub);
@@ -297,12 +351,23 @@ describe("v3 bundle emit → verify round trip", () => {
     const ownerSub = "0xowner-no-cnf";
     const providerAddress = "0xprovider";
     const { agentJwk, agentJkt } = await buildAgentState({
-      stateDir, ssoBaseUrl: sso.baseUrl, ownerSub, rsa, providerAddress,
+      stateDir,
+      ssoBaseUrl: sso.baseUrl,
+      ownerSub,
+      rsa,
+      providerAddress,
     });
 
     const commit = await runCli(
-      ["commit", "--state-dir", stateDir, "--message", "no-cnf", "--allow-empty"],
-      { cwd: repoDir },
+      [
+        "commit",
+        "--state-dir",
+        stateDir,
+        "--message",
+        "no-cnf",
+        "--allow-empty",
+      ],
+      { cwd: repoDir }
     );
     assert.equal(commit.code, 0);
 
@@ -311,8 +376,11 @@ describe("v3 bundle emit → verify round trip", () => {
       privateKey: rsa.privateKey,
       kid: rsa.publicKeyJwk.kid,
       payload: {
-        iss: sso.baseUrl, sub: ownerSub, aud: providerAddress,
-        iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 3600,
+        iss: sso.baseUrl,
+        sub: ownerSub,
+        aud: providerAddress,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
         jti: randomUUID(),
         // no cnf
       },
@@ -324,8 +392,14 @@ describe("v3 bundle emit → verify round trip", () => {
     }));
 
     const verify = await runCli(
-      ["verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
-      { cwd: repoDir },
+      [
+        "verify",
+        "--commit",
+        commit.parsed.commitHash,
+        "--sso-url",
+        sso.baseUrl,
+      ],
+      { cwd: repoDir }
     );
     assert.equal(verify.code, 1);
     assert.equal(verify.parsed?.ok, false);
@@ -337,12 +411,23 @@ describe("v3 bundle emit → verify round trip", () => {
   it("git-verify rejects pre-v3 (v2) bundles — no backward compat", async () => {
     const ownerSub = "0xowner-v2-rejected";
     await buildAgentState({
-      stateDir, ssoBaseUrl: sso.baseUrl, ownerSub, rsa, providerAddress: "0xprovider",
+      stateDir,
+      ssoBaseUrl: sso.baseUrl,
+      ownerSub,
+      rsa,
+      providerAddress: "0xprovider",
     });
 
     const commit = await runCli(
-      ["commit", "--state-dir", stateDir, "--message", "v2-reject", "--allow-empty"],
-      { cwd: repoDir },
+      [
+        "commit",
+        "--state-dir",
+        stateDir,
+        "--message",
+        "v2-reject",
+        "--allow-empty",
+      ],
+      { cwd: repoDir }
     );
     assert.equal(commit.code, 0);
 
@@ -350,14 +435,25 @@ describe("v3 bundle emit → verify round trip", () => {
     await tamperGitNote(commit.parsed.commitHash, () => ({
       version: 2,
       agent: { fingerprint: "deadbeef", publicKeyPem: "stub" },
-      ownerBinding: { id: "legacy", payload: {}, payloadHash: "h", signature: "s" },
+      ownerBinding: {
+        id: "legacy",
+        payload: {},
+        payloadHash: "h",
+        signature: "s",
+      },
       idToken: "stub",
       ssoBaseUrl: sso.baseUrl,
     }));
 
     const verify = await runCli(
-      ["verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
-      { cwd: repoDir },
+      [
+        "verify",
+        "--commit",
+        commit.parsed.commitHash,
+        "--sso-url",
+        sso.baseUrl,
+      ],
+      { cwd: repoDir }
     );
     assert.equal(verify.code, 1);
     assert.equal(verify.parsed?.ok, false);
@@ -368,12 +464,23 @@ describe("v3 bundle emit → verify round trip", () => {
     const ownerSub = "0xowner-jkt-mismatch";
     const providerAddress = "0xprovider";
     await buildAgentState({
-      stateDir, ssoBaseUrl: sso.baseUrl, ownerSub, rsa, providerAddress,
+      stateDir,
+      ssoBaseUrl: sso.baseUrl,
+      ownerSub,
+      rsa,
+      providerAddress,
     });
 
     const commit = await runCli(
-      ["commit", "--state-dir", stateDir, "--message", "jkt-mismatch", "--allow-empty"],
-      { cwd: repoDir },
+      [
+        "commit",
+        "--state-dir",
+        stateDir,
+        "--message",
+        "jkt-mismatch",
+        "--allow-empty",
+      ],
+      { cwd: repoDir }
     );
     assert.equal(commit.code, 0);
 
@@ -381,26 +488,49 @@ describe("v3 bundle emit → verify round trip", () => {
     // match cnf.jkt on the id_token, so the chain anchor breaks.
     const otherAgent = generateEd25519PemPair();
     const otherJwk = ed25519PublicKeyToJwk(otherAgent.publicKeyPem);
-    await tamperGitNote(commit.parsed.commitHash, (b) => ({ ...b, agent_jwk: otherJwk }));
+    await tamperGitNote(commit.parsed.commitHash, (b) => ({
+      ...b,
+      agent_jwk: otherJwk,
+    }));
 
     const verify = await runCli(
-      ["verify", "--commit", commit.parsed.commitHash, "--sso-url", sso.baseUrl],
-      { cwd: repoDir },
+      [
+        "verify",
+        "--commit",
+        commit.parsed.commitHash,
+        "--sso-url",
+        sso.baseUrl,
+      ],
+      { cwd: repoDir }
     );
     assert.equal(verify.code, 1);
     assert.equal(verify.parsed?.ok, false);
-    assert.match(verify.parsed?.error || "", /does not match id_token cnf\.jkt/);
+    assert.match(
+      verify.parsed?.error || "",
+      /does not match id_token cnf\.jkt/
+    );
   });
 
   it("git-verify rejects when Agent-ID-JKT trailer doesn't match the bundle's agent_jwk", async () => {
     const ownerSub = "0xowner-trailer-mismatch";
     await buildAgentState({
-      stateDir, ssoBaseUrl: sso.baseUrl, ownerSub, rsa, providerAddress: "0xprovider",
+      stateDir,
+      ssoBaseUrl: sso.baseUrl,
+      ownerSub,
+      rsa,
+      providerAddress: "0xprovider",
     });
 
     const commit = await runCli(
-      ["commit", "--state-dir", stateDir, "--message", "trailer-mismatch", "--allow-empty"],
-      { cwd: repoDir },
+      [
+        "commit",
+        "--state-dir",
+        stateDir,
+        "--message",
+        "trailer-mismatch",
+        "--allow-empty",
+      ],
+      { cwd: repoDir }
     );
     assert.equal(commit.code, 0);
 
@@ -408,55 +538,89 @@ describe("v3 bundle emit → verify round trip", () => {
     // has the original agent_jwk and the id_token's cnf.jkt still matches it,
     // but the trailer now claims a different key — the verifier's last anchor
     // check (trailer == bundle thumbprint) must catch this.
-    const { stdout: msg } = await exec("git", ["-C", repoDir, "log", "-1", "--format=%B"]);
+    const { stdout: msg } = await exec("git", [
+      "-C",
+      repoDir,
+      "log",
+      "-1",
+      "--format=%B",
+    ]);
     const fakeJkt = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbe";
-    const newMsg = msg.replace(/^Agent-ID-JKT: .*$/m, `Agent-ID-JKT: ${fakeJkt}`);
-    await exec("git", ["-C", repoDir, "commit", "--amend", "--allow-empty", "-m", newMsg, "--no-verify"]);
-    const { stdout: newHash } = await exec("git", ["-C", repoDir, "rev-parse", "HEAD"]);
+    const newMsg = msg.replace(
+      /^Agent-ID-JKT: .*$/m,
+      `Agent-ID-JKT: ${fakeJkt}`
+    );
+    await exec("git", [
+      "-C",
+      repoDir,
+      "commit",
+      "--amend",
+      "--allow-empty",
+      "-m",
+      newMsg,
+      "--no-verify",
+    ]);
+    const { stdout: newHash } = await exec("git", [
+      "-C",
+      repoDir,
+      "rev-parse",
+      "HEAD",
+    ]);
 
     // Re-attach the original (valid) bundle to the new SHA.
-    const { stdout: noteRaw } = await exec(
-      "git", ["-C", repoDir, "notes", "--ref=agent-id", "show", commit.parsed.commitHash],
-    ).catch(() => ({ stdout: "" }));
+    const { stdout: noteRaw } = await exec("git", [
+      "-C",
+      repoDir,
+      "notes",
+      "--ref=agent-id",
+      "show",
+      commit.parsed.commitHash,
+    ]).catch(() => ({ stdout: "" }));
     // amend may not preserve notes — read from old hash; if missing, skip the assertion path
     if (!noteRaw.trim()) {
       // graceful skip: amend wiped the note. Re-emit by running git-commit on the amended hash
       // would re-attach; but here we'd just rebuild manually. Instead assert reject-path on
       // the amended commit using a fresh bundle pointing at the original agent key.
       const stateMain = JSON.parse(
-        await fs.readFile(path.join(stateDir, "keys", "main.json"), "utf8"),
+        await fs.readFile(path.join(stateDir, "keys", "main.json"), "utf8")
       );
       const realJwk = ed25519PublicKeyToJwk(stateMain.publicKeyPem);
       const sessionJson = JSON.parse(
-        await fs.readFile(path.join(stateDir, "owner-session.json"), "utf8"),
+        await fs.readFile(path.join(stateDir, "owner-session.json"), "utf8")
       );
       const freshBundle = {
         version: 3,
         id_token: Buffer.from(sessionJson.idToken).toString("base64url"),
         agent_jwk: realJwk,
       };
-      await exec(
-        "git",
-        [
-          "-C", repoDir,
-          "notes", "--ref=agent-id",
-          "add", "-f", "-m", JSON.stringify(freshBundle), newHash.trim(),
-        ],
-      );
+      await exec("git", [
+        "-C",
+        repoDir,
+        "notes",
+        "--ref=agent-id",
+        "add",
+        "-f",
+        "-m",
+        JSON.stringify(freshBundle),
+        newHash.trim(),
+      ]);
     } else {
-      await exec(
-        "git",
-        [
-          "-C", repoDir,
-          "notes", "--ref=agent-id",
-          "add", "-f", "-m", noteRaw.trim(), newHash.trim(),
-        ],
-      );
+      await exec("git", [
+        "-C",
+        repoDir,
+        "notes",
+        "--ref=agent-id",
+        "add",
+        "-f",
+        "-m",
+        noteRaw.trim(),
+        newHash.trim(),
+      ]);
     }
 
     const verify = await runCli(
       ["verify", "--commit", newHash.trim(), "--sso-url", sso.baseUrl],
-      { cwd: repoDir },
+      { cwd: repoDir }
     );
     assert.equal(verify.code, 1);
     assert.equal(verify.parsed?.ok, false);
@@ -503,10 +667,21 @@ describe("level-0 self-asserted commit → verify (no SSO)", () => {
     const { agentJkt } = await buildUnboundAgent();
 
     const commit = await runCli(
-      ["commit", "--state-dir", stateDir, "--message", "fresh agent", "--allow-empty"],
-      { cwd: repoDir },
+      [
+        "commit",
+        "--state-dir",
+        stateDir,
+        "--message",
+        "fresh agent",
+        "--allow-empty",
+      ],
+      { cwd: repoDir }
     );
-    assert.equal(commit.code, 0, `commit failed: ${commit.stderr || commit.stdout}`);
+    assert.equal(
+      commit.code,
+      0,
+      `commit failed: ${commit.stderr || commit.stdout}`
+    );
     assert.equal(commit.parsed?.ok, true);
     assert.equal(commit.parsed?.level, 0);
     assert.equal(commit.parsed?.assurance, "self-asserted");
@@ -514,14 +689,25 @@ describe("level-0 self-asserted commit → verify (no SSO)", () => {
     assert.equal(commit.parsed?.proofAttached, true);
 
     // JKT trailer present, Owner trailer ABSENT.
-    const { stdout: commitMsg } = await exec("git", ["-C", repoDir, "log", "-1", "--format=%B"]);
+    const { stdout: commitMsg } = await exec("git", [
+      "-C",
+      repoDir,
+      "log",
+      "-1",
+      "--format=%B",
+    ]);
     assert.match(commitMsg, new RegExp(`^Agent-ID-JKT: ${agentJkt}$`, "m"));
     assert.doesNotMatch(commitMsg, /^Agent-ID-Owner:/m);
 
     // The attached bundle is the L0 shape: agent_jwk, no id_token.
-    const { stdout: noteRaw } = await exec(
-      "git", ["-C", repoDir, "notes", "--ref=agent-id", "show", "HEAD"],
-    );
+    const { stdout: noteRaw } = await exec("git", [
+      "-C",
+      repoDir,
+      "notes",
+      "--ref=agent-id",
+      "show",
+      "HEAD",
+    ]);
     const bundle = JSON.parse(noteRaw.trim());
     assert.equal(bundle.version, 3);
     assert.equal(bundle.id_token, undefined);
@@ -530,9 +716,13 @@ describe("level-0 self-asserted commit → verify (no SSO)", () => {
     // Verify accepts it as level 0 — no --sso-url needed.
     const verify = await runCli(
       ["verify", "--state-dir", stateDir, "--commit", "HEAD"],
-      { cwd: repoDir },
+      { cwd: repoDir }
     );
-    assert.equal(verify.code, 0, `verify failed: ${verify.stderr || verify.stdout}`);
+    assert.equal(
+      verify.code,
+      0,
+      `verify failed: ${verify.stderr || verify.stdout}`
+    );
     assert.equal(verify.parsed?.ok, true);
     assert.equal(verify.parsed?.level, 0);
     assert.equal(verify.parsed?.assurance, "self-asserted");
@@ -544,26 +734,58 @@ describe("level-0 self-asserted commit → verify (no SSO)", () => {
     const { agentJkt } = await buildUnboundAgent();
     // A clean L0 commit, to grab a genuine L0 bundle note (agent_jwk, no token).
     await runCli(
-      ["commit", "--state-dir", stateDir, "--message", "fresh", "--allow-empty"],
-      { cwd: repoDir },
+      [
+        "commit",
+        "--state-dir",
+        stateDir,
+        "--message",
+        "fresh",
+        "--allow-empty",
+      ],
+      { cwd: repoDir }
     );
-    const { stdout: noteRaw } = await exec(
-      "git", ["-C", repoDir, "notes", "--ref=agent-id", "show", "HEAD"],
-    );
+    const { stdout: noteRaw } = await exec("git", [
+      "-C",
+      repoDir,
+      "notes",
+      "--ref=agent-id",
+      "show",
+      "HEAD",
+    ]);
     // A second commit whose message forges an owner trailer (same JKT), with the
     // genuine L0 bundle re-attached. The bundle says level 0 / ownerSub null, so
     // the owner trailer must be rejected as inconsistent.
     const forgedMsg = `forged\n\nAgent-ID-JKT: ${agentJkt}\nAgent-ID-Owner: 0xnot-the-owner`;
-    await exec("git", ["-C", repoDir, "commit", "--allow-empty", "--no-gpg-sign", "-m", forgedMsg]);
-    const { stdout: newHash } = await exec("git", ["-C", repoDir, "rev-parse", "HEAD"]);
-    await exec(
-      "git",
-      ["-C", repoDir, "notes", "--ref=agent-id", "add", "-f", "-m", noteRaw.trim(), newHash.trim()],
-    );
+    await exec("git", [
+      "-C",
+      repoDir,
+      "commit",
+      "--allow-empty",
+      "--no-gpg-sign",
+      "-m",
+      forgedMsg,
+    ]);
+    const { stdout: newHash } = await exec("git", [
+      "-C",
+      repoDir,
+      "rev-parse",
+      "HEAD",
+    ]);
+    await exec("git", [
+      "-C",
+      repoDir,
+      "notes",
+      "--ref=agent-id",
+      "add",
+      "-f",
+      "-m",
+      noteRaw.trim(),
+      newHash.trim(),
+    ]);
 
     const verify = await runCli(
       ["verify", "--state-dir", stateDir, "--commit", "HEAD"],
-      { cwd: repoDir },
+      { cwd: repoDir }
     );
     assert.equal(verify.parsed?.ok, false);
     assert.match(verify.parsed?.error || "", /Agent-ID-Owner trailer/);

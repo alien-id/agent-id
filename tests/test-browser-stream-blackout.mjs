@@ -76,14 +76,14 @@ for (const action of ["fill-secret", "fill-otp"]) {
           params: { ref: "1:e1", cred: "example.password" },
           _stateDir: dir,
         }),
-      "the fill must fail — there is no vault to unlock",
+      "the fill must fail — there is no vault to unlock"
     );
 
     assert.equal(stream.suspends, 1, "the feed is blacked out for the fill");
     assert.equal(
       stream.resumes,
       1,
-      "and the blackout is lifted even though the fill threw",
+      "and the blackout is lifted even though the fill threw"
     );
     assert.equal(stream.depth, 0, "no leaked suspend depth");
     await fs.rm(dir, { recursive: true, force: true });
