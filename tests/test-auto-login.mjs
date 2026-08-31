@@ -635,13 +635,13 @@ test("the retry card is sized by where the code comes from, not by the fact of r
     "and the same holds on the retry",
   );
 
-  // Both retries stay under lethe's 16-minute HUMAN_TIMEOUT once the first card
-  // has spent its own budget — that ceiling covers the whole subprocess, so a
-  // second full-length card would have the host kill the run mid-answer.
-  const HUMAN_TIMEOUT_MS = 16 * 60 * 1000;
+  // Both retries stay under the caller's 16-minute ceiling once the first card
+  // has spent its own budget — that ceiling covers the whole run, so a second
+  // full-length card would be killed mid-answer.
+  const CALLER_CEILING_MS = 16 * 60 * 1000;
   for (const cred of [mailed, fromApp]) {
     const total = otpCardBudgetMs(cred) + otpCardBudgetMs(cred, { retry: true });
-    assert.ok(total < HUMAN_TIMEOUT_MS, `${cred.otp}: ${total}ms leaves nothing for the page`);
+    assert.ok(total < CALLER_CEILING_MS, `${cred.otp}: ${total}ms leaves nothing for the page`);
   }
 });
 

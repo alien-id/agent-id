@@ -4,7 +4,7 @@
 // launcher strips patchright's injected --no-sandbox to keep the renderer
 // sandbox ON (the stealth-validated config). Chrome refuses to start as root
 // with the sandbox on, so containerized deployments that run as root (e.g.
-// lethe-hosted per-user containers) set the env var to keep the injected flag.
+// hosted per-user containers) set the env var to keep the injected flag.
 // Pure — no browser.
 //
 // Run: node --test tests/test-browser-sandbox-toggle.mjs

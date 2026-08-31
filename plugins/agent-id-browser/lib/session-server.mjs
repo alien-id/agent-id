@@ -126,11 +126,11 @@ export function probeSession(info, timeoutMs = 450) {
 
 // Drop session files whose daemon is gone. A clean `close` reseals and removes
 // its own file (see finalize), but a killed container — or any abrupt death —
-// leaves the file behind while /home/lethe persists. Those orphans still
-// advertise a streamPort, so a viewer that picks "the newest session" can dial
-// a dead port and show nothing, and `status` reports sessions that do not
-// exist. Best effort by design: a file we cannot read or unlink is skipped
-// rather than failing the caller's real work. Returns the pruned names.
+// leaves the file behind while the container's home directory persists. Those
+// orphans still advertise a streamPort, so a viewer that picks "the newest
+// session" can dial a dead port and show nothing, and `status` reports sessions
+// that do not exist. Best effort by design: a file we cannot read or unlink is
+// skipped rather than failing the caller's real work. Returns the pruned names.
 export async function pruneDeadSessions(stateDir) {
   const pruned = [];
   const live = new Set();

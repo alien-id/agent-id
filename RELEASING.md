@@ -13,7 +13,7 @@ Three packages go to npm:
 | --- | --- | --- |
 | `@alien-id/agent-id-core` | public | shared crypto / bundle / verifier / OIDC / state |
 | `@alien-id/agent-id-vault` | public | encrypted credential vault (depends on core) |
-| `@alien-id/agent-id-browser` | public | vault-sealed browser automation; also consumed as a library (the Lethe desktop bundles it as an npm dependency) |
+| `@alien-id/agent-id-browser` | public | vault-sealed browser automation; also consumed as a library (the desktop host bundles it as an npm dependency) |
 
 `agent-id-browser` is dual-channel: it ships as a marketplace plugin **and** is
 published to npm, so external apps can depend on it instead of vendoring a
