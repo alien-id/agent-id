@@ -17,7 +17,7 @@ agent-id/
 │   ├── agent-id-auth/     # marketplace-only (private) — DPoP calls (→ core)
 │   ├── agent-id-git/      # marketplace-only (private) — SSH-signed commits (→ core)
 │   ├── agent-id-proxy/    # marketplace-only (private) — credential-injecting proxy (→ core, vault)
-│   └── agent-id-browser/  # marketplace-only (private) — vault-sealed browser (→ core, vault)
+│   └── agent-id-browser/  # @alien-id/agent-id-browser (npm, public) + marketplace — vault-sealed browser (→ core, vault)
 ├── .claude-plugin/marketplace.json   # marketplace catalog (versions synced from package.json)
 ├── scripts/               # changesets release tooling (.ts, run with bun)
 ├── tests/                 # node --test suite (test-*.mjs)
@@ -26,10 +26,27 @@ agent-id/
 
 ### Two distribution layers
 
-- **npm**: only `@alien-id/agent-id-core` and `@alien-id/agent-id-vault` are
-  published. They are the shared libraries the other plugins import.
-- **Claude Code marketplace**: all six plugins. `auth`/`git`/`proxy`/`browser`
-  are `private` (never on npm) and consume the two libs at runtime.
+- **npm**: `@alien-id/agent-id-core`, `@alien-id/agent-id-vault` and
+  `@alien-id/agent-id-browser` are published. `core` and `vault` are the shared
+  libraries the other plugins import; `browser` is dual-channel — a marketplace
+  plugin **and** an npm package, so external apps can depend on it instead of
+  vendoring a tarball. See RELEASING.md.
+- **Claude Code marketplace**: all six plugins. `auth`/`git`/`proxy` are
+  `private` (never on npm) and consume the libs at runtime.
+
+### This repository is public
+
+Everything here is world-readable, and the three npm packages above carry their
+`lib/` to the registry — a comment written for a colleague is published with the
+next release. Two rules, both enforced by `bun run ci:hygiene` (CI):
+
+- **Write about this repo only.** No project, repository, or file path from
+  another codebase, and no detail of how anything else is deployed. State what
+  holds here — "the caller's 16-minute ceiling" — rather than where someone else
+  implements it. This applies to commit messages, changesets and PR descriptions
+  as much as to comments; a cleanup that explains what it removed puts it back.
+- **Our prose is English.** Cyrillic is allowed only as data the product must
+  match: the rejection copy in `login-detect.mjs` and the fixtures pinning it.
 
 ### Cross-plugin code sharing
 

@@ -16,6 +16,7 @@
     "test:develop-smoke": "bash tests/integration/develop-sso-smoke.sh",
     "changeset": "changeset",
     "changeset:status": "changeset status --verbose",
+    "ci:hygiene": "bun scripts/check-public-hygiene.ts",
     "ci:detect": "bun scripts/detect-release.ts",
     "ci:version": "changeset version && bun install && bun run sync-plugin-versions",
     "ci:publish": "bun scripts/publish-topological.ts && changeset tag",

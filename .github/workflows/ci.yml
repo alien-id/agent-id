@@ -24,6 +24,8 @@ jobs:
         include:
           - name: Test
             run: bun run test
+          - name: Public-repo hygiene
+            run: bun run ci:hygiene
           - name: Script tests
             run: bun test scripts/tests
           - name: Version sync (drift check)
