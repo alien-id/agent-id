@@ -30,6 +30,7 @@ import {
   fromAuthenticatorApp,
   maskedIdentifier,
   otpCardLength,
+  otpModeCorrection,
 } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { generateTotp } from "../plugins/agent-id-core/lib/totp.mjs";
 
@@ -536,6 +537,21 @@ test("the card carries the cell count only when the page really stated one", () 
   }
   assert.equal(otpCardLength(6), 6);
   assert.equal(otpCardLength(32), null);
+});
+
+test("only a credential that denies codes is corrected, and it is corrected once", () => {
+  // The record and the object the fill path works with are the same object for a
+  // `login` credential, so asking "is it still none?" after setting it answered
+  // no — and the correction was computed, applied in memory, and never saved.
+  const denies = { name: "booking", otp: "none" };
+
+  assert.equal(otpModeCorrection(denies), "interactive");
+  denies.otp = otpModeCorrection(denies);
+  assert.equal(otpModeCorrection(denies), null, "nothing left to correct");
+
+  assert.equal(otpModeCorrection({ otp: "interactive" }), null);
+  assert.equal(otpModeCorrection({ otp: "totp" }), null, "a seed is not a wrong answer");
+  assert.equal(otpModeCorrection(undefined), null);
 });
 
 test("an identifier is masked down to what the owner recognises", () => {

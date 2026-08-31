@@ -39,7 +39,7 @@ import {
   SECRET_FIELDS,
   assertHostAllowed,
 } from "@alien-id/agent-id-vault/lib/store.mjs";
-import { otpCardHints, resolveOtp } from "./auto-login.mjs";
+import { otpCardHints, otpModeCorrection, resolveOtp } from "./auto-login.mjs";
 import {
   applyAccessGuard,
   assertActionAllowed,
@@ -1633,10 +1633,11 @@ export async function dispatch(state, msg, policy = null) {
           // the record only guessed. Auto-login corrects the same claim the same
           // way; a sign-in driven by hand arrives here instead and must not leave
           // the record to mislead the next one.
-          if (otpCred.otp === "none") {
-            otpCred.otp = "interactive";
-            if (rec.otp === "none") {
-              rec.otp = "interactive";
+          const correction = otpModeCorrection(rec);
+          if (correction) {
+            otpCred.otp = correction;
+            {
+              rec.otp = correction;
               vault.add(rec);
               await vault.save();
               process.stderr.write(

@@ -516,6 +516,14 @@ const IDENTIFIER_FIELD_SEL = [
 // `detectPageState`, which only the first of them runs, so a card raised the
 // second way arrived with neither: no cell count, so the screen drew a plain
 // field, and no destination, so it told the owner nothing about where to look.
+// A stored `otp` mode that a live sign-in has just contradicted, and what it
+// should say instead — or null when the record was right. Reaching a code step
+// settles the question: the site is asking, so "this site has no codes" is the
+// one answer that cannot be true.
+export function otpModeCorrection(cred) {
+  return cred?.otp === "none" ? "interactive" : null;
+}
+
 export async function otpCardHints(page) {
   const [length, bodyText] = await page.evaluate(() => {
     const visible = (e) =>
@@ -1119,7 +1127,8 @@ export async function autoLogin({
       }
       continue;
     } else if (outcome === "otp-required") {
-      if (cred.otp === "none") {
+      const correction = otpModeCorrection(cred);
+      if (correction) {
         // The site is asking for a code, so this credential's `none` is wrong —
         // it was a guess made before anyone had seen the sign-in, and abandoning
         // the run over it left the owner with a password typed, a code mailed and
@@ -1128,8 +1137,8 @@ export async function autoLogin({
         log(
           `auto-login: '${cred.name}' says otp=none but the site is asking — correcting it`
         );
-        cred.otp = "interactive";
-        await onOtpModeCorrected?.("interactive");
+        cred.otp = correction;
+        await onOtpModeCorrected?.(correction);
       }
       if (otpAsks >= maxOtpAsks) {
         // The site is still asking after we answered. Looping here re-asks the
