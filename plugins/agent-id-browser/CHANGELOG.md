@@ -1,5 +1,18 @@
 # @alien-id/agent-id-browser
 
+## 8.0.1
+
+### Patch Changes
+
+- [#138](https://github.com/alien-id/agent-id/pull/138) [`666aebc`](https://github.com/alien-id/agent-id/commit/666aebc3b325c83b5fbce3f1e35108f71a6f70e6) Thanks [@stelchankad](https://github.com/stelchankad)! - Describe behaviour in terms of this package.
+
+  Some implementation comments explained a decision by pointing at something
+  outside this repo. They now say what holds here — an auto-login run is bounded
+  by "the caller's own 16-minute ceiling", and the sandbox opt-in describes
+  containerized per-user deployments.
+
+  Comments only; no behaviour change.
+
 ## 8.0.0
 
 ### Major Changes
