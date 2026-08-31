@@ -91,6 +91,24 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
 <p>code=${code}</p><p>My trips. Account settings. Saved lists.</p>`);
       return;
     }
+    if (url.pathname === "/otp-boxes") {
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form>${Array.from({ length: 6 }, (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`).join("")}</form>`);
+      return;
+    }
+    if (url.pathname === "/otp-single") {
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form><input name=code type=text inputmode=numeric maxlength=8 autocomplete=one-time-code></form>`);
+      return;
+    }
+    if (url.pathname === "/otp-unbounded") {
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form><input name=code type=text inputmode=numeric></form>`);
+      return;
+    }
     if (url.pathname === "/masked-checkbox") {
       // The ordinary cookie banner: a dialog masking the page that carries an input
       // of its own. "The page asks for something else" is satisfied by that
@@ -480,3 +498,26 @@ test(
     }
   },
 );
+
+test("the page's own constraint is what says how many cells to draw", { skip }, async () => {
+  const { server, port } = await fixtureServer();
+  try {
+    await withBrowser(async (context) => {
+      const page = await context.newPage();
+      const lengthAt = async (route) => {
+        await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "domcontentloaded" });
+        return (await detectPageState(page)).otpLength;
+      };
+
+      // A row of one-character boxes IS the count.
+      assert.equal(await lengthAt("/otp-boxes"), 6);
+      // One field states it outright.
+      assert.equal(await lengthAt("/otp-single"), 8);
+      // And an unconstrained input states nothing — which must not be read as a
+      // count, because the screen submits itself once the cells it drew are full.
+      assert.equal(await lengthAt("/otp-unbounded"), null);
+    });
+  } finally {
+    server.close();
+  }
+});

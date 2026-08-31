@@ -8,6 +8,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 
 import {
   applyVars,
@@ -24,6 +27,9 @@ import {
   isDeepLoginUrl,
   otpCardBudgetMs,
   otpCardSpec,
+  fromAuthenticatorApp,
+  maskedIdentifier,
+  otpCardLength,
 } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { generateTotp } from "../plugins/agent-id-core/lib/totp.mjs";
 
@@ -228,8 +234,62 @@ test("resolveOtp generates a code from a stored TOTP seed (RFC vector)", async (
   assert.equal(code, generateTotp({ secret: cred.totpSecret, period: 30, digits: 6, now: 59_000 }));
 });
 
-test("resolveOtp throws when otp=totp but no seed is stored", async () => {
-  await assert.rejects(resolveOtp({ name: "x", otp: "totp" }, {}), /totpSecret/);
+// The hosted-harness protocol on a unix socket, as `test-secure-prompt.mjs` drives
+// it — the one way to watch what `resolveOtp` puts in front of the owner.
+async function withCardCapture(run) {
+  const sock = path.join(os.tmpdir(), `agentid-otp-${process.pid}-${Date.now()}.sock`);
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      seen.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ values: { otp: "123456" } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(sock, resolve));
+  try {
+    return { result: await run({ AGENT_ID_SECURE_PROMPT_SOCK: sock }), seen };
+  } finally {
+    server.close();
+  }
+}
+
+test("a TOTP credential with no seed asks the owner instead of failing the sign-in", async () => {
+  // It used to throw `otp=totp but no totpSecret stored` and fail the whole sign-in
+  // while the owner sat there with the code already on their phone.
+  const { result, seen } = await withCardCapture((env) =>
+    resolveOtp({ name: "gh", otp: "totp", loginUrl: "https://github.example/login" }, { env }),
+  );
+
+  assert.equal(result, "123456");
+  assert.equal(seen.length, 1, "exactly one card");
+  assert.match(seen[0].title, /2FA code for Github\.example/);
+  assert.equal(seen[0].fields[0].name, "otp");
+});
+
+test("a TOTP credential that has its seed still never raises a card", async () => {
+  const { result, seen } = await withCardCapture((env) =>
+    resolveOtp({ name: "gh", otp: "totp", totpSecret: "JBSWY3DPEHPK3PXP" }, { env }),
+  );
+
+  assert.equal(seen.length, 0, "a stored seed is answered without asking anyone");
+  assert.match(result, /^\d{6}$/);
+});
+
+test("the card for an authenticator code sends nobody to a mailbox", () => {
+  // The copy that was already there says "check your email or messages", which for
+  // a code that was never sent anywhere is a wrong instruction, not a vague one.
+  const spec = otpCardSpec({ name: "gh", otp: "totp", loginUrl: "https://github.example/login" });
+
+  assert.match(spec.description, /2FA app/i);
+  assert.ok(!/email|messages|sent/i.test(spec.description), spec.description);
+  assert.ok(fromAuthenticatorApp({ name: "gh", otp: "totp" }));
+  assert.ok(
+    !fromAuthenticatorApp({ name: "gh", otp: "totp", totpSecret: "x" }),
+    "with a seed there is no card, so nothing to word",
+  );
 });
 
 // ── Positive-confirmation helpers (the "logged-in" false-positive guard) ──────────
@@ -308,6 +368,59 @@ test("otpPromptWording: an ordinary second factor keeps the 2FA wording", () => 
   const w = otpPromptWording({ name: "gh", loginUrl: "https://github.example/login" });
   assert.match(w.title, /2FA code for Github\.example/);
   assert.match(w.label, /2FA/);
+});
+
+test("the card names where to look when the page did not say", () => {
+  // "check your email or messages" cost a real sign-in: the code went to a number
+  // attached to the account years earlier, on a phone in another room, and the
+  // owner spent the card's ten minutes searching a mailbox. The identifier they
+  // signed in with is the one thing we always have.
+  const cred = { name: "airbnb", passwordless: true, username: "daniel@eti.co", loginUrl: "https://www.airbnb.com/login" };
+  const guessed = otpPromptWording(cred);
+
+  assert.match(guessed.description, /d•••@eti\.co/);
+  // A guess, and worded as one: the page said nothing, and a site can text a code
+  // to an account opened with an address.
+  assert.match(guessed.description, /should reach/);
+  assert.ok(!/sent a code to/.test(guessed.description), guessed.description);
+
+  // What the page itself printed outranks it, and gets the certain wording.
+  const stated = otpPromptWording(cred, { destination: "your phone ending in 4817" });
+  assert.match(stated.description, /sent a code to your phone ending in 4817/);
+  assert.ok(!/d•••@eti\.co/.test(stated.description), stated.description);
+
+  // A username that names no channel is not turned into one.
+  const opaque = otpPromptWording({ ...cred, username: "daniel_smith" });
+  assert.match(opaque.description, /check your email or messages/);
+});
+
+test("the card carries the cell count only when the page really stated one", () => {
+  const cred = { name: "booking", passwordless: true, loginUrl: "https://booking.com/in" };
+  const placeholderFor = (length) => otpCardSpec(cred, { length }).fields[0].placeholder ?? null;
+
+  // The screen draws one cell per placeholder character and submits itself when
+  // they fill. That is why a guess is not a lesser version of silence: too few
+  // cells truncate a correct code, too many leave it unsubmittable with no button.
+  assert.equal(placeholderFor(6), "••••••");
+  assert.equal(placeholderFor(4), "••••");
+  assert.equal(placeholderFor(8), "••••••••");
+
+  // An unconstrained text input (maxlength 32, or none at all) states nothing
+  // about a code, and a three-character one is not a code either.
+  for (const nonsense of [3, 12, 32, 0, null, undefined, 6.5, "6"]) {
+    assert.equal(placeholderFor(nonsense), null, String(nonsense));
+  }
+  assert.equal(otpCardLength(6), 6);
+  assert.equal(otpCardLength(32), null);
+});
+
+test("an identifier is masked down to what the owner recognises", () => {
+  assert.equal(maskedIdentifier("daniel@eti.co"), "d•••@eti.co");
+  assert.equal(maskedIdentifier("+1 (415) 555-4817"), "••• 4817");
+  // Neither an address nor a number: it names no place to look.
+  assert.equal(maskedIdentifier("danielsmith"), null);
+  assert.equal(maskedIdentifier(""), null);
+  assert.equal(maskedIdentifier(null), null);
 });
 
 test("otpPromptWording: nothing to name the site by still says what to do", () => {
@@ -507,23 +620,26 @@ test("autoLogin does not dress every OTP failure up as a timeout", async () => {
 
 test("the retry card is sized by where the code comes from, not by the fact of retrying", () => {
   const mailed = { name: "booking", otp: "interactive", passwordless: true };
-  const generated = { name: "gh", otp: "totp", totpSecret: "x" };
+  // The only `totp` credential a card is ever built for: one whose seed is missing.
+  const fromApp = { name: "gh", otp: "totp" };
 
-  // A first card is the same either way: nobody knows whether the owner is there.
-  assert.equal(otpCardBudgetMs(mailed), otpCardBudgetMs(generated));
-
-  // A mailed code sends the owner back to the mailbox, so its retry cannot be
-  // sized like a glance at an authenticator already in their hand.
+  // Not the same wait even the first time. A mailed code may not have arrived yet
+  // and the owner has to go and fetch it; an authenticator is already in their
+  // hand, so ten minutes of an agent blocked on a card buys nothing.
   assert.ok(
-    otpCardBudgetMs(mailed, { retry: true }) > otpCardBudgetMs(generated, { retry: true }),
+    otpCardBudgetMs(mailed) > otpCardBudgetMs(fromApp),
     "a mailbox trip must outlast a glance",
+  );
+  assert.ok(
+    otpCardBudgetMs(mailed, { retry: true }) > otpCardBudgetMs(fromApp, { retry: true }),
+    "and the same holds on the retry",
   );
 
   // Both retries stay under the caller's 16-minute ceiling once the first card
   // has spent its own budget — that ceiling covers the whole run, so a second
   // full-length card would be killed mid-answer.
   const CALLER_CEILING_MS = 16 * 60 * 1000;
-  for (const cred of [mailed, generated]) {
+  for (const cred of [mailed, fromApp]) {
     const total = otpCardBudgetMs(cred) + otpCardBudgetMs(cred, { retry: true });
     assert.ok(total < CALLER_CEILING_MS, `${cred.otp}: ${total}ms leaves nothing for the page`);
   }

@@ -236,8 +236,11 @@ export function classifyLogin({
 // than naming none, because it sends the owner somewhere the code is not and
 // then convinces them it never came. Anything unrecognised fails closed to null,
 // and the card falls back to wording that claims no channel at all.
+// The capture ends at a clause boundary. A dash is one of them: "sent a code to
+// d••@gmail.com — enter it below" otherwise runs the address together with the
+// sentence after it and the whole destination is lost.
 const SENT_TO_RE =
-  /\b(?:sent|texted|e-?mailed|messaged)\b[^.\n]{0,40}?\bto\s+(.{2,38}?)(?=[,;!?\n]|\.(?:\s|$)|\s{2,}|$)/i;
+  /\b(?:sent|texted|e-?mailed|messaged)\b[^.\n]{0,40}?\bto\s+(.{2,38}?)(?=[,;!?\n—–]|\.(?:\s|$)|\s{2,}|$)/i;
 const EMAIL_DESTINATION_RE = /^[\w.+•·*…-]{1,32}@[\w.•·*…-]{2,32}$/;
 // The captured text is written by the page and ends up in a card the owner trusts.
 // The loopback form escapes it, but the hosted prompt hands `description` on as it
@@ -247,21 +250,55 @@ const MARKUP_RE = /[<>&"'\\]/;
 // Digits as a site masks them: bullets, stars, dots, dashes, parens, a leading +.
 const PHONE_DESTINATION_RE = /^[+()\d\s.*\u00b7\u2022\u2026-]{4,26}$/;
 const NAMED_DESTINATION_RE =
-  /^your\s+(?:e-?mail(?:\s+address)?|phone(?:\s+number)?|mobile|messages|device)$/i;
+  /^your\s+(?:e-?mail(?:\s+address)?|phone(?:\s+number)?|mobile|messages|device)(?:\s+ending\s+(?:in|with)\s+[\d\u2022\u00b7*.\u2026-]{2,8})?$/i;
+// The other half of how sites word it, and the half the `sent … to` shape cannot
+// reach: "We texted your phone ending in 4817" names the destination with no `to`
+// at all, and "sent to the number ending 4817" puts a word in front that stops it
+// looking like a phone. Read second, so an address the page states outright still
+// wins.
+const ENDING_RE =
+  /\b(?:(your|the)\s+)?(phone(?:\s+number)?|number|mobile|e-?mail(?:\s+address)?)\s+ending\s+(?:in\s+|with\s+)?([\d\u2022\u00b7*.\u2026-]{2,8})/i;
 
-export function codeDestination(bodyText) {
-  const match = SENT_TO_RE.exec(String(bodyText || ""));
+// How many characters the code has, when the page says so in words. The same
+// vocabulary the OTP classifier matches on, read for its number this time.
+//
+// Only 4-8 is answered. Outside that a "code" is something else — an order
+// reference, a discount, a year — and a wrong count is not a smaller version of
+// no count: the card draws exactly that many cells and submits itself when they
+// fill, so four cells for a six-digit code cannot be completed at all.
+const SPELLED_DIGITS = { four: 4, five: 5, six: 6, seven: 7, eight: 8 };
+const CODE_LENGTH_RE = /\b(\d|four|five|six|seven|eight)[- ]?digit\b/i;
+
+export function codeLengthFromText(bodyText) {
+  const match = CODE_LENGTH_RE.exec(String(bodyText || ""));
   if (!match) return null;
 
-  const target = match[1].trim().replace(/\s+/g, " ");
-  if (MARKUP_RE.test(target)) return null;
+  const word = match[1].toLowerCase();
+  const length = SPELLED_DIGITS[word] ?? Number(word);
 
-  const recognised =
-    EMAIL_DESTINATION_RE.test(target) ||
-    PHONE_DESTINATION_RE.test(target) ||
-    NAMED_DESTINATION_RE.test(target);
+  return length >= 4 && length <= 8 ? length : null;
+}
 
-  return recognised ? target : null;
+export function codeDestination(bodyText) {
+  const text = String(bodyText || "");
+  const match = SENT_TO_RE.exec(text);
+  const target = match ? match[1].trim().replace(/\s+/g, " ") : null;
+
+  if (target && !MARKUP_RE.test(target)) {
+    const recognised =
+      EMAIL_DESTINATION_RE.test(target) ||
+      PHONE_DESTINATION_RE.test(target) ||
+      NAMED_DESTINATION_RE.test(target);
+
+    if (recognised) return target;
+  }
+
+  const ending = ENDING_RE.exec(text);
+  if (!ending) return null;
+
+  const [, article, kind, tail] = ending;
+
+  return `${(article || "your").toLowerCase()} ${kind.toLowerCase()} ending in ${tail}`;
 }
 
 export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, QR_SIGN_IN_RE, ERROR_RE, BLOCK_RE };

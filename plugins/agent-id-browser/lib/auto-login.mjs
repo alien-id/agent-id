@@ -38,7 +38,7 @@ import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
 import { assertHostAllowed, credentialHost, siteName } from "@alien-id/agent-id-vault/lib/store.mjs";
-import { classifyLogin, codeDestination } from "./login-detect.mjs";
+import { classifyLogin, codeDestination, codeLengthFromText } from "./login-detect.mjs";
 import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
 // Type a secret (password / OTP) with human cadence, guarding against a
@@ -258,12 +258,10 @@ export async function runRecipe(
 // factor, not a second one — a card headed "2FA code" would be telling the owner
 // something untrue about the account they are signing into. Pure; exported so the
 // wording is testable without standing up a prompt provider.
-// The first card waits for someone who may be away from the screen. What the retry
-// waits for depends on where the code comes from, and the two are not comparable:
-// a generated code is read off a device the owner is already holding, so the retry
-// is a glance, while a mailed one sends them back to the mailbox for a second trip.
-// Measured on a live Booking.com run, where a two-minute retry expired with the
-// owner still fetching the mail.
+// How long the card waits depends on where the code comes from, and the two are
+// not comparable: an authenticator is already in the owner's hand, while a mailed
+// code sends them to a mailbox — measured on a live Booking.com run, where a
+// two-minute retry expired with the owner still fetching the mail.
 //
 // Both budgets are bounded by the same thing — the caller's own 16-minute ceiling
 // kills the whole auto-login run, cards, navigation and settles included. That is
@@ -274,9 +272,18 @@ const OTP_GLANCE_RETRY_CARD_MS = 2 * 60 * 1000;
 const OTP_MAILBOX_RETRY_CARD_MS = 4 * 60 * 1000;
 
 export function otpCardBudgetMs(cred, { retry = false } = {}) {
+  if (fromAuthenticatorApp(cred)) return OTP_GLANCE_RETRY_CARD_MS;
   if (!retry) return OTP_CARD_MS;
 
-  return cred.otp === "totp" ? OTP_GLANCE_RETRY_CARD_MS : OTP_MAILBOX_RETRY_CARD_MS;
+  return OTP_MAILBOX_RETRY_CARD_MS;
+}
+
+// Whether the owner will read this code off an authenticator rather than out of a
+// mailbox: a `totp` credential asks a person only when its seed is missing — with
+// a seed the code is generated and no card is raised at all. Nothing was sent
+// anywhere, so the card must not send them looking for a message.
+export function fromAuthenticatorApp(cred) {
+  return cred.otp === "totp" && !cred.totpSecret;
 }
 
 export function otpPromptWording(cred, { retry = false, destination = null } = {}) {
@@ -291,13 +298,27 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
   // time-based code the right move is to read the CURRENT one, not retype the
   // one they just sent.
   const retryNote = retry ? "That code was not accepted — enter the current one. " : "";
-  // Where the code went, in the site's own words, or nothing. Naming the wrong
-  // channel sends the owner to an inbox the code was never sent to and then
-  // convinces them it never arrived — so with no destination the copy claims no
-  // channel and names both places to look.
+  // Where the code went. Three tiers, and the wording weakens with each: what the
+  // page itself said, then the identifier the sign-in was started with, then
+  // nothing. The middle one is a guess — a site can text a code to an account
+  // opened with an e-mail — so it says "should reach" where the page's own words
+  // say "sent". And a guess is still worth making: "check your email or messages"
+  // sent an owner hunting through the wrong device while a number he had
+  // forgotten was attached to the account held the code.
+  const guess = maskedIdentifier(cred.username);
   const sentence = destination
     ? `${site} sent a code to ${destination} — enter it to finish signing in`
-    : `${site} sent you a code — check your email or messages, then enter it here`;
+    : guess
+      ? `The code should reach ${guess} — enter it to finish signing in`
+      : `${site} sent you a code — check your email or messages, then enter it here`;
+  if (fromAuthenticatorApp(cred)) {
+    return {
+      title: `2FA code for ${site}`,
+      description: `${retryNote}Open your 2FA app and enter the current code for ${site}`,
+      label: "Current 2FA code",
+      ask: `enter the current 2FA code for ${site}`,
+    };
+  }
   if (cred.passwordless) {
     return {
       title: `Sign-in code for ${site}`,
@@ -316,6 +337,25 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
   };
 }
 
+// The identifier the owner signed in with, reduced to what identifies it to them
+// and to nobody else. A username that is neither an address nor a number names no
+// channel, so it yields nothing rather than a guess about where to look.
+export function maskedIdentifier(identifier) {
+  const value = String(identifier || "").trim();
+  if (!value) return null;
+
+  const at = value.lastIndexOf("@");
+  if (at > 0) {
+    const domain = value.slice(at);
+    return `${value.slice(0, 1)}•••${domain}`;
+  }
+
+  const digits = value.replace(/\D/g, "");
+  const isPhone = /^\+?[\d\s().-]+$/.test(value) && digits.length >= 7;
+
+  return isPhone ? `••• ${digits.slice(-4)}` : null;
+}
+
 // How long until the credential's TOTP period rolls over, plus a beat so the new
 // window is unambiguously current. Exported for the test that pins the arithmetic.
 export function millisToNextTotpWindow(cred, now = Date.now()) {
@@ -327,10 +367,9 @@ export function millisToNextTotpWindow(cred, now = Date.now()) {
 // seed, or ask the human over the secure-prompt channel.
 export async function resolveOtp(
   cred,
-  { env = process.env, log = () => {}, now, retry = false, destination = null } = {},
+  { env = process.env, log = () => {}, now, retry = false, destination = null, length = null } = {},
 ) {
-  if (cred.otp === "totp") {
-    if (!cred.totpSecret) throw new Error(`login '${cred.name}': otp=totp but no totpSecret stored`);
+  if (cred.otp === "totp" && cred.totpSecret) {
     return generateTotp({
       secret: cred.totpSecret,
       period: cred.period,
@@ -339,7 +378,7 @@ export async function resolveOtp(
       ...(now != null ? { now } : {}),
     });
   }
-  const spec = otpCardSpec(cred, { retry, destination });
+  const spec = otpCardSpec(cred, { retry, destination, length });
   log(`Waiting for the ${spec.fields[0].label.toLowerCase()} via the secure prompt…`);
   const { values } = await collectSecret(spec, { env });
 
@@ -350,8 +389,20 @@ export async function resolveOtp(
 // exported for the same reason `otpPromptWording` is: what the owner is shown is
 // worth asserting without standing up a prompt provider, and this is the one card
 // both auto-login and `fill_otp` raise.
-export function otpCardSpec(cred, { retry = false, destination = null } = {}) {
+// The count the card is allowed to draw cells for. Outside this the screen falls
+// back to a plain field with a button, which is the only shape that cannot trap
+// someone: cells submit themselves when they fill, so a count that is too high
+// leaves a correct code unsubmittable with no button to press.
+const CODE_CELL_RANGE = [4, 8];
+
+export function otpCardLength(length) {
+  const [low, high] = CODE_CELL_RANGE;
+  return Number.isInteger(length) && length >= low && length <= high ? length : null;
+}
+
+export function otpCardSpec(cred, { retry = false, destination = null, length = null } = {}) {
   const wording = otpPromptWording(cred, { retry, destination });
+  const cells = otpCardLength(length);
 
   return {
     title: wording.title,
@@ -362,7 +413,16 @@ export function otpCardSpec(cred, { retry = false, destination = null } = {}) {
     // which is exactly the transcription whose slips the dots would hide. A wrong
     // code costs another round trip to the mailbox; watching it being typed
     // costs nothing.
-    fields: [{ name: "otp", label: wording.label, secret: false }],
+    // The screen reads the placeholder as the cell count — the one hint that
+    // already travels the whole way to the phone. Absent, it draws a text field.
+    fields: [
+      {
+        name: "otp",
+        label: wording.label,
+        secret: false,
+        ...(cells ? { placeholder: "•".repeat(cells) } : {}),
+      },
+    ],
     label: wording.ask,
     security: "Used once to complete sign-in; never stored or shown to the agent.",
     timeoutMs: otpCardBudgetMs(cred, { retry }),
@@ -443,11 +503,29 @@ export async function detectPageState(page) {
     const hasPasswordField = all('input[type="password"]').some(asked);
     const hasIdentifierField = all(identifierSel).some(visible);
     const hasOtpField = all('input[autocomplete="one-time-code"]').some(visible);
-    const otpFieldNames = all(
-      'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"]',
-    )
+    const otpFields = all(
+      'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]',
+    ).filter(visible);
+    const otpFieldNames = otpFields
       .map((e) => `${e.name || ""} ${e.id || ""} ${e.placeholder || ""} ${e.autocomplete || ""}`.trim())
       .filter(Boolean);
+    // How many characters the code has, as the page itself constrains it. A row of
+    // one-character boxes IS the count; a single field states it in maxlength. The
+    // card draws exactly this many cells and submits when they fill, so a number
+    // that is merely plausible is worse than none — an unconstrained text input
+    // (maxlength 32, or absent) says nothing about a code and must not be read as
+    // if it did.
+    const lengthOf = (e) => {
+      const declared = Number(e.getAttribute("maxlength"));
+      return Number.isInteger(declared) && declared > 0 ? declared : null;
+    };
+    const singleCharBoxes = otpFields.filter((e) => lengthOf(e) === 1).length;
+    const otpLength =
+      singleCharBoxes >= 4
+        ? singleCharBoxes
+        : otpFields.length === 1
+          ? lengthOf(otpFields[0])
+          : null;
     const bodyText = (document.body && document.body.innerText ? document.body.innerText : "").slice(0, 4000);
     // Language-independent block signal: a visible challenge widget. Fed to
     // classifyLogin via its `blocked` input so it wins over "logged-in".
@@ -466,6 +544,7 @@ export async function detectPageState(page) {
       hasIdentifierField,
       hasOtpField,
       otpFieldNames,
+      otpLength,
       bodyText,
       blocked,
       errorText,
@@ -749,7 +828,8 @@ export async function autoLogin({
   // credential's own origins. Checked once here so a loginUrl pointing off the
   // allowlist fails before a browser goes anywhere, not after.
   assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
-  const getOtp = (retry, destination) => resolveOtpFn(cred, { env, log, retry, destination });
+  const getOtp = (retry, destination, length) =>
+    resolveOtpFn(cred, { env, log, retry, destination, length });
   // One run answers a code challenge twice at most, and the second attempt is
   // deliberately cheap.
   //
@@ -892,7 +972,11 @@ export async function autoLogin({
       try {
         // The code screen has just told us where it sent the code; the card is
         // the only place that says so to the owner.
-        await typeOtp(page, await getOtp(retry, codeDestination(state.bodyText)));
+        // What the page enforces beats what it says: an input constrained to six
+        // characters is a fact, "6-digit code" is copy that may describe the last
+        // step rather than this one.
+        const length = state.otpLength ?? codeLengthFromText(state.bodyText);
+        await typeOtp(page, await getOtp(retry, codeDestination(state.bodyText), length));
       } catch (err) {
         if (err?.code !== "FORM_TIMEOUT") throw err;
         return otpTimedOut();
