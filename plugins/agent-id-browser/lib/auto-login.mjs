@@ -258,12 +258,10 @@ export async function runRecipe(
 // factor, not a second one — a card headed "2FA code" would be telling the owner
 // something untrue about the account they are signing into. Pure; exported so the
 // wording is testable without standing up a prompt provider.
-// The first card waits for someone who may be away from the screen. What the retry
-// waits for depends on where the code comes from, and the two are not comparable:
-// a generated code is read off a device the owner is already holding, so the retry
-// is a glance, while a mailed one sends them back to the mailbox for a second trip.
-// Measured on a live Booking.com run, where a two-minute retry expired with the
-// owner still fetching the mail.
+// How long the card waits depends on where the code comes from, and the two are
+// not comparable: an authenticator is already in the owner's hand, while a mailed
+// code sends them to a mailbox — measured on a live Booking.com run, where a
+// two-minute retry expired with the owner still fetching the mail.
 //
 // Both budgets are bounded by the same thing — lethe's 16-minute HUMAN_TIMEOUT
 // (`src/agent_id/cli.rs`) kills the whole auto-login subprocess, cards, navigation
@@ -274,9 +272,18 @@ const OTP_GLANCE_RETRY_CARD_MS = 2 * 60 * 1000;
 const OTP_MAILBOX_RETRY_CARD_MS = 4 * 60 * 1000;
 
 export function otpCardBudgetMs(cred, { retry = false } = {}) {
+  if (fromAuthenticatorApp(cred)) return OTP_GLANCE_RETRY_CARD_MS;
   if (!retry) return OTP_CARD_MS;
 
-  return cred.otp === "totp" ? OTP_GLANCE_RETRY_CARD_MS : OTP_MAILBOX_RETRY_CARD_MS;
+  return OTP_MAILBOX_RETRY_CARD_MS;
+}
+
+// Whether the owner will read this code off an authenticator rather than out of a
+// mailbox: a `totp` credential asks a person only when its seed is missing — with
+// a seed the code is generated and no card is raised at all. Nothing was sent
+// anywhere, so the card must not send them looking for a message.
+export function fromAuthenticatorApp(cred) {
+  return cred.otp === "totp" && !cred.totpSecret;
 }
 
 export function otpPromptWording(cred, { retry = false, destination = null } = {}) {
@@ -291,13 +298,27 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
   // time-based code the right move is to read the CURRENT one, not retype the
   // one they just sent.
   const retryNote = retry ? "That code was not accepted — enter the current one. " : "";
-  // Where the code went, in the site's own words, or nothing. Naming the wrong
-  // channel sends the owner to an inbox the code was never sent to and then
-  // convinces them it never arrived — so with no destination the copy claims no
-  // channel and names both places to look.
+  // Where the code went. Three tiers, and the wording weakens with each: what the
+  // page itself said, then the identifier the sign-in was started with, then
+  // nothing. The middle one is a guess — a site can text a code to an account
+  // opened with an e-mail — so it says "should reach" where the page's own words
+  // say "sent". And a guess is still worth making: "check your email or messages"
+  // sent an owner hunting through the wrong device while a number he had
+  // forgotten was attached to the account held the code.
+  const guess = maskedIdentifier(cred.username);
   const sentence = destination
     ? `${site} sent a code to ${destination} — enter it to finish signing in`
-    : `${site} sent you a code — check your email or messages, then enter it here`;
+    : guess
+      ? `The code should reach ${guess} — enter it to finish signing in`
+      : `${site} sent you a code — check your email or messages, then enter it here`;
+  if (fromAuthenticatorApp(cred)) {
+    return {
+      title: `2FA code for ${site}`,
+      description: `${retryNote}Open your 2FA app and enter the current code for ${site}`,
+      label: "Current 2FA code",
+      ask: `enter the current 2FA code for ${site}`,
+    };
+  }
   if (cred.passwordless) {
     return {
       title: `Sign-in code for ${site}`,
@@ -316,6 +337,25 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
   };
 }
 
+// The identifier the owner signed in with, reduced to what identifies it to them
+// and to nobody else. A username that is neither an address nor a number names no
+// channel, so it yields nothing rather than a guess about where to look.
+export function maskedIdentifier(identifier) {
+  const value = String(identifier || "").trim();
+  if (!value) return null;
+
+  const at = value.lastIndexOf("@");
+  if (at > 0) {
+    const domain = value.slice(at);
+    return `${value.slice(0, 1)}•••${domain}`;
+  }
+
+  const digits = value.replace(/\D/g, "");
+  const isPhone = /^\+?[\d\s().-]+$/.test(value) && digits.length >= 7;
+
+  return isPhone ? `••• ${digits.slice(-4)}` : null;
+}
+
 // How long until the credential's TOTP period rolls over, plus a beat so the new
 // window is unambiguously current. Exported for the test that pins the arithmetic.
 export function millisToNextTotpWindow(cred, now = Date.now()) {
@@ -329,8 +369,7 @@ export async function resolveOtp(
   cred,
   { env = process.env, log = () => {}, now, retry = false, destination = null } = {},
 ) {
-  if (cred.otp === "totp") {
-    if (!cred.totpSecret) throw new Error(`login '${cred.name}': otp=totp but no totpSecret stored`);
+  if (cred.otp === "totp" && cred.totpSecret) {
     return generateTotp({
       secret: cred.totpSecret,
       period: cred.period,
