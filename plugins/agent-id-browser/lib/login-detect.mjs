@@ -259,6 +259,26 @@ const NAMED_DESTINATION_RE =
 const ENDING_RE =
   /\b(?:(your|the)\s+)?(phone(?:\s+number)?|number|mobile|e-?mail(?:\s+address)?)\s+ending\s+(?:in\s+|with\s+)?([\d\u2022\u00b7*.\u2026-]{2,8})/i;
 
+// How many characters the code has, when the page says so in words. The same
+// vocabulary the OTP classifier matches on, read for its number this time.
+//
+// Only 4-8 is answered. Outside that a "code" is something else — an order
+// reference, a discount, a year — and a wrong count is not a smaller version of
+// no count: the card draws exactly that many cells and submits itself when they
+// fill, so four cells for a six-digit code cannot be completed at all.
+const SPELLED_DIGITS = { four: 4, five: 5, six: 6, seven: 7, eight: 8 };
+const CODE_LENGTH_RE = /\b(\d|four|five|six|seven|eight)[- ]?digit\b/i;
+
+export function codeLengthFromText(bodyText) {
+  const match = CODE_LENGTH_RE.exec(String(bodyText || ""));
+  if (!match) return null;
+
+  const word = match[1].toLowerCase();
+  const length = SPELLED_DIGITS[word] ?? Number(word);
+
+  return length >= 4 && length <= 8 ? length : null;
+}
+
 export function codeDestination(bodyText) {
   const text = String(bodyText || "");
   const match = SENT_TO_RE.exec(text);

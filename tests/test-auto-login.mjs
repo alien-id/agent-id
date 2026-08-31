@@ -29,6 +29,7 @@ import {
   otpCardSpec,
   fromAuthenticatorApp,
   maskedIdentifier,
+  otpCardLength,
 } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { generateTotp } from "../plugins/agent-id-core/lib/totp.mjs";
 
@@ -391,6 +392,26 @@ test("the card names where to look when the page did not say", () => {
   // A username that names no channel is not turned into one.
   const opaque = otpPromptWording({ ...cred, username: "daniel_smith" });
   assert.match(opaque.description, /check your email or messages/);
+});
+
+test("the card carries the cell count only when the page really stated one", () => {
+  const cred = { name: "booking", passwordless: true, loginUrl: "https://booking.com/in" };
+  const placeholderFor = (length) => otpCardSpec(cred, { length }).fields[0].placeholder ?? null;
+
+  // The screen draws one cell per placeholder character and submits itself when
+  // they fill. That is why a guess is not a lesser version of silence: too few
+  // cells truncate a correct code, too many leave it unsubmittable with no button.
+  assert.equal(placeholderFor(6), "••••••");
+  assert.equal(placeholderFor(4), "••••");
+  assert.equal(placeholderFor(8), "••••••••");
+
+  // An unconstrained text input (maxlength 32, or none at all) states nothing
+  // about a code, and a three-character one is not a code either.
+  for (const nonsense of [3, 12, 32, 0, null, undefined, 6.5, "6"]) {
+    assert.equal(placeholderFor(nonsense), null, String(nonsense));
+  }
+  assert.equal(otpCardLength(6), 6);
+  assert.equal(otpCardLength(32), null);
 });
 
 test("an identifier is masked down to what the owner recognises", () => {

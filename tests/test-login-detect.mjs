@@ -8,7 +8,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyLogin, codeDestination } from "../plugins/agent-id-browser/lib/login-detect.mjs";
+import {
+  classifyLogin,
+  codeDestination,
+  codeLengthFromText,
+} from "../plugins/agent-id-browser/lib/login-detect.mjs";
 
 test("logged-in: no password field, no otp, no error", () => {
   assert.equal(classifyLogin({ hasPasswordField: false, bodyText: "Welcome back, alice" }), "logged-in");
@@ -539,4 +543,19 @@ test("codeDestination says nothing rather than something wrong", () => {
   ]) {
     assert.equal(codeDestination(body), null, String(body));
   }
+});
+
+test("codeLengthFromText reads a stated digit count, and only a plausible one", () => {
+  assert.equal(codeLengthFromText("Enter the 6-digit code we sent you"), 6);
+  assert.equal(codeLengthFromText("We sent a six-digit code"), 6);
+  assert.equal(codeLengthFromText("Enter your 4 digit PIN"), 4);
+  assert.equal(codeLengthFromText("Enter the eight-digit code"), 8);
+
+  // Outside 4-8 the number is describing something that is not this code, and a
+  // wrong cell count is worse than none: the screen submits when the cells fill.
+  assert.equal(codeLengthFromText("a 3-digit code"), null);
+  assert.equal(codeLengthFromText("your 12-digit reference number"), null);
+  assert.equal(codeLengthFromText("Enter the code we sent you"), null);
+  assert.equal(codeLengthFromText(""), null);
+  assert.equal(codeLengthFromText(null), null);
 });
