@@ -22,8 +22,15 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import http from "node:http";
 
-import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
-import { autoLogin, detectPageState } from "../plugins/agent-id-browser/lib/auto-login.mjs";
+import {
+  resolvePatchright,
+  launchContext,
+} from "../plugins/agent-id-browser/lib/launch.mjs";
+import {
+  autoLogin,
+  detectPageState,
+  otpCardHints,
+} from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { classifyLogin } from "../plugins/agent-id-browser/lib/login-detect.mjs";
 import { formSnapshotInPage } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
@@ -39,7 +46,7 @@ const CODE_BOXES = Array.from(
   { length: 6 },
   (_, i) =>
     `<input class=box id=d${i} type=tel inputmode=numeric maxlength=1 ` +
-    `${i === 0 ? 'autocomplete="one-time-code"' : ""}>`,
+    `${i === 0 ? 'autocomplete="one-time-code"' : ""}>`
 ).join("");
 
 // `submit` picks how the code screen accepts the code — the three ways real
@@ -59,7 +66,11 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
 <p>We've sent a six-digit code to ${IDENTIFIER}. It expires shortly.</p>
 <form action="/search"><input name=q><button type=submit>Search</button></form>
 <form id=f>${field}
-  ${submit === "button" ? "<button type=button id=go>Verify</button><button type=button id=resend>Resend code</button>" : ""}
+  ${
+    submit === "button"
+      ? "<button type=button id=go>Verify</button><button type=button id=resend>Resend code</button>"
+      : ""
+  }
 </form>
 <script>
   const boxes = [...document.querySelectorAll('.box')];
@@ -94,7 +105,24 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
     if (url.pathname === "/otp-boxes") {
       res.end(`<!doctype html><meta charset=utf-8><title>code</title>
 <h1>Enter the code we sent you</h1>
-<form>${Array.from({ length: 6 }, (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`).join("")}</form>`);
+<form>${Array.from(
+        { length: 6 },
+        (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`
+      ).join("")}</form>`);
+      return;
+    }
+    if (url.pathname === "/otp-boxes-unmarked") {
+      // What Booking.com actually renders: a row of boxes with no maxlength at
+      // all, constrained in script. Counting only maxlength="1" missed it — on
+      // the very site this was built for.
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form>${Array.from({ length: 6 }, (_, i) => `<input name=d${i} type=text inputmode=numeric>`).join("")}</form>`);
+      return;
+    }
+    if (url.pathname === "/otp-not-a-code") {
+      res.end(`<!doctype html><meta charset=utf-8><title>address</title>
+<form>${["street", "city", "state", "zip", "country"].map((n) => `<input name=${n} type=text>`).join("")}</form>`);
       return;
     }
     if (url.pathname === "/otp-single") {
@@ -188,7 +216,7 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () =>
-      resolve({ server, port: server.address().port }),
+      resolve({ server, port: server.address().port })
     );
   });
 }
@@ -241,7 +269,7 @@ for (const submit of ["button", "auto", "enter"]) {
       } finally {
         server.close();
       }
-    },
+    }
   );
 }
 
@@ -254,21 +282,39 @@ test(
       await withBrowser(async (context) => {
         const page = await context.newPage();
 
-        await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
+        await page.goto(`http://127.0.0.1:${port}/`, {
+          waitUntil: "domcontentloaded",
+        });
         const step1 = await detectPageState(page);
         assert.equal(step1.hasPasswordField, false);
-        assert.equal(step1.hasIdentifierField, true, "the e-mail input must be seen");
+        assert.equal(
+          step1.hasIdentifierField,
+          true,
+          "the e-mail input must be seen"
+        );
         // The whole point: a screen with no password is not a finished login —
         // while we are still standing on it. `onLoginPage` is what the caller
         // knows and the snapshot does not; off the sign-in page the same e-mail
         // input is a newsletter box.
         assert.equal(classifyLogin({ ...step1, onLoginPage: true }), "unknown");
-        assert.equal(classifyLogin({ ...step1, onLoginPage: false }), "logged-in");
+        assert.equal(
+          classifyLogin({ ...step1, onLoginPage: false }),
+          "logged-in"
+        );
 
-        await page.goto(`http://127.0.0.1:${port}/code`, { waitUntil: "domcontentloaded" });
+        await page.goto(`http://127.0.0.1:${port}/code`, {
+          waitUntil: "domcontentloaded",
+        });
         const step2 = await detectPageState(page);
-        assert.equal(step2.hasOtpField, true, "the one-time-code box must be seen");
-        assert.equal(classifyLogin({ ...step2, onLoginPage: true }), "otp-required");
+        assert.equal(
+          step2.hasOtpField,
+          true,
+          "the one-time-code box must be seen"
+        );
+        assert.equal(
+          classifyLogin({ ...step2, onLoginPage: true }),
+          "otp-required"
+        );
 
         await page.goto(`http://127.0.0.1:${port}/done?code=483920`, {
           waitUntil: "domcontentloaded",
@@ -278,7 +324,7 @@ test(
     } finally {
       server.close();
     }
-  },
+  }
 );
 
 test(
@@ -288,7 +334,10 @@ test(
     // With one card per round this was ten consecutive 10-minute asks inside a
     // 16-minute host budget. `otp: interactive` cannot afford a second full-length
     // ask, so the run reports instead of looping.
-    const { server, port } = await fixtureServer({ submit: "button", acceptCode: false });
+    const { server, port } = await fixtureServer({
+      submit: "button",
+      acceptCode: false,
+    });
     try {
       let asks = 0;
       const result = await withBrowser(async (context) => {
@@ -318,11 +367,14 @@ test(
       assert.equal(result.outcome, "otp-rejected");
       // Two attempts, not one per round. The second waits out the TOTP window so
       // it is a different code — which is the only retry that can succeed.
-      assert.ok(asks <= 4, `asked ${asks} times; the budget is meant to stop it`);
+      assert.ok(
+        asks <= 4,
+        `asked ${asks} times; the budget is meant to stop it`
+      );
     } finally {
       server.close();
     }
-  },
+  }
 );
 
 test(
@@ -354,11 +406,14 @@ test(
       });
       assert.equal(result.ok, true, `auto-login failed: ${result.outcome}`);
       assert.match(result.finalUrl, /code=\d{6}$/);
-      assert.ok(!result.finalUrl.includes("/search"), "the decoy form must not win");
+      assert.ok(
+        !result.finalUrl.includes("/search"),
+        "the decoy form must not win"
+      );
     } finally {
       server.close();
     }
-  },
+  }
 );
 
 test(
@@ -369,7 +424,9 @@ test(
     try {
       await withBrowser(async (context) => {
         const page = await context.newPage();
-        await page.goto(`http://127.0.0.1:${port}/staged`, { waitUntil: "domcontentloaded" });
+        await page.goto(`http://127.0.0.1:${port}/staged`, {
+          waitUntil: "domcontentloaded",
+        });
 
         // Every ordinary visibility test passes on this input: it has a box, it
         // is opaque, it is in the viewport. Only the accessibility tree says it
@@ -378,32 +435,57 @@ test(
           const el = document.querySelector('input[type="password"]');
           const r = el.getBoundingClientRect();
           const st = getComputedStyle(el);
-          return { laidOut: r.width > 0 && r.height > 0, opacity: st.opacity, offsetParent: !!el.offsetParent };
+          return {
+            laidOut: r.width > 0 && r.height > 0,
+            opacity: st.opacity,
+            offsetParent: !!el.offsetParent,
+          };
         });
-        assert.deepEqual(naive, { laidOut: true, opacity: "1", offsetParent: true });
+        assert.deepEqual(naive, {
+          laidOut: true,
+          opacity: "1",
+          offsetParent: true,
+        });
 
         const state = await detectPageState(page);
-        assert.equal(state.hasPasswordField, false, "a staged password is not being asked for");
-        assert.equal(state.hasIdentifierField, true, "the identifier keeps the looser test");
+        assert.equal(
+          state.hasPasswordField,
+          false,
+          "a staged password is not being asked for"
+        );
+        assert.equal(
+          state.hasIdentifierField,
+          true,
+          "the identifier keeps the looser test"
+        );
         assert.equal(classifyLogin({ ...state, onLoginPage: true }), "unknown");
 
         // The same rule where the agent reads it. Seeing a password control here
         // is what made one store an ordinary login for a site that has none.
-        const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
+        const snapshot = await page.evaluate(formSnapshotInPage, {
+          prefix: "",
+          generation: 1,
+        });
         assert.ok(
           !snapshot.controls.some((c) => c.type === "password"),
-          "a staged control is not one of the fields on offer",
+          "a staged control is not one of the fields on offer"
         );
-        assert.ok(snapshot.controls.some((c) => c.type === "email"), "the identifier is");
+        assert.ok(
+          snapshot.controls.some((c) => c.type === "email"),
+          "the identifier is"
+        );
         // The conclusion, not the evidence. Reporting the password flagged was tried
         // and read straight past: an agent said it saw "a technical password field in
         // the markup" and stored a credential the site has no use for.
-        assert.deepEqual(snapshot.signIn, { identifier: true, passwordAsked: false });
+        assert.deepEqual(snapshot.signIn, {
+          identifier: true,
+          passwordAsked: false,
+        });
       });
     } finally {
       server.close();
     }
-  },
+  }
 );
 
 test(
@@ -414,29 +496,45 @@ test(
     try {
       await withBrowser(async (context) => {
         const page = await context.newPage();
-        await page.goto(`http://127.0.0.1:${port}/masked`, { waitUntil: "domcontentloaded" });
+        await page.goto(`http://127.0.0.1:${port}/masked`, {
+          waitUntil: "domcontentloaded",
+        });
 
         // Reading `aria-hidden` as "not asked for" without this distinction reported
         // no password and no identifier, which is the shape of a finished login: the
         // run sealed an unauthenticated profile and called it a success.
         const state = await detectPageState(page);
-        assert.equal(state.hasPasswordField, true, "the page is asking for this password");
+        assert.equal(
+          state.hasPasswordField,
+          true,
+          "the page is asking for this password"
+        );
         assert.notEqual(
           classifyLogin({ ...state, onLoginPage: false }),
           "logged-in",
-          "a masked sign-in page is not a finished one",
+          "a masked sign-in page is not a finished one"
         );
 
-        const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
-        assert.ok(snapshot.controls.some((c) => c.type === "password"), "covered is not staged");
+        const snapshot = await page.evaluate(formSnapshotInPage, {
+          prefix: "",
+          generation: 1,
+        });
+        assert.ok(
+          snapshot.controls.some((c) => c.type === "password"),
+          "covered is not staged"
+        );
         // Nothing here asks for an identifier, so no verdict is offered. Claiming one
         // on every page would make the field worthless where it matters.
-        assert.equal(snapshot.signIn, undefined, "a page with no identifier gets no verdict");
+        assert.equal(
+          snapshot.signIn,
+          undefined,
+          "a page with no identifier gets no verdict"
+        );
       });
     } finally {
       server.close();
     }
-  },
+  }
 );
 
 test(
@@ -452,25 +550,36 @@ test(
         // live input on the page. A cookie banner's own checkbox satisfies that, and
         // took the sign-in form with it — with no ref left to fill it by.
         for (const route of ["/masked-checkbox", "/staged-with-search"]) {
-          await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "domcontentloaded" });
-          const snapshot = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
+          await page.goto(`http://127.0.0.1:${port}${route}`, {
+            waitUntil: "domcontentloaded",
+          });
+          const snapshot = await page.evaluate(formSnapshotInPage, {
+            prefix: "",
+            generation: 1,
+          });
           const staged = snapshot.staged ?? [];
 
           assert.ok(
             !snapshot.controls.some((c) => c.type === "password"),
-            `${route}: a staged control is not one of the fields on offer`,
+            `${route}: a staged control is not one of the fields on offer`
           );
           assert.ok(
-            staged.some((c) => c.type === "password") && staged.some((c) => c.type === "email"),
-            `${route}: the form must still be reachable, got ${JSON.stringify(staged.map((c) => c.type))}`,
+            staged.some((c) => c.type === "password") &&
+              staged.some((c) => c.type === "email"),
+            `${route}: the form must still be reachable, got ${JSON.stringify(
+              staged.map((c) => c.type)
+            )}`
           );
-          assert.ok(staged.every((c) => c.ref), `${route}: reachable means it has a ref`);
+          assert.ok(
+            staged.every((c) => c.ref),
+            `${route}: reachable means it has a ref`
+          );
         }
       });
     } finally {
       server.close();
     }
-  },
+  }
 );
 
 test(
@@ -485,39 +594,192 @@ test(
         // A newsletter box answering `passwordAsked: false` tells the caller the site
         // has no password — the same wrong conclusion this file exists to prevent,
         // reached from the other end.
-        await page.goto(`http://127.0.0.1:${port}/newsletter`, { waitUntil: "domcontentloaded" });
-        const footer = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
-        assert.equal(footer.signIn, undefined, "an e-mail field alone is not a sign-in");
+        await page.goto(`http://127.0.0.1:${port}/newsletter`, {
+          waitUntil: "domcontentloaded",
+        });
+        const footer = await page.evaluate(formSnapshotInPage, {
+          prefix: "",
+          generation: 1,
+        });
+        assert.equal(
+          footer.signIn,
+          undefined,
+          "an e-mail field alone is not a sign-in"
+        );
 
-        await page.goto(`http://127.0.0.1:${port}/staged`, { waitUntil: "domcontentloaded" });
-        const signIn = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
-        assert.deepEqual(signIn.signIn, { identifier: true, passwordAsked: false });
+        await page.goto(`http://127.0.0.1:${port}/staged`, {
+          waitUntil: "domcontentloaded",
+        });
+        const signIn = await page.evaluate(formSnapshotInPage, {
+          prefix: "",
+          generation: 1,
+        });
+        assert.deepEqual(signIn.signIn, {
+          identifier: true,
+          passwordAsked: false,
+        });
       });
     } finally {
       server.close();
     }
-  },
+  }
 );
 
-test("the page's own constraint is what says how many cells to draw", { skip }, async () => {
-  const { server, port } = await fixtureServer();
-  try {
-    await withBrowser(async (context) => {
-      const page = await context.newPage();
-      const lengthAt = async (route) => {
-        await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "domcontentloaded" });
-        return (await detectPageState(page)).otpLength;
-      };
+test(
+  "the page's own constraint is what says how many cells to draw",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        const lengthAt = async (route) => {
+          await page.goto(`http://127.0.0.1:${port}${route}`, {
+            waitUntil: "domcontentloaded",
+          });
+          return (await detectPageState(page)).otpLength;
+        };
 
-      // A row of one-character boxes IS the count.
-      assert.equal(await lengthAt("/otp-boxes"), 6);
-      // One field states it outright.
-      assert.equal(await lengthAt("/otp-single"), 8);
-      // And an unconstrained input states nothing — which must not be read as a
-      // count, because the screen submits itself once the cells it drew are full.
-      assert.equal(await lengthAt("/otp-unbounded"), null);
-    });
-  } finally {
-    server.close();
+        // A row of one-character boxes IS the count.
+        assert.equal(await lengthAt("/otp-boxes"), 6);
+        // One field states it outright.
+        assert.equal(await lengthAt("/otp-single"), 8);
+        // And an unconstrained input states nothing — which must not be read as a
+        // count, because the screen submits itself once the cells it drew are full.
+        assert.equal(await lengthAt("/otp-unbounded"), null);
+      });
+    } finally {
+      server.close();
+    }
   }
-});
+);
+
+test(
+  "both paths to a code card read the same hints off the page",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        const hintsAt = async (route) => {
+          await page.goto(`http://127.0.0.1:${port}${route}`, {
+            waitUntil: "domcontentloaded",
+          });
+          return otpCardHints(page);
+        };
+
+        // `fill_otp` raises the same card as auto-login and used to pass neither of
+        // these, so a code screen driven by hand drew a plain field and told the
+        // owner nothing about where to look.
+        assert.deepEqual(await hintsAt("/otp-boxes"), {
+          length: 6,
+          destination: null,
+        });
+        assert.deepEqual(await hintsAt("/otp-boxes-unmarked"), {
+          length: 6,
+          destination: null,
+        });
+        assert.equal(
+          (await hintsAt("/otp-not-a-code")).length,
+          null,
+          "several text inputs are a form, not a row of code boxes",
+        );
+        assert.deepEqual(await hintsAt("/otp-single"), {
+          length: 8,
+          destination: null,
+        });
+
+        const unbounded = await hintsAt("/otp-unbounded");
+        assert.equal(
+          unbounded.length,
+          null,
+          "an unconstrained input states no count"
+        );
+      });
+    } finally {
+      server.close();
+    }
+  }
+);
+
+test(
+  "a credential that claims the site has no codes is corrected when it asks for one",
+  { skip },
+  async () => {
+    // `otp: "none"` is a claim about the site, and it used to end the run: the
+    // owner had a password typed and a code mailed, and no card was ever raised
+    // to type it into. The site asking IS the evidence that the claim is wrong.
+    const { server, port } = await fixtureServer();
+    try {
+      const corrections = [];
+      const result = await withBrowser(async (context) => {
+        const page = await context.newPage();
+        return autoLogin({
+          page,
+          cred: {
+            name: "fixture",
+            type: "login",
+            username: IDENTIFIER,
+            passwordless: true,
+            otp: "none",
+            loginUrl: `http://127.0.0.1:${port}/`,
+            domains: ["127.0.0.1"],
+            warmup: false,
+          },
+          settleMs: 400,
+          resolveOtpFn: async () => "123456",
+          onOtpModeCorrected: async (otp) => corrections.push(otp),
+        });
+      });
+
+      assert.notEqual(
+        result.outcome,
+        "otp-unexpected",
+        "asking is not a reason to give up"
+      );
+      assert.equal(result.ok, true, `auto-login failed: ${result.outcome}`);
+      assert.deepEqual(
+        corrections,
+        ["interactive"],
+        "and the record stops being wrong"
+      );
+    } finally {
+      server.close();
+    }
+  }
+);
+
+test(
+  "a credential that already answers codes is left alone",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      const corrections = [];
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        return autoLogin({
+          page,
+          cred: {
+            name: "fixture",
+            type: "login",
+            username: IDENTIFIER,
+            passwordless: true,
+            otp: "interactive",
+            loginUrl: `http://127.0.0.1:${port}/`,
+            domains: ["127.0.0.1"],
+            warmup: false,
+          },
+          settleMs: 400,
+          resolveOtpFn: async () => "123456",
+          onOtpModeCorrected: async (otp) => corrections.push(otp),
+        });
+      });
+
+      assert.deepEqual(corrections, [], "nothing to correct");
+    } finally {
+      server.close();
+    }
+  }
+);

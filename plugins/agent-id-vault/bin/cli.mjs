@@ -32,7 +32,14 @@
 //   (interactive trusted /dev/tty prompt as last resort)
 
 import fs from "node:fs/promises";
-import { mkdtempSync, writeFileSync, chmodSync, unlinkSync, rmSync, statSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  chmodSync,
+  unlinkSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -70,7 +77,12 @@ import {
   promptSecret,
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
-import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../lib/store.mjs";
+import {
+  CREDENTIAL_TYPES,
+  LOGIN_OTP_MODES,
+  SECRET_FIELDS,
+  validateRecord,
+} from "../lib/store.mjs";
 import {
   ACCESS_LEVELS,
   credentialHost,
@@ -94,7 +106,10 @@ async function readStdin() {
   return s.length === 0 ? null : s.replace(/\n$/, "");
 }
 
-async function resolvePassphrase(flags, { allowPrompt = true, promptMsg = "Passphrase: " } = {}) {
+async function resolvePassphrase(
+  flags,
+  { allowPrompt = true, promptMsg = "Passphrase: " } = {}
+) {
   if (flags["passphrase-file"]) {
     const raw = await fs.readFile(flags["passphrase-file"], "utf8");
     return raw.replace(/\n$/, "");
@@ -116,7 +131,8 @@ async function resolveValue(flags, fieldName = "credential") {
   }
   if (flags[`${fieldName}-env`]) {
     const val = process.env[flags[`${fieldName}-env`]];
-    if (!val) throw new Error(`Env var ${flags[`${fieldName}-env`]} is not set`);
+    if (!val)
+      throw new Error(`Env var ${flags[`${fieldName}-env`]} is not set`);
     return val;
   }
   const piped = await readStdin();
@@ -165,7 +181,9 @@ function parseCsvFlag(raw) {
 async function openWithFlags(flags, { allowPrompt = true } = {}) {
   const stateDir = resolveStateDir(flags);
   const useAgentKey = flags["agent-key"] !== false; // `--no-agent-key` opts out
-  const privateKeyPem = useAgentKey ? await loadAgentPrivateKey(stateDir) : null;
+  const privateKeyPem = useAgentKey
+    ? await loadAgentPrivateKey(stateDir)
+    : null;
   const hasPassphraseFlag =
     flags["passphrase-file"] || flags["passphrase-env"] || flags.passphrase;
 
@@ -215,17 +233,22 @@ async function cmdInit(flags) {
   // slot, so the agent can't silently self-unlock.
   const method = flags.unlock ? String(flags.unlock) : null;
   if (method && !["passkey", "passphrase", "agent-key"].includes(method)) {
-    return outputError(`--unlock must be passkey | passphrase | agent-key (got '${method}')`);
+    return outputError(
+      `--unlock must be passkey | passphrase | agent-key (got '${method}')`
+    );
   }
 
   let passphrase = await resolvePassphrase(flags, { allowPrompt: false });
-  const dev = flags.dev === true || passphrase != null || method === "passphrase";
+  const dev =
+    flags.dev === true || passphrase != null || method === "passphrase";
 
   // Passkey: enroll via the secure form (Touch ID / Face ID / security key).
   let passkey = null;
   if (method === "passkey") {
     try {
-      passkey = await registerPasskey({ deviceLabel: flags["device-label"] || null });
+      passkey = await registerPasskey({
+        deviceLabel: flags["device-label"] || null,
+      });
     } catch (err) {
       return outputError(`passkey registration failed: ${err.message}`);
     }
@@ -242,21 +265,37 @@ async function cmdInit(flags) {
   // Agent-key default: on, EXCEPT when passkey/passphrase was the chosen method.
   const agentKeyDefault = !(method === "passkey" || method === "passphrase");
   const useAgentKey =
-    flags["agent-key"] === true || (flags["agent-key"] !== false && agentKeyDefault);
-  const privateKeyPem = useAgentKey ? await loadAgentPrivateKey(stateDir) : null;
+    flags["agent-key"] === true ||
+    (flags["agent-key"] !== false && agentKeyDefault);
+  const privateKeyPem = useAgentKey
+    ? await loadAgentPrivateKey(stateDir)
+    : null;
   const agentId = privateKeyPem
     ? (await readJsonFile(statePaths(stateDir).mainKey, null))?.agentId || null
     : null;
 
   try {
-    const result = await initVault({ stateDir, passphrase, privateKeyPem, agentId, passkey, dev });
-    stderr(`Vault initialized (${result.mode} mode, ${result.slots} slot${result.slots > 1 ? "s" : ""}): ${result.path}`);
+    const result = await initVault({
+      stateDir,
+      passphrase,
+      privateKeyPem,
+      agentId,
+      passkey,
+      dev,
+    });
+    stderr(
+      `Vault initialized (${result.mode} mode, ${result.slots} slot${
+        result.slots > 1 ? "s" : ""
+      }): ${result.path}`
+    );
     if (passkey) {
-      stderr("Unlock with your passkey (the agent can't unlock it itself). Add `rekey add-passkey` for more devices.");
+      stderr(
+        "Unlock with your passkey (the agent can't unlock it itself). Add `rekey add-passkey` for more devices."
+      );
     } else if (result.mode === "user") {
       stderr(
         "User mode: unlock via agent-key or owner-approval (Alien app). A passphrase " +
-          "can never be added, and this vault cannot be converted to dev mode.",
+          "can never be added, and this vault cannot be converted to dev mode."
       );
     }
     outputJson({ ok: true, ...result });
@@ -282,61 +321,109 @@ async function cmdInit(flags) {
 // reads to a person as a typo.
 const CARD_TITLE = "Enter it securely";
 
-function formDescription({ name, type, loginUrl, domains, access, passwordless }) {
+function formDescription({
+  name,
+  type,
+  loginUrl,
+  domains,
+  access,
+  passwordless,
+}) {
   const site = siteName(credentialHost({ loginUrl, domains }));
-  const lead = type === "login"
-    ? `${site ? `${site} sign-in` : `Sign-in for ${name}`}. You type it on a sealed screen.`
-    : `${site ? `A credential for ${site}` : `Credential ${name}`}. You type it on a sealed screen.`;
+  const lead =
+    type === "login"
+      ? `${
+          site ? `${site} sign-in` : `Sign-in for ${name}`
+        }. You type it on a sealed screen.`
+      : `${
+          site ? `A credential for ${site}` : `Credential ${name}`
+        }. You type it on a sealed screen.`;
   // A passwordless card asks for an identifier and stops; nothing visibly happens
   // when it is submitted, because the site has yet to send anything.
-  const step = type === "login" && passwordless ? " The code comes at sign-in." : "";
+  const step =
+    type === "login" && passwordless ? " The code comes at sign-in." : "";
   // `ro` is a grant being made in the moment of typing, so it stays on the card
   // even though the rest of the metadata does not.
-  const grant = access === "ro" ? " The agent can read this, never change it." : "";
+  const grant =
+    access === "ro" ? " The agent can read this, never change it." : "";
 
   return `${lead}${step}${grant}`;
 }
 
-
 function formFieldsForType(type, flags) {
   switch (type) {
-    case "bearer": return [{ name: "value", label: "Token / bearer value" }];
-    case "header": return [{ name: "value", label: `Value for header "${flags["header-name"]}"` }];
-    case "query": return [{ name: "value", label: `Value for query param "${flags["param-name"]}"` }];
-    case "cookie": return [{ name: "value", label: `Value for cookie "${flags["cookie-name"]}"` }];
-    case "basic": return [
-      { name: "username", label: "Username", secret: false },
-      { name: "password", label: "Password" },
-    ];
-    case "totp": return [{ name: "secret", label: "TOTP secret (base32)" }];
-    case "secret": return [{ name: "value", label: "Secret — SSH/RSA private key, PEM, JSON, or token", multiline: true }];
-    case "cookie-jar": return [{ name: "jar", label: "Cookie jar JSON", multiline: true }];
-    case "oauth2": return [
-      { name: "client-secret", label: "Client secret", required: false },
-      { name: "refresh-token", label: "Refresh token" },
-    ];
-    case "login": return [
-      // A passwordless site takes whatever it can mail or text a code to, and
-      // Airbnb's first screen says so outright ("Phone number or email"). The
-      // owner read "Username / email", entered a mail address, and waited for a
-      // letter the site had sent as an SMS. A password site keeps the old label:
-      // there the field really can be a username.
-      {
-        name: "username",
-        label: flags.passwordless ? "Email or phone number" : "Username / email",
-        secret: false,
-      },
-      // A passwordless site has none to store — the only secret is the code that
-      // arrives out of band, collected at sign-in time rather than here. That
-      // leaves this form a single field, which is the whole point.
-      ...(flags.passwordless ? [] : [{ name: "password", label: "Password" }]),
-      // Only ask for the 2FA seed up front when the policy is `totp`; otherwise
-      // it's added later (when available) via `set-totp`.
-      ...(flags.otp === "totp"
-        ? [{ name: "totpSecret", label: "TOTP secret (base32) or otpauth:// URI" }]
-        : []),
-    ];
-    default: return null;
+    case "bearer":
+      return [{ name: "value", label: "Token / bearer value" }];
+    case "header":
+      return [
+        { name: "value", label: `Value for header "${flags["header-name"]}"` },
+      ];
+    case "query":
+      return [
+        {
+          name: "value",
+          label: `Value for query param "${flags["param-name"]}"`,
+        },
+      ];
+    case "cookie":
+      return [
+        { name: "value", label: `Value for cookie "${flags["cookie-name"]}"` },
+      ];
+    case "basic":
+      return [
+        { name: "username", label: "Username", secret: false },
+        { name: "password", label: "Password" },
+      ];
+    case "totp":
+      return [{ name: "secret", label: "TOTP secret (base32)" }];
+    case "secret":
+      return [
+        {
+          name: "value",
+          label: "Secret — SSH/RSA private key, PEM, JSON, or token",
+          multiline: true,
+        },
+      ];
+    case "cookie-jar":
+      return [{ name: "jar", label: "Cookie jar JSON", multiline: true }];
+    case "oauth2":
+      return [
+        { name: "client-secret", label: "Client secret", required: false },
+        { name: "refresh-token", label: "Refresh token" },
+      ];
+    case "login":
+      return [
+        // A passwordless site takes whatever it can mail or text a code to, and
+        // Airbnb's first screen says so outright ("Phone number or email"). The
+        // owner read "Username / email", entered a mail address, and waited for a
+        // letter the site had sent as an SMS. A password site keeps the old label:
+        // there the field really can be a username.
+        {
+          name: "username",
+          label: flags.passwordless
+            ? "Email or phone number"
+            : "Username / email",
+          secret: false,
+        },
+        // A passwordless site has none to store — the only secret is the code that
+        // arrives out of band, collected at sign-in time rather than here. That
+        // leaves this form a single field, which is the whole point.
+        ...(flags.passwordless
+          ? []
+          : [{ name: "password", label: "Password" }]),
+        // Only ask for the 2FA seed up front when the policy is `totp`; otherwise
+        // it's added later (when available) via `set-totp`.
+        ...(flags.otp === "totp"
+          ? [
+              {
+                name: "totpSecret",
+                label: "TOTP secret (base32) or otpauth:// URI",
+              },
+            ]
+          : []),
+      ];
+    default:
+      return null;
   }
 }
 
@@ -344,9 +431,12 @@ async function cmdAdd(flags) {
   const name = flags.name;
   const type = flags.type;
   if (!name) return outputError("--name <NAME> is required");
-  if (!type) return outputError(`--type <${CREDENTIAL_TYPES.join("|")}> is required`);
+  if (!type)
+    return outputError(`--type <${CREDENTIAL_TYPES.join("|")}> is required`);
   if (!CREDENTIAL_TYPES.includes(type)) {
-    return outputError(`Unknown type: ${type}. Allowed: ${CREDENTIAL_TYPES.join(", ")}`);
+    return outputError(
+      `Unknown type: ${type}. Allowed: ${CREDENTIAL_TYPES.join(", ")}`
+    );
   }
   const access = flags.access != null ? String(flags.access) : null;
   if (access && !ACCESS_LEVELS.includes(access)) {
@@ -372,11 +462,12 @@ async function cmdAdd(flags) {
       }
       if (!host) {
         return outputError(
-          "login needs --domains <host[,host…]> or a --login-url to derive it from (default-deny)",
+          "login needs --domains <host[,host…]> or a --login-url to derive it from (default-deny)"
         );
       }
       domains = [host];
-    } else return outputError("--domains <host[,host…]> is required (default-deny)");
+    } else
+      return outputError("--domains <host[,host…]> is required (default-deny)");
   }
 
   // Login-shape flags are checked before anything is collected: `--passwordless`
@@ -384,9 +475,13 @@ async function cmdAdd(flags) {
   // not after the owner has typed into the wrong card.
   let recipe = null;
   if (type === "login") {
-    if (flags.passwordless && flags.otp !== "interactive" && flags.otp !== "totp") {
+    if (
+      flags.passwordless &&
+      flags.otp !== "interactive" &&
+      flags.otp !== "totp"
+    ) {
       return outputError(
-        "--passwordless needs --otp interactive (a code mailed/SMSed at sign-in) or --otp totp",
+        "--passwordless needs --otp interactive (a code mailed/SMSed at sign-in) or --otp totp"
       );
     }
     if (flags.recipe != null) {
@@ -404,11 +499,19 @@ async function cmdAdd(flags) {
   // required metadata flags FIRST so we don't prompt and then reject.
   let formValues = null;
   if (flags.form) {
-    if (type === "header" && !flags["header-name"]) return outputError("--header-name is required");
-    if (type === "query" && !flags["param-name"]) return outputError("--param-name is required");
-    if (type === "cookie" && !flags["cookie-name"]) return outputError("--cookie-name is required");
-    if (type === "oauth2" && (!flags["token-endpoint"] || !flags["client-id"])) {
-      return outputError("oauth2 --form needs --token-endpoint and --client-id");
+    if (type === "header" && !flags["header-name"])
+      return outputError("--header-name is required");
+    if (type === "query" && !flags["param-name"])
+      return outputError("--param-name is required");
+    if (type === "cookie" && !flags["cookie-name"])
+      return outputError("--cookie-name is required");
+    if (
+      type === "oauth2" &&
+      (!flags["token-endpoint"] || !flags["client-id"])
+    ) {
+      return outputError(
+        "oauth2 --form needs --token-endpoint and --client-id"
+      );
     }
     const specs = formFieldsForType(type, flags);
     if (!specs) {
@@ -445,13 +548,22 @@ async function cmdAdd(flags) {
   // Read a secret either from the form (--form) or the existing file/env/stdin/tty
   // channels — never from argv.
   const secret = (field) =>
-    formValues ? Promise.resolve(formValues[field] ?? "") : resolveValue(flags, field);
+    formValues
+      ? Promise.resolve(formValues[field] ?? "")
+      : resolveValue(flags, field);
   const secretFileEnv = (field) =>
-    formValues ? Promise.resolve(formValues[field] ?? "") : resolveFileEnvFlag(flags, field);
+    formValues
+      ? Promise.resolve(formValues[field] ?? "")
+      : resolveFileEnvFlag(flags, field);
 
   const vault = await openWithFlags(flags);
   try {
-    const record = { name, type, domains, description: flags.description || null };
+    const record = {
+      name,
+      type,
+      domains,
+      description: flags.description || null,
+    };
     if (flags["upstream-scheme"] != null) {
       record.upstreamScheme = String(flags["upstream-scheme"]);
     }
@@ -463,11 +575,14 @@ async function cmdAdd(flags) {
     const existing = vault.get(name);
     if (existing) {
       if (!access && existing.access != null) record.access = existing.access;
-      if (existing.accessRules != null) record.accessRules = existing.accessRules;
+      if (existing.accessRules != null)
+        record.accessRules = existing.accessRules;
       if (isAccessRelaxation(existing, record)) {
         return outputError(
-          `Credential '${name}' has access level '${effectiveAccess(existing)}' — re-adding it ` +
-            `with '${access}' would widen what the agent may do. Use \`set-access\` (owner-confirmed).`,
+          `Credential '${name}' has access level '${effectiveAccess(
+            existing
+          )}' — re-adding it ` +
+            `with '${access}' would widen what the agent may do. Use \`set-access\` (owner-confirmed).`
         );
       }
     }
@@ -476,7 +591,10 @@ async function cmdAdd(flags) {
       case "bearer":
       case "secret": {
         const value = await secret("value");
-        if (!value) return outputError("Value required (--value-file / --value-env / stdin / --form)");
+        if (!value)
+          return outputError(
+            "Value required (--value-file / --value-env / stdin / --form)"
+          );
         record.value = value;
         break;
       }
@@ -484,7 +602,9 @@ async function cmdAdd(flags) {
         record.username = formValues ? formValues.username : flags.username;
         record.password = await secret("password");
         if (!record.username || !record.password) {
-          return outputError("--username and password input required for basic auth");
+          return outputError(
+            "--username and password input required for basic auth"
+          );
         }
         break;
       }
@@ -530,7 +650,7 @@ async function cmdAdd(flags) {
       case "evm-keypair": {
         return outputError(
           `${type} credentials are created with \`agent-id-vault generate\` — ` +
-            "the private key is generated inside the vault and never crosses a process boundary",
+            "the private key is generated inside the vault and never crosses a process boundary"
         );
       }
       case "oauth2": {
@@ -544,7 +664,7 @@ async function cmdAdd(flags) {
         if (!record.tokenEndpoint || !record.clientId || !record.refreshToken) {
           return outputError(
             "oauth2 needs --token-endpoint, --client-id, and a refresh token " +
-              "(--refresh-token-file / --refresh-token-env / stdin / --form)",
+              "(--refresh-token-file / --refresh-token-env / stdin / --form)"
           );
         }
         break;
@@ -559,10 +679,17 @@ async function cmdAdd(flags) {
         } else {
           record.password = await secret("password");
           if (!record.password) {
-            return outputError("password input required for login (or pass --passwordless)");
+            return outputError(
+              "password input required for login (or pass --passwordless)"
+            );
           }
         }
-        const otp = flags.otp ? String(flags.otp) : "none";
+        // A sign-in that is silent about codes is far more often one that asks for
+        // them than one that has none: sites add a second factor, they rarely drop
+        // it. And the two are not equally wrong — `interactive` costs a card the
+        // owner can dismiss, while `none` abandons the sign-in with the password
+        // already typed and the code already mailed.
+        const otp = flags.otp ? String(flags.otp) : "interactive";
         record.otp = otp;
         if (otp === "totp") {
           // Seed from the form, or --totp-secret-file/-env. Accepts a raw base32
@@ -573,7 +700,7 @@ async function cmdAdd(flags) {
           if (!seedInput) {
             return outputError(
               "otp totp needs a TOTP seed (--form, --totp-secret-file/-env) — " +
-                "or add it later with `set-totp`",
+                "or add it later with `set-totp`"
             );
           }
           let parsed;
@@ -595,7 +722,7 @@ async function cmdAdd(flags) {
           if (String(flags.profile) === name) {
             return outputError(
               `--profile '${flags.profile}' must differ from the login name '${name}' ` +
-                "(the login and its sealed browser-profile are separate vault records)",
+                "(the login and its sealed browser-profile are separate vault records)"
             );
           }
           record.profile = String(flags.profile);
@@ -608,7 +735,7 @@ async function cmdAdd(flags) {
     await vault.save();
     stderr(
       `Added credential '${name}' (${type}) for ${domains.join(", ")}` +
-        `${stored.access ? ` — access: ${stored.access}` : ""}.`,
+        `${stored.access ? ` — access: ${stored.access}` : ""}.`
     );
     outputJson({
       ok: true,
@@ -638,10 +765,14 @@ async function cmdSetTotp(flags) {
     try {
       const out = await collectSecret({
         title: `Set TOTP seed: ${name}`,
-        description: "Paste the base32 secret, or the full otpauth:// URI from the QR code",
-        fields: [{ name: "seed", label: "TOTP secret (base32) or otpauth:// URI" }],
+        description:
+          "Paste the base32 secret, or the full otpauth:// URI from the QR code",
+        fields: [
+          { name: "seed", label: "TOTP secret (base32) or otpauth:// URI" },
+        ],
         label: `enter the TOTP seed for "${name}"`,
-        security: "Sealed with <code>AES-256-GCM</code>. Never shown to the agent.",
+        security:
+          "Sealed with <code>AES-256-GCM</code>. Never shown to the agent.",
       });
       seedInput = out.values.seed;
     } catch (err) {
@@ -651,7 +782,9 @@ async function cmdSetTotp(flags) {
     seedInput = await resolveValue(flags, "seed"); // --seed-file / --seed-env / stdin / tty
   }
   if (!seedInput) {
-    return outputError("TOTP seed required (--form, --seed-file, --seed-env, or stdin)");
+    return outputError(
+      "TOTP seed required (--form, --seed-file, --seed-env, or stdin)"
+    );
   }
   let parsed;
   try {
@@ -670,7 +803,9 @@ async function cmdSetTotp(flags) {
     } else if (rec.type === "totp") {
       rec.secret = parsed.secret;
     } else {
-      return outputError(`set-totp works on 'login' or 'totp' credentials, not '${rec.type}'`);
+      return outputError(
+        `set-totp works on 'login' or 'totp' credentials, not '${rec.type}'`
+      );
     }
     if (parsed.period) rec.period = parsed.period;
     if (parsed.digits) rec.digits = parsed.digits;
@@ -678,7 +813,12 @@ async function cmdSetTotp(flags) {
     vault.add(rec); // re-validates + upserts (createdAt preserved)
     await vault.save();
     stderr(`Set TOTP seed on '${name}' (${rec.type}).`);
-    outputJson({ ok: true, name, type: rec.type, ...(rec.type === "login" ? { otp: "totp" } : {}) });
+    outputJson({
+      ok: true,
+      name,
+      type: rec.type,
+      ...(rec.type === "login" ? { otp: "totp" } : {}),
+    });
   } finally {
     vault.lock();
   }
@@ -692,7 +832,9 @@ async function cmdSetRecipe(flags) {
   const name = flags.name;
   if (!name) return outputError("--name <NAME> is required");
   if (flags.recipe == null && !flags.clear) {
-    return outputError("--recipe '<JSON steps>' is required (or --clear to drop it)");
+    return outputError(
+      "--recipe '<JSON steps>' is required (or --clear to drop it)"
+    );
   }
   let recipe = null;
   if (!flags.clear) {
@@ -708,13 +850,19 @@ async function cmdSetRecipe(flags) {
     const rec = vault.get(name);
     if (!rec) return outputError(`No credential named '${name}'`);
     if (rec.type !== "login") {
-      return outputError(`set-recipe works on 'login' credentials, not '${rec.type}'`);
+      return outputError(
+        `set-recipe works on 'login' credentials, not '${rec.type}'`
+      );
     }
     if (flags.clear) delete rec.recipe;
     else rec.recipe = recipe;
     vault.add(rec); // re-validates the step vocabulary + upserts
     await vault.save();
-    stderr(flags.clear ? `Cleared the recipe on '${name}'.` : `Set the recipe on '${name}'.`);
+    stderr(
+      flags.clear
+        ? `Cleared the recipe on '${name}'.`
+        : `Set the recipe on '${name}'.`
+    );
     outputJson({ ok: true, name, steps: flags.clear ? 0 : recipe.length });
   } finally {
     vault.lock();
@@ -731,7 +879,9 @@ async function cmdSetDomains(flags) {
   if (!name) return outputError("--name <NAME> is required");
   const domains = parseDomains(flags);
   if (domains.length === 0) {
-    return outputError("--domains <host[,host…]> is required (wildcards like *.example.com are allowed)");
+    return outputError(
+      "--domains <host[,host…]> is required (wildcards like *.example.com are allowed)"
+    );
   }
 
   const vault = await openWithFlags(flags);
@@ -742,8 +892,40 @@ async function cmdSetDomains(flags) {
     rec.domains = domains;
     vault.add(rec); // re-validates + upserts (createdAt preserved)
     await vault.save();
-    stderr(`Set domains on '${name}': ${previous.join(", ")} -> ${domains.join(", ")}.`);
+    stderr(
+      `Set domains on '${name}': ${previous.join(", ")} -> ${domains.join(
+        ", "
+      )}.`
+    );
     outputJson({ ok: true, name, domains });
+  } finally {
+    vault.lock();
+  }
+}
+
+async function cmdSetOtp(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const otp = flags.otp ? String(flags.otp) : "";
+  if (!LOGIN_OTP_MODES.includes(otp)) {
+    return outputError(`--otp must be one of: ${LOGIN_OTP_MODES.join(", ")}`);
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (otp === "totp" && !rec.totpSecret) {
+      return outputError(
+        `'${name}' has no TOTP seed — attach one with set-totp first`
+      );
+    }
+    const previous = rec.otp;
+    rec.otp = otp;
+    vault.add(rec); // re-validates + upserts (createdAt preserved)
+    await vault.save();
+    stderr(`Set otp on '${name}': ${previous} -> ${otp}.`);
+    outputJson({ ok: true, name, otp });
   } finally {
     vault.lock();
   }
@@ -763,8 +945,10 @@ async function cmdShow(flags) {
       rec.exportable === false
         ? "generated in-vault, not exportable"
         : isAccessRestricted(rec)
-          ? `access-restricted (${describeAccess(rec)}) — enforced via the proxy/browser only`
-          : null;
+        ? `access-restricted (${describeAccess(
+            rec
+          )}) — enforced via the proxy/browser only`
+        : null;
     if (sealedWhy) {
       const redacted = { ...rec };
       for (const f of SECRET_FIELDS) {
@@ -772,7 +956,7 @@ async function cmdShow(flags) {
       }
       stderr(
         `Credential '${name}' is sealed (${sealedWhy}). ` +
-          "Use the proxy or the sealed browser to exercise it.",
+          "Use the proxy or the sealed browser to exercise it."
       );
       outputJson({ ok: true, credential: redacted, sealed: true });
       return;
@@ -792,12 +976,14 @@ async function cmdGenerate(flags) {
   const type = flags.type || "solana-keypair";
   if (!name) return outputError("--name <NAME> is required");
   if (!GENERATE_TYPES.includes(type)) {
-    return outputError(`generate supports types: ${GENERATE_TYPES.join(", ")} (got '${type}')`);
+    return outputError(
+      `generate supports types: ${GENERATE_TYPES.join(", ")} (got '${type}')`
+    );
   }
   const domains = parseDomains(flags);
   if (domains.length === 0) {
     return outputError(
-      "--domains <host[,host…]> is required (RPC hosts the proxy may sign for, default-deny)",
+      "--domains <host[,host…]> is required (RPC hosts the proxy may sign for, default-deny)"
     );
   }
 
@@ -809,7 +995,9 @@ async function cmdGenerate(flags) {
   const vault = await openWithFlags(flags);
   try {
     if (vault.has(name) && !flags.overwrite) {
-      return outputError(`Credential '${name}' already exists (pass --overwrite to replace it)`);
+      return outputError(
+        `Credential '${name}' already exists (pass --overwrite to replace it)`
+      );
     }
     const record = {
       name,
@@ -823,11 +1011,14 @@ async function cmdGenerate(flags) {
     const existing = vault.get(name);
     if (existing) {
       if (!access && existing.access != null) record.access = existing.access;
-      if (existing.accessRules != null) record.accessRules = existing.accessRules;
+      if (existing.accessRules != null)
+        record.accessRules = existing.accessRules;
       if (isAccessRelaxation(existing, record)) {
         return outputError(
-          `Credential '${name}' has access level '${effectiveAccess(existing)}' — ` +
-            "overwriting cannot widen it. Use `set-access` (owner-confirmed).",
+          `Credential '${name}' has access level '${effectiveAccess(
+            existing
+          )}' — ` +
+            "overwriting cannot widen it. Use `set-access` (owner-confirmed)."
         );
       }
     }
@@ -853,7 +1044,11 @@ async function cmdGenerate(flags) {
     }
     const stored = vault.add(record);
     await vault.save();
-    stderr(`Generated ${type === "solana-keypair" ? "Solana" : "EVM"} keypair '${name}'.`);
+    stderr(
+      `Generated ${
+        type === "solana-keypair" ? "Solana" : "EVM"
+      } keypair '${name}'.`
+    );
     stderr(`  Address: ${address}`);
     stderr("  The private key is sealed in the vault and will never be shown.");
     outputJson({
@@ -880,7 +1075,9 @@ async function cmdGenerate(flags) {
 // agent cannot self-upgrade what its credentials permit.
 
 function describeAccess(rec) {
-  const rules = Array.isArray(rec.accessRules) ? ` + ${rec.accessRules.length} rule(s)` : "";
+  const rules = Array.isArray(rec.accessRules)
+    ? ` + ${rec.accessRules.length} rule(s)`
+    : "";
   return `${effectiveAccess(rec)}${rules}`;
 }
 
@@ -903,7 +1100,7 @@ async function cmdSetAccess(flags) {
   }
   if (wantLevel == null && wantRules === undefined) {
     return outputError(
-      "Nothing to change — pass --access ro|rw and/or --rules '<JSON array>' / --clear-rules",
+      "Nothing to change — pass --access ro|rw and/or --rules '<JSON array>' / --clear-rules"
     );
   }
 
@@ -926,8 +1123,10 @@ async function cmdSetAccess(flags) {
 
     if (isAccessRelaxation(rec, after)) {
       stderr(
-        `Widening access on '${name}' (${describeAccess(rec)} → ${describeAccess(after)}) ` +
-          "needs the owner's out-of-band confirmation…",
+        `Widening access on '${name}' (${describeAccess(
+          rec
+        )} → ${describeAccess(after)}) ` +
+          "needs the owner's out-of-band confirmation…"
       );
       let values;
       try {
@@ -945,13 +1144,16 @@ async function cmdSetAccess(flags) {
             },
           ],
           label: `approve wider access for "${name}"`,
-          security: "Typed by you, out of the agent's sight. Mismatch = no change.",
+          security:
+            "Typed by you, out of the agent's sight. Mismatch = no change.",
         }));
       } catch (err) {
         return outputError(`owner confirmation: ${err.message}`);
       }
       if (String(values.confirm || "").trim() !== name) {
-        return outputError("owner confirmation did not match the credential name — access unchanged");
+        return outputError(
+          "owner confirmation did not match the credential name — access unchanged"
+        );
       }
     }
 
@@ -972,7 +1174,12 @@ async function cmdSetAccess(flags) {
 async function cmdList(flags) {
   const vault = await openWithFlags(flags);
   try {
-    outputJson({ ok: true, mode: vault.mode, credentials: vault.list(), slots: vault.slots });
+    outputJson({
+      ok: true,
+      mode: vault.mode,
+      credentials: vault.list(),
+      slots: vault.slots,
+    });
   } finally {
     vault.lock();
   }
@@ -999,8 +1206,13 @@ async function cmdRekey(flags) {
   try {
     if (sub === "add-passphrase") {
       let passphrase = await resolvePassphrase(
-        { ...flags, "passphrase-file": flags["new-passphrase-file"], "passphrase-env": flags["new-passphrase-env"], passphrase: flags["new-passphrase"] },
-        { allowPrompt: false },
+        {
+          ...flags,
+          "passphrase-file": flags["new-passphrase-file"],
+          "passphrase-env": flags["new-passphrase-env"],
+          passphrase: flags["new-passphrase"],
+        },
+        { allowPrompt: false }
       );
       if (!passphrase) {
         if (!hasTty()) return outputError("New passphrase required");
@@ -1016,17 +1228,25 @@ async function cmdRekey(flags) {
     } else if (sub === "add-agent-key") {
       const stateDir = resolveStateDir(flags);
       const privateKeyPem = await loadAgentPrivateKey(stateDir);
-      if (!privateKeyPem) return outputError("No agent key found. Run agent-id-core bootstrap first.");
+      if (!privateKeyPem)
+        return outputError(
+          "No agent key found. Run agent-id-core bootstrap first."
+        );
       const agentId =
-        (await readJsonFile(statePaths(stateDir).mainKey, null))?.agentId || null;
+        (await readJsonFile(statePaths(stateDir).mainKey, null))?.agentId ||
+        null;
       const slot = vault.addAgentKeySlot(privateKeyPem, agentId);
       await vault.save();
-      stderr(`Added agent-key slot ${slot.id} for agent ${agentId || "(unknown)"}.`);
+      stderr(
+        `Added agent-key slot ${slot.id} for agent ${agentId || "(unknown)"}.`
+      );
       outputJson({ ok: true, slot: { id: slot.id, type: slot.type, agentId } });
     } else if (sub === "add-passkey") {
       let passkey;
       try {
-        passkey = await registerPasskey({ deviceLabel: flags["device-label"] || null });
+        passkey = await registerPasskey({
+          deviceLabel: flags["device-label"] || null,
+        });
       } catch (err) {
         return outputError(`passkey registration failed: ${err.message}`);
       }
@@ -1037,25 +1257,43 @@ async function cmdRekey(flags) {
         deviceLabel: passkey.deviceLabel,
       });
       await vault.save();
-      stderr(`Added passkey slot ${slot.id}${passkey.deviceLabel ? ` (${passkey.deviceLabel})` : ""}.`);
-      outputJson({ ok: true, slot: { id: slot.id, type: slot.type, credentialId: passkey.credentialId } });
+      stderr(
+        `Added passkey slot ${slot.id}${
+          passkey.deviceLabel ? ` (${passkey.deviceLabel})` : ""
+        }.`
+      );
+      outputJson({
+        ok: true,
+        slot: {
+          id: slot.id,
+          type: slot.type,
+          credentialId: passkey.credentialId,
+        },
+      });
     } else if (sub === "add-mobile") {
       const devicePubKey = flags["device-pubkey"];
       if (!devicePubKey) {
         return outputError(
-          "--device-pubkey <hex> required (P-256 enclave public key, X9.63 uncompressed: 04||X||Y)",
+          "--device-pubkey <hex> required (P-256 enclave public key, X9.63 uncompressed: 04||X||Y)"
         );
       }
       if (!/^04[0-9a-fA-F]{128}$/.test(devicePubKey)) {
         return outputError(
-          "--device-pubkey must be 130 hex chars starting with 04 (uncompressed P-256 point)",
+          "--device-pubkey must be 130 hex chars starting with 04 (uncompressed P-256 point)"
         );
       }
       const deviceId = flags["device-id"] || null;
       const slot = vault.addMobileSlot(devicePubKey, deviceId);
       await vault.save();
-      stderr(`Added mobile slot ${slot.id}${deviceId ? ` for device ${deviceId}` : ""}.`);
-      outputJson({ ok: true, slot: { id: slot.id, type: slot.type, deviceId } });
+      stderr(
+        `Added mobile slot ${slot.id}${
+          deviceId ? ` for device ${deviceId}` : ""
+        }.`
+      );
+      outputJson({
+        ok: true,
+        slot: { id: slot.id, type: slot.type, deviceId },
+      });
     } else if (sub === "add-owner-approval") {
       const stateDir = resolveStateDir(flags);
       const engine = new SignatureEngine({ baseDir: stateDir });
@@ -1063,14 +1301,18 @@ async function cmdRekey(flags) {
       const session = await engine.ensureValidSession();
       if (!session?.accessToken) {
         return outputError(
-          "No valid owner session. Run `agent-id-core auth` to bind an owner first.",
+          "No valid owner session. Run `agent-id-core auth` to bind an owner first."
         );
       }
-      const ssoBaseUrl = flags["sso-url"] || session.ssoBaseUrl || session.issuer;
+      const ssoBaseUrl =
+        flags["sso-url"] || session.ssoBaseUrl || session.issuer;
       if (!ssoBaseUrl) {
-        return outputError("Could not determine SSO base URL — pass --sso-url <URL>.");
+        return outputError(
+          "Could not determine SSO base URL — pass --sso-url <URL>."
+        );
       }
-      const providerAddress = flags["provider-address"] || session.providerAddress || null;
+      const providerAddress =
+        flags["provider-address"] || session.providerAddress || null;
 
       // The KEK lives only long enough to wrap the master key and hand a copy to
       // the SSO; it is zeroed below so neither the vault file nor this process
@@ -1083,10 +1325,17 @@ async function cmdRekey(flags) {
           agentPrivateKeyPem: main.privateKeyPem,
           secret: kek,
         });
-        const slot = vault.addOwnerApprovalSlot(kek, { keyRef, ssoBaseUrl, providerAddress });
+        const slot = vault.addOwnerApprovalSlot(kek, {
+          keyRef,
+          ssoBaseUrl,
+          providerAddress,
+        });
         await vault.save();
         stderr(`Added owner-approval slot ${slot.id} (key_ref ${keyRef}).`);
-        outputJson({ ok: true, slot: { id: slot.id, type: slot.type, keyRef } });
+        outputJson({
+          ok: true,
+          slot: { id: slot.id, type: slot.type, keyRef },
+        });
       } finally {
         kek.fill(0);
       }
@@ -1100,7 +1349,7 @@ async function cmdRekey(flags) {
       outputJson({ ok: true, removed: id });
     } else {
       return outputError(
-        `rekey subcommand required: add-passphrase | add-passkey | add-agent-key | add-mobile | add-owner-approval | remove-slot`,
+        `rekey subcommand required: add-passphrase | add-passkey | add-agent-key | add-mobile | add-owner-approval | remove-slot`
       );
     }
   } finally {
@@ -1141,13 +1390,14 @@ async function cmdMigrate(flags) {
     if (!flags["force"]) {
       return outputError(
         `Portable vault already exists at ${paths.vaultFile}. ` +
-          "Pass --force to re-run migration (will not overwrite existing slots).",
+          "Pass --force to re-run migration (will not overwrite existing slots)."
       );
     }
   }
 
   const privateKeyPem = await loadAgentPrivateKey(stateDir);
-  if (!privateKeyPem) return outputError("No agent key — cannot decrypt legacy vault.");
+  if (!privateKeyPem)
+    return outputError("No agent key — cannot decrypt legacy vault.");
 
   const legacy = await readLegacyVault(paths.vaultDir, privateKeyPem);
   if (legacy.length === 0) {
@@ -1158,14 +1408,14 @@ async function cmdMigrate(flags) {
 
   let passphrase = await resolvePassphrase(flags, { allowPrompt: false });
   if (!passphrase) {
-    if (!hasTty()) return outputError("Migration requires a passphrase for slot 0");
+    if (!hasTty())
+      return outputError("Migration requires a passphrase for slot 0");
     passphrase = promptNewPassphrase({
       prompt: "New vault passphrase (for portability): ",
       confirm: "Confirm: ",
     });
   }
-  const agentId =
-    (await readJsonFile(paths.mainKey, null))?.agentId || null;
+  const agentId = (await readJsonFile(paths.mainKey, null))?.agentId || null;
 
   await initVault({ stateDir, passphrase, privateKeyPem, agentId });
   const vault = await openVault({ stateDir, privateKeyPem });
@@ -1174,8 +1424,7 @@ async function cmdMigrate(flags) {
       // Legacy v4 records had no host allowlist; require migrate caller to
       // supply --default-domains, otherwise we tag them as "unrestricted"
       // so the proxy refuses to use them until the user attaches a domain.
-      const domains =
-        parseDomains({ domains: flags["default-domains"] }) || [];
+      const domains = parseDomains({ domains: flags["default-domains"] }) || [];
       vault.add({
         name: old.service,
         type: "bearer",
@@ -1190,7 +1439,7 @@ async function cmdMigrate(flags) {
       stderr(
         "WARNING: legacy records have no host allowlist. " +
           "Update each with `agent-id-vault add --name <N> --type bearer --domains <H> --value-env <V>` " +
-          "before the proxy will inject them.",
+          "before the proxy will inject them."
       );
     }
     // Rename old dir so a re-run notices it's done.
@@ -1232,7 +1481,7 @@ async function cmdExec() {
   if (sepIdx === -1) {
     return outputError(
       "exec needs a `--` separator before the command. " +
-        "Usage: exec --env VAR=cred.field | --file VAR=cred.field [more] -- <command> [args…]",
+        "Usage: exec --env VAR=cred.field | --file VAR=cred.field [more] -- <command> [args…]"
     );
   }
   const pre = rest.slice(0, sepIdx);
@@ -1256,22 +1505,32 @@ async function cmdExec() {
     }
   }
   if (mappings.length === 0) {
-    return outputError("exec needs at least one --env or --file VAR=cred.field mapping");
+    return outputError(
+      "exec needs at least one --env or --file VAR=cred.field mapping"
+    );
   }
 
   const specs = [];
   for (const m of mappings) {
     const eq = m.ref.indexOf("=");
-    if (eq <= 0) return outputError(`Bad --${m.kind} "${m.ref}" — expected VAR=cred.field`);
+    if (eq <= 0)
+      return outputError(
+        `Bad --${m.kind} "${m.ref}" — expected VAR=cred.field`
+      );
     const varName = m.ref.slice(0, eq);
     const ref = m.ref.slice(eq + 1);
     const dot = ref.lastIndexOf(".");
     if (dot <= 0 || dot === ref.length - 1) {
       return outputError(
-        `Bad --${m.kind} "${m.ref}" — expected VAR=cred.field (e.g. GIT_SSH_KEY=deploy-key.value)`,
+        `Bad --${m.kind} "${m.ref}" — expected VAR=cred.field (e.g. GIT_SSH_KEY=deploy-key.value)`
       );
     }
-    specs.push({ kind: m.kind, varName, credName: ref.slice(0, dot), field: ref.slice(dot + 1) });
+    specs.push({
+      kind: m.kind,
+      varName,
+      credName: ref.slice(0, dot),
+      field: ref.slice(dot + 1),
+    });
   }
 
   const flags = parseFlags(flagArgs);
@@ -1287,7 +1546,7 @@ async function cmdExec() {
       if (rec.exportable === false && SECRET_FIELDS.includes(s.field)) {
         return outputError(
           `Credential '${s.credName}' is sealed (generated in-vault); field ` +
-            `'${s.field}' cannot leave the vault. Use the proxy to exercise it.`,
+            `'${s.field}' cannot leave the vault. Use the proxy to exercise it.`
         );
       }
       // An access-restricted credential (ro, OR rw with deny rules) handed raw
@@ -1296,20 +1555,25 @@ async function cmdExec() {
       // proxy, so leaking the plaintext would make them theater.
       if (isAccessRestricted(rec) && SECRET_FIELDS.includes(s.field)) {
         return outputError(
-          `Credential '${s.credName}' is access-restricted (${describeAccess(rec)}); field ` +
+          `Credential '${s.credName}' is access-restricted (${describeAccess(
+            rec
+          )}); field ` +
             `'${s.field}' cannot be exported to a child process (that would bypass enforcement). ` +
-            "Use the proxy/browser, or ask the owner to run `set-access --access rw` (and clear rules).",
+            "Use the proxy/browser, or ask the owner to run `set-access --access rw` (and clear rules)."
         );
       }
       const value = rec[s.field];
       if (typeof value !== "string" || value.length === 0) {
-        return outputError(`Credential '${s.credName}' has no usable string field '${s.field}'`);
+        return outputError(
+          `Credential '${s.credName}' has no usable string field '${s.field}'`
+        );
       }
       if (s.kind === "file") {
         // mkdtemp makes a 0700 dir; the file is 0600. Same-uid isn't a boundary
         // (the agent could read the vault anyway) — this keeps the value out of
         // the transcript/argv and bounds its on-disk lifetime to the command.
-        if (!tmpDir) tmpDir = mkdtempSync(path.join(os.tmpdir(), "agent-id-exec-"));
+        if (!tmpDir)
+          tmpDir = mkdtempSync(path.join(os.tmpdir(), "agent-id-exec-"));
         const safe = s.varName.replace(/[^A-Za-z0-9._-]/g, "_") || "secret";
         const fp = path.join(tmpDir, safe);
         writeFileSync(fp, value, { mode: 0o600 });
@@ -1333,18 +1597,27 @@ async function cmdExec() {
     if (cleaned) return;
     cleaned = true;
     for (const fp of files) {
-      try { writeFileSync(fp, Buffer.alloc(statSync(fp).size, 0)); } catch {}
-      try { unlinkSync(fp); } catch {}
+      try {
+        writeFileSync(fp, Buffer.alloc(statSync(fp).size, 0));
+      } catch {}
+      try {
+        unlinkSync(fp);
+      } catch {}
     }
     if (tmpDir) {
-      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      try {
+        rmSync(tmpDir, { recursive: true, force: true });
+      } catch {}
     }
   };
 
   // Names + sources only — never the values.
   stderr(`Injecting ${injected.join(", ")} → ${cmdArgv.join(" ")}`);
 
-  const child = spawn(cmdArgv[0], cmdArgv.slice(1), { stdio: "inherit", env: childEnv });
+  const child = spawn(cmdArgv[0], cmdArgv.slice(1), {
+    stdio: "inherit",
+    env: childEnv,
+  });
   const forward = (sig) => {
     try {
       child.kill(sig);
@@ -1365,7 +1638,7 @@ async function cmdExec() {
     process.off("SIGINT", forward);
     process.off("SIGTERM", forward);
     cleanup();
-    process.exitCode = signal ? 1 : (code ?? 0);
+    process.exitCode = signal ? 1 : code ?? 0;
   });
 }
 
@@ -1398,6 +1671,7 @@ function printHelp() {
       "              mails/SMSes a code at sign-in (needs --otp interactive|totp)",
       "              driven by `agent-id-browser auto-login`, not the HTTP proxy",
       "  set-domains --name N --domains H[,H…]   replace the host allowlist",
+      "  set-otp --name N --otp none|interactive|totp   fix how a code is answered",
       "              a sign-in that redirects between subdomains needs them all",
       "  set-recipe --name N (--recipe '<JSON steps>' | --clear)",
       "              attach/replace the auto-login recipe on a login cred; steps are",
@@ -1433,7 +1707,7 @@ function printHelp() {
       "Types: " + CREDENTIAL_TYPES.join(", "),
       "Unlock: --passphrase-file F | --passphrase-env V | auto via agent-key | /dev/tty prompt",
       "Common: --state-dir <path>  (defaults to AGENT_ID_STATE_DIR or ~/.agent-id)",
-    ].join("\n"),
+    ].join("\n")
   );
 }
 
@@ -1453,6 +1727,7 @@ const commands = {
   "set-totp": cmdSetTotp,
   "set-recipe": cmdSetRecipe,
   "set-domains": cmdSetDomains,
+  "set-otp": cmdSetOtp,
   "set-access": cmdSetAccess,
   generate: cmdGenerate,
   show: cmdShow,
