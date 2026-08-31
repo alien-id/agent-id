@@ -1,7 +1,7 @@
 // Alien Agent ID — login-outcome classifier.
 //
 // After the sealed browser submits a login form, the page can be in one of a few
-// states. `looksLoggedOut` (session.mjs) is too coarse here: right after the
+// states. A coarse logged-out probe is not enough here: right after the
 // password step you are usually STILL on the auth host — entering a 2FA code —
 // which it would read as "logged out" for both "OTP required" and "wrong
 // password". This is a focused classifier over a snapshot of the page:

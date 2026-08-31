@@ -17,7 +17,7 @@
     "directory": "plugins/agent-id-browser"
   },
   "type": "module",
-  "description": "Universal browser automation with the profile sealed in the agent vault.",
+  "description": "Signs an agent into a service in the agent-browser, with the password going from the vault straight into the page.",
   "bin": {
     "agent-id-browser": "./bin/cli.mjs"
   },
@@ -26,18 +26,14 @@
   },
   "keywords": [
     "browser-automation",
-    "patchright",
     "credential-vault",
-    "agent-identity"
+    "agent-identity",
+    "auto-login"
   ],
   "author": "Alien Org <support@alien.org>",
   "license": "MIT",
   "dependencies": {
     "@alien-id/agent-id-core": "^7.3.1",
     "@alien-id/agent-id-vault": "^7.6.0"
-  },
-  "optionalDependencies": {
-    "patchright": "^1.61.0",
-    "werift": "0.24.2"
   }
 }

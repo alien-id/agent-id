@@ -30,24 +30,28 @@
 // after the fact with `agent-id-vault set-domains`, since a sign-in only reveals
 // which hosts it needs once it has been driven.
 //
-// The browser-driving functions take a `page` object (a patchright Page), so the
-// pure pieces (applyVars / stepNeedsOtp / runRecipe / resolveOtp-totp) unit-test
-// against a stub page with no real browser.
+// The browser-driving functions take a `page` object — lib/rpc-page.mjs, which
+// speaks to the agent-browser RPC port and offers the same handful of methods
+// this engine uses. So the pure pieces (applyVars / stepNeedsOtp / runRecipe /
+// resolveOtp-totp) still unit-test against a stub page with no real browser.
+//
+// Input is the browser's own: its `Session.dom.click` jitters inside the
+// element's box and its `Session.dom.type` sends a real key per character, so
+// the human cadence lives under this process rather than in it.
 
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
 import { assertHostAllowed, credentialHost, siteName } from "@alien-id/agent-id-vault/lib/store.mjs";
 import { classifyLogin, codeDestination } from "./login-detect.mjs";
-import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
 // Type a secret (password / OTP) with human cadence, guarding against a
 // keyboard/fill error that could echo the value — auto-login errors propagate to
 // the agent, so the raw error must never carry the secret. Mirrors the
-// session-server fill-secret guard.
+// same guard a secret-typing verb applies wherever one is offered.
 async function typeSecret(page, selector, value, opts = {}) {
   try {
-    await humanType(page, selector, value, opts);
+    await page.fill(selector, value, opts);
   } catch {
     throw new Error(`could not type into "${selector}" — element not visible/editable`);
   }
@@ -147,6 +151,18 @@ function stepCarriesSecret(step) {
   );
 }
 
+// The recipe action vocabulary mapped onto the page adapter. Injectable the way
+// it always was, so runRecipe's substitution and {otp}-laziness unit-test
+// against a recording driver with no browser at all.
+export const pageDriver = {
+  navigate: (page, url) => page.goto(url),
+  fill: (page, selector, value) => page.fill(selector, value),
+  type: (page, selector, value) => page.fill(selector, value),
+  click: (page, selector) => page.click(selector),
+  press: (page, selector, key) => page.press(selector, key),
+  wait: (page, ms) => page.waitForTimeout(ms),
+};
+
 /**
  * Execute recipe `steps` against a page. `{otp}` is resolved lazily via `getOtp()`
  * the first time a step needs it (so a recipe whose login fails before the OTP
@@ -157,12 +173,12 @@ function stepCarriesSecret(step) {
  * checked against it before the step runs.
  */
 // `driver` maps the action vocabulary to page interactions; it defaults to the
-// human-input driver (curved motion, key-by-key typing) and is injectable so the
-// mapping/{otp}-lazy-resolution logic unit-tests without a browser.
+// page driver above and is injectable so the mapping/{otp}-lazy-resolution
+// logic unit-tests without a browser.
 export async function runRecipe(
   page,
   steps,
-  { username, password, getOtp, domains, driver = humanDriver },
+  { username, password, getOtp, domains, driver = pageDriver },
 ) {
   if (!Array.isArray(domains)) {
     throw new Error("runRecipe requires the credential's `domains` allowlist");
@@ -520,7 +536,7 @@ async function submitCode(page, fieldSel) {
   for (const known of ["#submitButton", "#idSubmit_SAOTCC_Continue"]) {
     const button = page.locator(known).first();
     if ((await button.count()) && (await button.isVisible().catch(() => false))) {
-      await humanClick(page, known, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
+      await page.click(known, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
       return;
     }
   }
@@ -545,7 +561,7 @@ async function submitCode(page, fieldSel) {
       (await button.textContent({ timeout: SUBMIT_TIMEOUT }).catch(() => "")) || ""
     ).trim();
     if (!CODE_SUBMIT_TEXT_RE.test(label)) continue;
-    await humanClick(page, button, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
+    await button.click({ timeout: SUBMIT_TIMEOUT }).catch(() => {});
     return;
   }
   // Nothing to click: a single-field form, or a screen that submits on its own
@@ -578,7 +594,7 @@ async function detectMicrosoftFlow(page) {
 async function clickIfPresent(page, selector) {
   const loc = page.locator(selector).first();
   if (await loc.count()) {
-    await humanClick(page, selector, { timeout: 8000 }).catch(() => {});
+    await page.click(selector, { timeout: 8000 }).catch(() => {});
     return true;
   }
   return false;
@@ -589,7 +605,7 @@ async function clickIfPresent(page, selector) {
 async function fillWhenVisible(page, selector, value, { timeout = 15000, secret = false } = {}) {
   await page.waitForSelector(selector, { state: "visible", timeout }).catch(() => {});
   if (secret) await typeSecret(page, selector, value, { timeout });
-  else await humanType(page, selector, value, { timeout });
+  else await page.fill(selector, value, { timeout });
 }
 
 // Drive a Microsoft ADFS or Entra forms login: username → (Next) → password →
@@ -637,7 +653,7 @@ async function heuristicLogin(page, { username, password, passwordless }) {
     if ((await loc.count()) === 0) return false;
     if (!(await loc.isVisible().catch(() => false))) return false;
     if (secret) await typeSecret(page, sel, value);
-    else await humanType(page, sel, value);
+    else await page.fill(sel, value);
     return true;
   };
 
@@ -721,8 +737,9 @@ async function awaitDeviceConfirmation(page, cred, { log, settleMs, budgetMs }) 
 
 /**
  * Drive a full auto-login against `cred` (a `login` record). Returns
- * { ok, outcome, finalUrl }. Does NOT seal the profile — the caller does that
- * after closing the context. `page` is a patchright Page.
+ * { ok, outcome, finalUrl }. The browser keeps whatever session it ends up
+ * with; `page` is the adapter in lib/rpc-page.mjs, or any object offering the
+ * same handful of methods.
  */
 export async function autoLogin({
   page,

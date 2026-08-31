@@ -2,6 +2,12 @@
 
 _Last updated: 2026-06-22 · branch: `feat/vault-proxy-mvp`_
 
+> **Superseded.** A historical note, kept for the reasoning that led here.
+> The browser is no longer driven in-process with a bundled engine and a
+> vault-sealed profile: it is a separate process reached over an RPC port,
+> holding its own profile, and this plugin only signs it in. See
+> `plugins/agent-id-browser/skills/agent-id-browser/SKILL.md`.
+
 ## Where we landed
 
 For authenticated access to sites that block API/OAuth/cookie approaches (notably
