@@ -283,6 +283,19 @@ async function cmdInit(flags) {
 const CARD_TITLE = "Enter it securely";
 
 function formDescription({ name, type, loginUrl, domains, access, passwordless }) {
+  // A card gets its own sentence, and skips the `ro` grant below, because that
+  // grant reads here as the opposite of what it means. On a login it says the agent
+  // may read the account and not change it. On the screen where somebody is typing
+  // a card number, "the agent can read this" is the thing they are most afraid of —
+  // and it would sit directly above a security note promising that it never sees
+  // the value. The stored name is left out for the reason given above CARD_TITLE:
+  // it is a key the agent invented, and this is not where it belongs.
+  if (type === "card") {
+    return (
+      "A payment card for the agent to pay with. It asks you to approve every " +
+      "payment before using it — the amount and the site, every time."
+    );
+  }
   const site = siteName(credentialHost({ loginUrl, domains }));
   const lead = type === "login"
     ? `${site ? `${site} sign-in` : `Sign-in for ${name}`}. You type it on a sealed screen.`

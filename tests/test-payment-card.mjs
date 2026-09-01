@@ -4,16 +4,13 @@
 // is validated against, and the 3-D Secure challenge card the owner answers.
 // No browser and no vault are opened.
 //
-// The five schema tests here are RED until two edits land in
-// plugins/agent-id-vault/lib/store.mjs — `case "card"` calling validateCardFields
-// inside validateRecord, and the four card fields inside SECRET_FIELDS. They are
-// written first on purpose: they are the acceptance criteria for that wiring, and
-// a card whose fields are missing from SECRET_FIELDS survives an idle lock.
-//
 // Run: node --test tests/test-payment-card.mjs
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../plugins/agent-id-vault/lib/store.mjs";
 import {
@@ -77,6 +74,38 @@ test("a card missing any field is not a card", () => {
     delete incomplete[field];
     assert.throws(() => validateRecord(incomplete), new RegExp(field));
   }
+});
+
+// The screen where somebody types a card number is the one place trust is the
+// whole point, so what it says is worth pinning. The `ro` grant sentence used to
+// land here — "the agent can read this, never change it" — directly above a
+// security note promising the agent never sees the value.
+test("the card form does not tell the owner the agent can read their card", async () => {
+  const cli = await readFile(
+    new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url),
+    "utf8",
+  );
+  const source = cli.slice(
+    cli.indexOf("function formDescription"),
+    cli.indexOf("function formFieldsForType"),
+  );
+  const scratch = path.join(await mkdtemp(path.join(os.tmpdir(), "card-copy-")), "fd.mjs");
+  await writeFile(
+    scratch,
+    "const siteName=()=>null, credentialHost=()=>null;\n" + source + "\nexport default formDescription;\n",
+  );
+  const formDescription = (await import(`file://${scratch}`)).default;
+
+  const card = formDescription({ name: "visa", type: "card", domains: [], access: "ro" });
+  assert.ok(!/can read this/i.test(card), card);
+  assert.ok(!/\bvisa\b/.test(card), "the name the agent invented is not the owner's business");
+  assert.match(card, /approve every payment/i);
+
+  // And the sentence is still there for a login, where it means what it says.
+  const login = formDescription({ name: "booking", type: "login", domains: ["booking.com"], access: "ro" });
+  assert.match(login, /can read this, never change it/);
+
+  await rm(path.dirname(scratch), { recursive: true, force: true });
 });
 
 test("the challenge card quotes the payment, never the page", () => {
