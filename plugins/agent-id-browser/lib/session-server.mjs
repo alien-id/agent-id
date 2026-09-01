@@ -1646,6 +1646,22 @@ export async function dispatch(state, msg, policy = null) {
           // the code is and where it was sent. Without this the card raised by
           // hand is the same card with both facts missing.
           const hints = await otpCardHints(target);
+          // Why a row was or was not found, in the one place it matters: the
+          // predicate groups boxes by their parent, and a site that wraps each box
+          // in its own element defeats that silently.
+          const shape = await target
+            .evaluate((sel) => {
+              const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
+              const found = Array.from(document.querySelectorAll(sel)).filter(visible);
+              const groups = new Map();
+              for (const e of found) {
+                const key = e.parentElement;
+                groups.set(key, (groups.get(key) || 0) + 1);
+              }
+              return `candidates=${found.length} groups=${[...groups.values()].join(",") || "-"}`;
+            }, 'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]')
+            .catch(() => "shape unavailable");
+          process.stderr.write(`fill-otp: row shape ${shape}\n`);
           process.stderr.write(
             `fill-otp: code hints length=${hints.length ?? "?"} destination=${
               hints.destination ?? "?"

@@ -146,6 +146,20 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
       ).join("")}</form>`);
       return;
     }
+    if (url.pathname === "/otp-boxes-wrapped") {
+      // Booking.com's actual shape, measured on a live sign-in:
+      // `candidates=6 groups=1,1,1,1,1,1` — every box wrapped in an element of
+      // its own, so a row grouped by the direct parent is six groups of one and
+      // no row at all. The card went out with no cell count on the very site
+      // this was built for.
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form><div class=row>${Array.from(
+        { length: 6 },
+        (_, i) => `<div class=cell><input name=d${i} type=text inputmode=numeric></div>`,
+      ).join("")}</div></form>`);
+      return;
+    }
     if (url.pathname === "/otp-boxes-unmarked") {
       // What Booking.com actually renders: a row of boxes with no maxlength at
       // all, constrained in script. Counting only maxlength="1" missed it — on
@@ -791,6 +805,10 @@ test(
           destination: null,
         });
         assert.deepEqual(await hintsAt("/otp-boxes-unmarked"), {
+          length: 6,
+          destination: null,
+        });
+        assert.deepEqual(await hintsAt("/otp-boxes-wrapped"), {
           length: 6,
           destination: null,
         });

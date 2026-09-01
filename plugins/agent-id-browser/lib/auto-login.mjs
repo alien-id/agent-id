@@ -560,8 +560,11 @@ const OTP_ROW_MAX = 8;
 // with that many cells is the one failure this screen cannot recover from. What
 // separates a code row from a form that merely counts to four:
 //
-//   - one container. Boxes of a row are siblings; a form's fields are not
-//     gathered under a parent of their own.
+//   - one container. Boxes of a row sit together under a parent of their own; a
+//     form's fields do not. Plenty of sites wrap each box in an element of its
+//     own, so the container is looked for one level up as well — Booking.com
+//     reports `candidates=6 groups=1,1,1,1,1,1` under the direct parent, and its
+//     row is invisible to anything that only looks there.
 //   - nothing else in it. A container holding a boxish input beside an ordinary
 //     one is a form, not a row.
 //   - uniform. Every box of a row is the same shape — same `type`, same
@@ -596,12 +599,17 @@ function otpRowInPage({ selector, min, max, attr, codeCopy }) {
   const candidates = Array.from(document.querySelectorAll(selector)).filter(
     visible
   );
+  // Grouped by the direct parent first, then by the grandparent — a wrapped box
+  // has a parent all to itself, and the row only appears one level up. The
+  // checks below are what keep the wider net honest: a grandparent that holds a
+  // form's fields fails "nothing else in it" the same way a parent would.
   const byParent = new Map();
   for (const field of candidates) {
-    const parent = field.parentElement;
-    if (!parent) continue;
-    if (!byParent.has(parent)) byParent.set(parent, []);
-    byParent.get(parent).push(field);
+    for (const container of [field.parentElement, field.parentElement?.parentElement]) {
+      if (!container) continue;
+      if (!byParent.has(container)) byParent.set(container, []);
+      byParent.get(container).push(field);
+    }
   }
 
   for (const [parent, group] of byParent) {
@@ -613,6 +621,9 @@ function otpRowInPage({ selector, min, max, attr, codeCopy }) {
       visible
     );
     if (siblings.length !== group.length) continue;
+    // A wrapper contributes its box to both its own group and its parent's, so
+    // the same element can appear twice in one list. Count it once.
+    if (new Set(group).size !== group.length) continue;
     const [first] = group;
     const uniform = group.every(
       (e) => e.type === first.type && declared(e) === declared(first)
