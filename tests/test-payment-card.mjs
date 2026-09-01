@@ -16,7 +16,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../plugins/agent-id-vault/lib/store.mjs";
-import { codeFieldLength, threeDsCardSpec } from "../plugins/agent-id-browser/lib/session-server.mjs";
+import {
+  assertCardFieldShape,
+  cardFieldShape,
+  codeFieldLength,
+  threeDsCardSpec,
+} from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 // A Luhn-valid test number (the Visa test PAN every processor publishes).
 const GOOD_PAN = "4242424242424242";
@@ -91,6 +96,101 @@ test("the challenge card still stands up when the payment is not quotable", () =
 
   assert.match(spec.description, /your bank sent a code/i);
   assert.ok(!("placeholder" in spec.fields[0]), "no length means a plain field, not guessed cells");
+});
+
+// The refs come from the agent and the host check passes for the whole merchant
+// page, so this is the only thing standing between a prompt injection and a card
+// number in a box the page reads.
+const cardInput = (overrides = {}) => ({
+  tag: "input",
+  inputType: "text",
+  autocomplete: "cc-number",
+  label: "cardnumber",
+  maxLength: 19,
+  isContentEditable: false,
+  hasValue: false,
+  ...overrides,
+});
+
+test("a card field must be an input, not a box that merely accepts text", () => {
+  assert.doesNotThrow(() => assertCardFieldShape("number", cardInput()));
+  assert.throws(() => assertCardFieldShape("number", cardInput({ tag: "textarea" })), /not a card input/);
+  assert.throws(
+    () => assertCardFieldShape("number", cardInput({ tag: "div", isContentEditable: true })),
+    /not a card input/,
+  );
+  assert.throws(() => assertCardFieldShape("number", cardInput({ inputType: "search" })), /no card field is/);
+  assert.throws(() => assertCardFieldShape("number", cardInput({ inputType: "email" })), /no card field is/);
+});
+
+test("the notes-to-seller box is refused however it is dressed up", () => {
+  // A plain text input on the real checkout, with nothing saying it is a card
+  // field. This is the shape an injection aims at, and the host check passes.
+  assert.throws(
+    () =>
+      assertCardFieldShape(
+        "number",
+        cardInput({ autocomplete: "", label: "order notes for the seller", maxLength: null }),
+      ),
+    /does not identify itself/,
+  );
+});
+
+test("a field too short for the value is not the field for it", () => {
+  assert.throws(() => assertCardFieldShape("number", cardInput({ maxLength: 3 })), /too few for it/);
+  assert.doesNotThrow(() => assertCardFieldShape("security_code", cardInput({ autocomplete: "cc-csc", label: "cvc", maxLength: 3 })));
+});
+
+test("a field that already holds something is left alone", () => {
+  assert.throws(() => assertCardFieldShape("number", cardInput({ hasValue: true })), /already has a value/);
+});
+
+test("an honest form is accepted by its own words when it sets no autocomplete", () => {
+  for (const [field, label] of [
+    ["number", "ccNumber"],
+    ["expiry", "card-expiration"],
+    ["security_code", "CVV"],
+    ["holder", "nameOnCard"],
+  ]) {
+    assert.doesNotThrow(
+      () => assertCardFieldShape(field, cardInput({ autocomplete: "", label, maxLength: null })),
+      `${field} via label ${label}`,
+    );
+  }
+});
+
+test("the provider's own frame is accepted by its autocomplete", () => {
+  for (const [field, autocomplete] of [
+    ["number", "cc-number"],
+    ["expiry", "cc-exp"],
+    ["security_code", "cc-csc"],
+    ["holder", "cc-name"],
+  ]) {
+    assert.doesNotThrow(
+      () => assertCardFieldShape(field, cardInput({ autocomplete, label: "", maxLength: null })),
+      `${field} via autocomplete ${autocomplete}`,
+    );
+  }
+});
+
+test("the element is read in one round trip, attributes and all", async () => {
+  const el = {
+    tagName: "INPUT",
+    id: "card-number",
+    isContentEditable: false,
+    value: "",
+    getAttribute: (name) =>
+      ({ type: "tel", autocomplete: "cc-number", maxlength: "19", name: "cardnumber" })[name] ?? null,
+  };
+  const target = { locator: () => ({ evaluate: async (fn) => fn(el) }) };
+
+  const shape = await cardFieldShape(target, "e1");
+  assert.equal(shape.tag, "input");
+  assert.equal(shape.inputType, "tel");
+  assert.equal(shape.autocomplete, "cc-number");
+  assert.equal(shape.maxLength, 19);
+  assert.equal(shape.hasValue, false);
+  assert.doesNotThrow(() => assertCardFieldShape("number", shape));
 });
 
 test("only a length the screen can draw cells for is passed on", async () => {

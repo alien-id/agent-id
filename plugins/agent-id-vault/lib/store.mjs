@@ -302,6 +302,13 @@ export function validateRecord(rec) {
       validateToAllowlist(rec);
       break;
     }
+    case "card": {
+      // Everything a card-not-present payment needs. A read of this record is a
+      // complete instrument, which is why the payment path never returns a value
+      // and why an owner-approved intent — not the vault — is what gates a spend.
+      validateCardFields(rec);
+      break;
+    }
     case "browser-profile": {
       // Used by `agent-id-browser`, NOT the HTTP proxy. The vault holds only the
       // data-encryption key (DEK) + the sidecar filename; the actual browser
@@ -458,6 +465,9 @@ export function listMetadata(payload) {
     // so an agent can see which profile is which without opening the record.
     ...(c.account ? { account: c.account } : {}),
     ...(c.type === "browser-profile" ? { headless: c.headless !== false } : {}),
+    // card: the last four, so an approval card can name which instrument is
+    // about to be charged. The only part of a number that leaves the vault.
+    ...(c.type === "card" ? { cardLast4: cardLast4(c) } : {}),
     // login: the non-secret shape of the sign-in, so a caller can tell what a
     // stored credential will ask for before driving it — whether a password
     // exists at all, how a code is answered, where to start, and whether an
@@ -502,6 +512,10 @@ export const SECRET_FIELDS = Object.freeze([
   "privateKey", // evm-keypair
   "dek", // browser-profile (data-encryption key for the sealed profile)
   "totpSecret", // login (the stored 2FA seed; username + password already listed above)
+  "cardNumber",
+  "cardExpiry",
+  "cardSecurityCode",
+  "cardholderName", // card — every field of one, so none of it survives a lock
 ]);
 
 // Best-effort scrub of decrypted secret material when the vault locks. JS

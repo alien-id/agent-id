@@ -642,6 +642,108 @@ export const SECRET_TAINT_ATTR = "data-aib-secret";
 // show-password toggle flips a password field to type=text, so a type-only test
 // misses them. Best-effort: if the site has already swapped the node out there
 // is nothing (and no value) left to tag.
+// ─── Where a card may be typed ────────────────────────────────────────────────
+//
+// The element refs come from the agent, and the host check passes for the whole
+// merchant page — so without this, a prompt-injected agent points the number at a
+// "notes to seller" box on the real checkout and the page keeps it.
+// markSecretField stops the AGENT reading a value back; it does not stop the page
+// that owns the field. So the target must look like the thing it claims to be,
+// checked BEFORE the vault is opened.
+//
+// Fail closed on what is unambiguously wrong, then require one positive signal.
+// Deliberately not "autocomplete must be cc-*": provider frames set it, plenty of
+// merchant-hosted forms do not, and a rule that refuses every honest form is a
+// rule that gets widened.
+const CARD_FIELD_SIGNALS = {
+  number: {
+    autocomplete: ["cc-number"],
+    words: ["cardnumber", "card-number", "card_number", "ccnumber", "pan"],
+    minLength: 12,
+  },
+  expiry: {
+    autocomplete: ["cc-exp", "cc-exp-month", "cc-exp-year"],
+    words: ["exp", "expiry", "expiration", "mmyy"],
+    minLength: 4,
+  },
+  security_code: {
+    autocomplete: ["cc-csc"],
+    words: ["cvc", "cvv", "csc", "cid", "security"],
+    minLength: 3,
+  },
+  holder: {
+    autocomplete: ["cc-name", "cc-given-name", "cc-family-name", "name"],
+    words: ["holder", "cardname", "card-name", "nameoncard", "name_on_card"],
+    minLength: 2,
+  },
+};
+
+// Input types a card value can legitimately go into. `search` and `email` are
+// absent on purpose — those are the shapes of the boxes an injection aims at.
+const CARD_INPUT_TYPES = new Set(["", "text", "tel", "number", "password"]);
+
+// Everything the check needs about the element, in one round trip.
+export async function cardFieldShape(target, ref) {
+  return target.locator(sel(ref)).evaluate((el) => ({
+    tag: el.tagName.toLowerCase(),
+    inputType: String(el.getAttribute("type") || "").toLowerCase(),
+    autocomplete: String(el.getAttribute("autocomplete") || "").toLowerCase().trim(),
+    label: [
+      el.getAttribute("name"),
+      el.id,
+      el.getAttribute("aria-label"),
+      el.getAttribute("placeholder"),
+      el.getAttribute("data-elements-stable-field-name"),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase(),
+    maxLength: Number(el.getAttribute("maxlength")) || null,
+    isContentEditable: el.isContentEditable === true,
+    hasValue: "value" in el && !!el.value,
+  }));
+}
+
+export function assertCardFieldShape(field, shape) {
+  const signals = CARD_FIELD_SIGNALS[field];
+  if (!signals) throw new Error(`fill-card: unknown card field "${field}"`);
+  const where = `the element given for "${field}"`;
+
+  if (shape.tag !== "input" || shape.isContentEditable) {
+    throw new Error(`fill-card: ${where} is a <${shape.tag}>, not a card input — nothing was typed`);
+  }
+  if (!CARD_INPUT_TYPES.has(shape.inputType)) {
+    throw new Error(
+      `fill-card: ${where} is type="${shape.inputType}", which no card field is — nothing was typed`,
+    );
+  }
+  // A field that already holds something is not the empty box that was
+  // snapshotted, and overwriting it destroys whatever the owner can see there.
+  if (shape.hasValue) {
+    throw new Error(`fill-card: ${where} already has a value — nothing was typed`);
+  }
+  // Too short to hold the value means it is not the field for it, whatever it is
+  // called: a three-character box is not where a card number goes.
+  if (shape.maxLength != null && shape.maxLength < signals.minLength) {
+    throw new Error(
+      `fill-card: ${where} takes at most ${shape.maxLength} characters, too few for it — nothing was typed`,
+    );
+  }
+  // Lowercased here as well as in cardFieldShape: this function is the guard, and
+  // a guard that depends on its caller having normalised the input is a guard with
+  // a way around it.
+  const autocomplete = String(shape.autocomplete || "").toLowerCase();
+  const label = String(shape.label || "").toLowerCase().replace(/\s+/g, "");
+  const named = autocomplete.split(/\s+/).some((token) => signals.autocomplete.includes(token));
+  const described = signals.words.some((word) => label.includes(word.replace(/[-_]/g, "")));
+  if (!named && !described) {
+    throw new Error(
+      `fill-card: ${where} does not identify itself as one (autocomplete="${autocomplete}") — ` +
+        "re-snapshot the form, or hand the browser to the owner. Nothing was typed",
+    );
+  }
+}
+
 // How many characters the challenge input takes, when the page says so. Read off
 // the element rather than guessed: the screen draws one cell per character and
 // submits when they fill, so a wrong count is worse than none — too few truncate
@@ -1373,6 +1475,91 @@ export async function dispatch(state, msg, policy = null) {
       } finally {
         state.stream?.resume();
       }
+    }
+    case "fill-card": {
+      // A stored card typed into a checkout: all four fields, one blackout, no
+      // value returned and none logged. Whether this payment may happen at all is
+      // not decided here — lethe holds the owner-approved intent and has already
+      // spent it — but the merchant the owner approved is re-checked against the
+      // page THIS process can see, because a host the caller passes is a claim
+      // and page.url() is state.
+      const credName = String(p.cred || "");
+      if (!credName) throw new Error("fill-card needs a --cred");
+      const approvedHost = String(p.merchantHost || "");
+      if (!approvedHost) throw new Error("fill-card needs a --merchant-host");
+      const refs = p.refs && typeof p.refs === "object" ? p.refs : null;
+      if (!refs) throw new Error("fill-card needs --refs {number, expiry, security_code, holder}");
+      const plan = [
+        ["number", "cardNumber"],
+        ["expiry", "cardExpiry"],
+        ["security_code", "cardSecurityCode"],
+        ["holder", "cardholderName"],
+      ].map(([key, field]) => {
+        const ref = String(refs[key] || "").trim();
+        // All four or none: a half-filled checkout cannot be told from a filled
+        // one by anything downstream, and the owner's approval is spent either way.
+        if (!ref) throw new Error(`fill-card: refs.${key} is required — snapshot the form and pass all four`);
+        return { key, field, ref };
+      });
+      const pageHost = hostOfUrl(page.url());
+      if (pageHost !== approvedHost) {
+        throw new Error(
+          `fill-card: the owner approved paying at ${approvedHost}, but this session is on ${pageHost || "about:blank"} — nothing was typed`,
+        );
+      }
+      state.stream?.suspend();
+      try {
+        const vault = await openVaultAgentKey(msg._stateDir);
+        try {
+          const rec = vault.get(credName);
+          if (!rec) throw new Error(`no credential "${credName}"`);
+          if (rec.type !== "card") throw new Error(`"${credName}" is not a card credential`);
+          // The grant. A card's allowlist starts empty and gains a host each time
+          // the owner approves a payment there, so this is the moment it is known.
+          if (!Array.isArray(rec.domains) || !rec.domains.includes(approvedHost)) {
+            vault.add({ ...rec, domains: [...(rec.domains || []), approvedHost] });
+            await vault.save();
+          }
+          for (const { key, field, ref } of plan) {
+            assertFillAllowed(vault.get(credName), pageHost, field);
+            // Unlike fill-secret, the FRAME's origin is not required to be on the
+            // allowlist: a card form is normally the payment provider's iframe on
+            // the merchant's page, so demanding it would refuse the ordinary case.
+            // What stands in its place is two checks — the top page is the exact
+            // host the owner approved, and the element itself has to look like the
+            // field it is claimed to be. Without the second one the refs, which
+            // come from the agent, choose where the number lands inside a page the
+            // owner did approve: a "notes to seller" box on the real checkout
+            // passes the host check and keeps the value. Read the shape BEFORE the
+            // value, so a target that fails never causes a read.
+            const target = frameForRef(state, ref);
+            assertCardFieldShape(key, await cardFieldShape(target, ref));
+            const value = vault.get(credName)[field];
+            if (typeof value !== "string" || !value) {
+              throw new Error(`"${credName}.${field}" is not a usable string field`);
+            }
+            try {
+              await humanType(page, sel(ref), value, {
+                timeout: ACTION_TIMEOUT,
+                submit: false,
+                root: target,
+              });
+            } catch {
+              // Never let the raw error escape: a fill error can echo the value.
+              throw new Error(`fill-card: could not fill "${ref}" — element not visible/editable (re-snapshot and ask for a fresh approval)`);
+            }
+            await markSecretField(target, sel(ref));
+          }
+          if (p.submit) {
+            await page.keyboard.press("Enter").catch(() => {});
+          }
+        } finally {
+          vault.lock();
+        }
+      } finally {
+        state.stream?.resume();
+      }
+      return { filled: plan.map((step) => step.ref) };
     }
     case "fill-3ds-code": {
       // The bank's own challenge code, after a payment. No vault is opened and no
