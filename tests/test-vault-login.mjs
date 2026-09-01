@@ -16,15 +16,30 @@ import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 
-import { listMetadata, validateRecord } from "../plugins/agent-id-vault/lib/store.mjs";
+import {
+  listMetadata,
+  loginOtpMode,
+  LOGIN_OTP_MODES,
+  validateRecord,
+} from "../plugins/agent-id-vault/lib/store.mjs";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
-import { writeJsonFile, statePaths } from "../plugins/agent-id-core/lib/state.mjs";
+import {
+  writeJsonFile,
+  statePaths,
+} from "../plugins/agent-id-core/lib/state.mjs";
 import { fingerprintPublicKeyPem } from "../plugins/agent-id-core/lib/crypto.mjs";
 
 const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url).pathname;
 
 function loginRec(over = {}) {
-  return { name: "demo", type: "login", domains: ["example.com"], username: "u", password: "p", ...over };
+  return {
+    name: "demo",
+    type: "login",
+    domains: ["example.com"],
+    username: "u",
+    password: "p",
+    ...over,
+  };
 }
 
 async function makeVault(dir) {
@@ -62,36 +77,93 @@ function waitForUrl(child) {
 
 // ─── schema ───────────────────────────────────────────────────────────────────────
 
-test("validateRecord: a valid login passes (otp defaults to none)", () => {
+test("validateRecord: a valid login passes (otp defaults to interactive)", () => {
   assert.doesNotThrow(() => validateRecord(loginRec()));
   assert.doesNotThrow(() => validateRecord(loginRec({ otp: "none" })));
   assert.doesNotThrow(() => validateRecord(loginRec({ otp: "interactive" })));
   assert.doesNotThrow(() => validateRecord(loginRec({ loginUrl: "https://example.com/login" })));
 });
 
+test("loginOtpMode: one answer for a silent field, wherever it is read", () => {
+  // The defect this closes: `add` wrote `interactive` for a silent flag while
+  // validateRecord and listMetadata each read a silent field as `none`, so one
+  // field meant three things and `vault list` told the agent a credential had no
+  // codes for a sign-in that would raise a card.
+  assert.equal(loginOtpMode({}), "interactive");
+  assert.equal(loginOtpMode({ otp: null }), "interactive");
+  assert.equal(loginOtpMode({ otp: "" }), "interactive");
+  assert.equal(loginOtpMode(undefined), "interactive");
+  // A stated mode is never reinterpreted — including the one the default is not.
+  assert.equal(loginOtpMode({ otp: "none" }), "none");
+  assert.equal(loginOtpMode({ otp: "totp" }), "totp");
+  assert.equal(loginOtpMode({ otp: "interactive" }), "interactive");
+  // Whatever it resolves to is a mode the vault accepts, so a silent record can
+  // never validate into a value the enum does not hold.
+  assert.ok(LOGIN_OTP_MODES.includes(loginOtpMode({})));
+});
+
+test("listMetadata reports the same mode validateRecord enforced", () => {
+  // These two disagreeing is what let a card-raising credential be reported as
+  // having no codes, so they are pinned together rather than one at a time.
+  const silent = loginRec();
+  delete silent.otp;
+  assert.doesNotThrow(() => validateRecord(silent));
+  const [meta] = listMetadata({ credentials: [silent] });
+  assert.equal(meta.otp, loginOtpMode(silent));
+  assert.equal(meta.otp, "interactive");
+});
+
 test("validateRecord: login requires username and password", () => {
-  assert.throws(() => validateRecord(loginRec({ password: "" })), /password.*required/i);
   assert.throws(
-    () => validateRecord({ name: "demo", type: "login", domains: ["x"], password: "p" }),
-    /username.*required/i,
+    () => validateRecord(loginRec({ password: "" })),
+    /password.*required/i
+  );
+  assert.throws(
+    () =>
+      validateRecord({
+        name: "demo",
+        type: "login",
+        domains: ["x"],
+        password: "p",
+      }),
+    /username.*required/i
   );
 });
 
 // ─── passwordless ─────────────────────────────────────────────────────────────────
 
 test("validateRecord: a passwordless login needs no password, but still needs a code step", () => {
-  const pwless = { name: "demo", type: "login", domains: ["x"], username: "u", passwordless: true };
+  const pwless = {
+    name: "demo",
+    type: "login",
+    domains: ["x"],
+    username: "u",
+    passwordless: true,
+  };
   assert.doesNotThrow(() => validateRecord({ ...pwless, otp: "interactive" }));
   assert.doesNotThrow(() =>
-    validateRecord({ ...pwless, otp: "totp", totpSecret: "GEZDGNBVGY3TQOJQ" }),
+    validateRecord({ ...pwless, otp: "totp", totpSecret: "GEZDGNBVGY3TQOJQ" })
   );
-  // Nothing to sign in with: no password and no code.
-  assert.throws(() => validateRecord({ ...pwless, otp: "none" }), /needs otp=interactive or totp/i);
-  assert.throws(() => validateRecord(pwless), /needs otp=interactive or totp/i);
+  // Nothing to sign in with: no password and, said outright, no code either.
+  assert.throws(
+    () => validateRecord({ ...pwless, otp: "none" }),
+    /needs otp=interactive or totp/i
+  );
+  // Silence is not that claim. A missing `otp` resolves to `interactive` —
+  // identifier plus a mailed code, the commonest passwordless shape — so the
+  // record stands. Only an explicit `none` contradicts `passwordless`.
+  assert.doesNotThrow(() => validateRecord(pwless));
   // The username is still mandatory — it is what gets submitted.
   assert.throws(
-    () => validateRecord({ name: "demo", type: "login", domains: ["x"], passwordless: true, otp: "interactive" }),
-    /username.*required/i,
+    () =>
+      validateRecord({
+        name: "demo",
+        type: "login",
+        domains: ["x"],
+        passwordless: true,
+        otp: "interactive",
+      }),
+    /username.*required/i
   );
 });
 
@@ -100,7 +172,13 @@ test("validateRecord: password + an e-mailed code stays expressible (the axes ar
 });
 
 test("validateRecord: a stored login predating `passwordless` is still valid", () => {
-  const legacy = { name: "demo", type: "login", domains: ["x"], username: "u", password: "p" };
+  const legacy = {
+    name: "demo",
+    type: "login",
+    domains: ["x"],
+    username: "u",
+    password: "p",
+  };
   assert.doesNotThrow(() => validateRecord(legacy));
 });
 
@@ -114,8 +192,8 @@ test("validateRecord: a recipe is checked against the action vocabulary on the w
         { action: "fill", selector: "#u", value: "{username}" },
         { action: "click", selector: "#go" },
         { action: "wait", ms: 500 },
-      ]),
-    ),
+      ])
+    )
   );
   assert.throws(() => validateRecord(withRecipe([{ action: "frobnicate" }])), /must be one of/i);
   assert.throws(() => validateRecord(withRecipe(["fill #u"])), /step 0 must be an object/i);
@@ -129,7 +207,7 @@ test("validateRecord: rejects a bad otp mode", () => {
 test("validateRecord: otp=totp requires a totpSecret", () => {
   assert.throws(() => validateRecord(loginRec({ otp: "totp" })), /totpSecret.*required/i);
   assert.doesNotThrow(() =>
-    validateRecord(loginRec({ otp: "totp", totpSecret: "GEZDGNBVGY3TQOJQ" })),
+    validateRecord(loginRec({ otp: "totp", totpSecret: "GEZDGNBVGY3TQOJQ" }))
   );
 });
 
@@ -154,7 +232,13 @@ test("add --type login --form stores username/password/totpSecret; nothing leaks
         "--otp", "totp", "--login-url", "https://example.com/login",
         "--form", "--state-dir", dir,
       ],
-      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1", AGENT_ID_SECURE_PROMPT: "browser" } },
+      {
+        env: {
+          ...process.env,
+          AGENT_ID_NO_BROWSER: "1",
+          AGENT_ID_SECURE_PROMPT: "browser",
+        },
+      }
     );
     let stdout = "";
     let stderr = "";
@@ -165,7 +249,12 @@ test("add --type login --form stores username/password/totpSecret; nothing leaks
     const token = u.searchParams.get("t");
     const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
       method: "POST",
-      body: new URLSearchParams({ _token: token, username: USER, password: PW, totpSecret: SEED }),
+      body: new URLSearchParams({
+        _token: token,
+        username: USER,
+        password: PW,
+        totpSecret: SEED,
+      }),
     });
     assert.equal(res.status, 200);
 
@@ -206,7 +295,13 @@ test("add --type login --passwordless --form shows a single identifier field, an
         "--login-url", "https://account.example.com/sign-in",
         "--form", "--state-dir", dir,
       ],
-      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1", AGENT_ID_SECURE_PROMPT: "browser" } },
+      {
+        env: {
+          ...process.env,
+          AGENT_ID_NO_BROWSER: "1",
+          AGENT_ID_SECURE_PROMPT: "browser",
+        },
+      }
     );
     let stdout = "";
     let stderr = "";
@@ -252,8 +347,21 @@ test("add --type login without --domains or --login-url is refused instead of mi
     await makeVault(dir);
     const child = spawn(
       "node",
-      [CLI, "add", "--name", "x", "--type", "login", "--username", "u", "--password", "p", "--state-dir", dir],
-      { env: { ...process.env } },
+      [
+        CLI,
+        "add",
+        "--name",
+        "x",
+        "--type",
+        "login",
+        "--username",
+        "u",
+        "--password",
+        "p",
+        "--state-dir",
+        dir,
+      ],
+      { env: { ...process.env } }
     );
     let stdout = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -281,8 +389,17 @@ test("set-totp attaches a TOTP seed (otpauth URI) to an existing interactive log
       "otpauth://totp/Demo:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6";
     const child = spawn(
       "node",
-      [CLI, "set-totp", "--name", "demo", "--seed-env", "SEED_URI", "--state-dir", dir],
-      { env: { ...process.env, SEED_URI } },
+      [
+        CLI,
+        "set-totp",
+        "--name",
+        "demo",
+        "--seed-env",
+        "SEED_URI",
+        "--state-dir",
+        dir,
+      ],
+      { env: { ...process.env, SEED_URI } }
     );
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));
@@ -315,11 +432,23 @@ test("set-recipe attaches a recipe to an existing login and re-validates its ste
     const RECIPE = JSON.stringify([
       { action: "fill", selector: "input[type=email]", value: "{username}" },
       { action: "press", selector: "input[type=email]", key: "Enter" },
-      { action: "fill", selector: "input[autocomplete=one-time-code]", value: "{otp}" },
+      {
+        action: "fill",
+        selector: "input[autocomplete=one-time-code]",
+        value: "{otp}",
+      },
     ]);
     const run = (args) =>
       new Promise((resolve) => {
-        const child = spawn("node", [CLI, "set-recipe", "--name", "demo", ...args, "--state-dir", dir]);
+        const child = spawn("node", [
+          CLI,
+          "set-recipe",
+          "--name",
+          "demo",
+          ...args,
+          "--state-dir",
+          dir,
+        ]);
         let stdout = "";
         child.stdout.on("data", (d) => (stdout += d));
         child.on("exit", (code) => resolve({ code, stdout }));
@@ -334,7 +463,10 @@ test("set-recipe attaches a recipe to an existing login and re-validates its ste
     vault.lock();
 
     // An unknown action is refused here, not mid-login with a browser open.
-    const bad = await run(["--recipe", JSON.stringify([{ action: "frobnicate" }])]);
+    const bad = await run([
+      "--recipe",
+      JSON.stringify([{ action: "frobnicate" }]),
+    ]);
     assert.notEqual(bad.code, 0);
     assert.match(bad.stdout, /must be one of/i);
 
@@ -384,7 +516,13 @@ test("the card names the site, not the credential the agent invented", async () 
         "--login-url", "https://www.airbnb.com/login",
         "--form", "--state-dir", dir,
       ],
-      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1", AGENT_ID_SECURE_PROMPT: "browser" } },
+      {
+        env: {
+          ...process.env,
+          AGENT_ID_NO_BROWSER: "1",
+          AGENT_ID_SECURE_PROMPT: "browser",
+        },
+      }
     );
     child.stdout.on("data", () => {});
     child.stderr.on("data", () => {});

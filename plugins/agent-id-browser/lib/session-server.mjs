@@ -31,9 +31,20 @@ import { launchContext } from "./launch.mjs";
 import { sealProfile } from "./profile-store.mjs";
 import { startStreamServer } from "./stream-server.mjs";
 import { loadCodecConfig } from "./stream-encoder.mjs";
-import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
-import { SECRET_FIELDS, assertHostAllowed } from "@alien-id/agent-id-vault/lib/store.mjs";
-import { resolveOtp } from "./auto-login.mjs";
+import {
+  openVault,
+  loadAgentPrivateKey,
+} from "@alien-id/agent-id-vault/lib/vault.mjs";
+import {
+  SECRET_FIELDS,
+  assertHostAllowed,
+} from "@alien-id/agent-id-vault/lib/store.mjs";
+import {
+  otpBoxes,
+  otpCardHints,
+  otpModeCorrection,
+  resolveOtp,
+} from "./auto-login.mjs";
 import {
   applyAccessGuard,
   assertActionAllowed,
@@ -47,6 +58,7 @@ import {
   humanMove,
   humanScroll,
   humanType,
+  typeCodeAcrossBoxes,
   humanTypeFocused,
 } from "./human-input.mjs";
 
@@ -312,22 +324,32 @@ export function formSnapshotInPage(arg) {
         .split(/\s+/)
         .filter(Boolean)
         .map((id) => document.getElementById(id)?.textContent || "")
-        .join(" "),
+        .join(" ")
     );
   const labelOf = (el) => {
     const native = Array.from(el.labels || []).map((label) => label.textContent || "").join(" ");
     const wrapped = el.closest("label")?.textContent || "";
     const legend = el.closest("fieldset")?.querySelector("legend")?.textContent || "";
     return clip(
-      el.getAttribute("aria-label") || labelledBy(el) || native || wrapped ||
-        el.getAttribute("placeholder") || el.getAttribute("title") ||
-        el.getAttribute("name") || legend,
+      el.getAttribute("aria-label") ||
+        labelledBy(el) ||
+        native ||
+        wrapped ||
+        el.getAttribute("placeholder") ||
+        el.getAttribute("title") ||
+        el.getAttribute("name") ||
+        legend
     );
   };
   const visibleOf = (el) => {
     const r = el.getBoundingClientRect();
     const st = window.getComputedStyle(el);
-    return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+    return (
+      r.width > 0 &&
+      r.height > 0 &&
+      st.visibility !== "hidden" &&
+      st.display !== "none"
+    );
   };
   // Laid out is not the same as being asked for. Booking.com's e-mail step carries
   // a fully styled password input — 162x26, `visibility: visible`, `opacity: 1`,
@@ -353,7 +375,9 @@ export function formSnapshotInPage(arg) {
   // page, so neither can import it; the duplication is the price of that.
   const staged = (el) => !!el.closest('[aria-hidden="true"], [inert]');
   const asksSomethingElse = Array.from(
-    document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]),select,textarea'),
+    document.querySelectorAll(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]),select,textarea'
+    )
   ).some((el) => visibleOf(el) && !staged(el));
   const stagedOf = (el) => staged(el) && asksSomethingElse;
 
@@ -371,8 +395,13 @@ export function formSnapshotInPage(arg) {
     if (!el.matches(REPORTED)) continue;
     const tag = el.tagName.toLowerCase();
     const type = clip(
-      el.getAttribute("type") || (tag === "input" ? el.type || "text" : tag === "select" ? "select" : tag),
-      40,
+      el.getAttribute("type") ||
+        (tag === "input"
+          ? el.type || "text"
+          : tag === "select"
+          ? "select"
+          : tag),
+      40
     ).toLowerCase();
     const laidOut = visibleOf(el);
     const visible = laidOut && !stagedOf(el);
@@ -395,7 +424,17 @@ export function formSnapshotInPage(arg) {
       ...(el.disabled || el.getAttribute("aria-disabled") === "true" ? { disabled: true } : {}),
       ...(el.readOnly ? { readonly: true } : {}),
       ...(!laidOut ? { hidden: true } : {}),
-      ...(form ? { form: clip(form.getAttribute("name") || form.id || form.getAttribute("action") || "form", 160) } : {}),
+      ...(form
+        ? {
+            form: clip(
+              form.getAttribute("name") ||
+                form.id ||
+                form.getAttribute("action") ||
+                "form",
+              160
+            ),
+          }
+        : {}),
     };
     if (type === "checkbox" || type === "radio" || role === "checkbox" || role === "radio") {
       entry.checked = el.checked === true || el.getAttribute("aria-checked") === "true";
@@ -440,11 +479,17 @@ export function formSnapshotInPage(arg) {
   };
   const identifier = controls.find(identifierish);
   const submits = controls.some(
-    (c) => (c.type === "submit" || c.role === "button" || c.type === "button") && c.form === identifier?.form,
+    (c) =>
+      (c.type === "submit" || c.role === "button" || c.type === "button") &&
+      c.form === identifier?.form
   );
-  const signIn = identifier && submits
-    ? { identifier: true, passwordAsked: controls.some((c) => c.type === "password") }
-    : null;
+  const signIn =
+    identifier && submits
+      ? {
+          identifier: true,
+          passwordAsked: controls.some((c) => c.type === "password"),
+        }
+      : null;
 
   return {
     url: location.href,
@@ -522,7 +567,7 @@ export function refuseRef(action, p, alternative) {
   throw new Error(
     `${action} types into the FOCUSED element and takes no --ref (got "${p.ref}"). ` +
       `Use \`${alternative}\` to drive an element by ref, or focus it first ` +
-      `(click/click-xy) and re-run ${action} without --ref.`,
+      `(click/click-xy) and re-run ${action} without --ref.`
   );
 }
 
@@ -563,7 +608,10 @@ export function screenshotEncoding(outPath, quality) {
   const raw = typeof quality === "string" ? quality.trim() : quality;
   const n = Number(raw);
   const set = raw != null && raw !== "" && Number.isFinite(n);
-  return { type: "jpeg", quality: set ? Math.min(100, Math.max(1, Math.round(n))) : 80 };
+  return {
+    type: "jpeg",
+    quality: set ? Math.min(100, Math.max(1, Math.round(n))) : 80,
+  };
 }
 
 // Clamp a clip (CSS px) to the viewport: an oversized region degrades to its
@@ -589,7 +637,9 @@ export function clampClipToViewport(clip, viewport) {
 function frameForRef(state, ref) {
   if (!state.refsValid) {
     throw new Error(
-      `ref '${ref}' is stale (${state.refsInvalidReason || "page changed"}) — run form-inspect or snapshot again`,
+      `ref '${ref}' is stale (${
+        state.refsInvalidReason || "page changed"
+      }) — run form-inspect or snapshot again`
     );
   }
   // Snapshot versioning: refuse a ref minted by an earlier observation instead
@@ -599,7 +649,7 @@ function frameForRef(state, ref) {
   const generation = refGenerationOf(ref);
   if (generation !== null && typeof state.refGeneration === "number" && generation !== state.refGeneration) {
     throw new Error(
-      `ref '${ref}' is from observation ${generation}, but the page has been observed again since (now ${state.refGeneration}) — re-run form-inspect (or snapshot) and use the refs it returns`,
+      `ref '${ref}' is from observation ${generation}, but the page has been observed again since (now ${state.refGeneration}) — re-run form-inspect (or snapshot) and use the refs it returns`
     );
   }
   const id = frameRefId(ref);
@@ -647,6 +697,22 @@ export async function markSecretField(target, selector) {
     .catch(() => {});
 }
 
+// The same tag, for a code spread across a row of boxes. `markSecretField` names
+// one element through the ref's selector, and a row holds one character of the
+// code in each of its boxes — so tagging the ref alone leaves the rest readable
+// through `get --what value`. Every box written to is tainted, including after a
+// partial fill, because a partial fill is exactly when those characters are still
+// sitting there.
+export async function markSecretBoxes(boxes) {
+  await Promise.all(
+    boxes.map((box) =>
+      box
+        .evaluate((el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
+        .catch(() => {})
+    )
+  );
+}
+
 // `get --what value|attr value` must not read back a field that holds an injected
 // secret: the vault may have just typed one there (fill-secret/fill-otp), and
 // returning it would hand the agent the very value the vault exists to withhold.
@@ -656,8 +722,10 @@ export async function refusePasswordRead(target, selector) {
   const refuse = await target
     .$eval(
       selector,
-      (el, attr) => (el.tagName === "INPUT" && el.type === "password") || el.hasAttribute(attr),
-      SECRET_TAINT_ATTR,
+      (el, attr) =>
+        (el.tagName === "INPUT" && el.type === "password") ||
+        el.hasAttribute(attr),
+      SECRET_TAINT_ATTR
     )
     .catch(() => false);
   if (refuse) {
@@ -677,8 +745,18 @@ function pushConsole(state, entry) {
 // session's armed policy (default: dismiss — Playwright would otherwise
 // auto-dismiss silently), and closing the current tab falls back to another.
 function attachPage(state, page) {
-  page.on("console", (msg) => pushConsole(state, { type: msg.type(), text: String(msg.text()).slice(0, 500) }));
-  page.on("pageerror", (err) => pushConsole(state, { type: "error", text: String(err && err.message ? err.message : err).slice(0, 500) }));
+  page.on("console", (msg) =>
+    pushConsole(state, {
+      type: msg.type(),
+      text: String(msg.text()).slice(0, 500),
+    })
+  );
+  page.on("pageerror", (err) =>
+    pushConsole(state, {
+      type: "error",
+      text: String(err && err.message ? err.message : err).slice(0, 500),
+    })
+  );
   page.on("dialog", (d) => {
     state.lastDialog = {
       type: d.type(),
@@ -701,7 +779,7 @@ function attachPage(state, page) {
     state.downloads.push(entry);
     const file = path.join(
       sessionsDir(state.stateDir),
-      `download-${Date.now()}-${safeFilename(d.suggestedFilename())}`,
+      `download-${Date.now()}-${safeFilename(d.suggestedFilename())}`
     );
     d.saveAs(file)
       .then(() => {
@@ -755,7 +833,7 @@ export function assertFillAllowed(rec, host, field = null) {
   if (!rec) throw new Error("no such credential");
   if (field && rec.exportable === false && SECRET_FIELDS.includes(field)) {
     throw new Error(
-      `"${field}" is sealed (generated in-vault) and cannot be typed into a page — use the proxy`,
+      `"${field}" is sealed (generated in-vault) and cannot be typed into a page — use the proxy`
     );
   }
   assertHostAllowed(host, rec.domains, "refusing to type this credential on");
@@ -805,7 +883,7 @@ async function validateTaggedControls(state) {
           .map((el) => ({
             ref: el.getAttribute("data-aibref"),
             reason: String(el.validationMessage || "invalid").slice(0, 160),
-          })),
+          }))
       )
       .catch(() => []);
     invalid.push(...entries);
@@ -839,14 +917,19 @@ async function pickCombobox(target, ref, values) {
 
   // The listbox is usually a sibling/portal rather than a descendant, so look
   // page-wide for visible options and match on text.
-  const options = target.locator('[role=option]:visible, li[role=option], [role=listbox] li');
-  const exact = options.filter({ hasText: new RegExp(`^\\s*${escapeForRegex(wanted)}\\s*$`, "i") });
-  const chosen = (await exact.count().catch(() => 0)) > 0 ? exact.first() : options.first();
+  const options = target.locator(
+    "[role=option]:visible, li[role=option], [role=listbox] li"
+  );
+  const exact = options.filter({
+    hasText: new RegExp(`^\\s*${escapeForRegex(wanted)}\\s*$`, "i"),
+  });
+  const chosen =
+    (await exact.count().catch(() => 0)) > 0 ? exact.first() : options.first();
   try {
     await chosen.waitFor({ state: "visible", timeout: ACTION_TIMEOUT });
   } catch {
     throw new Error(
-      `combobox '${ref}' opened no option list for "${wanted}" — the site may need a different value spelling, or the widget is not a listbox combobox`,
+      `combobox '${ref}' opened no option list for "${wanted}" — the site may need a different value spelling, or the widget is not a listbox combobox`
     );
   }
   const label = ((await chosen.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim().slice(0, 160);
@@ -856,8 +939,16 @@ async function pickCombobox(target, ref, values) {
   // combobox that rejects the pick leaves the field empty or reverted, and that
   // must surface as a failure rather than a cheerful ok:true.
   const settled = ((await input.inputValue().catch(() => "")) || "").trim();
-  if (!settled) throw new Error(`combobox '${ref}' did not retain a value after picking "${label || wanted}"`);
-  return { value: settled, ...(label && label !== settled ? { option: label } : {}) };
+  if (!settled)
+    throw new Error(
+      `combobox '${ref}' did not retain a value after picking "${
+        label || wanted
+      }"`
+    );
+  return {
+    value: settled,
+    ...(label && label !== settled ? { option: label } : {}),
+  };
 }
 
 function escapeForRegex(value) {
@@ -882,8 +973,10 @@ export async function fillForm(state, p) {
       const target = frameForRef(state, ref);
       const locator = target.locator(sel(ref));
       const secretTarget = await locator.evaluate(
-        (el, attr) => (el.tagName === "INPUT" && el.type === "password") || el.hasAttribute(attr),
-        SECRET_TAINT_ATTR,
+        (el, attr) =>
+          (el.tagName === "INPUT" && el.type === "password") ||
+          el.hasAttribute(attr),
+        SECRET_TAINT_ATTR
       );
       if (secretTarget) throw new Error("password/secret fields require fill-secret or fill-otp");
       await locator.fill(value, { timeout: ACTION_TIMEOUT });
@@ -894,7 +987,12 @@ export async function fillForm(state, p) {
       if (!matches.matches) throw new Error("page did not retain the supplied value");
       results.push({ ref, kind: "field", ok: true, length: matches.length });
     } catch (error) {
-      results.push({ ref, kind: "field", ok: false, error: safeFormError(error, value) });
+      results.push({
+        ref,
+        kind: "field",
+        ok: false,
+        error: safeFormError(error, value),
+      });
     }
   }
   for (const check of checks) {
@@ -931,7 +1029,12 @@ export async function fillForm(state, p) {
       if (actual !== checked) throw new Error("page did not retain the checked state");
       results.push({ ref, kind: "check", ok: true, checked: actual });
     } catch (error) {
-      results.push({ ref, kind: "check", ok: false, error: safeFormError(error) });
+      results.push({
+        ref,
+        kind: "check",
+        ok: false,
+        error: safeFormError(error),
+      });
     }
   }
   for (const select of selects) {
@@ -949,23 +1052,36 @@ export async function fillForm(state, p) {
           ? "select"
           : el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")
             ? "combobox"
-            : el.tagName.toLowerCase(),
-      );
+            : el.tagName.toLowerCase()
+        );
       if (kind === "select") {
-        const selected = await target.selectOption(sel(ref), values, { timeout: ACTION_TIMEOUT });
+        const selected = await target.selectOption(sel(ref), values, {
+          timeout: ACTION_TIMEOUT,
+        });
         const matches = values.every((value) => selected.includes(value));
         if (!matches) throw new Error("page did not retain the selected option(s)");
         results.push({ ref, kind: "select", ok: true, selected });
       } else if (kind === "combobox") {
         const selected = await pickCombobox(target, ref, values);
-        results.push({ ref, kind: "select", ok: true, control: "combobox", selected });
+        results.push({
+          ref,
+          kind: "select",
+          ok: true,
+          control: "combobox",
+          selected,
+        });
       } else {
         throw new Error(
-          `ref '${ref}' is a <${kind}>, not a select or combobox — use fields for text input, or act/click for a custom widget`,
+          `ref '${ref}' is a <${kind}>, not a select or combobox — use fields for text input, or act/click for a custom widget`
         );
       }
     } catch (error) {
-      results.push({ ref, kind: "select", ok: false, error: safeFormError(error) });
+      results.push({
+        ref,
+        kind: "select",
+        ok: false,
+        error: safeFormError(error),
+      });
     }
   }
   for (const upload of uploads) {
@@ -974,7 +1090,12 @@ export async function fillForm(state, p) {
       const count = await uploadFiles(state.current, frameForRef(state, ref), ref, upload?.files);
       results.push({ ref, kind: "upload", ok: true, files: count });
     } catch (error) {
-      results.push({ ref, kind: "upload", ok: false, error: safeFormError(error) });
+      results.push({
+        ref,
+        kind: "upload",
+        ok: false,
+        error: safeFormError(error),
+      });
     }
   }
 
@@ -1008,8 +1129,16 @@ async function resizeWindow(state, page, width, height) {
     const { windowId } = await cdp.send("Browser.getWindowForTarget");
     // Two steps: exit maximized/fullscreen FIRST, else Chrome applies the
     // state change and ignores the bounds in the same call.
-    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }).catch(() => {});
-    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { width, height } });
+    await cdp
+      .send("Browser.setWindowBounds", {
+        windowId,
+        bounds: { windowState: "normal" },
+      })
+      .catch(() => {});
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { width, height },
+    });
   } catch (err) {
     throw new Error(`resize failed (CDP window bounds unavailable — needs a headed/cloud Chrome): ${err.message || err}`);
   } finally {
@@ -1022,7 +1151,7 @@ async function resizeWindow(state, page, width, height) {
       .waitForFunction(
         (b) => window.innerWidth !== b[0] || window.innerHeight !== b[1],
         before,
-        { timeout: 3000 },
+        { timeout: 3000 }
       )
       .catch(() => {});
   }
@@ -1055,7 +1184,9 @@ async function resizeToViewport(state, width, height) {
   const first = await resizeWindow(state, page, width, height);
   const second = chromeCompensatedBounds({ width, height }, first);
   if (!second) return first;
-  return (await resizeWindow(state, page, second.width, second.height)) ?? first;
+  return (
+    (await resizeWindow(state, page, second.width, second.height)) ?? first
+  );
 }
 
 // Exported for tests: the suspend/resume contract around credential fills is
@@ -1069,9 +1200,16 @@ export async function dispatch(state, msg, policy = null) {
   if (policy) assertActionAllowed(policy, msg.action);
   switch (msg.action) {
     case "info":
-      return { url: page.url(), title: await page.title().catch(() => ""), tabs: state.ctx.pages().length };
+      return {
+        url: page.url(),
+        title: await page.title().catch(() => ""),
+        tabs: state.ctx.pages().length,
+      };
     case "navigate": {
-      const resp = await page.goto(String(p.url), { waitUntil: "domcontentloaded", timeout: 30000 });
+      const resp = await page.goto(String(p.url), {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
       return { url: page.url(), status: resp ? resp.status() : null };
     }
     case "back":
@@ -1083,13 +1221,18 @@ export async function dispatch(state, msg, policy = null) {
     // session that is signed in. The CLI routes to these when a session exists.
     case "read": {
       const resp = p.url
-        ? await page.goto(String(p.url), { waitUntil: "domcontentloaded", timeout: 30000 })
+        ? await page.goto(String(p.url), {
+            waitUntil: "domcontentloaded",
+            timeout: 30000,
+          })
         : null;
       const finalUrl = page.url();
       const title = await page.title().catch(() => "");
       let text = "";
       try {
-        text = await page.evaluate(() => (document.body ? document.body.innerText : ""));
+        text = await page.evaluate(() =>
+          document.body ? document.body.innerText : ""
+        );
       } catch {
         /* page navigated/destroyed mid-read — leave text empty */
       }
@@ -1125,7 +1268,11 @@ export async function dispatch(state, msg, policy = null) {
       return {
         httpStatus,
         finalUrl: resp.url(),
-        loggedOut: looksLoggedOut({ finalUrl: resp.url(), bodyText: body, httpStatus }),
+        loggedOut: looksLoggedOut({
+          finalUrl: resp.url(),
+          bodyText: body,
+          httpStatus,
+        }),
         body: String(body).slice(0, Number(p.maxChars || 8000)),
       };
     }
@@ -1133,7 +1280,10 @@ export async function dispatch(state, msg, policy = null) {
       state.frames.clear();
       // Chosen before the scan so the page can stamp it into every ref.
       const generation = state.refGeneration + 1;
-      const main = await page.evaluate(snapshotInPage, { prefix: "", generation });
+      const main = await page.evaluate(snapshotInPage, {
+        prefix: "",
+        generation,
+      });
       const frames = [];
       let skipped = 0;
       let fCount = 0;
@@ -1145,14 +1295,21 @@ export async function dispatch(state, msg, policy = null) {
         }
         let snap;
         try {
-          snap = await f.evaluate(snapshotInPage, { prefix: `f${fCount + 1}`, generation });
+          snap = await f.evaluate(snapshotInPage, {
+            prefix: `f${fCount + 1}`,
+            generation,
+          });
         } catch {
           continue; // detached / navigating frame — nothing was tagged
         }
         fCount++;
         state.frames.set(`f${fCount}`, f);
         if (snap.elements.length) {
-          frames.push({ frame: `f${fCount}`, url: String(snap.url).slice(0, 200), elements: snap.elements.length });
+          frames.push({
+            frame: `f${fCount}`,
+            url: String(snap.url).slice(0, 200),
+            elements: snap.elements.length,
+          });
           main.elements.push(...snap.elements);
         }
       }
@@ -1169,7 +1326,10 @@ export async function dispatch(state, msg, policy = null) {
     case "form-inspect": {
       state.frames.clear();
       const generation = state.refGeneration + 1;
-      const main = await page.evaluate(formSnapshotInPage, { prefix: "", generation });
+      const main = await page.evaluate(formSnapshotInPage, {
+        prefix: "",
+        generation,
+      });
       const frames = [];
       let skipped = 0;
       let fCount = 0;
@@ -1181,14 +1341,21 @@ export async function dispatch(state, msg, policy = null) {
         }
         let snap;
         try {
-          snap = await frame.evaluate(formSnapshotInPage, { prefix: `f${fCount + 1}`, generation });
+          snap = await frame.evaluate(formSnapshotInPage, {
+            prefix: `f${fCount + 1}`,
+            generation,
+          });
         } catch {
           continue;
         }
         fCount++;
         state.frames.set(`f${fCount}`, frame);
         if (snap.controls.length) {
-          frames.push({ frame: `f${fCount}`, url: String(snap.url).slice(0, 200), controls: snap.controls.length });
+          frames.push({
+            frame: `f${fCount}`,
+            url: String(snap.url).slice(0, 200),
+            controls: snap.controls.length,
+          });
           main.controls.push(...snap.controls);
         }
       }
@@ -1203,18 +1370,33 @@ export async function dispatch(state, msg, policy = null) {
     case "form-fill":
       return fillForm(state, p);
     case "text":
-      return { text: String(await page.evaluate(() => (document.body ? document.body.innerText : ""))).slice(0, Number(p.maxChars || 6000)) };
+      return {
+        text: String(
+          await page.evaluate(() =>
+            document.body ? document.body.innerText : ""
+          )
+        ).slice(0, Number(p.maxChars || 6000)),
+      };
     case "click":
-      await humanClick(page, sel(p.ref), { timeout: ACTION_TIMEOUT, root: frameForRef(state, p.ref) });
+      await humanClick(page, sel(p.ref), {
+        timeout: ACTION_TIMEOUT,
+        root: frameForRef(state, p.ref),
+      });
       return { clicked: p.ref };
     case "dblclick":
-      await frameForRef(state, p.ref).dblclick(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await frameForRef(state, p.ref).dblclick(sel(p.ref), {
+        timeout: ACTION_TIMEOUT,
+      });
       return { dblclicked: p.ref };
     case "check":
-      await frameForRef(state, p.ref).check(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await frameForRef(state, p.ref).check(sel(p.ref), {
+        timeout: ACTION_TIMEOUT,
+      });
       return { checked: p.ref };
     case "uncheck":
-      await frameForRef(state, p.ref).uncheck(sel(p.ref), { timeout: ACTION_TIMEOUT });
+      await frameForRef(state, p.ref).uncheck(sel(p.ref), {
+        timeout: ACTION_TIMEOUT,
+      });
       return { unchecked: p.ref };
     case "type":
       await humanType(page, sel(p.ref), String(p.text ?? ""), {
@@ -1305,21 +1487,127 @@ export async function dispatch(state, msg, policy = null) {
           if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()));
           const otpCred =
             rec.type === "totp"
-              ? { name: credName, otp: "totp", totpSecret: rec.secret, period: rec.period, digits: rec.digits, algorithm: rec.algorithm }
+              ? {
+                  name: credName,
+                  otp: "totp",
+                  totpSecret: rec.secret,
+                  period: rec.period,
+                  digits: rec.digits,
+                  algorithm: rec.algorithm,
+                }
               : rec;
-          code = await resolveOtp(otpCred, {});
+          // The page is right there, and it is the only thing that knows how long
+          // the code is and where it was sent. Without this the card raised by
+          // hand is the same card with both facts missing.
+          const hints = await otpCardHints(target);
+          // Why a row was or was not found, in the one place it matters: the
+          // predicate groups boxes by their parent, and a site that wraps each box
+          // in its own element defeats that silently.
+          const shape = await target
+            .evaluate((sel) => {
+              const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
+              const found = Array.from(document.querySelectorAll(sel)).filter(visible);
+              const groups = new Map();
+              for (const e of found) {
+                const key = e.parentElement;
+                groups.set(key, (groups.get(key) || 0) + 1);
+              }
+              return `candidates=${found.length} groups=${[...groups.values()].join(",") || "-"}`;
+            }, 'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]')
+            .catch(() => "shape unavailable");
+          process.stderr.write(`fill-otp: row shape ${shape}\n`);
+          process.stderr.write(
+            `fill-otp: code hints length=${hints.length ?? "?"} destination=${
+              hints.destination ?? "?"
+            }\n`
+          );
+          // Reaching this line means a code is being asked for, which settles what
+          // the record only guessed. Auto-login corrects the same claim the same
+          // way; a sign-in driven by hand arrives here instead and must not leave
+          // the record to mislead the next one.
+          const correction = otpModeCorrection(rec);
+
+          try {
+            code = await resolveOtp(otpCred, hints);
+          } catch (err) {
+            // The owner closed the card. Nothing broke and nothing timed out, so
+            // the one thing that must not happen is the same card going straight
+            // back up — which is what a bare fault invites, because the sensible
+            // reply to a fault is a retry.
+            if (err?.code === "FORM_CANCELLED") {
+              throw new Error(
+                "fill-otp: the owner dismissed the code card — they were asked and said no. " +
+                  "Do not raise it again unless they ask for it."
+              );
+            }
+            throw err;
+          }
+
+          // Written only now, and only if the owner answered. `fill_otp` inspects
+          // no page state, so until a code comes back the sole evidence that this
+          // site asks for one is that the model said so — and a mistaken call
+          // would overwrite the owner's explicit `--otp none` for good, with no
+          // way back. Answering the card is the site being asked and the owner
+          // agreeing; that is worth writing down. A dismissal is not.
+          if (correction) {
+            try {
+              rec.otp = correction;
+              vault.add(rec);
+              await vault.save();
+              process.stderr.write(
+                `fill-otp: '${credName}' said otp=none but a code is being asked for — corrected\n`
+              );
+            } catch (err) {
+              // Bookkeeping. The owner has the code in hand and the sign-in is
+              // mid-flight; losing the correction costs one re-learn, losing the
+              // sign-in costs the whole thing.
+              process.stderr.write(
+                `fill-otp: could not record the corrected otp mode: ${err.message}\n`
+              );
+            }
+          }
         } finally {
           vault.lock();
         }
         // Same leak guard as fill-secret: never surface the value-bearing error.
+        let row = null;
         try {
-          await humanType(page, sel(p.ref), code, {
-            timeout: ACTION_TIMEOUT,
-            submit: p.submit !== false,
-            root: target,
-          });
+          // A row of boxes needs the code spread across it, and the ref names only
+          // the first one. Typing into that one and trusting the page to advance
+          // the focus is what leaves the row half-entered and the submit dead.
+          const boxes = await otpBoxes(target);
+          if (boxes.length > 0) {
+            // Tainted before the code goes in, not after: every path out of the
+            // typing below — a throw mid-row, a partial fill, a row that submits
+            // itself — leaves characters in these boxes, and only the tag stops
+            // them being read back one at a time.
+            await markSecretBoxes(boxes);
+            const typed = await typeCodeAcrossBoxes(page, boxes, code);
+            row = { count: boxes.length, ...typed };
+            // A row that submitted itself has already moved the page on; pressing
+            // Enter then lands on whatever screen came next.
+            const stillHere = await boxes[0].isVisible().catch(() => false);
+            if (!row.submitted && stillHere && p.submit !== false)
+              await page.keyboard.press("Enter");
+          } else {
+            await humanType(page, sel(p.ref), code, {
+              timeout: ACTION_TIMEOUT,
+              submit: p.submit !== false,
+              root: target,
+            });
+          }
         } catch {
           throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+        }
+        // Outside the guard above, which rewrites everything it catches into a
+        // visibility problem. A row that would not take the code is not that, and
+        // sending the model to re-snapshot over it is advice for the wrong fault.
+        if (row && !row.complete) {
+          throw new Error(
+            row.submitted
+              ? "fill-otp: the code was submitted and the site refused it — ask for a fresh one"
+              : `fill-otp: the code did not land in all ${row.count} boxes (re-snapshot and retry)`
+          );
         }
         // A derived OTP isn't sealed at fill time (see assertFillAllowed), so the
         // read-back guard is what protects it: tag the field so its value can't be
@@ -1340,16 +1628,25 @@ export async function dispatch(state, msg, policy = null) {
           ? "select"
           : el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")
             ? "combobox"
-            : el.tagName.toLowerCase(),
-      );
+            : el.tagName.toLowerCase()
+        );
       if (kind === "combobox") {
-        return { selected: p.ref, control: "combobox", ...(await pickCombobox(target, p.ref, values)) };
+        return {
+          selected: p.ref,
+          control: "combobox",
+          ...(await pickCombobox(target, p.ref, values)),
+        };
       }
-      await target.selectOption(sel(p.ref), values, { timeout: ACTION_TIMEOUT });
+      await target.selectOption(sel(p.ref), values, {
+        timeout: ACTION_TIMEOUT,
+      });
       return { selected: p.ref };
     }
     case "hover":
-      await humanHover(page, sel(p.ref), { timeout: ACTION_TIMEOUT, root: frameForRef(state, p.ref) });
+      await humanHover(page, sel(p.ref), {
+        timeout: ACTION_TIMEOUT,
+        root: frameForRef(state, p.ref),
+      });
       return { hovered: p.ref };
     case "press":
       if (p.ref) await frameForRef(state, p.ref).press(sel(p.ref), String(p.key));
@@ -1369,7 +1666,9 @@ export async function dispatch(state, msg, policy = null) {
       if (from !== frameForRef(state, p.to)) {
         throw new Error("drag: source and target must be in the same frame");
       }
-      await from.dragAndDrop(sel(p.ref), sel(p.to), { timeout: ACTION_TIMEOUT });
+      await from.dragAndDrop(sel(p.ref), sel(p.to), {
+        timeout: ACTION_TIMEOUT,
+      });
       return { dragged: p.ref, to: p.to };
     }
     case "scroll":
@@ -1397,7 +1696,11 @@ export async function dispatch(state, msg, policy = null) {
       const button = ["left", "right", "middle"].includes(String(p.button)) ? String(p.button) : "left";
       await humanMove(page, x, y); // stealth trail; the click itself lands at (x,y)
       await page.mouse.click(x, y, { button, clickCount: p.double ? 2 : 1 });
-      return { clicked: { x, y }, button, ...(p.double ? { double: true } : {}) };
+      return {
+        clicked: { x, y },
+        button,
+        ...(p.double ? { double: true } : {}),
+      };
     }
     case "move-xy": {
       const { x, y } = toXY(p.x, p.y, await liveDpr(page, p.css), "move-xy");
@@ -1438,7 +1741,7 @@ export async function dispatch(state, msg, policy = null) {
       // autocomplete). Same contract otherwise: PLAINTEXT ONLY (secrets stay
       // ref-based via fill-secret/fill-otp), APPENDS at the caret (no clear),
       // and only the length leaves the session, never the text.
-      refuseRef("fill-text", p, "fill --fields '[{\"ref\":\"eN\",\"value\":\"V\"}]'");
+      refuseRef("fill-text", p, 'fill --fields \'[{"ref":"eN","value":"V"}]\'');
       const text = String(p.text ?? "");
       await page.keyboard.insertText(text);
       if (p.submit) await page.keyboard.press("Enter");
@@ -1449,26 +1752,35 @@ export async function dispatch(state, msg, policy = null) {
       // Runs a fixed elementFromPoint (not agent JS like `eval`), reads no input
       // `value`, mutates nothing — so it is allowed on read-only sessions.
       const { x, y } = toXY(p.x, p.y, await liveDpr(page, p.css), "probe-xy");
-      const element = await page.evaluate(([px, py]) => {
-        const el = document.elementFromPoint(px, py);
-        if (!el) return null;
-        const r = el.getBoundingClientRect();
-        const clip = (s) => (s ? String(s).replace(/\s+/g, " ").trim().slice(0, 100) : "");
-        return {
-          tag: el.tagName.toLowerCase(),
-          role: el.getAttribute("role") || null,
-          type: el.getAttribute("type") || null,
-          ref: el.getAttribute("data-aibref") || null, // present only after a snapshot
-          name: clip(
-            el.getAttribute("aria-label") ||
-              el.getAttribute("placeholder") ||
-              el.getAttribute("title") ||
-              el.textContent,
-          ),
-          href: el.getAttribute("href") || null,
-          box: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
-        };
-      }, [x, y]);
+      const element = await page.evaluate(
+        ([px, py]) => {
+          const el = document.elementFromPoint(px, py);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          const clip = (s) =>
+            s ? String(s).replace(/\s+/g, " ").trim().slice(0, 100) : "";
+          return {
+            tag: el.tagName.toLowerCase(),
+            role: el.getAttribute("role") || null,
+            type: el.getAttribute("type") || null,
+            ref: el.getAttribute("data-aibref") || null, // present only after a snapshot
+            name: clip(
+              el.getAttribute("aria-label") ||
+                el.getAttribute("placeholder") ||
+                el.getAttribute("title") ||
+                el.textContent
+            ),
+            href: el.getAttribute("href") || null,
+            box: {
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+            },
+          };
+        },
+        [x, y]
+      );
       return { at: { x, y }, element };
     }
     case "resize": {
@@ -1537,7 +1849,10 @@ export async function dispatch(state, msg, policy = null) {
           format,
           dpr: info.dpr,
           region,
-          image: { width: Math.round(clip.width * info.dpr), height: Math.round(clip.height * info.dpr) },
+          image: {
+            width: Math.round(clip.width * info.dpr),
+            height: Math.round(clip.height * info.dpr),
+          },
         };
       }
       await page.screenshot({ path: out, fullPage: !!p.fullPage, ...enc });
@@ -1559,13 +1874,17 @@ export async function dispatch(state, msg, policy = null) {
       if (p.text) await page.getByText(String(p.text)).first().waitFor({ timeout: Number(p.ms || 15000) });
       else if (p.url) {
         const needle = String(p.url);
-        await page.waitForURL((u) => u.href.includes(needle), { timeout: Number(p.ms || 15000) });
+        await page.waitForURL((u) => u.href.includes(needle), {
+          timeout: Number(p.ms || 15000),
+        });
       } else if (p.load) {
         const stateName = String(p.load);
         if (!["load", "domcontentloaded", "networkidle"].includes(stateName)) {
           throw new Error("wait --load must be load|domcontentloaded|networkidle");
         }
-        await page.waitForLoadState(stateName, { timeout: Number(p.ms || 15000) });
+        await page.waitForLoadState(stateName, {
+          timeout: Number(p.ms || 15000),
+        });
       } else await page.waitForTimeout(Number(p.ms || 1000));
       return { waited: true, url: page.url() };
     case "get": {
@@ -1578,16 +1897,30 @@ export async function dispatch(state, msg, policy = null) {
       const cap = Number(p.maxChars || 4000);
       switch (what) {
         case "text":
-          return { text: String(await t.innerText(s, { timeout: ACTION_TIMEOUT })).slice(0, cap) };
+          return {
+            text: String(
+              await t.innerText(s, { timeout: ACTION_TIMEOUT })
+            ).slice(0, cap),
+          };
         case "html":
-          return { html: String(await t.innerHTML(s, { timeout: ACTION_TIMEOUT })).slice(0, cap) };
+          return {
+            html: String(
+              await t.innerHTML(s, { timeout: ACTION_TIMEOUT })
+            ).slice(0, cap),
+          };
         case "value":
           await refusePasswordRead(t, s);
           return { value: await t.inputValue(s, { timeout: ACTION_TIMEOUT }) };
         case "attr": {
           if (!p.attr) throw new Error("get --what attr needs --attr NAME");
-          if (String(p.attr).toLowerCase() === "value") await refusePasswordRead(t, s);
-          return { attr: p.attr, value: await t.getAttribute(s, String(p.attr), { timeout: ACTION_TIMEOUT }) };
+          if (String(p.attr).toLowerCase() === "value")
+            await refusePasswordRead(t, s);
+          return {
+            attr: p.attr,
+            value: await t.getAttribute(s, String(p.attr), {
+              timeout: ACTION_TIMEOUT,
+            }),
+          };
         }
         default:
           throw new Error(`get: unknown --what '${what}' (text|html|value|attr|url|title)`);
@@ -1605,7 +1938,9 @@ export async function dispatch(state, msg, policy = null) {
         case "checked":
           return { checked: await t.isChecked(s, { timeout: ACTION_TIMEOUT }) };
         case "editable":
-          return { editable: await t.isEditable(s, { timeout: ACTION_TIMEOUT }) };
+          return {
+            editable: await t.isEditable(s, { timeout: ACTION_TIMEOUT }),
+          };
         default:
           throw new Error(`is: unknown --what '${what}' (visible|enabled|checked|editable)`);
       }
@@ -1619,13 +1954,17 @@ export async function dispatch(state, msg, policy = null) {
             url: pg.url(),
             title: await pg.title().catch(() => ""),
             ...(pg === state.current ? { current: true } : {}),
-          })),
+          }))
         ),
       };
     }
     case "tab-new": {
       const pg = await state.ctx.newPage();
-      if (p.url) await pg.goto(String(p.url), { waitUntil: "domcontentloaded", timeout: 30000 });
+      if (p.url)
+        await pg.goto(String(p.url), {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
       state.current = pg;
       invalidateRefs(state, "current tab changed");
       return { index: state.ctx.pages().indexOf(pg), url: pg.url() };
@@ -1639,7 +1978,11 @@ export async function dispatch(state, msg, policy = null) {
       state.current = pages[index];
       invalidateRefs(state, "current tab changed");
       await state.current.bringToFront().catch(() => {});
-      return { index, url: state.current.url(), title: await state.current.title().catch(() => "") };
+      return {
+        index,
+        url: state.current.url(),
+        title: await state.current.title().catch(() => ""),
+      };
     }
     case "tab-close": {
       const pages = state.ctx.pages();
@@ -1661,7 +2004,11 @@ export async function dispatch(state, msg, policy = null) {
         if (!["accept", "dismiss"].includes(mode)) throw new Error("dialog --mode must be accept|dismiss");
         state.dialog = { mode, text: p.text != null ? String(p.text) : null };
       }
-      return { mode: state.dialog.mode, promptText: state.dialog.text, last: state.lastDialog };
+      return {
+        mode: state.dialog.mode,
+        promptText: state.dialog.text,
+        last: state.lastDialog,
+      };
     }
     case "downloads":
       return { downloads: state.downloads.slice(-Number(p.max || 20)) };
@@ -1677,7 +2024,9 @@ export async function dispatch(state, msg, policy = null) {
       return {
         messages: entries.slice(-Number(p.max || 50)),
         ...(state.console.length === 0
-          ? { note: "empty is expected: the stealth driver suppresses most console events — use `eval` to probe page state instead" }
+          ? {
+              note: "empty is expected: the stealth driver suppresses most console events — use `eval` to probe page state instead",
+            }
           : {}),
       };
     }
@@ -1718,7 +2067,11 @@ export async function dispatch(state, msg, policy = null) {
           const r = await dispatch(state, { action: name, params: a.params || {}, _stateDir: msg._stateDir }, policy);
           results.push({ action: name, ok: true, ...r });
         } catch (err) {
-          results.push({ action: name, ok: false, error: err.message || String(err) });
+          results.push({
+            action: name,
+            ok: false,
+            error: err.message || String(err),
+          });
           return { completed: results.length - 1, stopped: true, results };
         }
         if (delay) await new Promise((r) => setTimeout(r, delay));
@@ -1810,12 +2163,41 @@ export async function runSession({
   async function finalize() {
     if (finalizing) return;
     finalizing = true;
-    try { await ctx.close(); } catch { /* already gone */ }
-    try { await sealProfile({ stateDir, file: profileFile, dekHex, sourceDir: workDir }); } catch { /* best effort */ }
-    try { await fs.rm(workDir, { recursive: true, force: true }); } catch { /* best effort */ }
-    try { await fs.rm(sessionFilePath(stateDir, name), { force: true }); } catch { /* best effort */ }
-    try { stream.close(); } catch { /* not listening */ }
-    try { server.close(); } catch { /* not listening */ }
+    try {
+      await ctx.close();
+    } catch {
+      /* already gone */
+    }
+    try {
+      await sealProfile({
+        stateDir,
+        file: profileFile,
+        dekHex,
+        sourceDir: workDir,
+      });
+    } catch {
+      /* best effort */
+    }
+    try {
+      await fs.rm(workDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+    try {
+      await fs.rm(sessionFilePath(stateDir, name), { force: true });
+    } catch {
+      /* best effort */
+    }
+    try {
+      stream.close();
+    } catch {
+      /* not listening */
+    }
+    try {
+      server.close();
+    } catch {
+      /* not listening */
+    }
     process.exit(0);
   }
 
@@ -1839,7 +2221,7 @@ export async function runSession({
         idleMs >= 60_000 ? `${Math.round(idleMs / 60_000)} min` : `${Math.round(idleMs / 1000)}s`;
       process.stderr.write(
         `Session '${name}' idle for ${forHuman} with no viewer — closing ` +
-          `(profile is resealed; reopen with \`open --name ${name}\`).\n`,
+          `(profile is resealed; reopen with \`open --name ${name}\`).\n`
       );
       void finalize();
     }, IDLE_POLL_MS);
@@ -1879,16 +2261,18 @@ export async function runSession({
   await fs.mkdir(sessionsDir(stateDir), { recursive: true, mode: 0o700 });
   await fs.writeFile(
     sessionFilePath(stateDir, name),
-    JSON.stringify(sessionRecord(name, {
-      port,
-      token,
-      pid: process.pid,
-      headless,
-      startedAt: Date.now(),
-      streamPort: stream.port,
-      streamToken: stream.token,
-    })),
-    { mode: 0o600 },
+    JSON.stringify(
+      sessionRecord(name, {
+        port,
+        token,
+        pid: process.pid,
+        headless,
+        startedAt: Date.now(),
+        streamPort: stream.port,
+        streamToken: stream.token,
+      })
+    ),
+    { mode: 0o600 }
   );
   // Optional start page: navigate BEFORE the ready line so "ready" means "up
   // and on the requested page". Non-fatal — a bad/slow URL still yields a
@@ -1896,16 +2280,29 @@ export async function runSession({
   let navigation = null;
   if (startUrl) {
     try {
-      const resp = await page.goto(String(startUrl), { waitUntil: "domcontentloaded", timeout: 30000 });
+      const resp = await page.goto(String(startUrl), {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
       navigation = { url: page.url(), status: resp ? resp.status() : null };
     } catch (err) {
-      navigation = { url: String(startUrl), error: String(err?.message || err) };
+      navigation = {
+        url: String(startUrl),
+        error: String(err?.message || err),
+      };
     }
   }
   // Readiness signal: the agent runs `open` in the background and waits for this
   // line before issuing actions.
   process.stdout.write(
-    JSON.stringify({ ok: true, ready: true, session: name, headless, port, ...(navigation ? { navigation } : {}) }) + "\n",
+    JSON.stringify({
+      ok: true,
+      ready: true,
+      session: name,
+      headless,
+      port,
+      ...(navigation ? { navigation } : {}),
+    }) + "\n"
   );
 
   // Reseal + clean up if the browser dies or we're terminated. finalize() handles
@@ -1962,8 +2359,10 @@ export async function closeLiveSession(stateDir, name, { log = () => {}, timeout
     await new Promise((r) => setTimeout(r, 200));
   }
   const e = new Error(
-    `session '${name}' did not finish closing within ${Math.round(timeoutMs / 1000)}s — ` +
-      "its re-seal would race the new login; retry once it is gone (`sessions` lists it)",
+    `session '${name}' did not finish closing within ${Math.round(
+      timeoutMs / 1000
+    )}s — ` +
+      "its re-seal would race the new login; retry once it is gone (`sessions` lists it)"
   );
   e.code = "SESSION_BUSY";
   throw e;

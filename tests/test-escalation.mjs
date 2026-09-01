@@ -70,8 +70,19 @@ test("an unexpected OTP also names the case where the site has no password at al
 });
 
 test("every outcome yields one of the three actions", () => {
-  const actions = new Set([OWNER_MUST_DRIVE, OWNER_MUST_CONFIRM, FIX_CREDENTIAL]);
-  for (const outcome of ["blocked", "confirm-timeout", "failed", "otp-unexpected", "weird", ""]) {
+  const actions = new Set([
+    OWNER_MUST_DRIVE,
+    OWNER_MUST_CONFIRM,
+    FIX_CREDENTIAL,
+  ]);
+  for (const outcome of [
+    "blocked",
+    "confirm-timeout",
+    "failed",
+    "otp-unexpected",
+    "weird",
+    "",
+  ]) {
     const e = escalationFor(outcome, ctx);
     assert.ok(actions.has(e.action), `${outcome} → ${e.action}`);
     assert.ok(e.reason && e.message, `${outcome} needs a reason and a message`);
@@ -106,6 +117,22 @@ test("qr-sign-in sends the owner to the browser view, because that is where the 
   // viewport is not a last resort here — it is the only way this signs in at all.
   assert.match(message, /browser view for profile 'telegram'/);
   assert.ok(!/Google, Microsoft/.test(message));
+});
+
+test("a dismissed card is an answer, and the agent is told not to ask again", () => {
+  // Closing the card used to arrive as a bare `HTTP 409`, indistinguishable from
+  // a fault — so the agent retried, and the owner who had just dismissed it got
+  // it straight back.
+  const { action, reason, message } = escalationFor("otp-declined", {
+    credName: "booking",
+    profile: "main",
+  });
+
+  assert.equal(action, OWNER_MUST_CONFIRM);
+  assert.equal(reason, "otp_declined_by_owner");
+  assert.match(message, /dismissed/i);
+  assert.match(message, /do NOT run auto-login again/);
+  assert.ok(!/expired|timed out/i.test(message), `not a timeout: ${message}`);
 });
 
 test("otp-timeout blames nobody's credential — the owner simply was not at the screen", () => {

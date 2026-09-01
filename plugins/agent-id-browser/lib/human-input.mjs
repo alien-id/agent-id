@@ -19,6 +19,8 @@
 // Escape hatch: set AGENT_ID_HUMAN_INPUT=0 to fall back to fast direct calls
 // (for speed-sensitive automation or debugging).
 
+import { ERROR_RE } from "./login-detect.mjs";
+
 export function humanInputEnabled() {
   return process.env.AGENT_ID_HUMAN_INPUT !== "0";
 }
@@ -169,7 +171,7 @@ export async function humanType(
   page,
   selector,
   text,
-  { rng = Math.random, timeout = 15000, submit = false, root = page } = {},
+  { rng = Math.random, timeout = 15000, submit = false, root = page } = {}
 ) {
   const value = String(text ?? "");
   if (!humanInputEnabled()) {
@@ -193,7 +195,91 @@ export async function humanType(
 // came from a click-xy rather than a locator. No click, no clear: it appends at
 // the caret. `submit` presses Enter after a short dwell. With human input
 // disabled the keystrokes are sent back-to-back (still real key events).
-export async function humanTypeFocused(page, text, { rng = Math.random, submit = false } = {}) {
+// Type a one-time code that the page has split across a row of single-character
+// boxes. Typing into the first one and letting the site advance the focus is what
+// most of them expect, and it is what `humanType` does — but it depends on script
+// the site runs on every keystroke, and where that script is picky (Booking.com's
+// six boxes among them) the code lands half-entered and the submit stays dead.
+//
+// So: type, then look. Boxes that stayed empty are filled one at a time, each
+// with its own character, which needs no cooperation from the page at all.
+//
+// Returns `{ complete, submitted }`. `submitted` says the row took the page with
+// it, which is the one outcome that cannot be verified by reading the boxes back
+// — they are gone. Keeping the two apart is the point: a bare `true` made "the
+// row holds the code" and "something navigated" the same answer.
+export async function typeCodeAcrossBoxes(
+  page,
+  boxes,
+  code,
+  { rng = Math.random } = {}
+) {
+  const characters = Array.from(String(code ?? ""));
+  if (boxes.length === 0 || characters.length === 0) {
+    return { complete: false, submitted: false };
+  }
+
+  const startedAt = page.url();
+  const navigated = () => page.url() !== startedAt;
+  const values = async () =>
+    Promise.all(boxes.map((box) => box.inputValue().catch(() => "")));
+  // Each box must hold the character at its own index. A total character count
+  // cannot tell a filled row from one box holding the whole code and five empty
+  // beside it — which is exactly what a row with no `maxlength` does when its
+  // script declines to distribute, and exactly the shape this function exists
+  // for. It also let digits left over from a refused code stand in for the new
+  // one.
+  const holdsCode = (found) =>
+    characters.every((character, index) => found[index] === character);
+
+  // The whole row, not just the first box. A retry arrives at a row the site has
+  // re-rendered with the previous code still in it, and leaving those five
+  // characters behind is how two codes get spliced into one and submitted.
+  for (const box of boxes) await box.fill("").catch(() => {});
+
+  await humanClick(page, boxes[0]);
+  await humanTypeFocused(page, code, { rng });
+
+  if (navigated()) return afterSelfSubmit(page);
+  if (holdsCode(await values())) return { complete: true, submitted: false };
+
+  for (const [index, box] of boxes.entries()) {
+    const character = characters[index];
+    if (character === undefined) break;
+    // `fill` rather than keystrokes: the page's own key handling is what fell
+    // short, and a per-box value assignment still raises the input events a
+    // controlled component listens for.
+    await box.fill(character).catch(() => {});
+  }
+
+  if (navigated()) return afterSelfSubmit(page);
+
+  return { complete: holdsCode(await values()), submitted: false };
+}
+
+// A row that submits itself on the last character takes the page with it, and
+// then there is nothing left to read back — so navigating away is the code
+// landing, and calling empty boxes on the next screen a failure would fail the
+// one case that worked perfectly. Unless the screen it landed on is saying the
+// code was refused: that is a navigation too, and reading it as success is how a
+// rejected code gets reported as typed.
+async function afterSelfSubmit(page) {
+  const bodyText = await page
+    .evaluate(() =>
+      document.body && document.body.innerText
+        ? document.body.innerText.slice(0, 4000)
+        : ""
+    )
+    .catch(() => "");
+
+  return { complete: !ERROR_RE.test(bodyText), submitted: true };
+}
+
+export async function humanTypeFocused(
+  page,
+  text,
+  { rng = Math.random, submit = false } = {}
+) {
   const value = String(text ?? "");
   if (!humanInputEnabled()) {
     await page.keyboard.type(value);

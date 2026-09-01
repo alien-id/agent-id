@@ -33,7 +33,12 @@ import { statSync } from "node:fs";
 import http from "node:http";
 
 import { collectViaForm } from "./secure-form.mjs";
-import { promptSecret, promptText, hasTty, notifyTty } from "./trusted-input.mjs";
+import {
+  promptSecret,
+  promptText,
+  hasTty,
+  notifyTty,
+} from "./trusted-input.mjs";
 
 // ─── Browser loopback form (the existing mechanism, wrapped) ─────────────────────
 
@@ -157,7 +162,18 @@ export class HostedHarnessProvider {
           res.on("data", (c) => chunks.push(c));
           res.on("end", () => {
             if (res.statusCode !== 200) {
-              reject(new Error(`hosted secure prompt: HTTP ${res.statusCode}`));
+              // 409 is the owner closing the card, not a fault: the host says so
+              // explicitly. Without a code of its own it arrives as a bare HTTP
+              // error, and a caller that cannot tell "they declined" from "it
+              // broke" retries — putting the same card back in front of someone
+              // who has just dismissed it.
+              const error = new Error(
+                res.statusCode === 409
+                  ? "hosted secure prompt: the owner dismissed the card"
+                  : `hosted secure prompt: HTTP ${res.statusCode}`
+              );
+              if (res.statusCode === 409) error.code = "FORM_CANCELLED";
+              reject(error);
               return;
             }
             try {
@@ -171,13 +187,20 @@ export class HostedHarnessProvider {
               reject(new Error(`hosted secure prompt: bad JSON response (${err.message})`));
             }
           });
-        },
+        }
       );
       req.on("error", reject);
       if (spec.timeoutMs) {
-        req.setTimeout(spec.timeoutMs, () =>
-          req.destroy(new Error("hosted secure prompt timed out")),
-        );
+        req.setTimeout(spec.timeoutMs, () => {
+          // The same reason the dismissal above carries a code: callers tell an
+          // expiry from a fault by `err.code`, and without one this arrived as an
+          // ordinary error. Auto-login's `otp-timeout` outcome was unreachable
+          // whenever the card came from the hosted provider — which is the first
+          // one tried, and the one a card on a phone comes from.
+          const error = new Error("hosted secure prompt timed out");
+          error.code = "FORM_TIMEOUT";
+          req.destroy(error);
+        });
       }
       req.end(payload);
     });
@@ -202,7 +225,11 @@ function specNeeds(spec) {
  *                    provider) inserted right after `hosted`
  *   need           — { multiline? } capability requirements
  */
-export function resolveSecurePrompt({ env = process.env, extraProviders = [], need = {} } = {}) {
+export function resolveSecurePrompt({
+  env = process.env,
+  extraProviders = [],
+  need = {},
+} = {}) {
   const browser = new BrowserFormProvider({ env });
   // Explicit operator override: AGENT_ID_SECURE_PROMPT=browser|tty|hosted (or the
   // name of an extraProvider, e.g. "mobile") forces that backend regardless of the
@@ -215,7 +242,12 @@ export function resolveSecurePrompt({ env = process.env, extraProviders = [], ne
     if (forced === "tty") return new TtyProvider();
     if (forced === "hosted") return new HostedHarnessProvider({ env });
   }
-  const chain = [new HostedHarnessProvider({ env }), ...extraProviders, browser, new TtyProvider()];
+  const chain = [
+    new HostedHarnessProvider({ env }),
+    ...extraProviders,
+    browser,
+    new TtyProvider(),
+  ];
   for (const p of chain) {
     if (!p.isAvailable || !p.isAvailable()) continue;
     const caps = (p.capabilities && p.capabilities()) || {};
@@ -230,7 +262,14 @@ export function resolveSecurePrompt({ env = process.env, extraProviders = [], ne
  * collect the values. The ergonomic entry point for call sites that previously
  * called collectViaForm directly. Returns { values: { <fieldName>: string } }.
  */
-export function collectSecret(spec, { env = process.env, extraProviders = [] } = {}) {
-  const provider = resolveSecurePrompt({ env, extraProviders, need: specNeeds(spec) });
+export function collectSecret(
+  spec,
+  { env = process.env, extraProviders = [] } = {}
+) {
+  const provider = resolveSecurePrompt({
+    env,
+    extraProviders,
+    need: specNeeds(spec),
+  });
   return provider.collect(spec);
 }
