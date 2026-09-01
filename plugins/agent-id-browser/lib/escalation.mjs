@@ -102,6 +102,34 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           "Either way the password is FINE: do not re-check it and do not ask for one. " +
           "Run auto-login again once the cause is addressed.",
       };
+    // The owner pressed "use the browser instead". They are not refusing the
+    // sign-in — they are asking to do it where they can see it, which is exactly
+    // what the viewport is for. Anything else here (another card, a retry, a
+    // question about the password) ignores what they just said.
+    case "owner-will-drive":
+      return {
+        action: OWNER_MUST_DRIVE,
+        reason: "owner_chose_the_browser",
+        message:
+          `The owner closed the secure card for '${credName}' and asked to sign in through the ` +
+          `browser themselves. Open the browser view for profile '${profile}', parked on the ` +
+          "sign-in page, and let them finish there — then continue. Do NOT raise another card, " +
+          "do NOT ask for the password, and do NOT report the sign-in refused: they did not " +
+          "refuse it, they took it over.",
+      };
+    // The owner closed the card. Nothing is broken and nothing timed out — they
+    // were asked and declined, so the one thing that must not happen is the same
+    // card going back up unbidden.
+    case "otp-declined":
+      return {
+        action: OWNER_MUST_CONFIRM,
+        reason: "otp_declined_by_owner",
+        message:
+          `The owner dismissed the code card for '${credName}' — they were asked and said no. ` +
+          "The credential is FINE: do not re-add it, do not ask for a password, and do NOT run " +
+          "auto-login again unless they ask for it. Say the sign-in was not completed and leave " +
+          "it there.",
+      };
     // The code card expired unanswered — the owner was away, not the sign-in
     // broken. The page is still sitting on the code screen, so the fix is a fresh
     // code, and nothing about the credential is in doubt.
@@ -128,10 +156,10 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           `The site asked '${credName}' for a one-time code, but the credential is set to ` +
           "`otp: none`. If the sign-in page has NO password field — it takes an e-mail or " +
           "phone number and sends a code — the credential is the wrong shape: re-add it with " +
-          "`passwordless: true` and `otp: \"interactive\"`, passing `overwrite: true` (without " +
+          '`passwordless: true` and `otp: "interactive"`, passing `overwrite: true` (without ' +
           "that the call returns the stored entry and nothing changes). If the site does have " +
           "a password and this code is a second factor, keep the credential and set " +
-          "`otp: \"interactive\"` so the owner can be asked, or attach a seed with " +
+          '`otp: "interactive"` so the owner can be asked, or attach a seed with ' +
           "`vault set-totp`. Do not retry as-is; it will ask again.",
       };
     case "failed":

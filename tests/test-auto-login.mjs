@@ -30,11 +30,19 @@ import {
   fromAuthenticatorApp,
   maskedIdentifier,
   otpCardLength,
+  otpModeCorrection,
 } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { generateTotp } from "../plugins/agent-id-core/lib/totp.mjs";
 
 test("applyVars substitutes username/password/otp; passes non-strings through", () => {
-  assert.equal(applyVars("{username}:{password}:{otp}", { username: "u", password: "p", otp: "123" }), "u:p:123");
+  assert.equal(
+    applyVars("{username}:{password}:{otp}", {
+      username: "u",
+      password: "p",
+      otp: "123",
+    }),
+    "u:p:123"
+  );
   assert.equal(applyVars("nothing here", {}), "nothing here");
   assert.equal(applyVars(42, {}), 42);
 });
@@ -120,7 +128,7 @@ test("runRecipe rejects an unknown action", async () => {
       domains: ["x"],
       driver: recordingDriver([]),
     }),
-    /unknown recipe action/,
+    /unknown recipe action/
   );
 });
 
@@ -132,21 +140,25 @@ test("runRecipe requires the credential's domains allowlist", async () => {
       getOtp: async () => "",
       driver: recordingDriver([]),
     }),
-    /requires the credential's `domains` allowlist/,
+    /requires the credential's `domains` allowlist/
   );
 });
 
 test("runRecipe refuses to navigate off the credential's allowlist", async () => {
   const calls = [];
   await assert.rejects(
-    runRecipe(pageOn("https://x/login"), [{ action: "navigate", url: "https://evil.test/collect" }], {
-      username: "u",
-      password: "p",
-      getOtp: async () => "",
-      domains: ["x"],
-      driver: recordingDriver(calls),
-    }),
-    /not on the credential's domain allowlist/,
+    runRecipe(
+      pageOn("https://x/login"),
+      [{ action: "navigate", url: "https://evil.test/collect" }],
+      {
+        username: "u",
+        password: "p",
+        getOtp: async () => "",
+        domains: ["x"],
+        driver: recordingDriver(calls),
+      }
+    ),
+    /not on the credential's domain allowlist/
   );
   assert.deepEqual(calls, [], "the navigation must not have happened");
 });
@@ -155,17 +167,21 @@ test("runRecipe refuses a secret step on a foreign origin BEFORE resolving the c
   const calls = [];
   let otpCalls = 0;
   await assert.rejects(
-    runRecipe(pageOn("https://evil.test/phish"), [{ action: "fill", selector: "#code", value: "{otp}" }], {
-      username: "u",
-      password: "p",
-      getOtp: async () => {
-        otpCalls++;
-        return "654321";
-      },
-      domains: ["x"],
-      driver: recordingDriver(calls),
-    }),
-    /not on the credential's domain allowlist/,
+    runRecipe(
+      pageOn("https://evil.test/phish"),
+      [{ action: "fill", selector: "#code", value: "{otp}" }],
+      {
+        username: "u",
+        password: "p",
+        getOtp: async () => {
+          otpCalls++;
+          return "654321";
+        },
+        domains: ["x"],
+        driver: recordingDriver(calls),
+      }
+    ),
+    /not on the credential's domain allowlist/
   );
   assert.deepEqual(calls, [], "the fill must not have happened");
   assert.equal(otpCalls, 0, "the owner must not be asked for a code we were going to refuse");
@@ -174,14 +190,18 @@ test("runRecipe refuses a secret step on a foreign origin BEFORE resolving the c
 test("runRecipe gates a secret hidden in a selector, not just in a value", async () => {
   const calls = [];
   await assert.rejects(
-    runRecipe(pageOn("https://evil.test/phish"), [{ action: "click", selector: "#x-{password}" }], {
-      username: "u",
-      password: "p",
-      getOtp: async () => "",
-      domains: ["x"],
-      driver: recordingDriver(calls),
-    }),
-    /not on the credential's domain allowlist/,
+    runRecipe(
+      pageOn("https://evil.test/phish"),
+      [{ action: "click", selector: "#x-{password}" }],
+      {
+        username: "u",
+        password: "p",
+        getOtp: async () => "",
+        domains: ["x"],
+        driver: recordingDriver(calls),
+      }
+    ),
+    /not on the credential's domain allowlist/
   );
   assert.deepEqual(calls, []);
 });
@@ -189,14 +209,18 @@ test("runRecipe gates a secret hidden in a selector, not just in a value", async
 test("runRecipe refuses a navigate URL carrying a secret placeholder", async () => {
   const calls = [];
   await assert.rejects(
-    runRecipe(pageOn("https://x/login"), [{ action: "navigate", url: "https://x/c?v={otp}" }], {
-      username: "u",
-      password: "p",
-      getOtp: async () => "654321",
-      domains: ["x"],
-      driver: recordingDriver(calls),
-    }),
-    /must not carry \{password\} or \{otp\}/,
+    runRecipe(
+      pageOn("https://x/login"),
+      [{ action: "navigate", url: "https://x/c?v={otp}" }],
+      {
+        username: "u",
+        password: "p",
+        getOtp: async () => "654321",
+        domains: ["x"],
+        driver: recordingDriver(calls),
+      }
+    ),
+    /must not carry \{password\} or \{otp\}/
   );
   assert.deepEqual(calls, []);
 });
@@ -212,7 +236,7 @@ test("runRecipe fails closed when the page cannot report its origin", async () =
       getOtp: async () => "654321",
       domains: ["x"],
       driver: recordingDriver(calls),
-    }),
+    })
   );
   assert.deepEqual(calls, []);
 });
@@ -221,17 +245,37 @@ test("autoLogin refuses a loginUrl off the credential's allowlist, before openin
   await assert.rejects(
     autoLogin({
       page: {},
-      cred: { name: "c", username: "u", password: "p", loginUrl: "https://evil.test/login", domains: ["x"] },
+      cred: {
+        name: "c",
+        username: "u",
+        password: "p",
+        loginUrl: "https://evil.test/login",
+        domains: ["x"],
+      },
     }),
-    /not on the credential's domain allowlist/,
+    /not on the credential's domain allowlist/
   );
 });
 
 test("resolveOtp generates a code from a stored TOTP seed (RFC vector)", async () => {
-  const cred = { name: "demo", otp: "totp", totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", period: 30, digits: 6 };
+  const cred = {
+    name: "demo",
+    otp: "totp",
+    totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+    period: 30,
+    digits: 6,
+  };
   const code = await resolveOtp(cred, { now: 59_000 });
   assert.equal(code, "287082");
-  assert.equal(code, generateTotp({ secret: cred.totpSecret, period: 30, digits: 6, now: 59_000 }));
+  assert.equal(
+    code,
+    generateTotp({
+      secret: cred.totpSecret,
+      period: 30,
+      digits: 6,
+      now: 59_000,
+    })
+  );
 });
 
 // The hosted-harness protocol on a unix socket, as `test-secure-prompt.mjs` drives
@@ -260,7 +304,10 @@ test("a TOTP credential with no seed asks the owner instead of failing the sign-
   // It used to throw `otp=totp but no totpSecret stored` and fail the whole sign-in
   // while the owner sat there with the code already on their phone.
   const { result, seen } = await withCardCapture((env) =>
-    resolveOtp({ name: "gh", otp: "totp", loginUrl: "https://github.example/login" }, { env }),
+    resolveOtp(
+      { name: "gh", otp: "totp", loginUrl: "https://github.example/login" },
+      { env }
+    )
   );
 
   assert.equal(result, "123456");
@@ -271,7 +318,10 @@ test("a TOTP credential with no seed asks the owner instead of failing the sign-
 
 test("a TOTP credential that has its seed still never raises a card", async () => {
   const { result, seen } = await withCardCapture((env) =>
-    resolveOtp({ name: "gh", otp: "totp", totpSecret: "JBSWY3DPEHPK3PXP" }, { env }),
+    resolveOtp(
+      { name: "gh", otp: "totp", totpSecret: "JBSWY3DPEHPK3PXP" },
+      { env }
+    )
   );
 
   assert.equal(seen.length, 0, "a stored seed is answered without asking anyone");
@@ -281,25 +331,43 @@ test("a TOTP credential that has its seed still never raises a card", async () =
 test("the card for an authenticator code sends nobody to a mailbox", () => {
   // The copy that was already there says "check your email or messages", which for
   // a code that was never sent anywhere is a wrong instruction, not a vague one.
-  const spec = otpCardSpec({ name: "gh", otp: "totp", loginUrl: "https://github.example/login" });
+  const spec = otpCardSpec({
+    name: "gh",
+    otp: "totp",
+    loginUrl: "https://github.example/login",
+  });
 
   assert.match(spec.description, /2FA app/i);
   assert.ok(!/email|messages|sent/i.test(spec.description), spec.description);
   assert.ok(fromAuthenticatorApp({ name: "gh", otp: "totp" }));
   assert.ok(
     !fromAuthenticatorApp({ name: "gh", otp: "totp", totpSecret: "x" }),
-    "with a seed there is no card, so nothing to word",
+    "with a seed there is no card, so nothing to word"
   );
 });
 
 // ── Positive-confirmation helpers (the "logged-in" false-positive guard) ──────────
 
 test("isLoginishPath matches whole login/auth segments, not substrings", () => {
-  for (const p of ["/login", "/login/", "/account/signin", "/oauth2/authorize", "/auth/callback", "/challenge"]) {
+  for (const p of [
+    "/login",
+    "/login/",
+    "/account/signin",
+    "/oauth2/authorize",
+    "/auth/callback",
+    "/challenge",
+  ]) {
     assert.equal(isLoginishPath(p), true, `login-ish: ${p}`);
   }
   // "authors" must NOT match "auth"; app paths are not login-ish.
-  for (const p of ["/", "/feed", "/authors/jane", "/r/test", "/user/me", "/settings"]) {
+  for (const p of [
+    "/",
+    "/feed",
+    "/authors/jane",
+    "/r/test",
+    "/user/me",
+    "/settings",
+  ]) {
     assert.equal(isLoginishPath(p), false, `app path: ${p}`);
   }
 });
@@ -308,8 +376,11 @@ test("stillOnLoginPage: true only when stuck on the same-host login page", () =>
   const loginUrl = "https://www.reddit.com/login";
   // The exact Reddit failure: form gone but still on /login with a js_challenge.
   assert.equal(
-    stillOnLoginPage("https://www.reddit.com/login/?solution=abc&js_challenge=1", loginUrl),
-    true,
+    stillOnLoginPage(
+      "https://www.reddit.com/login/?solution=abc&js_challenge=1",
+      loginUrl
+    ),
+    true
   );
   // Real success leaves the login page (redirect to the feed) → confirmed.
   assert.equal(stillOnLoginPage("https://www.reddit.com/", loginUrl), false);
@@ -365,7 +436,10 @@ test("otpPromptWording: a passwordless code is not presented as a second factor"
 });
 
 test("otpPromptWording: an ordinary second factor keeps the 2FA wording", () => {
-  const w = otpPromptWording({ name: "gh", loginUrl: "https://github.example/login" });
+  const w = otpPromptWording({
+    name: "gh",
+    loginUrl: "https://github.example/login",
+  });
   assert.match(w.title, /2FA code for Github\.example/);
   assert.match(w.label, /2FA/);
 });
@@ -375,7 +449,12 @@ test("the card names where to look when the page did not say", () => {
   // attached to the account years earlier, on a phone in another room, and the
   // owner spent the card's ten minutes searching a mailbox. The identifier they
   // signed in with is the one thing we always have.
-  const cred = { name: "airbnb", passwordless: true, username: "daniel@eti.co", loginUrl: "https://www.airbnb.com/login" };
+  const cred = {
+    name: "airbnb",
+    passwordless: true,
+    username: "daniel@eti.co",
+    loginUrl: "https://www.airbnb.com/login",
+  };
   const guessed = otpPromptWording(cred);
 
   assert.match(guessed.description, /d•••@eti\.co/);
@@ -385,7 +464,9 @@ test("the card names where to look when the page did not say", () => {
   assert.ok(!/sent a code to/.test(guessed.description), guessed.description);
 
   // What the page itself printed outranks it, and gets the certain wording.
-  const stated = otpPromptWording(cred, { destination: "your phone ending in 4817" });
+  const stated = otpPromptWording(cred, {
+    destination: "your phone ending in 4817",
+  });
   assert.match(stated.description, /sent a code to your phone ending in 4817/);
   assert.ok(!/d•••@eti\.co/.test(stated.description), stated.description);
 
@@ -395,8 +476,13 @@ test("the card names where to look when the page did not say", () => {
 });
 
 test("the card carries the cell count only when the page really stated one", () => {
-  const cred = { name: "booking", passwordless: true, loginUrl: "https://booking.com/in" };
-  const placeholderFor = (length) => otpCardSpec(cred, { length }).fields[0].placeholder ?? null;
+  const cred = {
+    name: "booking",
+    passwordless: true,
+    loginUrl: "https://booking.com/in",
+  };
+  const placeholderFor = (length) =>
+    otpCardSpec(cred, { length }).fields[0].placeholder ?? null;
 
   // The screen draws one cell per placeholder character and submits itself when
   // they fill. That is why a guess is not a lesser version of silence: too few
@@ -412,6 +498,25 @@ test("the card carries the cell count only when the page really stated one", () 
   }
   assert.equal(otpCardLength(6), 6);
   assert.equal(otpCardLength(32), null);
+});
+
+test("only a credential that denies codes is corrected, and it is corrected once", () => {
+  // The record and the object the fill path works with are the same object for a
+  // `login` credential, so asking "is it still none?" after setting it answered
+  // no — and the correction was computed, applied in memory, and never saved.
+  const denies = { name: "booking", otp: "none" };
+
+  assert.equal(otpModeCorrection(denies), "interactive");
+  denies.otp = otpModeCorrection(denies);
+  assert.equal(otpModeCorrection(denies), null, "nothing left to correct");
+
+  assert.equal(otpModeCorrection({ otp: "interactive" }), null);
+  assert.equal(
+    otpModeCorrection({ otp: "totp" }),
+    null,
+    "a seed is not a wrong answer"
+  );
+  assert.equal(otpModeCorrection(undefined), null);
 });
 
 test("an identifier is masked down to what the owner recognises", () => {
@@ -443,17 +548,21 @@ test("a sign-in that hops to an unlisted subdomain is refused BEFORE the owner i
   const calls = [];
   let otpCalls = 0;
   await assert.rejects(
-    runRecipe(pageOn("https://account.example.com/verify"), [{ action: "fill", selector: "#code", value: "{otp}" }], {
-      username: "u",
-      password: "p",
-      getOtp: async () => {
-        otpCalls++;
-        return "654321";
-      },
-      domains: ["www.example.com"],
-      driver: recordingDriver(calls),
-    }),
-    /account\.example\.com.*not on the credential's domain allowlist/s,
+    runRecipe(
+      pageOn("https://account.example.com/verify"),
+      [{ action: "fill", selector: "#code", value: "{otp}" }],
+      {
+        username: "u",
+        password: "p",
+        getOtp: async () => {
+          otpCalls++;
+          return "654321";
+        },
+        domains: ["www.example.com"],
+        driver: recordingDriver(calls),
+      }
+    ),
+    /account\.example\.com.*not on the credential's domain allowlist/s
   );
   assert.equal(otpCalls, 0, "no card may be raised for a step we are going to refuse");
   assert.deepEqual(calls, []);
@@ -472,8 +581,19 @@ test("a wildcard covering the whole sign-in flow lets the hop through", async ()
 });
 
 test("the code-screen submit vocabulary never matches a control that discards the code", () => {
-  for (const label of ["Verify", "Continue", "Submit", "Confirm", "Next", "Sign in", "Log in"]) {
-    assert.ok(CODE_SUBMIT_TEXT_RE.test(label), `"${label}" should advance the code screen`);
+  for (const label of [
+    "Verify",
+    "Continue",
+    "Submit",
+    "Confirm",
+    "Next",
+    "Sign in",
+    "Log in",
+  ]) {
+    assert.ok(
+      CODE_SUBMIT_TEXT_RE.test(label),
+      `"${label}" should advance the code screen`
+    );
   }
   // Clicking any of these throws away a code the owner has just typed, and on a
   // mailed code that means waiting for a fresh one.
@@ -510,22 +630,24 @@ test("a page that navigates WHILE the owner types the code cannot receive it", a
       domains: ["account.example.com"],
       driver: recordingDriver(calls),
     }),
-    /evil\.test.*not on the credential's domain allowlist/s,
+    /evil\.test.*not on the credential's domain allowlist/s
   );
   assert.deepEqual(calls, [], "the code must not have been typed anywhere");
 });
 
 test("a step whose origin stays put is unaffected by the second check", async () => {
   const calls = [];
-  await runRecipe(pageOn("https://account.example.com/verify"), [
-    { action: "fill", selector: "#code", value: "{otp}" },
-  ], {
-    username: "u",
-    password: "p",
-    getOtp: async () => "654321",
-    domains: ["account.example.com"],
-    driver: recordingDriver(calls),
-  });
+  await runRecipe(
+    pageOn("https://account.example.com/verify"),
+    [{ action: "fill", selector: "#code", value: "{otp}" }],
+    {
+      username: "u",
+      password: "p",
+      getOtp: async () => "654321",
+      domains: ["account.example.com"],
+      driver: recordingDriver(calls),
+    }
+  );
   assert.deepEqual(calls, [["fill", "#code", "654321"]]);
 });
 
@@ -539,7 +661,10 @@ test("the TOTP retry lands in the next period, not the one just refused", () => 
   const now = 1_000_000_000_000;
   const first = generateTotp({ secret: seed, now });
   const immediate = generateTotp({ secret: seed, now: now + 3000 });
-  const afterWait = generateTotp({ secret: seed, now: now + millisToNextTotpWindow({}, now) });
+  const afterWait = generateTotp({
+    secret: seed,
+    now: now + millisToNextTotpWindow({}, now),
+  });
 
   assert.equal(immediate, first, "a retry three seconds later is the same code");
   assert.notEqual(afterWait, first, "a retry after the wait is a different one");
@@ -560,10 +685,14 @@ test("the retry card says the code was refused, so the owner reads a fresh one",
   // the CURRENT one, not retype what they just sent.
   const cred = { name: "site", loginUrl: "https://x.example/login" };
   assert.ok(!otpPromptWording(cred).description.includes("not accepted"));
-  assert.match(otpPromptWording(cred, { retry: true }).description, /not accepted/);
   assert.match(
-    otpPromptWording({ ...cred, passwordless: true }, { retry: true }).description,
-    /not accepted/,
+    otpPromptWording(cred, { retry: true }).description,
+    /not accepted/
+  );
+  assert.match(
+    otpPromptWording({ ...cred, passwordless: true }, { retry: true })
+      .description,
+    /not accepted/
   );
 });
 
@@ -576,10 +705,16 @@ function formTimeout() {
 }
 
 function recipePage(url) {
-  return { url: () => url, goto: async () => {}, waitForTimeout: async () => {} };
+  return {
+    url: () => url,
+    goto: async () => {},
+    waitForTimeout: async () => {},
+  };
 }
 
-const OTP_FIRST_RECIPE = [{ action: "fill", selector: "#code", value: "{otp}" }];
+const OTP_FIRST_RECIPE = [
+  { action: "fill", selector: "#code", value: "{otp}" },
+];
 const PWLESS_CRED = {
   name: "booking",
   username: "u@example.test",
@@ -603,6 +738,92 @@ test("autoLogin reports an expired code card as an outcome, so the caller learns
   assert.equal(result.finalUrl, "https://x.test/otp");
 });
 
+test("a card closed for the browser asks for the browser, not for another card", async () => {
+  const useBrowser = () => {
+    const err = new Error("hosted secure prompt: the owner will sign in through the browser instead");
+    err.code = "FORM_USE_BROWSER";
+    return err;
+  };
+  const result = await autoLogin({
+    page: recipePage("https://x.test/otp"),
+    cred: PWLESS_CRED,
+    resolveOtpFn: async () => {
+      throw useBrowser();
+    },
+  });
+
+  assert.equal(result.outcome, "owner-will-drive");
+  assert.notEqual(result.outcome, "otp-declined", "they did not refuse, they took it over");
+});
+
+test("a card the owner dismissed is reported as their answer, not as a fault", async () => {
+  // The hosted host answers 409 when the owner closes the card. Arriving as a
+  // bare HTTP error it read as "something broke", and the sensible response to
+  // that is a retry — which puts the card back in front of someone who has just
+  // said no.
+  const cancelled = () => {
+    const err = new Error("hosted secure prompt: the owner dismissed the card");
+    err.code = "FORM_CANCELLED";
+    return err;
+  };
+  const result = await autoLogin({
+    page: recipePage("https://x.test/otp"),
+    cred: PWLESS_CRED,
+    resolveOtpFn: async () => {
+      throw cancelled();
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "otp-declined");
+  assert.notEqual(result.outcome, "otp-timeout", "nobody ran out of time");
+});
+
+test(
+  "a real 409 from the hosted card reaches the declined outcome, end to end",
+  async () => {
+    // The test above fabricates the error, so it passes whether or not anything
+    // ever sets that code. The code is set in agent-id-core and read in
+    // agent-id-browser, and a release that bumps only the reader resolves a
+    // published core that never sets it — the retry loop would be exactly as open
+    // as before, with the whole suite green. So this one drives a real 409 all the
+    // way: hosted socket, core's provider, no `resolveOtpFn` injected.
+    const sock = path.join(
+      os.tmpdir(),
+      `agentid-al-${process.pid}-${Date.now()}.sock`
+    );
+    const server = http.createServer((_req, res) => {
+      const payload = JSON.stringify({ error: "cancelled" });
+      res.writeHead(409, {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      });
+      res.end(payload);
+    });
+    await new Promise((resolve) => server.listen(sock, resolve));
+
+    const previous = process.env.AGENT_ID_SECURE_PROMPT_SOCK;
+    process.env.AGENT_ID_SECURE_PROMPT_SOCK = sock;
+    try {
+      const result = await autoLogin({
+        page: recipePage("https://x.test/otp"),
+        cred: PWLESS_CRED,
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(
+        result.outcome,
+        "otp-declined",
+        "a dismissal must survive the trip across the package boundary"
+      );
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_ID_SECURE_PROMPT_SOCK;
+      else process.env.AGENT_ID_SECURE_PROMPT_SOCK = previous;
+      server.close();
+    }
+  }
+);
+
 test("autoLogin does not dress every OTP failure up as a timeout", async () => {
   // Only an unanswered card is an outcome. A credential that cannot produce a
   // code at all is a fault, and swallowing it would report "nobody typed it".
@@ -614,7 +835,7 @@ test("autoLogin does not dress every OTP failure up as a timeout", async () => {
         throw new Error("login 'booking': otp=totp but no totpSecret stored");
       },
     }),
-    /totpSecret/,
+    /totpSecret/
   );
 });
 
@@ -628,11 +849,12 @@ test("the retry card is sized by where the code comes from, not by the fact of r
   // hand, so ten minutes of an agent blocked on a card buys nothing.
   assert.ok(
     otpCardBudgetMs(mailed) > otpCardBudgetMs(fromApp),
-    "a mailbox trip must outlast a glance",
+    "a mailbox trip must outlast a glance"
   );
   assert.ok(
-    otpCardBudgetMs(mailed, { retry: true }) > otpCardBudgetMs(fromApp, { retry: true }),
-    "and the same holds on the retry",
+    otpCardBudgetMs(mailed, { retry: true }) >
+      otpCardBudgetMs(fromApp, { retry: true }),
+    "and the same holds on the retry"
   );
 
   // Both retries stay under the caller's 16-minute ceiling once the first card
@@ -646,8 +868,15 @@ test("the retry card is sized by where the code comes from, not by the fact of r
 });
 
 test("the code card does not mask what it asks for", () => {
-  const mailed = otpCardSpec({ name: "booking", otp: "interactive", loginUrl: "https://x.test/in" });
-  const generated = otpCardSpec({ name: "gh", otp: "interactive", loginUrl: "https://gh.test/in" }, { retry: true });
+  const mailed = otpCardSpec({
+    name: "booking",
+    otp: "interactive",
+    loginUrl: "https://x.test/in",
+  });
+  const generated = otpCardSpec(
+    { name: "gh", otp: "interactive", loginUrl: "https://gh.test/in" },
+    { retry: true }
+  );
 
   // Every other value this vault collects is masked by default — the code is the
   // one that must opt out, and it has to hold on the retry card too, which is
@@ -660,8 +889,16 @@ test("the code card does not mask what it asks for", () => {
 });
 
 test("the code card never says '2FA' to someone who has no first factor", () => {
-  const passwordless = otpCardSpec({ name: "booking", otp: "interactive", passwordless: true, loginUrl: "https://x.test/in" });
-  assert.ok(!/2fa|two-factor/i.test(JSON.stringify(passwordless)), "this code IS the sign-in, not a second step");
+  const passwordless = otpCardSpec({
+    name: "booking",
+    otp: "interactive",
+    passwordless: true,
+    loginUrl: "https://x.test/in",
+  });
+  assert.ok(
+    !/2fa|two-factor/i.test(JSON.stringify(passwordless)),
+    "this code IS the sign-in, not a second step"
+  );
   assert.match(passwordless.fields[0].label, /sign-in code/i);
 });
 

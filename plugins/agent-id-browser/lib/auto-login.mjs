@@ -42,8 +42,19 @@
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
-import { assertHostAllowed, credentialHost, siteName } from "@alien-id/agent-id-vault/lib/store.mjs";
-import { classifyLogin, codeDestination, codeLengthFromText } from "./login-detect.mjs";
+import {
+  assertHostAllowed,
+  credentialHost,
+  DEFAULT_LOGIN_OTP_MODE,
+  loginOtpMode,
+  siteName,
+} from "@alien-id/agent-id-vault/lib/store.mjs";
+import {
+  classifyLogin,
+  codeDestination,
+  codeLengthFromText,
+  OTP_BODY_RE,
+} from "./login-detect.mjs";
 
 // Type a secret (password / OTP) with human cadence, guarding against a
 // keyboard/fill error that could echo the value — auto-login errors propagate to
@@ -136,7 +147,7 @@ export function applyVars(str, vars = {}) {
 // Does this recipe step reference {otp} anywhere (so we must resolve a code)? Pure.
 export function stepNeedsOtp(step) {
   return PLACEHOLDER_FIELDS.some(
-    (k) => typeof step[k] === "string" && step[k].includes("{otp}"),
+    (k) => typeof step[k] === "string" && step[k].includes("{otp}")
   );
 }
 
@@ -147,7 +158,7 @@ function stepCarriesSecret(step) {
   return PLACEHOLDER_FIELDS.some(
     (k) =>
       typeof step?.[k] === "string" &&
-      (step[k].includes("{password}") || step[k].includes("{otp}")),
+      (step[k].includes("{password}") || step[k].includes("{otp}"))
   );
 }
 
@@ -383,7 +394,14 @@ export function millisToNextTotpWindow(cred, now = Date.now()) {
 // seed, or ask the human over the secure-prompt channel.
 export async function resolveOtp(
   cred,
-  { env = process.env, log = () => {}, now, retry = false, destination = null, length = null } = {},
+  {
+    env = process.env,
+    log = () => {},
+    now,
+    retry = false,
+    destination = null,
+    length = null,
+  } = {}
 ) {
   if (cred.otp === "totp" && cred.totpSecret) {
     return generateTotp({
@@ -486,86 +504,291 @@ const IDENTIFIER_FIELD_SEL = [
   'input[autocomplete="tel-national"]',
 ].join(",");
 
-export async function detectPageState(page) {
-  return page.evaluate(([challengeSel, identifierSel]) => {
-    const all = (sel) => Array.from(document.querySelectorAll(sel));
-    const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
-    // Asked-for is narrower than visible, and only the password reads it that way.
-    // Booking.com's e-mail step carries a fully styled password input inside an
-    // `aria-hidden` wrapper: laid out, opaque, in the viewport, and not part of
-    // the step. Counting it made an identifier-first screen look like an ordinary
-    // login.
-    //
-    // But `aria-hidden` on an ancestor has a second, commoner meaning: a modal —
-    // a cookie banner, a consent dialog — masking the whole page behind it. There
-    // the password IS what the page wants; it is merely covered. Telling the two
-    // apart is what the page asks for ALONGSIDE it: a staged step sits next to the
-    // field that is live (Booking's e-mail), while a masked page has no live field
-    // at all. So a control only stops counting when something else is being asked.
-    //
-    // Without that clause a password step behind a cookie dialog reported no
-    // password and no identifier — which reads as a finished login, and sealed an
-    // unauthenticated profile while reporting success.
-    //
-    // The identifier keeps the looser test. Losing a password makes the page read
-    // as identifier-first, which is the cautious reading; losing the identifier too
-    // would leave a page with no form at all, and "no form" is a finished login.
-    const staged = (e) => !!e.closest('[aria-hidden="true"], [inert]');
-    const askableFields = all(
-      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]),select,textarea',
+// What the page says about the code it is asking for, read straight from the DOM:
+// how many characters it takes, and where it says it sent it. Both callers that
+// raise a code card need this — `auto_login` on its own OTP step, and `fill_otp`
+// when the model drives the sign-in by hand. It used to live inside
+// `detectPageState`, which only the first of them runs, so a card raised the
+// second way arrived with neither: no cell count, so the screen drew a plain
+// field, and no destination, so it told the owner nothing about where to look.
+// A stored `otp` mode that a live sign-in has just contradicted, and what it
+// should say instead — or null when the record was right. Reaching a code step
+// settles the question: the site is asking, so "this site has no codes" is the
+// one answer that cannot be true.
+// Through the store's normaliser rather than `cred.otp === "none"`, so a record
+// that never carried the field is judged by what the field means when it is
+// missing, not by strict equality against a value it does not hold.
+export function otpModeCorrection(cred) {
+  if (!cred) return null;
+
+  return loginOtpMode(cred) === "none" ? DEFAULT_LOGIN_OTP_MODE : null;
+}
+
+// The row of single-character boxes a code screen is built from, in document
+// order — empty when the page uses one ordinary field. Same test as the cell
+// count in `otpCardHints`: a box qualifies by taking a code.
+export const OTP_BOX_SEL =
+  'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]';
+
+// The row members, once found, are tagged with this so the boxes the code is
+// typed into are the same elements the cell count was derived from. They used to
+// be two separate predicates — one reading `e.type`, the other
+// `getAttribute("type")` — which already disagreed on `type="TEL"`: the card
+// promised six cells and the fill path found no row at all.
+export const OTP_ROW_ATTR = "data-aib-otp-box";
+
+// A code has at least four characters and at most eight; below four is not a row
+// and above eight is not a code. The cap matters on its own — the screen draws
+// one cell per character and submits on the last, so a count taken from nine
+// stray inputs would strand every answer.
+const OTP_ROW_MIN = 4;
+const OTP_ROW_MAX = 8;
+
+// Find the row and tag it, in one place, in the page. Returns how many boxes it
+// holds, or null when the page has no row.
+//
+// "Four or more inputs that could take a code" is not enough on its own: a
+// checkout step is four numeric fields, so is a quantity grid, and drawing a card
+// with that many cells is the one failure this screen cannot recover from. What
+// separates a code row from a form that merely counts to four:
+//
+//   - one container. Boxes of a row sit together under a parent of their own; a
+//     form's fields do not. Plenty of sites wrap each box in an element of its
+//     own, so the container is looked for one level up as well — Booking.com
+//     reports `candidates=6 groups=1,1,1,1,1,1` under the direct parent, and its
+//     row is invisible to anything that only looks there.
+//   - nothing else in it. A container holding a boxish input beside an ordinary
+//     one is a form, not a row.
+//   - uniform. Every box of a row is the same shape — same `type`, same
+//     `maxlength` (all of them one, or all of them silent). Card number 19,
+//     expiry 5 and CVC 4 are not a row however numeric they are.
+//   - about a code. A row that declares `maxlength="1"` says so itself. One that
+//     leaves the length to script — Booking.com's, the row this was built for —
+//     is taken on the page's word instead: `one-time-code`, or copy that says a
+//     code was sent.
+function otpRowInPage({ selector, min, max, attr, codeCopy }) {
+  const codeCopyRe = new RegExp(codeCopy, "i");
+  const staged = (e) => !!e.closest('[aria-hidden="true"],[hidden]');
+  const visible = (e) =>
+    !staged(e) && !!(e.offsetParent !== null || e.getClientRects().length);
+  const declared = (e) => {
+    const value = Number(e.getAttribute("maxlength"));
+    return Number.isInteger(value) && value > 0 ? value : null;
+  };
+  const boxish = (e) =>
+    declared(e) === 1 ||
+    e.getAttribute("autocomplete") === "one-time-code" ||
+    e.getAttribute("inputmode") === "numeric" ||
+    e.type === "tel" ||
+    e.type === "number";
+
+  for (const stale of document.querySelectorAll(`[${attr}]`)) {
+    stale.removeAttribute(attr);
+  }
+
+  const bodyText =
+    document.body && document.body.innerText ? document.body.innerText : "";
+  const candidates = Array.from(document.querySelectorAll(selector)).filter(
+    visible
+  );
+  // Grouped by the direct parent first, then by the grandparent — a wrapped box
+  // has a parent all to itself, and the row only appears one level up. The
+  // checks below are what keep the wider net honest: a grandparent that holds a
+  // form's fields fails "nothing else in it" the same way a parent would.
+  const byParent = new Map();
+  for (const field of candidates) {
+    for (const container of [field.parentElement, field.parentElement?.parentElement]) {
+      if (!container) continue;
+      if (!byParent.has(container)) byParent.set(container, []);
+      byParent.get(container).push(field);
+    }
+  }
+
+  for (const [parent, group] of byParent) {
+    if (group.length < min || group.length > max) continue;
+    if (!group.every(boxish)) continue;
+    // Every input the container holds, not just the ones that matched the
+    // selector: a password or an e-mail beside them makes it a form.
+    const siblings = Array.from(parent.querySelectorAll("input")).filter(
+      visible
     );
-    const asksSomethingElse = askableFields.some((e) => visible(e) && !staged(e));
-    const asked = (e) => visible(e) && !(staged(e) && asksSomethingElse);
-    const hasPasswordField = all('input[type="password"]').some(asked);
-    const hasIdentifierField = all(identifierSel).some(visible);
-    const hasOtpField = all('input[autocomplete="one-time-code"]').some(visible);
-    const otpFields = all(
-      'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]',
-    ).filter(visible);
-    const otpFieldNames = otpFields
-      .map((e) => `${e.name || ""} ${e.id || ""} ${e.placeholder || ""} ${e.autocomplete || ""}`.trim())
-      .filter(Boolean);
-    // How many characters the code has, as the page itself constrains it. A row of
-    // one-character boxes IS the count; a single field states it in maxlength. The
-    // card draws exactly this many cells and submits when they fill, so a number
-    // that is merely plausible is worse than none — an unconstrained text input
-    // (maxlength 32, or absent) says nothing about a code and must not be read as
-    // if it did.
-    const lengthOf = (e) => {
-      const declared = Number(e.getAttribute("maxlength"));
-      return Number.isInteger(declared) && declared > 0 ? declared : null;
-    };
-    const singleCharBoxes = otpFields.filter((e) => lengthOf(e) === 1).length;
-    const otpLength =
-      singleCharBoxes >= 4
-        ? singleCharBoxes
-        : otpFields.length === 1
-          ? lengthOf(otpFields[0])
-          : null;
-    const bodyText = (document.body && document.body.innerText ? document.body.innerText : "").slice(0, 4000);
-    // Language-independent block signal: a visible challenge widget. Fed to
-    // classifyLogin via its `blocked` input so it wins over "logged-in".
-    const blocked = all(challengeSel).some(visible);
-    // The page's own error/alert copy, surfaced verbatim in a failure report so
-    // a rejection the classifier cannot read is still visible to the caller.
-    const errorText =
-      all('[role="alert"], [aria-live="assertive"], [class*="error" i], [class*="alert" i], [class*="invalid" i]')
-        .filter(visible)
-        .map((e) => (e.innerText || "").trim())
-        .filter(Boolean)
-        .join(" | ")
-        .slice(0, 300) || null;
-    return {
-      hasPasswordField,
-      hasIdentifierField,
-      hasOtpField,
-      otpFieldNames,
-      otpLength,
-      bodyText,
-      blocked,
-      errorText,
-    };
-  }, [CHALLENGE_WIDGET_SEL, IDENTIFIER_FIELD_SEL]);
+    if (siblings.length !== group.length) continue;
+    // A wrapper contributes its box to both its own group and its parent's, so
+    // the same element can appear twice in one list. Count it once.
+    if (new Set(group).size !== group.length) continue;
+    const [first] = group;
+    const uniform = group.every(
+      (e) => e.type === first.type && declared(e) === declared(first)
+    );
+    if (!uniform) continue;
+    const aboutACode =
+      declared(first) === 1 ||
+      group.some((e) => e.getAttribute("autocomplete") === "one-time-code") ||
+      codeCopyRe.test(bodyText);
+    if (!aboutACode) continue;
+
+    group.forEach((box, index) => box.setAttribute(attr, String(index)));
+
+    return group.length;
+  }
+
+  return null;
+}
+
+export async function otpBoxes(target) {
+  const count = await target
+    .evaluate(otpRowInPage, {
+      selector: OTP_BOX_SEL,
+      min: OTP_ROW_MIN,
+      max: OTP_ROW_MAX,
+      attr: OTP_ROW_ATTR,
+      codeCopy: OTP_BODY_RE.source,
+    })
+    .catch(() => null);
+  if (!count) return [];
+
+  const all = target.locator(`[${OTP_ROW_ATTR}]`);
+
+  return Array.from({ length: count }, (_, index) => all.nth(index));
+}
+
+export async function otpCardHints(target) {
+  // Only an exact count. A row of boxes is one — there are as many as the code
+  // has characters. A single field's maxlength is NOT: it says "no more than",
+  // and a site is free to allow eight for a six-character code. Drawing eight
+  // cells for a six-character code is the one failure this screen cannot
+  // recover from, because it submits on the last cell and carries no button.
+  //
+  // With one exception, measured on shadcn's InputOTP — the component a great
+  // many sites take their code screen from. It draws the cells itself and takes
+  // the whole code in ONE field carrying `autocomplete="one-time-code"` and
+  // `maxlength`. A field that declares itself a code field is not budgeting for
+  // an unknown length: it is stating this code's. Without this such a site gets
+  // the plain fallback, which is safe but is the shape we are trying to leave.
+  const count = await target
+    .evaluate(otpRowInPage, {
+      selector: OTP_BOX_SEL,
+      min: OTP_ROW_MIN,
+      max: OTP_ROW_MAX,
+      attr: OTP_ROW_ATTR,
+      codeCopy: OTP_BODY_RE.source,
+    })
+    .catch(() => null);
+  const bodyText = await target
+    .evaluate(() =>
+      document.body && document.body.innerText
+        ? document.body.innerText.slice(0, 4000)
+        : ""
+    )
+    .catch(() => "");
+
+  return {
+    length: count ?? (await declaredCodeFieldLength(target)) ?? codeLengthFromText(bodyText),
+    destination: codeDestination(bodyText),
+  };
+}
+
+// A single field that says it is a code field AND says how long: `one-time-code`
+// with a `maxlength` in range. Both halves are required — the attribute alone
+// leaves the length unknown, and a `maxlength` alone is the upper bound this
+// deliberately refuses.
+async function declaredCodeFieldLength(target) {
+  return target
+    .evaluate(
+      ({ min, max }) => {
+        const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
+        const fields = Array.from(
+          document.querySelectorAll('input[autocomplete="one-time-code"]'),
+        ).filter(visible);
+        if (fields.length !== 1) return null;
+
+        const declared = Number(fields[0].getAttribute("maxlength"));
+
+        return Number.isInteger(declared) && declared >= min && declared <= max ? declared : null;
+      },
+      { min: OTP_ROW_MIN, max: OTP_ROW_MAX },
+    )
+    .catch(() => null);
+}
+
+export async function detectPageState(page) {
+  return page.evaluate(
+    ([challengeSel, identifierSel]) => {
+      const all = (sel) => Array.from(document.querySelectorAll(sel));
+      const visible = (e) =>
+        !!(e.offsetParent !== null || e.getClientRects().length);
+      // Asked-for is narrower than visible, and only the password reads it that way.
+      // Booking.com's e-mail step carries a fully styled password input inside an
+      // `aria-hidden` wrapper: laid out, opaque, in the viewport, and not part of
+      // the step. Counting it made an identifier-first screen look like an ordinary
+      // login.
+      //
+      // But `aria-hidden` on an ancestor has a second, commoner meaning: a modal —
+      // a cookie banner, a consent dialog — masking the whole page behind it. There
+      // the password IS what the page wants; it is merely covered. Telling the two
+      // apart is what the page asks for ALONGSIDE it: a staged step sits next to the
+      // field that is live (Booking's e-mail), while a masked page has no live field
+      // at all. So a control only stops counting when something else is being asked.
+      //
+      // Without that clause a password step behind a cookie dialog reported no
+      // password and no identifier — which reads as a finished login, and sealed an
+      // unauthenticated profile while reporting success.
+      //
+      // The identifier keeps the looser test. Losing a password makes the page read
+      // as identifier-first, which is the cautious reading; losing the identifier too
+      // would leave a page with no form at all, and "no form" is a finished login.
+      const staged = (e) => !!e.closest('[aria-hidden="true"], [inert]');
+      const askableFields = all(
+        'input:not([type="hidden"]):not([type="submit"]):not([type="button"]),select,textarea'
+      );
+      const asksSomethingElse = askableFields.some(
+        (e) => visible(e) && !staged(e)
+      );
+      const asked = (e) => visible(e) && !(staged(e) && asksSomethingElse);
+      const hasPasswordField = all('input[type="password"]').some(asked);
+      const hasIdentifierField = all(identifierSel).some(visible);
+      const hasOtpField = all('input[autocomplete="one-time-code"]').some(
+        visible
+      );
+      const otpFields = all(
+        'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]'
+      ).filter(visible);
+      const otpFieldNames = otpFields
+        .map((e) =>
+          `${e.name || ""} ${e.id || ""} ${e.placeholder || ""} ${
+            e.autocomplete || ""
+          }`.trim()
+        )
+        .filter(Boolean);
+      const bodyText = (
+        document.body && document.body.innerText ? document.body.innerText : ""
+      ).slice(0, 4000);
+      // Language-independent block signal: a visible challenge widget. Fed to
+      // classifyLogin via its `blocked` input so it wins over "logged-in".
+      const blocked = all(challengeSel).some(visible);
+      // The page's own error/alert copy, surfaced verbatim in a failure report so
+      // a rejection the classifier cannot read is still visible to the caller.
+      const errorText =
+        all(
+          '[role="alert"], [aria-live="assertive"], [class*="error" i], [class*="alert" i], [class*="invalid" i]'
+        )
+          .filter(visible)
+          .map((e) => (e.innerText || "").trim())
+          .filter(Boolean)
+          .join(" | ")
+          .slice(0, 300) || null;
+      return {
+        hasPasswordField,
+        hasIdentifierField,
+        hasOtpField,
+        otpFieldNames,
+        bodyText,
+        blocked,
+        errorText,
+      };
+    },
+    [CHALLENGE_WIDGET_SEL, IDENTIFIER_FIELD_SEL]
+  );
 }
 
 // One line of page state for the trace: what the classifier saw, never any
@@ -697,15 +920,20 @@ export async function microsoftLogin(page, cred, log = () => {}) {
     log("Detected Microsoft Entra (Azure AD) login");
     await fillWhenVisible(page, 'input[name="loginfmt"]', cred.username);
     await clickIfPresent(page, "#idSIButton9"); // Next
-    await fillWhenVisible(page, 'input[name="passwd"]', cred.password, { secret: true });
+    await fillWhenVisible(page, 'input[name="passwd"]', cred.password, {
+      secret: true,
+    });
     await clickIfPresent(page, "#idSIButton9"); // Sign in
     return;
   }
   log("Detected Microsoft ADFS login");
   await fillWhenVisible(page, "#userNameInput", cred.username);
   // Paginated ADFS: a "Next" button reveals the password page.
-  if (await page.locator("#nextButton").count()) await clickIfPresent(page, "#nextButton");
-  await fillWhenVisible(page, "#passwordInput", cred.password, { secret: true });
+  if (await page.locator("#nextButton").count())
+    await clickIfPresent(page, "#nextButton");
+  await fillWhenVisible(page, "#passwordInput", cred.password, {
+    secret: true,
+  });
   const kmsi = page.locator("#kmsiInput"); // "keep me signed in", if offered
   if (await kmsi.count()) await kmsi.check().catch(() => {});
   await clickIfPresent(page, "#submitButton");
@@ -839,6 +1067,10 @@ export async function autoLogin({
   // Injected the same way runRecipe takes `driver`: the code card is a ten-minute
   // wait on a human, which no test can afford to take literally.
   resolveOtpFn = resolveOtp,
+  // Called when the run discovers that the stored `otp` mode contradicts what the
+  // site does. Auto-login has no business opening the vault, so whoever did gets
+  // to write the correction.
+  onOtpModeCorrected = null,
 }) {
   if (!cred.loginUrl) throw new Error(`login '${cred.name}': loginUrl is required for auto-login`);
   // The whole run — warmup, the login page, every recipe step — happens on the
@@ -877,14 +1109,20 @@ export async function autoLogin({
   if (origin && isDeepLoginUrl(cred.loginUrl) && cred.warmup !== false) {
     log("auto-login: warming up via the site origin before the login page");
     try {
-      await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.goto(origin, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
       await page.waitForTimeout(Math.max(settleMs * 2, 4000));
     } catch {
       /* warmup is best-effort — proceed to the login URL regardless */
     }
   }
 
-  await page.goto(cred.loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(cred.loginUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: 30000,
+  });
   await page.waitForTimeout(settleMs);
 
   let errorText = null;
@@ -892,7 +1130,56 @@ export async function autoLogin({
   // site is waiting at a screen a fresh code can still clear. Reporting it as an
   // outcome keeps the run's shape — a caller that gets an exception here learns
   // nothing about where the browser stopped, and the profile is sealed anyway.
-  const otpTimedOut = () => ({ ok: false, outcome: "otp-timeout", finalUrl: page.url(), errorText });
+  const otpTimedOut = () => ({
+    ok: false,
+    outcome: "otp-timeout",
+    finalUrl: page.url(),
+    errorText,
+  });
+  // Dismissing the card is a decision, and a different one from walking away: the
+  // owner saw what was being asked and said no. Running again puts the same card
+  // straight back in front of them, so this outcome exists to say "they answered,
+  // and the answer was no".
+  const otpDeclined = () => ({
+    ok: false,
+    outcome: "otp-declined",
+    finalUrl: page.url(),
+    errorText,
+  });
+  // Not a refusal at all: the owner pressed the card's own button and means to
+  // finish the sign-in themselves, in a browser they can see. Reported apart from
+  // a dismissal because the answer to it is the opposite — hand them the browser
+  // rather than leave the sign-in alone.
+  const ownerWillDrive = () => ({
+    ok: false,
+    outcome: "owner-will-drive",
+    finalUrl: page.url(),
+    errorText,
+  });
+  // The stored `otp` said this site has no codes, and it has just been shown
+  // wrong. Called once a code is in hand, because that is the whole of the
+  // evidence — `otp-required` is also what a signed-in landing page inviting the
+  // owner to switch on two-factor authentication classifies as, off body copy
+  // alone and with nothing on it to type. On `main` such a page merely stopped
+  // the run; correcting the record from it would overwrite an explicit
+  // `--otp none` permanently, with no way back.
+  const recordOtpModeCorrection = async () => {
+    const correction = otpModeCorrection(cred);
+    if (!correction) return;
+    log(
+      `auto-login: '${cred.name}' says otp=none but the site asked for a code — correcting it`
+    );
+    cred.otp = correction;
+    try {
+      await onOtpModeCorrected?.(correction);
+    } catch (err) {
+      // Bookkeeping, and the run is mid-flight with a code already in hand and a
+      // password already typed. Losing the correction costs one re-learn next
+      // time; letting this throw costs the sign-in itself — which is the failure
+      // the correction exists to prevent.
+      log(`auto-login: could not record the corrected otp mode: ${err.message}`);
+    }
+  };
 
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
     try {
@@ -903,6 +1190,8 @@ export async function autoLogin({
         domains: cred.domains,
       });
     } catch (err) {
+      if (err?.code === "FORM_USE_BROWSER") return ownerWillDrive();
+      if (err?.code === "FORM_CANCELLED") return otpDeclined();
       if (err?.code !== "FORM_TIMEOUT") throw err;
       return otpTimedOut();
     }
@@ -968,16 +1257,18 @@ export async function autoLogin({
       }
       continue;
     } else if (outcome === "otp-required") {
-      if (cred.otp === "none") {
-        return { ok: false, outcome: "otp-unexpected", finalUrl: page.url() };
-      }
       if (otpAsks >= maxOtpAsks) {
         // The site is still asking after we answered. Looping here re-asks the
         // owner for a code the site has already refused once, and each ask is
         // another ten minutes of a budget that does not have them to give.
         // The page's own copy is the diagnosis here — "that code has expired" vs
         // "incorrect code" is the difference between retrying and giving up.
-        return { ok: false, outcome: "otp-rejected", finalUrl: page.url(), errorText };
+        return {
+          ok: false,
+          outcome: "otp-rejected",
+          finalUrl: page.url(),
+          errorText,
+        };
       }
       const retry = otpAsks > 0;
       if (retry && cred.otp === "totp") {
@@ -987,14 +1278,20 @@ export async function autoLogin({
       }
       otpAsks += 1;
       try {
-        // The code screen has just told us where it sent the code; the card is
-        // the only place that says so to the owner.
+        // The code screen has just told us how long the code is and where it sent
+        // it, and the card is the only place either fact reaches the owner. Both
+        // come from the same read: taking the length from here and the destination
+        // from the snapshot a settle earlier paired a fresh fact with a stale one.
         // What the page enforces beats what it says: an input constrained to six
         // characters is a fact, "6-digit code" is copy that may describe the last
         // step rather than this one.
-        const length = state.otpLength ?? codeLengthFromText(state.bodyText);
-        await typeOtp(page, await getOtp(retry, codeDestination(state.bodyText), length));
+        const hints = await otpCardHints(page);
+        const code = await getOtp(retry, hints.destination, hints.length);
+        await recordOtpModeCorrection();
+        await typeOtp(page, code);
       } catch (err) {
+        if (err?.code === "FORM_USE_BROWSER") return ownerWillDrive();
+        if (err?.code === "FORM_CANCELLED") return otpDeclined();
         if (err?.code !== "FORM_TIMEOUT") throw err;
         return otpTimedOut();
       }

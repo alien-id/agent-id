@@ -45,6 +45,25 @@ export const CREDENTIAL_TYPES = Object.freeze([
 // Allowed `otp` policies on a `login` credential.
 export const LOGIN_OTP_MODES = Object.freeze(["none", "totp", "interactive"]);
 
+// What a login credential answers a one-time code with, for a record that may not
+// carry the field at all — anything stored before `otp` existed. Every reader goes
+// through here, because the alternative is what this replaced: `add` writing
+// `interactive` when the flag is absent while validation and `vault list` each read
+// a missing field as `none`, so one field meant three things depending on who asked
+// and a record the sign-in would raise a card for was reported to the agent as
+// having no codes.
+//
+// Silence resolves the way `add` resolves it. Sites add a second factor far more
+// often than they drop one, and the two mistakes do not cost the same: `interactive`
+// costs a card the owner can dismiss, `none` abandons the sign-in with the password
+// typed and the code already sent. The mode is only ever consulted at a code step,
+// so a site that asks for nothing is unaffected either way.
+export const DEFAULT_LOGIN_OTP_MODE = "interactive";
+
+export function loginOtpMode(rec) {
+  return rec?.otp == null || rec.otp === "" ? DEFAULT_LOGIN_OTP_MODE : rec.otp;
+}
+
 // The recipe step vocabulary auto-login can execute (runRecipe's switch). Kept in
 // step with it by hand — validation happens on write, so a drift shows up as a
 // recipe the vault accepts and runRecipe then rejects at the `default` arm.
@@ -269,7 +288,7 @@ export function validateRecord(rec) {
       // expressible; collapsing the two would make the pair indistinguishable.
       requireNonEmpty(rec, ["username"]);
       if (!rec.passwordless) requireNonEmpty(rec, ["password"]);
-      const otp = rec.otp == null ? "none" : rec.otp;
+      const otp = loginOtpMode(rec);
       if (!LOGIN_OTP_MODES.includes(otp)) {
         throw new Error(
           `Credential ${rec.name}: otp must be one of ${LOGIN_OTP_MODES.join(", ")}`,
@@ -396,7 +415,7 @@ export function listMetadata(payload) {
     // guessing.
     ...(c.type === "login"
       ? {
-          otp: c.otp || "none",
+          otp: loginOtpMode(c),
           passwordless: c.passwordless === true,
           loginUrl: c.loginUrl || null,
           hasRecipe: Array.isArray(c.recipe) && c.recipe.length > 0,
