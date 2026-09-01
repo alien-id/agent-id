@@ -1,6 +1,6 @@
 {
   "name": "agent-id-mcp",
-  "version": "7.3.2",
+  "version": "7.3.3",
   "description": "MCP server exposing agent-id (identity, vault, vault-sealed browser) as tools — the connector shape Claude Cowork consumes. Thin adapter over the agent-id-* CLIs.",
   "author": {
     "name": "Alien",
@@ -15,11 +15,11 @@
   "dependencies": [
     {
       "name": "agent-id-core",
-      "version": "^7.3.1"
+      "version": "^7.4.0"
     },
     {
       "name": "agent-id-vault",
-      "version": "^7.6.0"
+      "version": "^7.7.0"
     }
   ]
 }
