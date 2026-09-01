@@ -119,6 +119,21 @@ test("qr-sign-in sends the owner to the browser view, because that is where the 
   assert.ok(!/Google, Microsoft/.test(message));
 });
 
+test("choosing the browser sends the agent to the browser", () => {
+  const { action, reason, message } = escalationFor("owner-will-drive", {
+    credName: "booking",
+    profile: "main",
+  });
+
+  assert.equal(action, OWNER_MUST_DRIVE, "the viewport is the answer to this");
+  assert.equal(reason, "owner_chose_the_browser");
+  assert.match(message, /browser view for profile 'main'/);
+  // The two ways a card can close must not read the same: one means leave it
+  // alone, the other means open the browser now.
+  assert.ok(!/do NOT run auto-login again/.test(message), message);
+  assert.match(message, /did not\s+refuse it/);
+});
+
 test("a dismissed card is an answer, and the agent is told not to ask again", () => {
   // Closing the card used to arrive as a bare `HTTP 409`, indistinguishable from
   // a fault — so the agent retried, and the owner who had just dismissed it got

@@ -124,6 +124,17 @@ function hostedSocketPath(env) {
   }
 }
 
+// Why a card was dismissed, when the host said. Unreadable or absent leaves the
+// plain dismissal, which is what every host that predates the button sends.
+function readDismissalReason(body) {
+  try {
+    const reason = JSON.parse(body.toString("utf8"))?.reason;
+    return typeof reason === "string" && reason ? reason : null;
+  } catch {
+    return null;
+  }
+}
+
 export class HostedHarnessProvider {
   constructor({ env = process.env } = {}) {
     this.name = "hosted";
@@ -171,12 +182,26 @@ export class HostedHarnessProvider {
               // error, and a caller that cannot tell "they declined" from "it
               // broke" retries — putting the same card back in front of someone
               // who has just dismissed it.
-              const error = new Error(
+              //
+              // The body may also say HOW it was closed. `use_browser` is the
+              // card's own button: the owner still means to sign in, just not
+              // here, and a caller that cannot tell that from a refusal reports
+              // the task abandoned when it was only handed over.
+              const reason =
                 res.statusCode === 409
-                  ? "hosted secure prompt: the owner dismissed the card"
-                  : `hosted secure prompt: HTTP ${res.statusCode}`
+                  ? readDismissalReason(Buffer.concat(chunks))
+                  : null;
+              const error = new Error(
+                res.statusCode !== 409
+                  ? `hosted secure prompt: HTTP ${res.statusCode}`
+                  : reason === "use_browser"
+                    ? "hosted secure prompt: the owner will sign in through the browser instead"
+                    : "hosted secure prompt: the owner dismissed the card"
               );
-              if (res.statusCode === 409) error.code = "FORM_CANCELLED";
+              if (res.statusCode === 409) {
+                error.code =
+                  reason === "use_browser" ? "FORM_USE_BROWSER" : "FORM_CANCELLED";
+              }
               reject(error);
               return;
             }

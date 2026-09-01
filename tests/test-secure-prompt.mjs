@@ -135,6 +135,34 @@ test("resolver: AGENT_ID_SECURE_PROMPT forces a backend (overriding availability
   );
 });
 
+test("hosted: a card closed through its button says which button", async () => {
+  // "Use the browser instead" is not a refusal — the owner still means to sign
+  // in, just not here. Arriving as a plain dismissal it reads as "they said no",
+  // and the sign-in is reported abandoned rather than handed over.
+  const { sock, server } = await startHostedSocket((_body, res) => {
+    const payload = JSON.stringify({ error: "cancelled", reason: "use_browser" });
+    res.writeHead(409, {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(payload),
+    });
+    res.end(payload);
+  });
+  try {
+    const provider = resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT_SOCK: sock } });
+    const err = await provider.collect({ fields: [{ name: "otp" }], timeoutMs: 5000 }).then(
+      () => null,
+      (e) => e,
+    );
+
+    assert.ok(err, "a dismissal must not resolve as values");
+    assert.equal(err.code, "FORM_USE_BROWSER");
+    assert.notEqual(err.code, "FORM_CANCELLED", "the two must not be confused");
+    assert.match(err.message, /browser/i);
+  } finally {
+    server.close();
+  }
+});
+
 test("hosted: a card the owner dismissed is refused with a code, not a bare status", async () => {
   // The host answers 409 for a dismissal. Without a code of its own it reaches
   // the caller as `HTTP 409` — indistinguishable from a fault, and the sensible
