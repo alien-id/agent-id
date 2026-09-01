@@ -773,6 +773,22 @@ export async function markSecretField(target, selector) {
     .catch(() => {});
 }
 
+// The same tag, for a code spread across a row of boxes. `markSecretField` names
+// one element through the ref's selector, and a row holds one character of the
+// code in each of its boxes — so tagging the ref alone leaves the rest readable
+// through `get --what value`. Every box written to is tainted, including after a
+// partial fill, because a partial fill is exactly when those characters are still
+// sitting there.
+export async function markSecretBoxes(boxes) {
+  await Promise.all(
+    boxes.map((box) =>
+      box
+        .evaluate((el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
+        .catch(() => {})
+    )
+  );
+}
+
 // `get --what value|attr value` must not read back a field that holds an injected
 // secret: the vault may have just typed one there (fill-secret/fill-otp), and
 // returning it would hand the agent the very value the vault exists to withhold.
@@ -1662,6 +1678,11 @@ export async function dispatch(state, msg, policy = null) {
           // the focus is what leaves the row half-entered and the submit dead.
           const boxes = await otpBoxes(target);
           if (boxes.length > 0) {
+            // Tainted before the code goes in, not after: every path out of the
+            // typing below — a throw mid-row, a partial fill, a row that submits
+            // itself — leaves characters in these boxes, and only the tag stops
+            // them being read back one at a time.
+            await markSecretBoxes(boxes);
             const complete = await typeCodeAcrossBoxes(page, boxes, code);
             if (!complete) {
               throw new Error(

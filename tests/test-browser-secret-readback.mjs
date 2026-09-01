@@ -35,8 +35,11 @@ import {
   fillForm,
   refusePasswordRead,
   markSecretField,
+  markSecretBoxes,
   SECRET_TAINT_ATTR,
 } from "../plugins/agent-id-browser/lib/session-server.mjs";
+import { otpBoxes } from "../plugins/agent-id-browser/lib/auto-login.mjs";
+import { typeCodeAcrossBoxes } from "../plugins/agent-id-browser/lib/human-input.mjs";
 
 const patchrightAvailable = !!resolvePatchright();
 
@@ -284,5 +287,88 @@ test(
       "a tainted field's value stays out of snapshot names after re-snapshot"
     );
     await assert.rejects(() => refusePasswordRead(page, "#otp"), /secret/i);
+  }
+);
+
+// A code screen built from a row of single-character boxes. The row is what
+// `fill-otp` spreads a code across, and each box then holds one character of it.
+const CODE_ROW = `<!doctype html><meta charset=utf-8><title>code</title><form>
+  ${Array.from(
+    { length: 6 },
+    (_, i) => `<input id="d${i}" type="text" inputmode="numeric" maxlength="1">`
+  ).join("\n  ")}
+  <input id="nickname" type="text" value="alice">
+</form>`;
+
+test(
+  "a code spread across a row taints every box, not just the ref",
+  { skip },
+  async () => {
+    const rowPage = await ctx.newPage();
+    try {
+      await rowPage.setContent(CODE_ROW, { waitUntil: "domcontentloaded" });
+
+      const boxes = await otpBoxes(rowPage);
+      assert.equal(boxes.length, 6, "the row must be read as six code boxes");
+
+      await typeCodeAcrossBoxes(rowPage, boxes, "423124");
+      const landed = await Promise.all(
+        boxes.map((box) => box.inputValue())
+      );
+      assert.equal(
+        landed.join(""),
+        "423124",
+        "the code must actually be in the row for this test to mean anything"
+      );
+
+      // Untainted, every box reads straight back — one character at a time is
+      // still the whole code.
+      for (let index = 0; index < boxes.length; index += 1) {
+        await assert.doesNotReject(
+          () => refusePasswordRead(rowPage, `#d${index}`),
+          `box ${index} should be readable before it is tainted`
+        );
+      }
+
+      // Tagging the ref alone is what the fill path used to do, and it leaves the
+      // other five characters readable. This is the leak, stated as a test.
+      await markSecretField(rowPage, "#d0");
+      await assert.rejects(
+        () => refusePasswordRead(rowPage, "#d0"),
+        /secret/i,
+        "the ref's own box must be refused"
+      );
+      const readableAfterRefOnly = [];
+      for (let index = 1; index < boxes.length; index += 1) {
+        try {
+          await refusePasswordRead(rowPage, `#d${index}`);
+          readableAfterRefOnly.push(index);
+        } catch {
+          // refused, as it must be once the row is tainted
+        }
+      }
+      assert.deepEqual(
+        readableAfterRefOnly,
+        [1, 2, 3, 4, 5],
+        "tagging only the ref must leave the rest of the row readable — if this " +
+          "changes, the leak this test guards has moved"
+      );
+
+      // Tainting the row closes it: no box gives its character up.
+      await markSecretBoxes(boxes);
+      for (let index = 0; index < boxes.length; index += 1) {
+        await assert.rejects(
+          () => refusePasswordRead(rowPage, `#d${index}`),
+          /secret/i,
+          `box ${index} must refuse a read-back once the row is tainted`
+        );
+      }
+
+      // And a field the code never went into stays readable — the taint must not
+      // spread across the form.
+      await assert.doesNotReject(() => refusePasswordRead(rowPage, "#nickname"));
+    } finally {
+      await rowPage.close().catch(() => {});
+    }
   }
 );
