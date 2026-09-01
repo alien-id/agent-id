@@ -336,6 +336,16 @@ function formFieldsForType(type, flags) {
         ? [{ name: "totpSecret", label: "TOTP secret (base32) or otpauth:// URI" }]
         : []),
     ];
+    case "card": return [
+      // These four names are a wire contract, not labels: the secure-input
+      // envelope carries no field type, so the name a value is sealed under is
+      // what picks the phone's keyboard and the paired expiry/code row. Renaming
+      // one downgrades that screen to a plain text box and nothing fails.
+      { name: "cardNumber", label: "Card number" },
+      { name: "cardExpiry", label: "Expiry (MMYY)" },
+      { name: "cardSecurityCode", label: "Security code" },
+      { name: "cardholderName", label: "Name on card", secret: false },
+    ];
     default: return null;
   }
 }
@@ -353,10 +363,22 @@ async function cmdAdd(flags) {
     return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
   }
   let domains = parseDomains(flags);
+  // Declaring where a card may be used would be granting oneself a merchant: the
+  // allowlist is what the owner's approvals write, one payment at a time.
+  if (type === "card" && domains.length > 0) {
+    return outputError(
+      "A card takes no --domains. Where it may be used is decided by the owner when they " +
+        "approve a payment, not here.",
+    );
+  }
   if (domains.length === 0) {
     // `secret` is not host-scoped (it's used via exec/file, not the HTTP proxy),
     // so it doesn't need a domain allowlist; everything else is default-deny.
     if (type === "secret") domains = ["*"];
+    // A card's allowlist is the owner's to grant: it starts empty — which matches
+    // no host, so default-deny holds literally — and gains one each time they
+    // approve a payment there.
+    else if (type === "card") domains = [];
     else if (type === "login") {
       // `login` IS host-scoped — the browser gates fill-secret / fill-otp and every
       // auto-login recipe step on this list. Default to the loginUrl host; falling
@@ -547,6 +569,24 @@ async function cmdAdd(flags) {
               "(--refresh-token-file / --refresh-token-env / stdin / --form)",
           );
         }
+        break;
+      }
+      case "card": {
+        // Form-only, and not for tidiness: a PAN passed as a flag is a PAN in the
+        // process table, in `ps` output, and in whatever shell history saw it.
+        if (!formValues) {
+          return outputError("A card is typed into the secure form — re-run with --form");
+        }
+        record.cardNumber = formValues.cardNumber || "";
+        record.cardExpiry = formValues.cardExpiry || "";
+        record.cardSecurityCode = formValues.cardSecurityCode || "";
+        record.cardholderName = formValues.cardholderName || "";
+        // A read of this record is a complete card-not-present instrument, so it
+        // never comes back out: `ro` makes it access-restricted, which is what
+        // `show` redacts every SECRET_FIELD on. Not `exportable: false` — that
+        // means "generated in-vault, never typed into a page", which is the one
+        // thing a card exists to do, and assertFillAllowed enforces it literally.
+        if (!record.access) record.access = "ro";
         break;
       }
       case "login": {

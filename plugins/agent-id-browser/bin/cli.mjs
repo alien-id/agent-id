@@ -906,6 +906,11 @@ runCli({
     open: cmdOpen,
     close: cmdClose,
     sessions: cmdSessions,
+    // Where the session actually is. The dispatcher has always answered this;
+    // it had no command because every caller so far learned the URL as a side
+    // effect of doing something to the page. A caller that must know the origin
+    // BEFORE it acts — anything host-scoped — needs to ask on its own.
+    info: actionCmd("info"),
     snapshot: actionCmd("snapshot"),
     "form-inspect": actionCmd("form-inspect"),
     "form-fill": actionCmd("form-fill", (f) => JSON.parse(f.spec || "{}"), 120000),
@@ -927,6 +932,33 @@ runCli({
     // budget kills the child while the owner is still fetching the code from
     // their mail, dropping a secret that was on its way back.
     "fill-otp": actionCmd("fill-otp", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit !== false }), 11 * 60 * 1000),
+    // Card payments. The four refs arrive as one JSON object because a partial
+    // fill is not a state anything downstream can tell from a whole one, and the
+    // owner's approval is spent either way.
+    "fill-card": actionCmd(
+      "fill-card",
+      (f) => ({
+        cred: f.cred,
+        merchantHost: f["merchant-host"],
+        refs: JSON.parse(f.refs || "{}"),
+        submit: f.submit === true,
+      }),
+      120000,
+    ),
+    // Same budget as fill-otp, and for the same reason: this raises a card the
+    // owner answers from their phone, and a shorter one kills the child while
+    // they are still reading the code off it.
+    "fill-3ds-code": actionCmd(
+      "fill-3ds-code",
+      (f) => ({
+        ref: f.ref,
+        merchant: f.merchant,
+        amount: f.amount,
+        submit: f.submit !== false,
+      }),
+      11 * 60 * 1000,
+    ),
+    "ref-text": actionCmd("ref-text", (f) => ({ ref: f.ref })),
     select: actionCmd("select", (f) => ({ ref: f.ref, values: csv(f.values) })),
     press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
     hover: actionCmd("hover", (f) => ({ ref: f.ref })),

@@ -11,7 +11,7 @@
 //     name: "github-pat",
 //     type: one of CREDENTIAL_TYPES below (bearer | basic | header | query |
 //           cookie | totp | cookie-jar | oauth2 | solana-keypair | evm-keypair |
-//           browser-profile | secret | login),
+//           browser-profile | secret | login | card),
 //     domains: ["*.github.com"],
 //     description: "...",
 //     createdAt, updatedAt, lastUsedAt,
@@ -40,6 +40,7 @@ export const CREDENTIAL_TYPES = Object.freeze([
   "browser-profile",
   "secret",
   "login",
+  "card",
 ]);
 
 // Allowed `otp` policies on a `login` credential.
@@ -110,6 +111,68 @@ function validateProgramAllowlist(rec) {
   }
 }
 
+// ─── Card field validators ─────────────────────────────────────────────────
+
+// Luhn. A typo in a hand-copied 16-digit number is the single likeliest failure
+// of the whole payment flow, and the merchant only reports it after the owner
+// has typed and approved. Catching it at the point of storage costs one pass.
+function passesLuhn(digits) {
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let d = digits.charCodeAt(i) - 48;
+    if (double) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+// `MMYY`, and not already over. `now` is injectable so the check is testable
+// without freezing the clock: a card stored in December must not start failing
+// on the first of January because the test pinned a literal.
+function validateCardExpiry(rec, now = new Date()) {
+  const expiry = rec.cardExpiry;
+  if (typeof expiry !== "string" || !/^\d{4}$/.test(expiry)) {
+    throw new Error(`Credential ${rec.name}: cardExpiry must be MMYY (four digits)`);
+  }
+  const month = Number(expiry.slice(0, 2));
+  const year = 2000 + Number(expiry.slice(2));
+  if (month < 1 || month > 12) {
+    throw new Error(`Credential ${rec.name}: cardExpiry month must be 01-12`);
+  }
+  // A card is good through the last day of its stated month.
+  const endOfMonth = Date.UTC(year, month, 1);
+  if (endOfMonth <= now.getTime()) {
+    throw new Error(`Credential ${rec.name}: cardExpiry ${expiry} is in the past`);
+  }
+}
+
+function validateCardFields(rec) {
+  requireNonEmpty(rec, ["cardNumber", "cardExpiry", "cardSecurityCode", "cardholderName"]);
+  const number = rec.cardNumber;
+  if (!/^\d{12,19}$/.test(number)) {
+    throw new Error(`Credential ${rec.name}: cardNumber must be 12-19 digits, no spaces`);
+  }
+  if (!passesLuhn(number)) {
+    throw new Error(`Credential ${rec.name}: cardNumber fails the Luhn check — it was mistyped`);
+  }
+  validateCardExpiry(rec);
+  if (!/^\d{3,4}$/.test(rec.cardSecurityCode)) {
+    throw new Error(`Credential ${rec.name}: cardSecurityCode must be 3 or 4 digits`);
+  }
+}
+
+// The last four, for a card the owner is asked to recognise. The only part of a
+// number that may leave the vault — everything that renders a card to a human
+// (the approval card, `list`, `show`) reads this and never the record.
+export function cardLast4(rec) {
+  return typeof rec?.cardNumber === "string" ? rec.cardNumber.slice(-4) : "";
+}
+
 export function validateRecord(rec) {
   if (!rec || typeof rec !== "object") {
     throw new Error("Record must be an object");
@@ -122,7 +185,13 @@ export function validateRecord(rec) {
   if (!CREDENTIAL_TYPES.includes(rec.type)) {
     throw new Error(`Unknown credential type: ${rec.type}`);
   }
-  if (!Array.isArray(rec.domains) || rec.domains.length === 0) {
+  // A card is the one type whose allowlist is granted by the owner rather than
+  // declared at creation: it starts empty and gains a host each time the owner
+  // approves a payment there. Empty still denies everything — hostMatchesAllowlist
+  // returns false for an empty list — so default-deny holds literally; what
+  // changes is only that nothing has been granted yet.
+  const allowsEmptyDomains = rec.type === "card";
+  if (!Array.isArray(rec.domains) || (rec.domains.length === 0 && !allowsEmptyDomains)) {
     throw new Error(
       `Credential ${rec.name}: 'domains' must be a non-empty array (default-deny)`,
     );
@@ -231,6 +300,13 @@ export function validateRecord(rec) {
       // chains and recipients the in-vault key will sign for.
       validateChainIdAllowlist(rec);
       validateToAllowlist(rec);
+      break;
+    }
+    case "card": {
+      // Everything a card-not-present payment needs. A read of this record is a
+      // complete instrument, which is why the payment path never returns a value
+      // and why an owner-approved intent — not the vault — is what gates a spend.
+      validateCardFields(rec);
       break;
     }
     case "browser-profile": {
@@ -389,6 +465,9 @@ export function listMetadata(payload) {
     // so an agent can see which profile is which without opening the record.
     ...(c.account ? { account: c.account } : {}),
     ...(c.type === "browser-profile" ? { headless: c.headless !== false } : {}),
+    // card: the last four, so an approval card can name which instrument is
+    // about to be charged. The only part of a number that leaves the vault.
+    ...(c.type === "card" ? { cardLast4: cardLast4(c) } : {}),
     // login: the non-secret shape of the sign-in, so a caller can tell what a
     // stored credential will ask for before driving it — whether a password
     // exists at all, how a code is answered, where to start, and whether an
@@ -433,6 +512,10 @@ export const SECRET_FIELDS = Object.freeze([
   "privateKey", // evm-keypair
   "dek", // browser-profile (data-encryption key for the sealed profile)
   "totpSecret", // login (the stored 2FA seed; username + password already listed above)
+  "cardNumber",
+  "cardExpiry",
+  "cardSecurityCode",
+  "cardholderName", // card — every field of one, so none of it survives a lock
 ]);
 
 // Best-effort scrub of decrypted secret material when the vault locks. JS

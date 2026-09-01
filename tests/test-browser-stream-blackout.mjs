@@ -89,3 +89,71 @@ for (const action of ["fill-secret", "fill-otp"]) {
     await fs.rm(dir, { recursive: true, force: true });
   });
 }
+
+// `fill-card` types four values instead of one, so it holds the blackout across
+// all of them. The same unlock failure has to lift it, and the two guards that
+// run BEFORE the suspend must not raise one at all — an approval refused on the
+// wrong host should leave the feed exactly as it found it.
+const CARD_REFS = { number: "1:e1", expiry: "1:e2", security_code: "1:e3", holder: "1:e4" };
+
+test("fill-card: a failed vault unlock still lifts the blackout", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aid-blackout-card-"));
+  const stream = fakeStream();
+  const state = fakeState(stream);
+
+  await assert.rejects(
+    () =>
+      dispatch(state, {
+        action: "fill-card",
+        // fakeState's page is on example.com, so this is the approved merchant.
+        params: { cred: "visa", merchantHost: "example.com", refs: CARD_REFS },
+        _stateDir: dir,
+      }),
+    "the fill must fail — there is no vault to unlock",
+  );
+
+  assert.equal(stream.suspends, 1, "the feed is blacked out for the fill");
+  assert.equal(stream.resumes, 1, "and the blackout is lifted even though the fill threw");
+  assert.equal(stream.depth, 0, "no leaked suspend depth");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("fill-card: a merchant the owner did not approve is refused before anything is typed", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aid-card-host-"));
+  const stream = fakeStream();
+  const state = fakeState(stream);
+
+  await assert.rejects(
+    () =>
+      dispatch(state, {
+        action: "fill-card",
+        params: { cred: "visa", merchantHost: "checkout.attacker.net", refs: CARD_REFS },
+        _stateDir: dir,
+      }),
+    /approved paying at checkout\.attacker\.net/,
+  );
+
+  assert.equal(stream.suspends, 0, "nothing was typed, so nothing was blacked out");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("fill-card: a form missing any of the four is not a card form", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aid-card-refs-"));
+  for (const missing of Object.keys(CARD_REFS)) {
+    const stream = fakeStream();
+    const refs = { ...CARD_REFS };
+    delete refs[missing];
+    await assert.rejects(
+      () =>
+        dispatch(fakeState(stream), {
+          action: "fill-card",
+          params: { cred: "visa", merchantHost: "example.com", refs },
+          _stateDir: dir,
+        }),
+      new RegExp(`refs\\.${missing} is required`),
+      `a form missing ${missing} was accepted`,
+    );
+    assert.equal(stream.suspends, 0, "a refused shape must not black out the feed");
+  }
+  await fs.rm(dir, { recursive: true, force: true });
+});
