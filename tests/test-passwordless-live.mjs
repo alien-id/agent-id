@@ -146,6 +146,27 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
       ).join("")}</form>`);
       return;
     }
+    if (url.pathname === "/otp-declared-twice") {
+      // Two code fields on one page — a docs page demonstrating the component,
+      // or a screen offering e-mail and SMS side by side. Which one the code goes
+      // into is not knowable from here, so neither length is.
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form><input autocomplete=one-time-code inputmode=numeric maxlength=6></form>
+<form><input autocomplete=one-time-code inputmode=numeric maxlength=4></form>`);
+      return;
+    }
+    if (url.pathname === "/otp-declared-field") {
+      // shadcn's InputOTP shape, measured on its own docs: the cells are drawn,
+      // and the whole code goes into ONE field carrying `one-time-code` with the
+      // length in `maxlength`. A great many sites take their code screen from
+      // that component, and all of them were getting the plain fallback.
+      const len = Number(url.searchParams.get("len") || 6);
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form><input id=code autocomplete=one-time-code inputmode=numeric maxlength=${len}></form>`);
+      return;
+    }
     if (url.pathname === "/otp-boxes-wrapped") {
       // Booking.com's actual shape, measured on a live sign-in:
       // `candidates=6 groups=1,1,1,1,1,1` — every box wrapped in an element of
@@ -179,10 +200,13 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
         .join("")}</form>`);
       return;
     }
+    // One ordinary field with room to spare and nothing declaring it a code
+    // field: `maxlength` here is a bound, not a length, and drawing eight cells
+    // for a six-character code strands a correct answer.
     if (url.pathname === "/otp-single") {
       res.end(`<!doctype html><meta charset=utf-8><title>code</title>
 <h1>Enter the code we sent you</h1>
-<form><input name=code type=text inputmode=numeric maxlength=8 autocomplete=one-time-code></form>`);
+<form><input name=code type=text inputmode=numeric maxlength=8></form>`);
       return;
     }
     if (url.pathname === "/otp-unbounded") {
@@ -1126,6 +1150,36 @@ test("a sign-in with a password AND a code runs end to end", { skip }, async () 
     // The card the owner would have seen: six cells, and where the code went.
     assert.equal(cards[0].length, 6);
     assert.equal(cards[0].destination, IDENTIFIER);
+  } finally {
+    server.close();
+  }
+});
+
+test("a field that declares itself a code field states its length", { skip }, async () => {
+  const { server, port } = await fixtureServer();
+  try {
+    await withBrowser(async (context) => {
+      const page = await context.newPage();
+      const lengthAt = async (route) => {
+        await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "domcontentloaded" });
+        return (await otpCardHints(page)).length;
+      };
+
+      // `one-time-code` AND a maxlength: the field says what it is for and how
+      // long that is. Every length the screen can draw.
+      for (const len of [4, 5, 6, 7, 8]) {
+        assert.equal(await lengthAt(`/otp-declared-field?len=${len}`), len, `len=${len}`);
+      }
+
+      // Neither half alone. A maxlength on an ordinary field is the upper bound
+      // this refuses, and it is refused still.
+      assert.equal(await lengthAt("/otp-single"), null, "a bare maxlength is a bound, not a length");
+      assert.equal(
+        await lengthAt("/otp-declared-twice"),
+        null,
+        "two code fields state two lengths, and neither is this code's",
+      );
+    });
   } finally {
     server.close();
   }

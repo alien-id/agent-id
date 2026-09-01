@@ -666,6 +666,13 @@ export async function otpCardHints(target) {
   // and a site is free to allow eight for a six-character code. Drawing eight
   // cells for a six-character code is the one failure this screen cannot
   // recover from, because it submits on the last cell and carries no button.
+  //
+  // With one exception, measured on shadcn's InputOTP — the component a great
+  // many sites take their code screen from. It draws the cells itself and takes
+  // the whole code in ONE field carrying `autocomplete="one-time-code"` and
+  // `maxlength`. A field that declares itself a code field is not budgeting for
+  // an unknown length: it is stating this code's. Without this such a site gets
+  // the plain fallback, which is safe but is the shape we are trying to leave.
   const count = await target
     .evaluate(otpRowInPage, {
       selector: OTP_BOX_SEL,
@@ -684,9 +691,32 @@ export async function otpCardHints(target) {
     .catch(() => "");
 
   return {
-    length: count ?? codeLengthFromText(bodyText),
+    length: count ?? (await declaredCodeFieldLength(target)) ?? codeLengthFromText(bodyText),
     destination: codeDestination(bodyText),
   };
+}
+
+// A single field that says it is a code field AND says how long: `one-time-code`
+// with a `maxlength` in range. Both halves are required — the attribute alone
+// leaves the length unknown, and a `maxlength` alone is the upper bound this
+// deliberately refuses.
+async function declaredCodeFieldLength(target) {
+  return target
+    .evaluate(
+      ({ min, max }) => {
+        const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
+        const fields = Array.from(
+          document.querySelectorAll('input[autocomplete="one-time-code"]'),
+        ).filter(visible);
+        if (fields.length !== 1) return null;
+
+        const declared = Number(fields[0].getAttribute("maxlength"));
+
+        return Number.isInteger(declared) && declared >= min && declared <= max ? declared : null;
+      },
+      { min: OTP_ROW_MIN, max: OTP_ROW_MAX },
+    )
+    .catch(() => null);
 }
 
 export async function detectPageState(page) {
