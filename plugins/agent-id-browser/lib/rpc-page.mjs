@@ -293,16 +293,33 @@ class RpcPage {
     return reply.result ?? {};
   }
 
-  /** The browser starts a session for whoever needs one — a CLI invoked
-   *  against a fresh container must not depend on somebody else having gone
-   *  first. Already-active is the ordinary case and not an error. */
+  /** The session belongs to whoever called this command, not to this process.
+   *
+   *  One browser is one user at a time, and which user is a `Session.start`
+   *  name — a profile directory under the browser's --data. This command has no
+   *  notion of profiles: it is handed a port and a credential, so it can
+   *  neither name the profile it wants nor move a browser that is currently
+   *  being somebody else (a `Session.start` against an active session answers
+   *  "already active", leaving the sign-in to land in that other user's tab,
+   *  with their cookies).
+   *
+   *  It used to start one anyway, unnamed, from back when a session had no
+   *  profile to name. Against a browser that has them, that call is simply an
+   *  error — so the honest move is to require the session and say who should
+   *  have opened it. */
   async ensureSession() {
     const state = await this._call("Session.state");
     if (state.active) {
       await this._refreshUrl();
       return;
     }
-    await this._call("Session.start", { width: 1280, height: 800, os: "linux" });
+    const err = new Error(
+      "the browser has no active session, and this command does not open one: the caller " +
+        "chooses the profile a sign-in lands in (Session.start with a name) and must open " +
+        "the session before handing the port over",
+    );
+    err.code = "NO_SESSION";
+    throw err;
   }
 
   async _refreshUrl() {

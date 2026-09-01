@@ -183,6 +183,10 @@ async function cmdAutoLogin(flags) {
     try {
       page = await openRpcPage(rpc);
     } catch (err) {
+      // A browser that answers but holds no session is not an unreachable one,
+      // and saying so sent the caller looking for a network fault instead of
+      // the session they did not open.
+      if (err.code === "NO_SESSION") return outputError(err.message);
       return outputError(`the browser at ${rpc} is not reachable: ${err.message}`);
     }
 

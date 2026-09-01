@@ -43,6 +43,43 @@ const BASE = {
   "Session.nav.state": { url: "https://site.test/login", title: "Sign in" },
 };
 
+test("a browser with no session is refused, not started", async () => {
+  // One browser is one user at a time, and which user is a Session.start name.
+  // This command is handed a port and a credential, never a profile, so a
+  // session it opened would be an unnamed one (an error against a browser that
+  // has profiles) or would land the sign-in in whoever's tab was already open.
+  const stub = await stubBrowser({ "Session.state": { active: false } });
+  try {
+    await assert.rejects(
+      () => openRpcPage(stub.rpc),
+      (error) => {
+        assert.equal(error.code, "NO_SESSION", "the caller branches on the code");
+        assert.match(error.message, /no active session/);
+        assert.match(error.message, /must open the session/, "and is told whose job it is");
+        return true;
+      },
+    );
+    assert.deepEqual(
+      stub.of("Session.start"),
+      [],
+      "opening a session here would choose a profile that is not ours to choose",
+    );
+  } finally {
+    await stub.close();
+  }
+});
+
+test("a session somebody else opened is used as it is", async () => {
+  const stub = await stubBrowser(BASE);
+  try {
+    const page = await openRpcPage(stub.rpc);
+    assert.equal(page.url(), "https://site.test/login");
+    assert.deepEqual(stub.of("Session.start"), [], "an active session is never restarted");
+  } finally {
+    await stub.close();
+  }
+});
+
 test("a keystroke is keyDown, then a char for the character, then keyUp", async () => {
   const stub = await stubBrowser(BASE);
   try {
