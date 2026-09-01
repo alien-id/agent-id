@@ -89,8 +89,7 @@ export class TtyProvider {
       const label = f.label || f.name;
       const opt = f.required === false ? " (optional)" : "";
       const prompt = `  ${label}${opt}: `;
-      values[f.name] =
-        f.secret === false ? promptText(prompt) : promptSecret(prompt);
+      values[f.name] = f.secret === false ? promptText(prompt) : promptSecret(prompt);
     }
     return { values };
   }
@@ -148,10 +147,7 @@ export class HostedHarnessProvider {
   }
   collect(spec) {
     const socketPath = hostedSocketPath(this._env);
-    if (!socketPath)
-      return Promise.reject(
-        new Error("hosted secure prompt is not configured")
-      );
+    if (!socketPath) return Promise.reject(new Error("hosted secure prompt is not configured"));
     const payload = JSON.stringify({
       title: spec.title || "",
       description: spec.description || "",
@@ -207,23 +203,13 @@ export class HostedHarnessProvider {
             }
             try {
               const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-              if (
-                !body ||
-                typeof body.values !== "object" ||
-                body.values == null
-              ) {
-                reject(
-                  new Error("hosted secure prompt: response missing { values }")
-                );
+              if (!body || typeof body.values !== "object" || body.values == null) {
+                reject(new Error("hosted secure prompt: response missing { values }"));
                 return;
               }
               resolve({ values: body.values });
             } catch (err) {
-              reject(
-                new Error(
-                  `hosted secure prompt: bad JSON response (${err.message})`
-                )
-              );
+              reject(new Error(`hosted secure prompt: bad JSON response (${err.message})`));
             }
           });
         }

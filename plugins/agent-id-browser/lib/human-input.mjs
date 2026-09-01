@@ -36,11 +36,7 @@ export function randBetween(min, max, rng = Math.random) {
 // so the cursor arcs like a hand rather than sliding on a rail. Returns the
 // ordered waypoints AFTER `from` (the cursor is assumed already at `from`); the
 // final point is exactly `to`. Step count scales with distance.
-export function bezierPath(
-  from,
-  to,
-  { rng = Math.random, maxSteps = 26 } = {}
-) {
+export function bezierPath(from, to, { rng = Math.random, maxSteps = 26 } = {}) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const dist = Math.hypot(dx, dy) || 1;
@@ -150,14 +146,9 @@ async function locate(root, selector, timeout) {
 // retries under overlays / sticky headers). Doing the click by raw page.mouse at
 // a coordinate would skip those checks and silently miss when anything covers
 // the point — so we keep the human motion but not the fragile raw click.
-export async function humanClick(
-  page,
-  selector,
-  { rng = Math.random, timeout = 15000, root = page } = {}
-) {
+export async function humanClick(page, selector, { rng = Math.random, timeout = 15000, root = page } = {}) {
   if (!humanInputEnabled()) {
-    if (typeof selector?.click === "function")
-      return void (await selector.click({ timeout }));
+    if (typeof selector?.click === "function") return void (await selector.click({ timeout }));
     return void (await root.click(selector, { timeout }));
   }
   const el = await locate(root, selector, timeout);
@@ -306,13 +297,8 @@ export async function humanTypeFocused(
   }
 }
 
-export async function humanHover(
-  page,
-  selector,
-  { rng = Math.random, timeout = 15000, root = page } = {}
-) {
-  if (!humanInputEnabled())
-    return void (await root.hover(selector, { timeout }));
+export async function humanHover(page, selector, { rng = Math.random, timeout = 15000, root = page } = {}) {
+  if (!humanInputEnabled()) return void (await root.hover(selector, { timeout }));
   const el = await locate(root, selector, timeout);
   const box = await el.boundingBox();
   if (!box) return void (await el.hover({ timeout }));
@@ -327,10 +313,7 @@ export async function humanScroll(page, dx, dy, { rng = Math.random } = {}) {
   if (!humanInputEnabled() || (totalY === 0 && totalX === 0)) {
     return void (await page.mouse.wheel(totalX, totalY));
   }
-  const steps = Math.max(
-    2,
-    Math.min(6, Math.round(Math.abs(totalY || totalX) / 220) + 2)
-  );
+  const steps = Math.max(2, Math.min(6, Math.round(Math.abs(totalY || totalX) / 220) + 2));
   let sentX = 0;
   let sentY = 0;
   for (let i = 1; i <= steps; i++) {
@@ -345,12 +328,7 @@ export async function humanScroll(page, dx, dy, { rng = Math.random } = {}) {
 }
 
 // A small pre-press dwell, then the key. For submitting a field, etc.
-export async function humanPress(
-  page,
-  selector,
-  key,
-  { rng = Math.random, timeout = 15000 } = {}
-) {
+export async function humanPress(page, selector, key, { rng = Math.random, timeout = 15000 } = {}) {
   await wait(page, 40 + rng() * 120);
   if (selector) await page.press(selector, key, { timeout });
   else await page.keyboard.press(key);
@@ -362,8 +340,7 @@ export async function humanPress(
 // runRecipe stays testable (tests pass a recording driver) while production uses
 // real human motion.
 export const humanDriver = {
-  navigate: (page, url) =>
-    page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }),
+  navigate: (page, url) => page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }),
   fill: (page, selector, value) => humanType(page, selector, value),
   type: (page, selector, value) => humanType(page, selector, value),
   click: (page, selector) => humanClick(page, selector),

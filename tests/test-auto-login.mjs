@@ -48,14 +48,8 @@ test("applyVars substitutes username/password/otp; passes non-strings through", 
 });
 
 test("stepNeedsOtp detects {otp} in a placeholder field", () => {
-  assert.equal(
-    stepNeedsOtp({ action: "fill", selector: "#code", value: "{otp}" }),
-    true
-  );
-  assert.equal(
-    stepNeedsOtp({ action: "fill", selector: "#pw", value: "{password}" }),
-    false
-  );
+  assert.equal(stepNeedsOtp({ action: "fill", selector: "#code", value: "{otp}" }), true);
+  assert.equal(stepNeedsOtp({ action: "fill", selector: "#pw", value: "{password}" }), false);
 });
 
 // A page stub that reports the origin it is "on" — the allowlist gate reads it
@@ -112,20 +106,16 @@ test("runRecipe maps steps to driver calls, substitutes vars, resolves {otp} onc
 
 test("runRecipe does not resolve OTP when no step needs it", async () => {
   let otpCalls = 0;
-  await runRecipe(
-    pageOn("https://x/login"),
-    [{ action: "fill", selector: "#u", value: "{username}" }],
-    {
-      username: "u",
-      password: "p",
-      getOtp: async () => {
-        otpCalls++;
-        return "x";
-      },
-      domains: ["x"],
-      driver: recordingDriver([]),
-    }
-  );
+  await runRecipe(pageOn("https://x/login"), [{ action: "fill", selector: "#u", value: "{username}" }], {
+    username: "u",
+    password: "p",
+    getOtp: async () => {
+      otpCalls++;
+      return "x";
+    },
+    domains: ["x"],
+    driver: recordingDriver([]),
+  });
   assert.equal(otpCalls, 0);
 });
 
@@ -194,11 +184,7 @@ test("runRecipe refuses a secret step on a foreign origin BEFORE resolving the c
     /not on the credential's domain allowlist/
   );
   assert.deepEqual(calls, [], "the fill must not have happened");
-  assert.equal(
-    otpCalls,
-    0,
-    "the owner must not be asked for a code we were going to refuse"
-  );
+  assert.equal(otpCalls, 0, "the owner must not be asked for a code we were going to refuse");
 });
 
 test("runRecipe gates a secret hidden in a selector, not just in a value", async () => {
@@ -295,10 +281,7 @@ test("resolveOtp generates a code from a stored TOTP seed (RFC vector)", async (
 // The hosted-harness protocol on a unix socket, as `test-secure-prompt.mjs` drives
 // it — the one way to watch what `resolveOtp` puts in front of the owner.
 async function withCardCapture(run) {
-  const sock = path.join(
-    os.tmpdir(),
-    `agentid-otp-${process.pid}-${Date.now()}.sock`
-  );
+  const sock = path.join(os.tmpdir(), `agentid-otp-${process.pid}-${Date.now()}.sock`);
   const seen = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -341,11 +324,7 @@ test("a TOTP credential that has its seed still never raises a card", async () =
     )
   );
 
-  assert.equal(
-    seen.length,
-    0,
-    "a stored seed is answered without asking anyone"
-  );
+  assert.equal(seen.length, 0, "a stored seed is answered without asking anyone");
   assert.match(result, /^\d{6}$/);
 });
 
@@ -405,15 +384,9 @@ test("stillOnLoginPage: true only when stuck on the same-host login page", () =>
   );
   // Real success leaves the login page (redirect to the feed) → confirmed.
   assert.equal(stillOnLoginPage("https://www.reddit.com/", loginUrl), false);
-  assert.equal(
-    stillOnLoginPage("https://www.reddit.com/r/programming/", loginUrl),
-    false
-  );
+  assert.equal(stillOnLoginPage("https://www.reddit.com/r/programming/", loginUrl), false);
   // Left the auth host entirely → progressed.
-  assert.equal(
-    stillOnLoginPage("https://app.example.com/dashboard", loginUrl),
-    false
-  );
+  assert.equal(stillOnLoginPage("https://app.example.com/dashboard", loginUrl), false);
   // Garbage URLs don't wedge the caller into a false "stuck".
   assert.equal(stillOnLoginPage("not a url", loginUrl), false);
 });
@@ -421,29 +394,20 @@ test("stillOnLoginPage: true only when stuck on the same-host login page", () =>
 test("stillOnLoginPage: a modal login on the homepage isn't falsely flagged as stuck", () => {
   // loginUrl is the app homepage (login via modal, URL unchanged). After login we
   // are on "/" — NOT a login-ish path — so "logged-in" is confirmed, not rejected.
-  assert.equal(
-    stillOnLoginPage("https://app.example.com/", "https://app.example.com/"),
-    false
-  );
+  assert.equal(stillOnLoginPage("https://app.example.com/", "https://app.example.com/"), false);
 });
 
 // ── Warmup helpers (the cold-deep-link block fix) ─────────────────────────────────
 
 test("originOf returns scheme+host, null on garbage", () => {
-  assert.equal(
-    originOf("https://www.reddit.com/login/?x=1"),
-    "https://www.reddit.com"
-  );
+  assert.equal(originOf("https://www.reddit.com/login/?x=1"), "https://www.reddit.com");
   assert.equal(originOf("http://host:8080/a/b"), "http://host:8080");
   assert.equal(originOf("not a url"), null);
 });
 
 test("isDeepLoginUrl: true for a real path, false for the bare origin root", () => {
   assert.equal(isDeepLoginUrl("https://www.reddit.com/login/"), true);
-  assert.equal(
-    isDeepLoginUrl("https://accounts.example.com/auth/signin"),
-    true
-  );
+  assert.equal(isDeepLoginUrl("https://accounts.example.com/auth/signin"), true);
   // Bare root → nothing to warm up first.
   assert.equal(isDeepLoginUrl("https://www.reddit.com/"), false);
   assert.equal(isDeepLoginUrl("https://www.reddit.com"), false);
@@ -465,10 +429,7 @@ test("otpPromptWording: a passwordless code is not presented as a second factor"
   // The same site name the vault card used when it collected the identifier —
   // both cards belong to one sign-in, so a service subdomain is dropped on both.
   assert.match(w.title, /Sign-in code for Booking\.example/);
-  assert.ok(
-    !JSON.stringify(w).includes("record-key-not-a-site"),
-    "the credential name is not a title"
-  );
+  assert.ok(!JSON.stringify(w).includes("record-key-not-a-site"), "the credential name is not a title");
   assert.ok(!/2FA/i.test(w.title), "the only factor must not be called 2FA");
   assert.ok(!/2FA/i.test(w.label));
   assert.match(w.description, /Booking\.example/);
@@ -574,10 +535,7 @@ test("otpPromptWording: nothing to name the site by still says what to do", () =
   const passwordless = otpPromptWording({ name: "x", passwordless: true });
   assert.match(passwordless.description, /x sent you a code/);
   assert.match(passwordless.description, /email or messages/i);
-  assert.match(
-    otpPromptWording({ name: "x" }).description,
-    /needs your current code/
-  );
+  assert.match(otpPromptWording({ name: "x" }).description, /needs your current code/);
 });
 
 // ─── multi-host sign-ins refuse safely, not silently ──────────────────────────────
@@ -606,27 +564,19 @@ test("a sign-in that hops to an unlisted subdomain is refused BEFORE the owner i
     ),
     /account\.example\.com.*not on the credential's domain allowlist/s
   );
-  assert.equal(
-    otpCalls,
-    0,
-    "no card may be raised for a step we are going to refuse"
-  );
+  assert.equal(otpCalls, 0, "no card may be raised for a step we are going to refuse");
   assert.deepEqual(calls, []);
 });
 
 test("a wildcard covering the whole sign-in flow lets the hop through", async () => {
   const calls = [];
-  await runRecipe(
-    pageOn("https://account.example.com/verify"),
-    [{ action: "fill", selector: "#code", value: "{otp}" }],
-    {
-      username: "u",
-      password: "p",
-      getOtp: async () => "654321",
-      domains: ["*.example.com"],
-      driver: recordingDriver(calls),
-    }
-  );
+  await runRecipe(pageOn("https://account.example.com/verify"), [{ action: "fill", selector: "#code", value: "{otp}" }], {
+    username: "u",
+    password: "p",
+    getOtp: async () => "654321",
+    domains: ["*.example.com"],
+    driver: recordingDriver(calls),
+  });
   assert.deepEqual(calls, [["fill", "#code", "654321"]]);
 });
 
@@ -656,10 +606,7 @@ test("the code-screen submit vocabulary never matches a control that discards th
     "Cancel",
     "Try another way",
   ]) {
-    assert.ok(
-      !CODE_SUBMIT_TEXT_RE.test(label),
-      `"${label}" must never be clicked`
-    );
+    assert.ok(!CODE_SUBMIT_TEXT_RE.test(label), `"${label}" must never be clicked`);
   }
 });
 
@@ -719,16 +666,8 @@ test("the TOTP retry lands in the next period, not the one just refused", () => 
     now: now + millisToNextTotpWindow({}, now),
   });
 
-  assert.equal(
-    immediate,
-    first,
-    "a retry three seconds later is the same code"
-  );
-  assert.notEqual(
-    afterWait,
-    first,
-    "a retry after the wait is a different one"
-  );
+  assert.equal(immediate, first, "a retry three seconds later is the same code");
+  assert.notEqual(afterWait, first, "a retry after the wait is a different one");
 });
 
 test("millisToNextTotpWindow respects the credential's own period", () => {
@@ -760,9 +699,7 @@ test("the retry card says the code was refused, so the owner reads a fresh one",
 // ── An unanswered code card ends the run as an outcome, not an exception ─────────
 
 function formTimeout() {
-  const err = new Error(
-    "timed out waiting for the secure form to be submitted"
-  );
+  const err = new Error("timed out waiting for the secure form to be submitted");
   err.code = "FORM_TIMEOUT";
   return err;
 }
@@ -925,12 +862,8 @@ test("the retry card is sized by where the code comes from, not by the fact of r
   // full-length card would be killed mid-answer.
   const CALLER_CEILING_MS = 16 * 60 * 1000;
   for (const cred of [mailed, fromApp]) {
-    const total =
-      otpCardBudgetMs(cred) + otpCardBudgetMs(cred, { retry: true });
-    assert.ok(
-      total < CALLER_CEILING_MS,
-      `${cred.otp}: ${total}ms leaves nothing for the page`
-    );
+    const total = otpCardBudgetMs(cred) + otpCardBudgetMs(cred, { retry: true });
+    assert.ok(total < CALLER_CEILING_MS, `${cred.otp}: ${total}ms leaves nothing for the page`);
   }
 });
 
@@ -951,11 +884,7 @@ test("the code card does not mask what it asks for", () => {
   for (const spec of [mailed, generated]) {
     assert.equal(spec.fields.length, 1);
     assert.equal(spec.fields[0].name, "otp");
-    assert.equal(
-      spec.fields[0].secret,
-      false,
-      "a single-use code is not a lasting secret"
-    );
+    assert.equal(spec.fields[0].secret, false, "a single-use code is not a lasting secret");
   }
 });
 

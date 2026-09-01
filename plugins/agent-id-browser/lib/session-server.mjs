@@ -104,8 +104,7 @@ export function sessionAlive(info) {
 export function probeSession(info, timeoutMs = 450) {
   return new Promise((resolve) => {
     const port = Number(info?.port);
-    if (!Number.isInteger(port) || port <= 0 || !info?.token)
-      return resolve("unsure");
+    if (!Number.isInteger(port) || port <= 0 || !info?.token) return resolve("unsure");
     const sock = net.connect(port, "127.0.0.1");
     let buf = "";
     let settled = false;
@@ -230,34 +229,20 @@ export function sessionRecord(name, fields) {
 // "f1" for the first iframe ("f1e1", …) — so a ref is self-describing about
 // which frame it lives in.
 export function snapshotInPage(arg) {
-  const { prefix, generation } =
-    arg && typeof arg === "object" ? arg : { prefix: arg, generation: 0 };
+  const { prefix, generation } = arg && typeof arg === "object" ? arg : { prefix: arg, generation: 0 };
   const pre = `${generation ?? 0}:${prefix || ""}`;
   const SEL = [
-    "a[href]",
-    "button",
-    "input:not([type=hidden])",
-    "textarea",
-    "select",
-    "[role=button]",
-    "[role=link]",
-    "[role=textbox]",
-    "[role=combobox]",
-    "[role=checkbox]",
-    "[role=radio]",
-    "[role=tab]",
-    "[role=menuitem]",
-    "[role=option]",
-    "[contenteditable=true]",
-    "summary",
+    "a[href]", "button", "input:not([type=hidden])", "textarea", "select",
+    "[role=button]", "[role=link]", "[role=textbox]", "[role=combobox]",
+    "[role=checkbox]", "[role=radio]", "[role=tab]", "[role=menuitem]",
+    "[role=option]", "[contenteditable=true]", "summary",
     "[tabindex]:not([tabindex='-1'])",
   ].join(",");
   // Clear refs from a previous snapshot first: forms that swap in place (e.g.
   // multi-step IdP logins) leave stale data-aibref attributes, so a reused ref
   // like "e2" could match BOTH an old hidden element and a new one — and an action
   // would target the wrong (often invisible) element.
-  for (const old of document.querySelectorAll("[data-aibref]"))
-    old.removeAttribute("data-aibref");
+  for (const old of document.querySelectorAll("[data-aibref]")) old.removeAttribute("data-aibref");
   const out = [];
   let i = 0;
   const seen = new Set();
@@ -270,12 +255,7 @@ export function snapshotInPage(arg) {
     el.setAttribute("data-aibref", ref);
     const r = el.getBoundingClientRect();
     const st = window.getComputedStyle(el);
-    if (
-      r.width === 0 ||
-      r.height === 0 ||
-      st.visibility === "hidden" ||
-      st.display === "none"
-    ) {
+    if (r.width === 0 || r.height === 0 || st.visibility === "hidden" || st.display === "none") {
       continue;
     }
     // el.value is a useful *label* only for button-like inputs (submit/button/
@@ -300,10 +280,7 @@ export function snapshotInPage(arg) {
       el.getAttribute("title") ||
       el.getAttribute("name") ||
       ""
-    )
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 100);
+    ).replace(/\s+/g, " ").trim().slice(0, 100);
     out.push({
       ref,
       role: el.getAttribute("role") || el.tagName.toLowerCase(),
@@ -320,50 +297,27 @@ export function snapshotInPage(arg) {
 // inputs are deliberately never returned; validation reports lengths/matches,
 // not the contents the user or vault supplied.
 export function formSnapshotInPage(arg) {
-  const { prefix, generation } =
-    arg && typeof arg === "object" ? arg : { prefix: arg, generation: 0 };
+  const { prefix, generation } = arg && typeof arg === "object" ? arg : { prefix: arg, generation: 0 };
   const pre = `${generation ?? 0}:${prefix || ""}`;
   // Identical to snapshotInPage's selector and numbering loop — see the note
   // there. This mode reports only form controls, but it must NUMBER the same
   // union so a ref means the same element in both modes.
   const SEL = [
-    "a[href]",
-    "button",
-    "input:not([type=hidden])",
-    "textarea",
-    "select",
-    "[role=button]",
-    "[role=link]",
-    "[role=textbox]",
-    "[role=combobox]",
-    "[role=checkbox]",
-    "[role=radio]",
-    "[role=tab]",
-    "[role=menuitem]",
-    "[role=option]",
-    "[contenteditable=true]",
-    "summary",
+    "a[href]", "button", "input:not([type=hidden])", "textarea", "select",
+    "[role=button]", "[role=link]", "[role=textbox]", "[role=combobox]",
+    "[role=checkbox]", "[role=radio]", "[role=tab]", "[role=menuitem]",
+    "[role=option]", "[contenteditable=true]", "summary",
     "[tabindex]:not([tabindex='-1'])",
   ].join(",");
   const REPORTED = [
-    "input:not([type=hidden])",
-    "textarea",
-    "select",
-    "button",
-    "[role=textbox]",
-    "[role=combobox]",
-    "[role=checkbox]",
-    "[role=radio]",
+    "input:not([type=hidden])", "textarea", "select", "button",
+    "[role=textbox]", "[role=combobox]", "[role=checkbox]", "[role=radio]",
     "[contenteditable=true]",
   ].join(",");
-  for (const old of document.querySelectorAll("[data-aibref]"))
-    old.removeAttribute("data-aibref");
+  for (const old of document.querySelectorAll("[data-aibref]")) old.removeAttribute("data-aibref");
 
   const clip = (value, max = 120) =>
-    String(value || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, max);
+    String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
   const labelledBy = (el) =>
     clip(
       (el.getAttribute("aria-labelledby") || "")
@@ -373,12 +327,9 @@ export function formSnapshotInPage(arg) {
         .join(" ")
     );
   const labelOf = (el) => {
-    const native = Array.from(el.labels || [])
-      .map((label) => label.textContent || "")
-      .join(" ");
+    const native = Array.from(el.labels || []).map((label) => label.textContent || "").join(" ");
     const wrapped = el.closest("label")?.textContent || "";
-    const legend =
-      el.closest("fieldset")?.querySelector("legend")?.textContent || "";
+    const legend = el.closest("fieldset")?.querySelector("legend")?.textContent || "";
     return clip(
       el.getAttribute("aria-label") ||
         labelledBy(el) ||
@@ -464,19 +415,13 @@ export function formSnapshotInPage(arg) {
       role,
       type,
       label: labelOf(el),
-      ...(el.getAttribute("name")
-        ? { name: clip(el.getAttribute("name"), 100) }
-        : {}),
+      ...(el.getAttribute("name") ? { name: clip(el.getAttribute("name"), 100) } : {}),
       // What a sign-in page states about a field, and the one signal it gives that
       // no wording heuristic can match: `autocomplete="username"` is never a
       // newsletter box.
-      ...(el.getAttribute("autocomplete")
-        ? { autocomplete: clip(el.getAttribute("autocomplete"), 40) }
-        : {}),
+      ...(el.getAttribute("autocomplete") ? { autocomplete: clip(el.getAttribute("autocomplete"), 40) } : {}),
       ...(el.required ? { required: true } : {}),
-      ...(el.disabled || el.getAttribute("aria-disabled") === "true"
-        ? { disabled: true }
-        : {}),
+      ...(el.disabled || el.getAttribute("aria-disabled") === "true" ? { disabled: true } : {}),
       ...(el.readOnly ? { readonly: true } : {}),
       ...(!laidOut ? { hidden: true } : {}),
       ...(form
@@ -491,25 +436,17 @@ export function formSnapshotInPage(arg) {
           }
         : {}),
     };
-    if (
-      type === "checkbox" ||
-      type === "radio" ||
-      role === "checkbox" ||
-      role === "radio"
-    ) {
-      entry.checked =
-        el.checked === true || el.getAttribute("aria-checked") === "true";
+    if (type === "checkbox" || type === "radio" || role === "checkbox" || role === "radio") {
+      entry.checked = el.checked === true || el.getAttribute("aria-checked") === "true";
     }
     if (tag === "select") {
       entry.multiple = !!el.multiple;
-      entry.options = Array.from(el.options)
-        .slice(0, 100)
-        .map((option) => ({
-          value: clip(option.value, 160),
-          label: clip(option.label || option.textContent, 160),
-          ...(option.disabled ? { disabled: true } : {}),
-          ...(option.selected ? { selected: true } : {}),
-        }));
+      entry.options = Array.from(el.options).slice(0, 100).map((option) => ({
+        value: clip(option.value, 160),
+        label: clip(option.label || option.textContent, 160),
+        ...(option.disabled ? { disabled: true } : {}),
+        ...(option.selected ? { selected: true } : {}),
+      }));
     }
     if (type === "file") {
       entry.multiple = !!el.multiple;
@@ -536,12 +473,9 @@ export function formSnapshotInPage(arg) {
   const identifierish = (c) => {
     if (c.type === "search") return false;
     if (/username|email|tel/i.test(c.autocomplete || "")) return true;
-    if (c.type !== "email" && c.type !== "tel" && c.type !== "text")
-      return false;
+    if (c.type !== "email" && c.type !== "tel" && c.type !== "text") return false;
 
-    return /user|email|e-mail|phone|mobile|login/i.test(
-      `${c.name || ""} ${c.label || ""}`
-    );
+    return /user|email|e-mail|phone|mobile|login/i.test(`${c.name || ""} ${c.label || ""}`);
   };
   const identifier = controls.find(identifierish);
   const submits = controls.some(
@@ -602,9 +536,7 @@ export function frameRefId(ref) {
 // A download's suggested filename, made safe to join under the sessions dir
 // (no separators / traversal, bounded length). Exported for tests.
 export function safeFilename(name) {
-  const cleaned = String(name || "")
-    .replace(/[^\w.-]+/g, "_")
-    .replace(/^\.+/, "");
+  const cleaned = String(name || "").replace(/[^\w.-]+/g, "_").replace(/^\.+/, "");
   return (cleaned || "file").slice(0, 80);
 }
 
@@ -715,11 +647,7 @@ function frameForRef(state, ref) {
   // sides carry a generation — an unversioned ref, or a caller driving fillForm
   // directly against a hand-built state, is let through unchanged.
   const generation = refGenerationOf(ref);
-  if (
-    generation !== null &&
-    typeof state.refGeneration === "number" &&
-    generation !== state.refGeneration
-  ) {
+  if (generation !== null && typeof state.refGeneration === "number" && generation !== state.refGeneration) {
     throw new Error(
       `ref '${ref}' is from observation ${generation}, but the page has been observed again since (now ${state.refGeneration}) — re-run form-inspect (or snapshot) and use the refs it returns`
     );
@@ -765,11 +693,7 @@ export const SECRET_TAINT_ATTR = "data-aib-secret";
 // is nothing (and no value) left to tag.
 export async function markSecretField(target, selector) {
   await target
-    .$eval(
-      selector,
-      (el, attr) => el.setAttribute(attr, "1"),
-      SECRET_TAINT_ATTR
-    )
+    .$eval(selector, (el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
     .catch(() => {});
 }
 
@@ -805,9 +729,7 @@ export async function refusePasswordRead(target, selector) {
     )
     .catch(() => false);
   if (refuse) {
-    throw new Error(
-      "refusing to read a field that holds a password or an injected secret"
-    );
+    throw new Error("refusing to read a field that holds a password or an injected secret");
   }
 }
 
@@ -843,9 +765,7 @@ function attachPage(state, page) {
       at: Date.now(),
     };
     const done =
-      state.dialog.mode === "accept"
-        ? d.accept(state.dialog.text ?? undefined)
-        : d.dismiss();
+      state.dialog.mode === "accept" ? d.accept(state.dialog.text ?? undefined) : d.dismiss();
     done.catch(() => {});
   });
   page.on("download", (d) => {
@@ -868,10 +788,7 @@ function attachPage(state, page) {
       })
       .catch((err) => {
         entry.state = "failed";
-        entry.error = String(err && err.message ? err.message : err).slice(
-          0,
-          200
-        );
+        entry.error = String(err && err.message ? err.message : err).slice(0, 200);
       });
   });
   page.on("framenavigated", () => invalidateRefs(state, "page navigated"));
@@ -949,9 +866,7 @@ async function uploadFiles(page, target, ref, files) {
 }
 
 function safeFormError(error, secret = "") {
-  let message = String(
-    error?.message || error || "form operation failed"
-  ).replace(/\s+/g, " ");
+  let message = String(error?.message || error || "form operation failed").replace(/\s+/g, " ");
   if (secret) message = message.split(secret).join("[value]");
   return message.slice(0, 300);
 }
@@ -964,9 +879,7 @@ async function validateTaggedControls(state) {
     const entries = await target
       .$$eval("[data-aibref]", (elements) =>
         elements
-          .filter(
-            (el) => el.willValidate === true && el.checkValidity() === false
-          )
+          .filter((el) => el.willValidate === true && el.checkValidity() === false)
           .map((el) => ({
             ref: el.getAttribute("data-aibref"),
             reason: String(el.validationMessage || "invalid").slice(0, 160),
@@ -994,9 +907,7 @@ async function validateTaggedControls(state) {
 // (chips/tags) and pretending otherwise would silently drop values.
 async function pickCombobox(target, ref, values) {
   if (values.length !== 1) {
-    throw new Error(
-      "combobox takes exactly one value (multi-select comboboxes are not supported)"
-    );
+    throw new Error("combobox takes exactly one value (multi-select comboboxes are not supported)");
   }
   const wanted = values[0];
   const input = target.locator(sel(ref));
@@ -1021,10 +932,7 @@ async function pickCombobox(target, ref, values) {
       `combobox '${ref}' opened no option list for "${wanted}" — the site may need a different value spelling, or the widget is not a listbox combobox`
     );
   }
-  const label = ((await chosen.innerText().catch(() => "")) || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 160);
+  const label = ((await chosen.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim().slice(0, 160);
   await chosen.click({ timeout: ACTION_TIMEOUT });
 
   // Verify against the control's own value, not against what we clicked: a
@@ -1052,20 +960,10 @@ export async function fillForm(state, p) {
   const checks = Array.isArray(p.checks) ? p.checks : [];
   const selects = Array.isArray(p.selects) ? p.selects : [];
   const uploads = Array.isArray(p.uploads) ? p.uploads : [];
-  const operationCount =
-    fields.length + checks.length + selects.length + uploads.length;
-  if (!operationCount)
-    throw new Error("form-fill needs fields, checks, selects, or uploads");
+  const operationCount = fields.length + checks.length + selects.length + uploads.length;
+  if (!operationCount) throw new Error("form-fill needs fields, checks, selects, or uploads");
   if (operationCount > 50) throw new Error("form-fill: max 50 controls");
-  if (!state.refsValid)
-    frameForRef(
-      state,
-      fields[0]?.ref ||
-        checks[0]?.ref ||
-        selects[0]?.ref ||
-        uploads[0]?.ref ||
-        "?"
-    );
+  if (!state.refsValid) frameForRef(state, fields[0]?.ref || checks[0]?.ref || selects[0]?.ref || uploads[0]?.ref || "?");
 
   const results = [];
   for (const field of fields) {
@@ -1080,17 +978,13 @@ export async function fillForm(state, p) {
           el.hasAttribute(attr),
         SECRET_TAINT_ATTR
       );
-      if (secretTarget)
-        throw new Error(
-          "password/secret fields require fill-secret or fill-otp"
-        );
+      if (secretTarget) throw new Error("password/secret fields require fill-secret or fill-otp");
       await locator.fill(value, { timeout: ACTION_TIMEOUT });
       const matches = await locator.evaluate((el, expected) => {
         const actual = "value" in el ? el.value : el.textContent || "";
         return { matches: actual === expected, length: String(actual).length };
       }, value);
-      if (!matches.matches)
-        throw new Error("page did not retain the supplied value");
+      if (!matches.matches) throw new Error("page did not retain the supplied value");
       results.push({ ref, kind: "field", ok: true, length: matches.length });
     } catch (error) {
       results.push({
@@ -1107,15 +1001,9 @@ export async function fillForm(state, p) {
     try {
       const locator = frameForRef(state, ref).locator(sel(ref));
       const native = await locator.evaluate((el) => ({
-        native:
-          el.tagName === "INPUT" && ["checkbox", "radio"].includes(el.type),
-        visible:
-          !!(
-            el.getBoundingClientRect().width &&
-            el.getBoundingClientRect().height
-          ) &&
-          getComputedStyle(el).visibility !== "hidden" &&
-          getComputedStyle(el).display !== "none",
+        native: el.tagName === "INPUT" && ["checkbox", "radio"].includes(el.type),
+        visible: !!(el.getBoundingClientRect().width && el.getBoundingClientRect().height) &&
+          getComputedStyle(el).visibility !== "hidden" && getComputedStyle(el).display !== "none",
       }));
       if (native.native && !native.visible) {
         // Styled controls often hide the native input completely. Playwright's
@@ -1123,10 +1011,7 @@ export async function fillForm(state, p) {
         // drivers, so update the real control and emit the same bubbling events
         // frameworks observe.
         await locator.evaluate((el, desired) => {
-          const setter = Object.getOwnPropertyDescriptor(
-            HTMLInputElement.prototype,
-            "checked"
-          )?.set;
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set;
           if (setter) setter.call(el, desired);
           else el.checked = desired;
           el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1136,14 +1021,12 @@ export async function fillForm(state, p) {
         await locator.setChecked(checked, { timeout: ACTION_TIMEOUT });
       } else {
         const before = (await locator.getAttribute("aria-checked")) === "true";
-        if (before !== checked)
-          await locator.click({ timeout: ACTION_TIMEOUT });
+        if (before !== checked) await locator.click({ timeout: ACTION_TIMEOUT });
       }
       const actual = native.native
         ? await locator.isChecked()
         : (await locator.getAttribute("aria-checked")) === "true";
-      if (actual !== checked)
-        throw new Error("page did not retain the checked state");
+      if (actual !== checked) throw new Error("page did not retain the checked state");
       results.push({ ref, kind: "check", ok: true, checked: actual });
     } catch (error) {
       results.push({
@@ -1156,11 +1039,7 @@ export async function fillForm(state, p) {
   }
   for (const select of selects) {
     const ref = String(select?.ref || "");
-    const values = (
-      Array.isArray(select?.values) ? select.values : [select?.value]
-    )
-      .filter((v) => v != null)
-      .map(String);
+    const values = (Array.isArray(select?.values) ? select.values : [select?.value]).filter((v) => v != null).map(String);
     try {
       const target = frameForRef(state, ref);
       // Dispatch on what the control actually IS. `selectOption` only works on
@@ -1168,13 +1047,10 @@ export async function fillForm(state, p) {
       // with "Element is not a <select> element", which no amount of retrying
       // fixes — and enterprise forms (Oracle/Taleo/Workday) render their
       // country/nationality pickers as <input role="combobox"> autocompletes.
-      const kind = await target
-        .locator(sel(ref))
-        .evaluate((el) =>
-          el.tagName.toLowerCase() === "select"
-            ? "select"
-            : el.getAttribute("role") === "combobox" ||
-              el.getAttribute("aria-autocomplete")
+      const kind = await target.locator(sel(ref)).evaluate((el) =>
+        el.tagName.toLowerCase() === "select"
+          ? "select"
+          : el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")
             ? "combobox"
             : el.tagName.toLowerCase()
         );
@@ -1183,8 +1059,7 @@ export async function fillForm(state, p) {
           timeout: ACTION_TIMEOUT,
         });
         const matches = values.every((value) => selected.includes(value));
-        if (!matches)
-          throw new Error("page did not retain the selected option(s)");
+        if (!matches) throw new Error("page did not retain the selected option(s)");
         results.push({ ref, kind: "select", ok: true, selected });
       } else if (kind === "combobox") {
         const selected = await pickCombobox(target, ref, values);
@@ -1212,12 +1087,7 @@ export async function fillForm(state, p) {
   for (const upload of uploads) {
     const ref = String(upload?.ref || "");
     try {
-      const count = await uploadFiles(
-        state.current,
-        frameForRef(state, ref),
-        ref,
-        upload?.files
-      );
+      const count = await uploadFiles(state.current, frameForRef(state, ref), ref, upload?.files);
       results.push({ ref, kind: "upload", ok: true, files: count });
     } catch (error) {
       results.push({
@@ -1270,11 +1140,7 @@ async function resizeWindow(state, page, width, height) {
       bounds: { width, height },
     });
   } catch (err) {
-    throw new Error(
-      `resize failed (CDP window bounds unavailable — needs a headed/cloud Chrome): ${
-        err.message || err
-      }`
-    );
+    throw new Error(`resize failed (CDP window bounds unavailable — needs a headed/cloud Chrome): ${err.message || err}`);
   } finally {
     await cdp.detach().catch(() => {});
   }
@@ -1542,11 +1408,7 @@ export async function dispatch(state, msg, policy = null) {
     case "fill": {
       const fields = Array.isArray(p.fields) ? p.fields : [];
       for (const f of fields) {
-        await frameForRef(state, f.ref).fill(
-          sel(f.ref),
-          String(f.value ?? ""),
-          { timeout: ACTION_TIMEOUT }
-        );
+        await frameForRef(state, f.ref).fill(sel(f.ref), String(f.value ?? ""), { timeout: ACTION_TIMEOUT });
       }
       return { filled: fields.map((f) => f.ref) };
     }
@@ -1555,10 +1417,7 @@ export async function dispatch(state, msg, policy = null) {
       // supplies { ref, cred: "name.field" } — never the value; nothing about the
       // value is returned or logged.
       const dot = String(p.cred || "").lastIndexOf(".");
-      if (dot <= 0)
-        throw new Error(
-          `fill-secret needs cred "name.field" (got "${p.cred}")`
-        );
+      if (dot <= 0) throw new Error(`fill-secret needs cred "name.field" (got "${p.cred}")`);
       const credName = String(p.cred).slice(0, dot);
       const field = String(p.cred).slice(dot + 1);
       const target = frameForRef(state, p.ref);
@@ -1582,13 +1441,10 @@ export async function dispatch(state, msg, policy = null) {
           // the field lives in an iframe, the frame's origin is where the value
           // actually goes, so BOTH the top page and the frame must pass.
           assertFillAllowed(rec, hostOfUrl(page.url()), field);
-          if (target !== page)
-            assertFillAllowed(rec, hostOfUrl(target.url()), field);
+          if (target !== page) assertFillAllowed(rec, hostOfUrl(target.url()), field);
           const value = rec[field];
           if (typeof value !== "string" || !value) {
-            throw new Error(
-              `"${credName}.${field}" is not a usable string field`
-            );
+            throw new Error(`"${credName}.${field}" is not a usable string field`);
           }
           // CRITICAL: a fill/keyboard error can echo the value being typed, so
           // never let the raw error escape — it would leak the secret to the agent.
@@ -1599,9 +1455,7 @@ export async function dispatch(state, msg, policy = null) {
               root: target,
             });
           } catch {
-            throw new Error(
-              `fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`
-            );
+            throw new Error(`fill-secret: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
           }
           // Tag the field so a later read-back is refused whatever its input type.
           await markSecretField(target, sel(p.ref));
@@ -1743,9 +1597,7 @@ export async function dispatch(state, msg, policy = null) {
             });
           }
         } catch {
-          throw new Error(
-            `fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`
-          );
+          throw new Error(`fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
         }
         // Outside the guard above, which rewrites everything it catches into a
         // visibility problem. A row that would not take the code is not that, and
@@ -1770,16 +1622,11 @@ export async function dispatch(state, msg, policy = null) {
       // Same dispatch as form-fill's selects — a bare `select` on an ARIA
       // combobox would otherwise fail identically here.
       const target = frameForRef(state, p.ref);
-      const values = (Array.isArray(p.values) ? p.values : [p.values])
-        .filter((v) => v != null)
-        .map(String);
-      const kind = await target
-        .locator(sel(p.ref))
-        .evaluate((el) =>
-          el.tagName.toLowerCase() === "select"
-            ? "select"
-            : el.getAttribute("role") === "combobox" ||
-              el.getAttribute("aria-autocomplete")
+      const values = (Array.isArray(p.values) ? p.values : [p.values]).filter((v) => v != null).map(String);
+      const kind = await target.locator(sel(p.ref)).evaluate((el) =>
+        el.tagName.toLowerCase() === "select"
+          ? "select"
+          : el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")
             ? "combobox"
             : el.tagName.toLowerCase()
         );
@@ -1802,8 +1649,7 @@ export async function dispatch(state, msg, policy = null) {
       });
       return { hovered: p.ref };
     case "press":
-      if (p.ref)
-        await frameForRef(state, p.ref).press(sel(p.ref), String(p.key));
+      if (p.ref) await frameForRef(state, p.ref).press(sel(p.ref), String(p.key));
       else await page.keyboard.press(String(p.key));
       return { pressed: p.key };
     case "upload": {
@@ -1847,9 +1693,7 @@ export async function dispatch(state, msg, policy = null) {
     // use a viewport screenshot (not --full) as the reference.
     case "click-xy": {
       const { x, y } = toXY(p.x, p.y, await liveDpr(page, p.css), "click-xy");
-      const button = ["left", "right", "middle"].includes(String(p.button))
-        ? String(p.button)
-        : "left";
+      const button = ["left", "right", "middle"].includes(String(p.button)) ? String(p.button) : "left";
       await humanMove(page, x, y); // stealth trail; the click itself lands at (x,y)
       await page.mouse.click(x, y, { button, clickCount: p.double ? 2 : 1 });
       return {
@@ -1946,14 +1790,8 @@ export async function dispatch(state, msg, policy = null) {
       // INNER viewport (what coordinate actions use) is smaller and is returned.
       const width = Math.round(Number(p.width));
       const height = Math.round(Number(p.height));
-      if (
-        ![width, height].every(Number.isFinite) ||
-        width < 200 ||
-        height < 200
-      ) {
-        throw new Error(
-          "resize needs numeric --width and --height (min 200 each)"
-        );
+      if (![width, height].every(Number.isFinite) || width < 200 || height < 200) {
+        throw new Error("resize needs numeric --width and --height (min 200 each)");
       }
       const viewport = await resizeWindow(state, page, width, height);
       return { resized: { width, height }, ...(viewport ? { viewport } : {}) };
@@ -1966,13 +1804,8 @@ export async function dispatch(state, msg, policy = null) {
       p.requireRegion = true;
     // fallthrough
     case "screenshot": {
-      const out = p.path
-        ? String(p.path)
-        : path.join(sessionsDir(msg._stateDir), `shot-${Date.now()}.jpg`);
-      const enc = screenshotEncoding(
-        out,
-        process.env.AGENT_ID_SCREENSHOT_QUALITY
-      );
+      const out = p.path ? String(p.path) : path.join(sessionsDir(msg._stateDir), `shot-${Date.now()}.jpg`);
+      const enc = screenshotEncoding(out, process.env.AGENT_ID_SCREENSHOT_QUALITY);
       const format = enc.type || "png";
       // dims are BEST-EFFORT and must never block the capture: a JS-hostile page
       // (PDF viewer, chrome://, mid-navigation) can't run this evaluate, but the
@@ -1996,30 +1829,20 @@ export async function dispatch(state, msg, policy = null) {
         }
       }
       // `zoom` sets requireRegion — a region-less zoom is a mistake, not a full shot.
-      if (p.requireRegion && !region)
-        throw new Error("zoom needs --region x0,y0,x1,y1");
+      if (p.requireRegion && !region) throw new Error("zoom needs --region x0,y0,x1,y1");
       if (region) {
         // Clamp to the viewport so an over-large region gives a helpful error
         // instead of a raw Playwright "clipped area outside image".
-        const clip = clampClipToViewport(
-          regionToClip(region, p.css ? 1 : info.dpr),
-          info.viewport
-        );
+        const clip = clampClipToViewport(regionToClip(region, p.css ? 1 : info.dpr), info.viewport);
         if (clip.width < 1 || clip.height < 1) {
-          throw new Error(
-            "screenshot --region has zero area (or lies outside the viewport)"
-          );
+          throw new Error("screenshot --region has zero area (or lies outside the viewport)");
         }
         // Guard the capture too: when viewport was unknown (JS-hostile page) we
         // couldn't clamp, so a raw clip error becomes a readable one.
         try {
           await page.screenshot({ path: out, clip, ...enc });
         } catch (err) {
-          throw new Error(
-            `screenshot --region could not capture (region likely outside the page): ${
-              err.message || err
-            }`
-          );
+          throw new Error(`screenshot --region could not capture (region likely outside the page): ${err.message || err}`);
         }
         return {
           screenshot: out,
@@ -2048,11 +1871,7 @@ export async function dispatch(state, msg, policy = null) {
     case "eval":
       return { result: await page.evaluate(String(p.expression)) };
     case "wait":
-      if (p.text)
-        await page
-          .getByText(String(p.text))
-          .first()
-          .waitFor({ timeout: Number(p.ms || 15000) });
+      if (p.text) await page.getByText(String(p.text)).first().waitFor({ timeout: Number(p.ms || 15000) });
       else if (p.url) {
         const needle = String(p.url);
         await page.waitForURL((u) => u.href.includes(needle), {
@@ -2061,9 +1880,7 @@ export async function dispatch(state, msg, policy = null) {
       } else if (p.load) {
         const stateName = String(p.load);
         if (!["load", "domcontentloaded", "networkidle"].includes(stateName)) {
-          throw new Error(
-            "wait --load must be load|domcontentloaded|networkidle"
-          );
+          throw new Error("wait --load must be load|domcontentloaded|networkidle");
         }
         await page.waitForLoadState(stateName, {
           timeout: Number(p.ms || 15000),
@@ -2073,8 +1890,7 @@ export async function dispatch(state, msg, policy = null) {
     case "get": {
       const what = String(p.what || "text");
       if (what === "url") return { url: page.url() };
-      if (what === "title")
-        return { title: await page.title().catch(() => "") };
+      if (what === "title") return { title: await page.title().catch(() => "") };
       if (!p.ref) throw new Error(`get --what ${what} needs --ref`);
       const t = frameForRef(state, p.ref);
       const s = sel(p.ref);
@@ -2107,9 +1923,7 @@ export async function dispatch(state, msg, policy = null) {
           };
         }
         default:
-          throw new Error(
-            `get: unknown --what '${what}' (text|html|value|attr|url|title)`
-          );
+          throw new Error(`get: unknown --what '${what}' (text|html|value|attr|url|title)`);
       }
     }
     case "is": {
@@ -2128,9 +1942,7 @@ export async function dispatch(state, msg, policy = null) {
             editable: await t.isEditable(s, { timeout: ACTION_TIMEOUT }),
           };
         default:
-          throw new Error(
-            `is: unknown --what '${what}' (visible|enabled|checked|editable)`
-          );
+          throw new Error(`is: unknown --what '${what}' (visible|enabled|checked|editable)`);
       }
     }
     case "tabs": {
@@ -2161,9 +1973,7 @@ export async function dispatch(state, msg, policy = null) {
       const pages = state.ctx.pages();
       const index = Number(p.index);
       if (!Number.isInteger(index) || index < 0 || index >= pages.length) {
-        throw new Error(
-          `no tab ${p.index} (open tabs: 0..${pages.length - 1})`
-        );
+        throw new Error(`no tab ${p.index} (open tabs: 0..${pages.length - 1})`);
       }
       state.current = pages[index];
       invalidateRefs(state, "current tab changed");
@@ -2177,16 +1987,11 @@ export async function dispatch(state, msg, policy = null) {
     case "tab-close": {
       const pages = state.ctx.pages();
       if (pages.length <= 1) {
-        throw new Error(
-          "tab-close: closing the last tab would end the session — use `close`"
-        );
+        throw new Error("tab-close: closing the last tab would end the session — use `close`");
       }
-      const index =
-        p.index != null ? Number(p.index) : pages.indexOf(state.current);
+      const index = p.index != null ? Number(p.index) : pages.indexOf(state.current);
       if (!Number.isInteger(index) || index < 0 || index >= pages.length) {
-        throw new Error(
-          `no tab ${p.index} (open tabs: 0..${pages.length - 1})`
-        );
+        throw new Error(`no tab ${p.index} (open tabs: 0..${pages.length - 1})`);
       }
       await pages[index].close(); // "close" listener re-points state.current if needed
       return { closed: index, tabs: state.ctx.pages().length };
@@ -2196,8 +2001,7 @@ export async function dispatch(state, msg, policy = null) {
       // from now on; without --mode, just report the policy + last dialog seen.
       if (p.mode != null) {
         const mode = String(p.mode);
-        if (!["accept", "dismiss"].includes(mode))
-          throw new Error("dialog --mode must be accept|dismiss");
+        if (!["accept", "dismiss"].includes(mode)) throw new Error("dialog --mode must be accept|dismiss");
         state.dialog = { mode, text: p.text != null ? String(p.text) : null };
       }
       return {
@@ -2215,12 +2019,8 @@ export async function dispatch(state, msg, policy = null) {
       // rather than letting an empty list read as "the page logged nothing".
       const level = p.level ? String(p.level) : null;
       let entries = state.console;
-      if (level === "error")
-        entries = entries.filter((e) => e.type === "error");
-      else if (level === "warn")
-        entries = entries.filter(
-          (e) => e.type === "error" || e.type === "warning"
-        );
+      if (level === "error") entries = entries.filter((e) => e.type === "error");
+      else if (level === "warn") entries = entries.filter((e) => e.type === "error" || e.type === "warning");
       return {
         messages: entries.slice(-Number(p.max || 50)),
         ...(state.console.length === 0
@@ -2233,9 +2033,7 @@ export async function dispatch(state, msg, policy = null) {
     case "cookies": {
       // Metadata only — values are session tokens, which stay sealed in the
       // session by design (the agent never handles a secret).
-      const cookies = await state.ctx.cookies(
-        p.url ? String(p.url) : undefined
-      );
+      const cookies = await state.ctx.cookies(p.url ? String(p.url) : undefined);
       return {
         cookies: cookies.map((c) => ({
           name: c.name,
@@ -2256,10 +2054,7 @@ export async function dispatch(state, msg, policy = null) {
       // between steps (capped 5s) for sites that need time to settle (animations,
       // canvas repaints) before the next action.
       const actions = Array.isArray(p.actions) ? p.actions : [];
-      if (!actions.length)
-        throw new Error(
-          'batch needs --actions \'[{"action":"click","params":{"ref":"e1"}}, …]\''
-        );
+      if (!actions.length) throw new Error('batch needs --actions \'[{"action":"click","params":{"ref":"e1"}}, …]\'');
       if (actions.length > 20) throw new Error("batch: max 20 actions");
       const delay = Number(p.delay) > 0 ? Math.min(Number(p.delay), 5000) : 0;
       const results = [];
@@ -2269,11 +2064,7 @@ export async function dispatch(state, msg, policy = null) {
           throw new Error(`batch: unsupported action '${name}'`);
         }
         try {
-          const r = await dispatch(
-            state,
-            { action: name, params: a.params || {}, _stateDir: msg._stateDir },
-            policy
-          );
+          const r = await dispatch(state, { action: name, params: a.params || {}, _stateDir: msg._stateDir }, policy);
           results.push({ action: name, ok: true, ...r });
         } catch (err) {
           results.push({
@@ -2427,9 +2218,7 @@ export async function runSession({
       }
       if (Date.now() - lastActivityAt < idleMs) return;
       const forHuman =
-        idleMs >= 60_000
-          ? `${Math.round(idleMs / 60_000)} min`
-          : `${Math.round(idleMs / 1000)}s`;
+        idleMs >= 60_000 ? `${Math.round(idleMs / 60_000)} min` : `${Math.round(idleMs / 1000)}s`;
       process.stderr.write(
         `Session '${name}' idle for ${forHuman} with no viewer — closing ` +
           `(profile is resealed; reopen with \`open --name ${name}\`).\n`
@@ -2448,16 +2237,8 @@ export async function runSession({
       if (nl < 0) return;
       const line = buf.slice(0, nl);
       let msg;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        sock.end(JSON.stringify({ ok: false, error: "bad json" }) + "\n");
-        return;
-      }
-      if (msg.token !== token) {
-        sock.end(JSON.stringify({ ok: false, error: "bad token" }) + "\n");
-        return;
-      }
+      try { msg = JSON.parse(line); } catch { sock.end(JSON.stringify({ ok: false, error: "bad json" }) + "\n"); return; }
+      if (msg.token !== token) { sock.end(JSON.stringify({ ok: false, error: "bad token" }) + "\n"); return; }
       if (msg.action === "close") {
         sock.end(JSON.stringify({ ok: true, closed: true }) + "\n");
         finalize(); // reseals, wipes, and exits (once cleanup completes)
@@ -2469,10 +2250,7 @@ export async function runSession({
         const result = await dispatch(state, msg, policy);
         sock.end(JSON.stringify({ ok: true, ...result }) + "\n");
       } catch (err) {
-        sock.end(
-          JSON.stringify({ ok: false, error: err.message || String(err) }) +
-            "\n"
-        );
+        sock.end(JSON.stringify({ ok: false, error: err.message || String(err) }) + "\n");
       }
     });
     sock.on("error", () => {});
@@ -2529,13 +2307,9 @@ export async function runSession({
 
   // Reseal + clean up if the browser dies or we're terminated. finalize() handles
   // the exit itself, so these just invoke it (idempotent).
-  ctx.on("close", () => {
-    finalize();
-  });
+  ctx.on("close", () => { finalize(); });
   for (const sig of ["SIGINT", "SIGTERM"]) {
-    process.on(sig, () => {
-      finalize();
-    });
+    process.on(sig, () => { finalize(); });
   }
   return { port };
 }
@@ -2557,11 +2331,7 @@ export async function runSession({
 // removes it only after the reseal, so once it is gone the profile file is
 // stable and ours to overwrite. A stale file (daemon died without finalize) is
 // removed so the next open does not keep trying to reach it.
-export async function closeLiveSession(
-  stateDir,
-  name,
-  { log = () => {}, timeoutMs = 30000 } = {}
-) {
+export async function closeLiveSession(stateDir, name, { log = () => {}, timeoutMs = 30000 } = {}) {
   const file = sessionFilePath(stateDir, name);
   let info = null;
   try {
@@ -2569,11 +2339,7 @@ export async function closeLiveSession(
   } catch {
     return false;
   }
-  log(
-    `Closing the open '${name}' session (pid ${
-      info.pid ?? "?"
-    }) so the new login is not overwritten by its stale copy.`
-  );
+  log(`Closing the open '${name}' session (pid ${info.pid ?? "?"}) so the new login is not overwritten by its stale copy.`);
   try {
     await callSession(stateDir, name, "close", {}, timeoutMs);
   } catch (err) {
@@ -2603,58 +2369,34 @@ export async function closeLiveSession(
 }
 
 // Client: send one action to a running session, return its JSON reply.
-export async function callSession(
-  stateDir,
-  name,
-  action,
-  params = {},
-  timeoutMs = 35000
-) {
+export async function callSession(stateDir, name, action, params = {}, timeoutMs = 35000) {
   let info = null;
   for (let attempt = 0; attempt < 10 && !info; attempt++) {
     try {
-      info = JSON.parse(
-        await fs.readFile(sessionFilePath(stateDir, name), "utf8")
-      );
+      info = JSON.parse(await fs.readFile(sessionFilePath(stateDir, name), "utf8"));
     } catch {
       await new Promise((r) => setTimeout(r, 300)); // tolerate the open→ready race
     }
   }
   if (!info) {
-    const e = new Error(
-      `no open session named '${name}' — run \`open --name ${name}\` first`
-    );
+    const e = new Error(`no open session named '${name}' — run \`open --name ${name}\` first`);
     e.code = "NO_SESSION";
     throw e;
   }
   return await new Promise((resolve, reject) => {
     const sock = net.connect(info.port, "127.0.0.1");
     let buf = "";
-    const to = setTimeout(() => {
-      sock.destroy();
-      reject(new Error("session timed out"));
-    }, timeoutMs);
-    sock.on("connect", () =>
-      sock.write(JSON.stringify({ token: info.token, action, params }) + "\n")
-    );
+    const to = setTimeout(() => { sock.destroy(); reject(new Error("session timed out")); }, timeoutMs);
+    sock.on("connect", () => sock.write(JSON.stringify({ token: info.token, action, params }) + "\n"));
     sock.on("data", (d) => {
       buf += d.toString("utf8");
       const nl = buf.indexOf("\n");
       if (nl >= 0) {
         clearTimeout(to);
-        try {
-          resolve(JSON.parse(buf.slice(0, nl)));
-        } catch (e) {
-          reject(e);
-        }
+        try { resolve(JSON.parse(buf.slice(0, nl))); } catch (e) { reject(e); }
         sock.end();
       }
     });
-    sock.on("error", (err) => {
-      clearTimeout(to);
-      const e = new Error(`session unreachable: ${err.message}`);
-      e.code = "NO_SESSION";
-      reject(e);
-    });
+    sock.on("error", (err) => { clearTimeout(to); const e = new Error(`session unreachable: ${err.message}`); e.code = "NO_SESSION"; reject(e); });
   });
 }

@@ -32,23 +32,16 @@ function stub(name, { available = true, multiline = true } = {}) {
 
 // Spin up an HTTP server on a unix socket (the hosted-harness protocol).
 function startHostedSocket(handler) {
-  const sock = path.join(
-    os.tmpdir(),
-    `agentid-sp-${process.pid}-${Date.now()}.sock`
-  );
+  const sock = path.join(os.tmpdir(), `agentid-sp-${process.pid}-${Date.now()}.sock`);
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
-      const body = chunks.length
-        ? JSON.parse(Buffer.concat(chunks).toString("utf8"))
-        : {};
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
       handler(body, res);
     });
   });
-  return new Promise((resolve) =>
-    server.listen(sock, () => resolve({ sock, server }))
-  );
+  return new Promise((resolve) => server.listen(sock, () => resolve({ sock, server })));
 }
 
 test("resolver: default environment selects the browser form", () => {
@@ -88,10 +81,7 @@ test("resolver: an unavailable extraProvider is skipped", () => {
 test("resolver: a multiline spec skips providers that can't do multiline", () => {
   const single = stub("single", { multiline: false });
   // Non-multiline need → the single-line provider is fine.
-  assert.equal(
-    resolveSecurePrompt({ env: {}, extraProviders: [single], need: {} }).name,
-    "single"
-  );
+  assert.equal(resolveSecurePrompt({ env: {}, extraProviders: [single], need: {} }).name, "single");
   // Multiline need → it is filtered out, the browser form wins.
   assert.equal(
     resolveSecurePrompt({
@@ -109,10 +99,7 @@ test("TtyProvider is single-line only (multiline:false)", () => {
 
 test("resolver: AGENT_ID_SECURE_PROMPT forces a backend (overriding availability + order)", () => {
   // Forces tty even though a browser is available…
-  assert.equal(
-    resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "tty" } }).name,
-    "tty"
-  );
+  assert.equal(resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "tty" } }).name, "tty");
   // …and forces browser even when AGENT_ID_NO_BROWSER would normally disable it.
   assert.equal(
     resolveSecurePrompt({
@@ -129,10 +116,7 @@ test("resolver: AGENT_ID_SECURE_PROMPT forces a backend (overriding availability
     "mobile"
   );
   // An unknown name falls through to normal resolution.
-  assert.equal(
-    resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "nope" } }).name,
-    "browser"
-  );
+  assert.equal(resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "nope" } }).name, "browser");
 });
 
 test("hosted: a card closed through its button says which button", async () => {
@@ -218,10 +202,7 @@ test("hosted: selected for a valid unix socket; collect() round-trips values; UR
     assert.equal(values.otp, "from-harness");
 
     // collectSecret routes through the same resolver.
-    const out = await collectSecret(
-      { fields: [{ name: "password" }] },
-      { env }
-    );
+    const out = await collectSecret({ fields: [{ name: "password" }] }, { env });
     assert.equal(out.values.password, "from-harness");
 
     // A URL (TCP) value is refused — the agent can't redirect the channel.
