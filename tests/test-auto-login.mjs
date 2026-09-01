@@ -824,6 +824,51 @@ test("a card the owner dismissed is reported as their answer, not as a fault", a
   assert.notEqual(result.outcome, "otp-timeout", "nobody ran out of time");
 });
 
+test(
+  "a real 409 from the hosted card reaches the declined outcome, end to end",
+  async () => {
+    // The test above fabricates the error, so it passes whether or not anything
+    // ever sets that code. The code is set in agent-id-core and read in
+    // agent-id-browser, and a release that bumps only the reader resolves a
+    // published core that never sets it — the retry loop would be exactly as open
+    // as before, with the whole suite green. So this one drives a real 409 all the
+    // way: hosted socket, core's provider, no `resolveOtpFn` injected.
+    const sock = path.join(
+      os.tmpdir(),
+      `agentid-al-${process.pid}-${Date.now()}.sock`
+    );
+    const server = http.createServer((_req, res) => {
+      const payload = JSON.stringify({ error: "cancelled" });
+      res.writeHead(409, {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      });
+      res.end(payload);
+    });
+    await new Promise((resolve) => server.listen(sock, resolve));
+
+    const previous = process.env.AGENT_ID_SECURE_PROMPT_SOCK;
+    process.env.AGENT_ID_SECURE_PROMPT_SOCK = sock;
+    try {
+      const result = await autoLogin({
+        page: recipePage("https://x.test/otp"),
+        cred: PWLESS_CRED,
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(
+        result.outcome,
+        "otp-declined",
+        "a dismissal must survive the trip across the package boundary"
+      );
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_ID_SECURE_PROMPT_SOCK;
+      else process.env.AGENT_ID_SECURE_PROMPT_SOCK = previous;
+      server.close();
+    }
+  }
+);
+
 test("autoLogin does not dress every OTP failure up as a timeout", async () => {
   // Only an unanswered card is an outcome. A credential that cannot produce a
   // code at all is a fault, and swallowing it would report "nobody typed it".
