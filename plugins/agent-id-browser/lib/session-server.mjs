@@ -1656,22 +1656,51 @@ export async function dispatch(state, msg, policy = null) {
           // way; a sign-in driven by hand arrives here instead and must not leave
           // the record to mislead the next one.
           const correction = otpModeCorrection(rec);
+
+          try {
+            code = await resolveOtp(otpCred, hints);
+          } catch (err) {
+            // The owner closed the card. Nothing broke and nothing timed out, so
+            // the one thing that must not happen is the same card going straight
+            // back up — which is what a bare fault invites, because the sensible
+            // reply to a fault is a retry.
+            if (err?.code === "FORM_CANCELLED") {
+              throw new Error(
+                "fill-otp: the owner dismissed the code card — they were asked and said no. " +
+                  "Do not raise it again unless they ask for it."
+              );
+            }
+            throw err;
+          }
+
+          // Written only now, and only if the owner answered. `fill_otp` inspects
+          // no page state, so until a code comes back the sole evidence that this
+          // site asks for one is that the model said so — and a mistaken call
+          // would overwrite the owner's explicit `--otp none` for good, with no
+          // way back. Answering the card is the site being asked and the owner
+          // agreeing; that is worth writing down. A dismissal is not.
           if (correction) {
-            otpCred.otp = correction;
-            {
+            try {
               rec.otp = correction;
               vault.add(rec);
               await vault.save();
               process.stderr.write(
                 `fill-otp: '${credName}' said otp=none but a code is being asked for — corrected\n`
               );
+            } catch (err) {
+              // Bookkeeping. The owner has the code in hand and the sign-in is
+              // mid-flight; losing the correction costs one re-learn, losing the
+              // sign-in costs the whole thing.
+              process.stderr.write(
+                `fill-otp: could not record the corrected otp mode: ${err.message}\n`
+              );
             }
           }
-          code = await resolveOtp(otpCred, hints);
         } finally {
           vault.lock();
         }
         // Same leak guard as fill-secret: never surface the value-bearing error.
+        let row = null;
         try {
           // A row of boxes needs the code spread across it, and the ref names only
           // the first one. Typing into that one and trusting the page to advance
@@ -1683,16 +1712,12 @@ export async function dispatch(state, msg, policy = null) {
             // itself — leaves characters in these boxes, and only the tag stops
             // them being read back one at a time.
             await markSecretBoxes(boxes);
-            const complete = await typeCodeAcrossBoxes(page, boxes, code);
-            if (!complete) {
-              throw new Error(
-                `fill-otp: the code did not land in all ${boxes.length} boxes (re-snapshot and retry)`
-              );
-            }
+            const typed = await typeCodeAcrossBoxes(page, boxes, code);
+            row = { count: boxes.length, ...typed };
             // A row that submitted itself has already moved the page on; pressing
             // Enter then lands on whatever screen came next.
             const stillHere = await boxes[0].isVisible().catch(() => false);
-            if (p.submit !== false && stillHere)
+            if (!row.submitted && stillHere && p.submit !== false)
               await page.keyboard.press("Enter");
           } else {
             await humanType(page, sel(p.ref), code, {
@@ -1704,6 +1729,16 @@ export async function dispatch(state, msg, policy = null) {
         } catch {
           throw new Error(
             `fill-otp: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`
+          );
+        }
+        // Outside the guard above, which rewrites everything it catches into a
+        // visibility problem. A row that would not take the code is not that, and
+        // sending the model to re-snapshot over it is advice for the wrong fault.
+        if (row && !row.complete) {
+          throw new Error(
+            row.submitted
+              ? "fill-otp: the code was submitted and the site refused it — ask for a fresh one"
+              : `fill-otp: the code did not land in all ${row.count} boxes (re-snapshot and retry)`
           );
         }
         // A derived OTP isn't sealed at fill time (see assertFillAllowed), so the

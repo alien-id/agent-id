@@ -19,6 +19,8 @@
 // Escape hatch: set AGENT_ID_HUMAN_INPUT=0 to fall back to fast direct calls
 // (for speed-sensitive automation or debugging).
 
+import { ERROR_RE } from "./login-detect.mjs";
+
 export function humanInputEnabled() {
   return process.env.AGENT_ID_HUMAN_INPUT !== "0";
 }
@@ -210,7 +212,11 @@ export async function humanType(
 //
 // So: type, then look. Boxes that stayed empty are filled one at a time, each
 // with its own character, which needs no cooperation from the page at all.
-// Returns whether the row ended up holding the whole code.
+//
+// Returns `{ complete, submitted }`. `submitted` says the row took the page with
+// it, which is the one outcome that cannot be verified by reading the boxes back
+// — they are gone. Keeping the two apart is the point: a bare `true` made "the
+// row holds the code" and "something navigated" the same answer.
 export async function typeCodeAcrossBoxes(
   page,
   boxes,
@@ -218,23 +224,33 @@ export async function typeCodeAcrossBoxes(
   { rng = Math.random } = {}
 ) {
   const characters = Array.from(String(code ?? ""));
-  if (boxes.length === 0 || characters.length === 0) return false;
+  if (boxes.length === 0 || characters.length === 0) {
+    return { complete: false, submitted: false };
+  }
 
-  // A row that submits itself on the last character takes the page with it, and
-  // then there is nothing left to read back. Navigating away IS the code landing:
-  // reading empty boxes on the next screen and calling that a failure would fail
-  // the one case that worked perfectly.
   const startedAt = page.url();
   const navigated = () => page.url() !== startedAt;
-  const filled = async () =>
+  const values = async () =>
     Promise.all(boxes.map((box) => box.inputValue().catch(() => "")));
+  // Each box must hold the character at its own index. A total character count
+  // cannot tell a filled row from one box holding the whole code and five empty
+  // beside it — which is exactly what a row with no `maxlength` does when its
+  // script declines to distribute, and exactly the shape this function exists
+  // for. It also let digits left over from a refused code stand in for the new
+  // one.
+  const holdsCode = (found) =>
+    characters.every((character, index) => found[index] === character);
+
+  // The whole row, not just the first box. A retry arrives at a row the site has
+  // re-rendered with the previous code still in it, and leaving those five
+  // characters behind is how two codes get spliced into one and submitted.
+  for (const box of boxes) await box.fill("").catch(() => {});
 
   await humanClick(page, boxes[0]);
-  await boxes[0].fill("");
   await humanTypeFocused(page, code, { rng });
 
-  if (navigated()) return true;
-  if ((await filled()).join("").length >= characters.length) return true;
+  if (navigated()) return afterSelfSubmit(page);
+  if (holdsCode(await values())) return { complete: true, submitted: false };
 
   for (const [index, box] of boxes.entries()) {
     const character = characters[index];
@@ -245,9 +261,27 @@ export async function typeCodeAcrossBoxes(
     await box.fill(character).catch(() => {});
   }
 
-  if (navigated()) return true;
+  if (navigated()) return afterSelfSubmit(page);
 
-  return (await filled()).join("").length >= characters.length;
+  return { complete: holdsCode(await values()), submitted: false };
+}
+
+// A row that submits itself on the last character takes the page with it, and
+// then there is nothing left to read back — so navigating away is the code
+// landing, and calling empty boxes on the next screen a failure would fail the
+// one case that worked perfectly. Unless the screen it landed on is saying the
+// code was refused: that is a navigation too, and reading it as success is how a
+// rejected code gets reported as typed.
+async function afterSelfSubmit(page) {
+  const bodyText = await page
+    .evaluate(() =>
+      document.body && document.body.innerText
+        ? document.body.innerText.slice(0, 4000)
+        : ""
+    )
+    .catch(() => "");
+
+  return { complete: !ERROR_RE.test(bodyText), submitted: true };
 }
 
 export async function humanTypeFocused(

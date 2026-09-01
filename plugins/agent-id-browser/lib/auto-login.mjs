@@ -40,12 +40,15 @@ import { notifyHost } from "@alien-id/agent-id-core/lib/notice.mjs";
 import {
   assertHostAllowed,
   credentialHost,
+  DEFAULT_LOGIN_OTP_MODE,
+  loginOtpMode,
   siteName,
 } from "@alien-id/agent-id-vault/lib/store.mjs";
 import {
   classifyLogin,
   codeDestination,
   codeLengthFromText,
+  OTP_BODY_RE,
 } from "./login-detect.mjs";
 import { humanClick, humanDriver, humanType } from "./human-input.mjs";
 
@@ -520,8 +523,13 @@ const IDENTIFIER_FIELD_SEL = [
 // should say instead — or null when the record was right. Reaching a code step
 // settles the question: the site is asking, so "this site has no codes" is the
 // one answer that cannot be true.
+// Through the store's normaliser rather than `cred.otp === "none"`, so a record
+// that never carried the field is judged by what the field means when it is
+// missing, not by strict equality against a value it does not hold.
 export function otpModeCorrection(cred) {
-  return cred?.otp === "none" ? "interactive" : null;
+  if (!cred) return null;
+
+  return loginOtpMode(cred) === "none" ? DEFAULT_LOGIN_OTP_MODE : null;
 }
 
 // The row of single-character boxes a code screen is built from, in document
@@ -530,73 +538,142 @@ export function otpModeCorrection(cred) {
 export const OTP_BOX_SEL =
   'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]';
 
-export async function otpBoxes(target) {
-  const all = target.locator(OTP_BOX_SEL);
-  const count = await all.count().catch(() => 0);
-  const boxes = [];
+// The row members, once found, are tagged with this so the boxes the code is
+// typed into are the same elements the cell count was derived from. They used to
+// be two separate predicates — one reading `e.type`, the other
+// `getAttribute("type")` — which already disagreed on `type="TEL"`: the card
+// promised six cells and the fill path found no row at all.
+export const OTP_ROW_ATTR = "data-aib-otp-box";
 
-  for (let index = 0; index < count; index += 1) {
-    const box = all.nth(index);
-    const [visible, maxLength, autocomplete, inputMode, type] =
-      await Promise.all([
-        box.isVisible().catch(() => false),
-        box.getAttribute("maxlength").catch(() => null),
-        box.getAttribute("autocomplete").catch(() => null),
-        box.getAttribute("inputmode").catch(() => null),
-        box.getAttribute("type").catch(() => null),
-      ]);
-    const boxish =
-      Number(maxLength) === 1 ||
-      autocomplete === "one-time-code" ||
-      inputMode === "numeric" ||
-      type === "tel" ||
-      type === "number";
+// A code has at least four characters and at most eight; below four is not a row
+// and above eight is not a code. The cap matters on its own — the screen draws
+// one cell per character and submits on the last, so a count taken from nine
+// stray inputs would strand every answer.
+const OTP_ROW_MIN = 4;
+const OTP_ROW_MAX = 8;
 
-    if (visible && boxish) boxes.push(box);
+// Find the row and tag it, in one place, in the page. Returns how many boxes it
+// holds, or null when the page has no row.
+//
+// "Four or more inputs that could take a code" is not enough on its own: a
+// checkout step is four numeric fields, so is a quantity grid, and drawing a card
+// with that many cells is the one failure this screen cannot recover from. What
+// separates a code row from a form that merely counts to four:
+//
+//   - one container. Boxes of a row are siblings; a form's fields are not
+//     gathered under a parent of their own.
+//   - nothing else in it. A container holding a boxish input beside an ordinary
+//     one is a form, not a row.
+//   - uniform. Every box of a row is the same shape — same `type`, same
+//     `maxlength` (all of them one, or all of them silent). Card number 19,
+//     expiry 5 and CVC 4 are not a row however numeric they are.
+//   - about a code. A row that declares `maxlength="1"` says so itself. One that
+//     leaves the length to script — Booking.com's, the row this was built for —
+//     is taken on the page's word instead: `one-time-code`, or copy that says a
+//     code was sent.
+function otpRowInPage({ selector, min, max, attr, codeCopy }) {
+  const codeCopyRe = new RegExp(codeCopy, "i");
+  const staged = (e) => !!e.closest('[aria-hidden="true"],[hidden]');
+  const visible = (e) =>
+    !staged(e) && !!(e.offsetParent !== null || e.getClientRects().length);
+  const declared = (e) => {
+    const value = Number(e.getAttribute("maxlength"));
+    return Number.isInteger(value) && value > 0 ? value : null;
+  };
+  const boxish = (e) =>
+    declared(e) === 1 ||
+    e.getAttribute("autocomplete") === "one-time-code" ||
+    e.getAttribute("inputmode") === "numeric" ||
+    e.type === "tel" ||
+    e.type === "number";
+
+  for (const stale of document.querySelectorAll(`[${attr}]`)) {
+    stale.removeAttribute(attr);
   }
 
-  return boxes.length >= 4 ? boxes : [];
+  const bodyText =
+    document.body && document.body.innerText ? document.body.innerText : "";
+  const candidates = Array.from(document.querySelectorAll(selector)).filter(
+    visible
+  );
+  const byParent = new Map();
+  for (const field of candidates) {
+    const parent = field.parentElement;
+    if (!parent) continue;
+    if (!byParent.has(parent)) byParent.set(parent, []);
+    byParent.get(parent).push(field);
+  }
+
+  for (const [parent, group] of byParent) {
+    if (group.length < min || group.length > max) continue;
+    if (!group.every(boxish)) continue;
+    // Every input the container holds, not just the ones that matched the
+    // selector: a password or an e-mail beside them makes it a form.
+    const siblings = Array.from(parent.querySelectorAll("input")).filter(
+      visible
+    );
+    if (siblings.length !== group.length) continue;
+    const [first] = group;
+    const uniform = group.every(
+      (e) => e.type === first.type && declared(e) === declared(first)
+    );
+    if (!uniform) continue;
+    const aboutACode =
+      declared(first) === 1 ||
+      group.some((e) => e.getAttribute("autocomplete") === "one-time-code") ||
+      codeCopyRe.test(bodyText);
+    if (!aboutACode) continue;
+
+    group.forEach((box, index) => box.setAttribute(attr, String(index)));
+
+    return group.length;
+  }
+
+  return null;
 }
 
-export async function otpCardHints(page) {
-  const [length, bodyText] = await page.evaluate(() => {
-    const visible = (e) =>
-      !!(e.offsetParent !== null || e.getClientRects().length);
-    const fields = Array.from(
-      document.querySelectorAll(
-        'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]'
-      )
-    ).filter(visible);
-    const declared = (e) => {
-      const value = Number(e.getAttribute("maxlength"));
-      return Number.isInteger(value) && value > 0 ? value : null;
-    };
-    // A row of boxes IS the count, and plenty of sites build one without saying
-    // maxlength="1" — Booking.com renders six and constrains them in script. What
-    // makes a row a row is that every box takes a code: `one-time-code`, a numeric
-    // keypad, or a declared single character. A form that merely has several text
-    // inputs is not that.
-    const boxish = (e) =>
-      declared(e) === 1 ||
-      e.getAttribute("autocomplete") === "one-time-code" ||
-      e.getAttribute("inputmode") === "numeric" ||
-      e.type === "tel" ||
-      e.type === "number";
-    // Only an exact count. A row of boxes is one — there are as many as the code
-    // has characters. A single field's maxlength is NOT: it says "no more than",
-    // and a site is free to allow eight for a six-character code. Drawing eight
-    // cells for a six-character code is the one failure this screen cannot
-    // recover from, because it submits on the last cell and carries no button.
-    const boxes = fields.filter(boxish).length;
-    const count = boxes >= 4 ? boxes : null;
-    const text =
-      document.body && document.body.innerText ? document.body.innerText : "";
+export async function otpBoxes(target) {
+  const count = await target
+    .evaluate(otpRowInPage, {
+      selector: OTP_BOX_SEL,
+      min: OTP_ROW_MIN,
+      max: OTP_ROW_MAX,
+      attr: OTP_ROW_ATTR,
+      codeCopy: OTP_BODY_RE.source,
+    })
+    .catch(() => null);
+  if (!count) return [];
 
-    return [count, text.slice(0, 4000)];
-  });
+  const all = target.locator(`[${OTP_ROW_ATTR}]`);
+
+  return Array.from({ length: count }, (_, index) => all.nth(index));
+}
+
+export async function otpCardHints(target) {
+  // Only an exact count. A row of boxes is one — there are as many as the code
+  // has characters. A single field's maxlength is NOT: it says "no more than",
+  // and a site is free to allow eight for a six-character code. Drawing eight
+  // cells for a six-character code is the one failure this screen cannot
+  // recover from, because it submits on the last cell and carries no button.
+  const count = await target
+    .evaluate(otpRowInPage, {
+      selector: OTP_BOX_SEL,
+      min: OTP_ROW_MIN,
+      max: OTP_ROW_MAX,
+      attr: OTP_ROW_ATTR,
+      codeCopy: OTP_BODY_RE.source,
+    })
+    .catch(() => null);
+  const bodyText = await target
+    .evaluate(() =>
+      document.body && document.body.innerText
+        ? document.body.innerText.slice(0, 4000)
+        : ""
+    )
+    .catch(() => "");
 
   return {
-    length: length ?? codeLengthFromText(bodyText),
+    length: count ?? codeLengthFromText(bodyText),
     destination: codeDestination(bodyText),
   };
 }
@@ -1073,6 +1150,30 @@ export async function autoLogin({
     finalUrl: page.url(),
     errorText,
   });
+  // The stored `otp` said this site has no codes, and it has just been shown
+  // wrong. Called once a code is in hand, because that is the whole of the
+  // evidence — `otp-required` is also what a signed-in landing page inviting the
+  // owner to switch on two-factor authentication classifies as, off body copy
+  // alone and with nothing on it to type. On `main` such a page merely stopped
+  // the run; correcting the record from it would overwrite an explicit
+  // `--otp none` permanently, with no way back.
+  const recordOtpModeCorrection = async () => {
+    const correction = otpModeCorrection(cred);
+    if (!correction) return;
+    log(
+      `auto-login: '${cred.name}' says otp=none but the site asked for a code — correcting it`
+    );
+    cred.otp = correction;
+    try {
+      await onOtpModeCorrected?.(correction);
+    } catch (err) {
+      // Bookkeeping, and the run is mid-flight with a code already in hand and a
+      // password already typed. Losing the correction costs one re-learn next
+      // time; letting this throw costs the sign-in itself — which is the failure
+      // the correction exists to prevent.
+      log(`auto-login: could not record the corrected otp mode: ${err.message}`);
+    }
+  };
 
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
     try {
@@ -1158,19 +1259,6 @@ export async function autoLogin({
       }
       continue;
     } else if (outcome === "otp-required") {
-      const correction = otpModeCorrection(cred);
-      if (correction) {
-        // The site is asking for a code, so this credential's `none` is wrong —
-        // it was a guess made before anyone had seen the sign-in, and abandoning
-        // the run over it left the owner with a password typed, a code mailed and
-        // no card to type it into. Ask, and correct the record so the next
-        // sign-in does not re-learn this the same way.
-        log(
-          `auto-login: '${cred.name}' says otp=none but the site is asking — correcting it`
-        );
-        cred.otp = correction;
-        await onOtpModeCorrected?.(correction);
-      }
       if (otpAsks >= maxOtpAsks) {
         // The site is still asking after we answered. Looping here re-asks the
         // owner for a code the site has already refused once, and each ask is
@@ -1192,16 +1280,17 @@ export async function autoLogin({
       }
       otpAsks += 1;
       try {
-        // The code screen has just told us where it sent the code; the card is
-        // the only place that says so to the owner.
+        // The code screen has just told us how long the code is and where it sent
+        // it, and the card is the only place either fact reaches the owner. Both
+        // come from the same read: taking the length from here and the destination
+        // from the snapshot a settle earlier paired a fresh fact with a stale one.
         // What the page enforces beats what it says: an input constrained to six
         // characters is a fact, "6-digit code" is copy that may describe the last
         // step rather than this one.
-        const { length } = await otpCardHints(page);
-        await typeOtp(
-          page,
-          await getOtp(retry, codeDestination(state.bodyText), length)
-        );
+        const hints = await otpCardHints(page);
+        const code = await getOtp(retry, hints.destination, hints.length);
+        await recordOtpModeCorrection();
+        await typeOtp(page, code);
       } catch (err) {
         if (err?.code === "FORM_CANCELLED") return otpDeclined();
         if (err?.code !== "FORM_TIMEOUT") throw err;

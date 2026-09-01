@@ -102,9 +102,6 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           "Either way the password is FINE: do not re-check it and do not ask for one. " +
           "Run auto-login again once the cause is addressed.",
       };
-    // The code card expired unanswered — the owner was away, not the sign-in
-    // broken. The page is still sitting on the code screen, so the fix is a fresh
-    // code, and nothing about the credential is in doubt.
     // The owner closed the card. Nothing is broken and nothing timed out — they
     // were asked and declined, so the one thing that must not happen is the same
     // card going back up unbidden.
@@ -118,6 +115,9 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           "auto-login again unless they ask for it. Say the sign-in was not completed and leave " +
           "it there.",
       };
+    // The code card expired unanswered — the owner was away, not the sign-in
+    // broken. The page is still sitting on the code screen, so the fix is a fresh
+    // code, and nothing about the credential is in doubt.
     case "otp-timeout":
       return {
         action: OWNER_MUST_CONFIRM,

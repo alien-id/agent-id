@@ -292,11 +292,16 @@ test(
 
 // A code screen built from a row of single-character boxes. The row is what
 // `fill-otp` spreads a code across, and each box then holds one character of it.
-const CODE_ROW = `<!doctype html><meta charset=utf-8><title>code</title><form>
-  ${Array.from(
+// The row sits in a container of its own, the way a code screen builds one, with
+// the unrelated field outside it — a container holding a box beside an ordinary
+// input is a form, and is deliberately not read as a row.
+const CODE_ROW = `<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form>
+  <div id="row">${Array.from(
     { length: 6 },
     (_, i) => `<input id="d${i}" type="text" inputmode="numeric" maxlength="1">`
-  ).join("\n  ")}
+  ).join("")}</div>
   <input id="nickname" type="text" value="alice">
 </form>`;
 

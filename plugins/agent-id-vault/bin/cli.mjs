@@ -79,6 +79,7 @@ import {
 } from "../lib/trusted-input.mjs";
 import {
   CREDENTIAL_TYPES,
+  loginOtpMode,
   LOGIN_OTP_MODES,
   SECRET_FIELDS,
   validateRecord,
@@ -475,10 +476,12 @@ async function cmdAdd(flags) {
   // not after the owner has typed into the wrong card.
   let recipe = null;
   if (type === "login") {
+    // Against the resolved mode, not the raw flag: a silent `--otp` now resolves
+    // to `interactive`, which is exactly what a passwordless sign-in needs, and
+    // testing the flag demanded the owner spell out the default.
     if (
       flags.passwordless &&
-      flags.otp !== "interactive" &&
-      flags.otp !== "totp"
+      loginOtpMode({ otp: flags.otp ? String(flags.otp) : null }) === "none"
     ) {
       return outputError(
         "--passwordless needs --otp interactive (a code mailed/SMSed at sign-in) or --otp totp"
@@ -684,12 +687,11 @@ async function cmdAdd(flags) {
             );
           }
         }
-        // A sign-in that is silent about codes is far more often one that asks for
-        // them than one that has none: sites add a second factor, they rarely drop
-        // it. And the two are not equally wrong — `interactive` costs a card the
-        // owner can dismiss, while `none` abandons the sign-in with the password
-        // already typed and the code already mailed.
-        const otp = flags.otp ? String(flags.otp) : "interactive";
+        // Through the store's normaliser, so what a silent `--otp` means here is
+        // the same thing a silent `otp` field means to every reader of the record.
+        const otp = loginOtpMode({
+          otp: flags.otp ? String(flags.otp) : null,
+        });
         record.otp = otp;
         if (otp === "totp") {
           // Seed from the form, or --totp-secret-file/-env. Accepts a raw base32
@@ -915,12 +917,26 @@ async function cmdSetOtp(flags) {
   try {
     const rec = vault.get(name);
     if (!rec) return outputError(`No credential named '${name}'`);
-    if (otp === "totp" && !rec.totpSecret) {
+    // `otp` is a login's field and validation only checks it for a login, so
+    // without this the flag writes a silently meaningless key onto a bearer or a
+    // cookie — invisible in `vault list`, which reports `otp` only for a login,
+    // and sitting in `vault show` for someone to read as policy. Every sibling
+    // that edits one type's field refuses the others the same way.
+    if (rec.type !== "login") {
+      return outputError(
+        `set-otp works on 'login' credentials, not '${rec.type}'`
+      );
+    }
+    // The seed lives under a different key for each of the two types that hold
+    // one, and set-totp writes both: `totpSecret` on a login, `secret` on a
+    // `totp` credential. Checking only the first told a fully seeded credential
+    // to go and run the command it had already run.
+    if (otp === "totp" && !rec.totpSecret && !rec.secret) {
       return outputError(
         `'${name}' has no TOTP seed — attach one with set-totp first`
       );
     }
-    const previous = rec.otp;
+    const previous = loginOtpMode(rec);
     rec.otp = otp;
     vault.add(rec); // re-validates + upserts (createdAt preserved)
     await vault.save();
@@ -1671,8 +1687,10 @@ function printHelp() {
       "              mails/SMSes a code at sign-in (needs --otp interactive|totp)",
       "              driven by `agent-id-browser auto-login`, not the HTTP proxy",
       "  set-domains --name N --domains H[,H…]   replace the host allowlist",
-      "  set-otp --name N --otp none|interactive|totp   fix how a code is answered",
       "              a sign-in that redirects between subdomains needs them all",
+      "  set-otp --name N --otp none|totp|interactive   fix how a code is answered",
+      "              for a login whose stored mode turned out to be wrong; asks the",
+      "              owner for nothing. A mailed/texted code is `interactive`.",
       "  set-recipe --name N (--recipe '<JSON steps>' | --clear)",
       "              attach/replace the auto-login recipe on a login cred; steps are",
       "              navigate|fill|type|click|press|wait with {username}/{password}/{otp}",

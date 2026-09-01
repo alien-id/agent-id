@@ -177,6 +177,45 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
 <form><input name=code type=text inputmode=numeric></form>`);
       return;
     }
+    if (url.pathname === "/checkout-numeric") {
+      // Four numeric fields, which is all "≥ 4 boxish inputs" ever asked for.
+      // Nothing here is a code, and a card drawn with four cells for it submits
+      // on the fourth character with no button to recover — so this page must
+      // state no count at all.
+      res.end(`<!doctype html><meta charset=utf-8><title>checkout</title>
+<h1>Payment details</h1>
+<form>
+  <input name=card type=text inputmode=numeric maxlength=19 autocomplete="cc-number">
+  <input name=exp type=text inputmode=numeric maxlength=5>
+  <input name=cvc type=text inputmode=numeric maxlength=4>
+  <input name=zip type=text inputmode=numeric maxlength=10>
+</form>`);
+      return;
+    }
+    if (url.pathname === "/quantities") {
+      // The same count, uniform this time, and still not a code: nothing on the
+      // page says one was sent, and no box claims to hold a single character.
+      res.end(`<!doctype html><meta charset=utf-8><title>cart</title>
+<h1>Your basket</h1>
+<form>${Array.from(
+        { length: 5 },
+        (_, i) => `<input name=qty${i} type=number>`
+      ).join("")}</form>`);
+      return;
+    }
+    if (url.pathname === "/otp-boxes-unmarked-stubborn") {
+      // Both halves of the reported failure at once: no `maxlength` anywhere AND
+      // no script to advance the focus. Typing the code into the first box leaves
+      // the whole of it sitting there, which a total-character count reads as a
+      // filled row — one box full, five empty, and reported as landed.
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form>${Array.from(
+        { length: 6 },
+        (_, i) => `<input name=d${i} type=text inputmode=numeric>`
+      ).join("")}</form>`);
+      return;
+    }
     if (url.pathname === "/masked-checkbox") {
       // The ordinary cookie banner: a dialog masking the page that carries an input
       // of its own. "The page asks for something else" is satisfied by that
@@ -705,6 +744,23 @@ test(
         // And an unconstrained input states nothing — which must not be read as a
         // count, because the screen submits itself once the cells it drew are full.
         assert.equal(await lengthAt("/otp-unbounded"), null);
+        // Four numeric inputs is what a checkout step looks like, and "four or
+        // more inputs that could take a code" is satisfied by it. What rules it
+        // out is that a row is uniform: 19, 5, 4 and 10 characters are four
+        // different fields, not one code.
+        assert.equal(
+          await lengthAt("/checkout-numeric"),
+          null,
+          "a payment form must not be read as a four-cell code row"
+        );
+        // Uniform this time, so shape alone does not settle it — but nothing says
+        // a code was sent and no box claims a single character, so the page is
+        // taken at its word rather than counted.
+        assert.equal(
+          await lengthAt("/quantities"),
+          null,
+          "a row of quantity inputs is not a code row"
+        );
       });
     } finally {
       server.close();
@@ -847,6 +903,85 @@ test(
 );
 
 test(
+  "an unmarked row that will not move the focus is filled, not merely counted",
+  { skip },
+  async () => {
+    // Both halves of the reported failure together: no `maxlength` to truncate the
+    // first box, and no script to advance the focus. Typing the code leaves all
+    // six characters in box 0 — which a total-character count reads as a filled
+    // row, so the repair loop never runs and `fill-otp` reports success over one
+    // box full and five empty. Per-box comparison is what tells the two apart.
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(
+          `http://127.0.0.1:${port}/otp-boxes-unmarked-stubborn`,
+          { waitUntil: "domcontentloaded" }
+        );
+
+        const boxes = await otpBoxes(page);
+        assert.equal(boxes.length, 6, "the unmarked row is recognised");
+
+        const typed = await typeCodeAcrossBoxes(page, boxes, "423124");
+        assert.deepEqual(typed, { complete: true, submitted: false });
+
+        const values = await page.evaluate(() =>
+          Array.from(document.querySelectorAll("input")).map((i) => i.value)
+        );
+        assert.deepEqual(
+          values,
+          ["4", "2", "3", "1", "2", "4"],
+          `one character per box, not all six in the first: got ${values.join("|")}`
+        );
+      });
+    } finally {
+      server.close();
+    }
+  }
+);
+
+test(
+  "a row still holding a refused code is cleared, not spliced with the new one",
+  { skip },
+  async () => {
+    // A retry arrives at a row the site re-rendered with the previous code in it.
+    // Clearing only box 0 left five stale characters behind, and a total count
+    // then passed on a hybrid of two codes — submitted, and reported as landed.
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(
+          `http://127.0.0.1:${port}/otp-boxes-unmarked-stubborn`,
+          { waitUntil: "domcontentloaded" }
+        );
+        await page.evaluate(() =>
+          Array.from(document.querySelectorAll("input")).forEach((input, i) => {
+            input.value = "999999"[i];
+          })
+        );
+
+        const boxes = await otpBoxes(page);
+        const typed = await typeCodeAcrossBoxes(page, boxes, "423124");
+        assert.deepEqual(typed, { complete: true, submitted: false });
+
+        const values = await page.evaluate(() =>
+          Array.from(document.querySelectorAll("input")).map((i) => i.value)
+        );
+        assert.deepEqual(
+          values,
+          ["4", "2", "3", "1", "2", "4"],
+          `no digit of the refused code survives: got ${values.join("|")}`
+        );
+      });
+    } finally {
+      server.close();
+    }
+  }
+);
+
+test(
   "a code lands in every box, even when the page will not move the focus",
   { skip },
   async () => {
@@ -861,8 +996,12 @@ test(
         const boxes = await otpBoxes(page);
         assert.equal(boxes.length, 6, "the row is recognised");
 
-        const complete = await typeCodeAcrossBoxes(page, boxes, "423124");
-        assert.equal(complete, true, "and it reports the row as filled");
+        const typed = await typeCodeAcrossBoxes(page, boxes, "423124");
+        assert.deepEqual(
+          typed,
+          { complete: true, submitted: false },
+          "the row is filled, and this row is not one that submits itself"
+        );
 
         const values = await page.evaluate(() =>
           Array.from(document.querySelectorAll("input")).map((i) => i.value)
@@ -916,12 +1055,14 @@ test(
         });
 
         const boxes = await otpBoxes(page);
-        const complete = await typeCodeAcrossBoxes(page, boxes, "423124");
+        const typed = await typeCodeAcrossBoxes(page, boxes, "423124");
 
-        assert.equal(
-          complete,
-          true,
-          "navigating away is the code landing, not losing it"
+        assert.deepEqual(
+          typed,
+          { complete: true, submitted: true },
+          "navigating away is the code landing, not losing it — and the caller is " +
+            "told the row took the page with it, so it does not press Enter into " +
+            "whatever screen came next"
         );
         await page.waitForURL(/code=423124/, { timeout: 5000 });
       });

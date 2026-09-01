@@ -205,9 +205,16 @@ export class HostedHarnessProvider {
       );
       req.on("error", reject);
       if (spec.timeoutMs) {
-        req.setTimeout(spec.timeoutMs, () =>
-          req.destroy(new Error("hosted secure prompt timed out"))
-        );
+        req.setTimeout(spec.timeoutMs, () => {
+          // The same reason the dismissal above carries a code: callers tell an
+          // expiry from a fault by `err.code`, and without one this arrived as an
+          // ordinary error. Auto-login's `otp-timeout` outcome was unreachable
+          // whenever the card came from the hosted provider — which is the first
+          // one tried, and the one a card on a phone comes from.
+          const error = new Error("hosted secure prompt timed out");
+          error.code = "FORM_TIMEOUT";
+          req.destroy(error);
+        });
       }
       req.end(payload);
     });

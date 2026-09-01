@@ -18,6 +18,8 @@ import { generateKeyPairSync } from "node:crypto";
 
 import {
   listMetadata,
+  loginOtpMode,
+  LOGIN_OTP_MODES,
   validateRecord,
 } from "../plugins/agent-id-vault/lib/store.mjs";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
@@ -82,13 +84,42 @@ function waitForUrl(child) {
 
 // ─── schema ───────────────────────────────────────────────────────────────────────
 
-test("validateRecord: a valid login passes (otp defaults to none)", () => {
+test("validateRecord: a valid login passes (otp defaults to interactive)", () => {
   assert.doesNotThrow(() => validateRecord(loginRec()));
   assert.doesNotThrow(() => validateRecord(loginRec({ otp: "none" })));
   assert.doesNotThrow(() => validateRecord(loginRec({ otp: "interactive" })));
   assert.doesNotThrow(() =>
     validateRecord(loginRec({ loginUrl: "https://example.com/login" }))
   );
+});
+
+test("loginOtpMode: one answer for a silent field, wherever it is read", () => {
+  // The defect this closes: `add` wrote `interactive` for a silent flag while
+  // validateRecord and listMetadata each read a silent field as `none`, so one
+  // field meant three things and `vault list` told the agent a credential had no
+  // codes for a sign-in that would raise a card.
+  assert.equal(loginOtpMode({}), "interactive");
+  assert.equal(loginOtpMode({ otp: null }), "interactive");
+  assert.equal(loginOtpMode({ otp: "" }), "interactive");
+  assert.equal(loginOtpMode(undefined), "interactive");
+  // A stated mode is never reinterpreted — including the one the default is not.
+  assert.equal(loginOtpMode({ otp: "none" }), "none");
+  assert.equal(loginOtpMode({ otp: "totp" }), "totp");
+  assert.equal(loginOtpMode({ otp: "interactive" }), "interactive");
+  // Whatever it resolves to is a mode the vault accepts, so a silent record can
+  // never validate into a value the enum does not hold.
+  assert.ok(LOGIN_OTP_MODES.includes(loginOtpMode({})));
+});
+
+test("listMetadata reports the same mode validateRecord enforced", () => {
+  // These two disagreeing is what let a card-raising credential be reported as
+  // having no codes, so they are pinned together rather than one at a time.
+  const silent = loginRec();
+  delete silent.otp;
+  assert.doesNotThrow(() => validateRecord(silent));
+  const [meta] = listMetadata({ credentials: [silent] });
+  assert.equal(meta.otp, loginOtpMode(silent));
+  assert.equal(meta.otp, "interactive");
 });
 
 test("validateRecord: login requires username and password", () => {
@@ -122,12 +153,15 @@ test("validateRecord: a passwordless login needs no password, but still needs a 
   assert.doesNotThrow(() =>
     validateRecord({ ...pwless, otp: "totp", totpSecret: "GEZDGNBVGY3TQOJQ" })
   );
-  // Nothing to sign in with: no password and no code.
+  // Nothing to sign in with: no password and, said outright, no code either.
   assert.throws(
     () => validateRecord({ ...pwless, otp: "none" }),
     /needs otp=interactive or totp/i
   );
-  assert.throws(() => validateRecord(pwless), /needs otp=interactive or totp/i);
+  // Silence is not that claim. A missing `otp` resolves to `interactive` —
+  // identifier plus a mailed code, the commonest passwordless shape — so the
+  // record stands. Only an explicit `none` contradicts `passwordless`.
+  assert.doesNotThrow(() => validateRecord(pwless));
   // The username is still mandatory — it is what gets submitted.
   assert.throws(
     () =>
