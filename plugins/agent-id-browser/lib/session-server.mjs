@@ -33,6 +33,7 @@ import { startStreamServer } from "./stream-server.mjs";
 import { loadCodecConfig } from "./stream-encoder.mjs";
 import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
 import { SECRET_FIELDS, assertHostAllowed } from "@alien-id/agent-id-vault/lib/store.mjs";
+import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { resolveOtp } from "./auto-login.mjs";
 import {
   applyAccessGuard,
@@ -641,6 +642,49 @@ export const SECRET_TAINT_ATTR = "data-aib-secret";
 // show-password toggle flips a password field to type=text, so a type-only test
 // misses them. Best-effort: if the site has already swapped the node out there
 // is nothing (and no value) left to tag.
+// How many characters the challenge input takes, when the page says so. Read off
+// the element rather than guessed: the screen draws one cell per character and
+// submits when they fill, so a wrong count is worse than none — too few truncate
+// a correct code and too many leave it unsendable. Anything outside the range the
+// clients draw cells for comes back null, and they render a plain field instead.
+export async function codeFieldLength(target, ref) {
+  const declared = await target
+    .locator(sel(ref))
+    .evaluate((el) => {
+      const attr = el.getAttribute("maxlength");
+      const value = attr == null ? NaN : Number(attr);
+      return Number.isInteger(value) ? value : null;
+    })
+    .catch(() => null);
+  return Number.isInteger(declared) && declared >= 4 && declared <= 8 ? declared : null;
+}
+
+// The card the owner answers a 3-D Secure challenge on.
+//
+// Merchant and amount are quoted from the payment they approved, never from the
+// page: the challenge is rendered by the issuer inside the merchant's frame, and
+// a card that repeated what that frame said about itself would be a card the
+// page could write.
+export function threeDsCardSpec({ merchant, amount, length }) {
+  const what = [amount, merchant].filter(Boolean).join(" at ");
+  return {
+    title: "Confirm your payment",
+    description: what
+      ? `Your bank sent a code to confirm ${what}. Enter it to finish the payment.`
+      : "Your bank sent a code to confirm this payment. Enter it to finish.",
+    fields: [
+      {
+        name: "otp",
+        label: "Code from your bank",
+        secret: false,
+        ...(length ? { placeholder: "•".repeat(length) } : {}),
+      },
+    ],
+    label: "confirm the payment with your bank",
+    security: "Used once to confirm this payment; never stored or shown to the agent.",
+  };
+}
+
 export async function markSecretField(target, selector) {
   await target
     .$eval(selector, (el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
@@ -1324,6 +1368,39 @@ export async function dispatch(state, msg, policy = null) {
         // A derived OTP isn't sealed at fill time (see assertFillAllowed), so the
         // read-back guard is what protects it: tag the field so its value can't be
         // read back regardless of the input's type (OTP inputs are text/tel).
+        await markSecretField(target, sel(p.ref));
+        return { filled: p.ref, otp: true };
+      } finally {
+        state.stream?.resume();
+      }
+    }
+    case "fill-3ds-code": {
+      // The bank's own challenge code, after a payment. No vault is opened and no
+      // credential is named, because there is nothing stored to name: this value
+      // is a one-shot the owner reads off their phone, so a domain allowlist has
+      // no secret here to protect and the issuer's host is not knowable in
+      // advance anyway. What stands in its place is the caller's check — lethe
+      // reaches this only for a payment it has already made, on the merchant the
+      // owner approved — and the card below, which quotes that payment rather
+      // than anything the page says about itself.
+      const target = frameForRef(state, p.ref);
+      state.stream?.suspend();
+      try {
+        const length = await codeFieldLength(target, p.ref);
+        const { values } = await collectSecret(
+          threeDsCardSpec({ merchant: String(p.merchant || ""), amount: String(p.amount || ""), length }),
+        );
+        const code = String(values.otp || "").trim();
+        if (!code) throw new Error("fill-3ds-code: no code was entered");
+        try {
+          await humanType(page, sel(p.ref), code, {
+            timeout: ACTION_TIMEOUT,
+            submit: p.submit !== false,
+            root: target,
+          });
+        } catch {
+          throw new Error(`fill-3ds-code: could not fill "${p.ref}" — element not visible/editable (re-snapshot and retry)`);
+        }
         await markSecretField(target, sel(p.ref));
         return { filled: p.ref, otp: true };
       } finally {

@@ -906,6 +906,11 @@ runCli({
     open: cmdOpen,
     close: cmdClose,
     sessions: cmdSessions,
+    // Where the session actually is. The dispatcher has always answered this;
+    // it had no command because every caller so far learned the URL as a side
+    // effect of doing something to the page. A caller that must know the origin
+    // BEFORE it acts — anything host-scoped — needs to ask on its own.
+    info: actionCmd("info"),
     snapshot: actionCmd("snapshot"),
     "form-inspect": actionCmd("form-inspect"),
     "form-fill": actionCmd("form-fill", (f) => JSON.parse(f.spec || "{}"), 120000),
