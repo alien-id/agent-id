@@ -21,15 +21,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
-import {
-  writeJsonFile,
-  statePaths,
-} from "../plugins/agent-id-core/lib/state.mjs";
+import { writeJsonFile, statePaths } from "../plugins/agent-id-core/lib/state.mjs";
 import { fingerprintPublicKeyPem } from "../plugins/agent-id-core/lib/crypto.mjs";
 import { PROXY_AUTH_HEADER } from "../plugins/agent-id-proxy/lib/proxy.mjs";
 
-const CLI = new URL("../plugins/agent-id-proxy/bin/cli.mjs", import.meta.url)
-  .pathname;
+const CLI = new URL("../plugins/agent-id-proxy/bin/cli.mjs", import.meta.url).pathname;
 const TOKEN = "cli-plumbing-token";
 
 function freePort() {
@@ -46,21 +42,13 @@ function startUpstream() {
   return new Promise((resolve) => {
     const requests = [];
     const server = http.createServer((req, res) => {
-      requests.push({
-        url: req.url,
-        authorization: req.headers.authorization || null,
-      });
+      requests.push({ url: req.url, authorization: req.headers.authorization || null });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end('{"ok":true}');
     });
     server.listen(0, "127.0.0.1", () => {
       const a = server.address();
-      resolve({
-        server,
-        requests,
-        host: `${a.address}:${a.port}`,
-        hostname: a.address,
-      });
+      resolve({ server, requests, host: `${a.address}:${a.port}`, hostname: a.address });
     });
   });
 }
@@ -69,12 +57,8 @@ function startUpstream() {
 // human, so the CLI reaches "listening" unattended.
 async function makeAgentKeyVault(stateDir, upstreamHostname) {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey
-    .export({ format: "pem", type: "spki" })
-    .toString();
-  const privateKeyPem = privateKey
-    .export({ format: "pem", type: "pkcs8" })
-    .toString();
+  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
+  const privateKeyPem = privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   await writeJsonFile(statePaths(stateDir).mainKey, {
     version: 1,
     agentId: "main",
@@ -110,11 +94,8 @@ function spawnStart(args) {
 function waitForStderr({ child, out }, re, ms) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () =>
-        reject(
-          new Error(`timeout waiting for ${re}\n${out.stderr}\n${out.stdout}`)
-        ),
-      ms
+      () => reject(new Error(`timeout waiting for ${re}\n${out.stderr}\n${out.stdout}`)),
+      ms,
     );
     const check = () => {
       const m = out.stderr.match(re);
@@ -155,12 +136,9 @@ function proxyRequest({ port, target, headers = {} }) {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            body: Buffer.concat(chunks).toString("utf8"),
-          })
+          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
         );
-      }
+      },
     );
     req.on("error", reject);
     req.end();
@@ -181,15 +159,11 @@ describe("CLI --auth-token-file reaches the running data plane", () => {
     await fs.writeFile(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
     port = await freePort();
     proc = spawnStart([
-      "--auth-token-file",
-      tokenFile,
+      "--auth-token-file", tokenFile,
       "--no-control",
-      "--idle-timeout",
-      "never",
-      "--port",
-      String(port),
-      "--state-dir",
-      dir,
+      "--idle-timeout", "never",
+      "--port", String(port),
+      "--state-dir", dir,
     ]);
     await waitForStderr(proc, /agent-id-proxy listening on/, 15000);
   });
@@ -243,15 +217,11 @@ describe("CLI --auth-token-file validation", () => {
     await fs.writeFile(tokenFile, contents, { mode });
     await fs.chmod(tokenFile, mode);
     const proc = spawnStart([
-      "--auth-token-file",
-      tokenFile,
+      "--auth-token-file", tokenFile,
       "--no-control",
-      "--idle-timeout",
-      "never",
-      "--port",
-      String(port),
-      "--state-dir",
-      dir,
+      "--idle-timeout", "never",
+      "--port", String(port),
+      "--state-dir", dir,
     ]);
     const result = await waitForExit(proc);
     return { ...result, tokenFile };
@@ -263,25 +233,15 @@ describe("CLI --auth-token-file validation", () => {
     const payload = JSON.parse(r.stdout);
     assert.equal(payload.ok, false);
     assert.match(payload.error, /group\/world accessible/i);
-    assert.ok(
-      payload.error.includes(r.tokenFile),
-      "the error must name the offending path"
-    );
+    assert.ok(payload.error.includes(r.tokenFile), "the error must name the offending path");
   });
 
   it("refuses a token that cannot survive an HTTP header", async () => {
-    const r = await startWithTokenFile(
-      "nonascii-token",
-      "tökén-value\n",
-      0o600
-    );
+    const r = await startWithTokenFile("nonascii-token", "tökén-value\n", 0o600);
     assert.equal(r.code, 1);
     const payload = JSON.parse(r.stdout);
     assert.equal(payload.ok, false);
     assert.match(payload.error, /printable ASCII/i);
-    assert.ok(
-      payload.error.includes(r.tokenFile),
-      "the error must name the offending path"
-    );
+    assert.ok(payload.error.includes(r.tokenFile), "the error must name the offending path");
   });
 });

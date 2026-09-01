@@ -28,13 +28,11 @@ async function fakePatchright(dir, marker) {
   await mkdir(pkg, { recursive: true });
   await writeFile(
     path.join(pkg, "package.json"),
-    JSON.stringify({ name: "patchright", version: "0.0.0", main: "index.js" })
+    JSON.stringify({ name: "patchright", version: "0.0.0", main: "index.js" }),
   );
   await writeFile(
     path.join(pkg, "index.js"),
-    `module.exports = { chromium: { __marker: ${JSON.stringify(
-      marker
-    )}, launchPersistentContext() {} } };`
+    `module.exports = { chromium: { __marker: ${JSON.stringify(marker)}, launchPersistentContext() {} } };`,
   );
 }
 
@@ -45,16 +43,9 @@ test("prefers patchright from CLAUDE_PLUGIN_DATA (the runtime hook install)", as
     await fakePatchright(data, "data-dir");
     process.env.CLAUDE_PLUGIN_DATA = data;
 
-    assert.ok(
-      resolvePatchright(),
-      "should resolve patchright from the data dir"
-    );
+    assert.ok(resolvePatchright(), "should resolve patchright from the data dir");
     const chromium = await loadChromium();
-    assert.equal(
-      chromium.__marker,
-      "data-dir",
-      "must load the data-dir install"
-    );
+    assert.equal(chromium.__marker, "data-dir", "must load the data-dir install");
     assert.equal(typeof chromium.launchPersistentContext, "function");
   } finally {
     if (saved === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
@@ -78,11 +69,7 @@ test("falls back to a dev/workspace install when no data dir is set", async () =
     assert.ok(entry, "dev/workspace patchright should resolve");
     assert.match(entry, /[/\\]patchright[/\\]/);
     const chromium = await loadChromium();
-    assert.equal(
-      typeof chromium.launchPersistentContext,
-      "function",
-      "real patchright API"
-    );
+    assert.equal(typeof chromium.launchPersistentContext, "function", "real patchright API");
   } finally {
     if (savedData !== undefined) process.env.CLAUDE_PLUGIN_DATA = savedData;
     if (savedRoot !== undefined) process.env.CLAUDE_PLUGIN_ROOT = savedRoot;
@@ -105,10 +92,7 @@ test("missing patchright everywhere yields a clear PATCHRIGHT_MISSING error", as
     // not erroneously matched.
     const entry = resolvePatchright();
     assert.ok(entry, "empty data dir must be skipped, local install used");
-    assert.doesNotMatch(
-      entry,
-      new RegExp(empty.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    );
+    assert.doesNotMatch(entry, new RegExp(empty.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     if (savedData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = savedData;

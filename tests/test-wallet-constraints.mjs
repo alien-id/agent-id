@@ -11,10 +11,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  generateEvmKeypair,
-  signEvmRpcBody,
-} from "../plugins/agent-id-core/lib/evm.mjs";
+import { generateEvmKeypair, signEvmRpcBody } from "../plugins/agent-id-core/lib/evm.mjs";
 import {
   base58Encode,
   buildSolanaTransferTx,
@@ -56,38 +53,25 @@ describe("evm signing constraints", () => {
 
   it("refuses a chainId not on the allowlist", () => {
     assert.throws(
-      () =>
-        signEvmRpcBody(evmTx({ chainId: 137 }), privateKeyHex, address, {
-          chainIdAllowlist: [1],
-        }),
-      /chainId 137 not in/
+      () => signEvmRpcBody(evmTx({ chainId: 137 }), privateKeyHex, address, { chainIdAllowlist: [1] }),
+      /chainId 137 not in/,
     );
   });
 
   it("allows a chainId on the allowlist", () => {
-    const out = signEvmRpcBody(
-      evmTx({ chainId: 137 }),
-      privateKeyHex,
-      address,
-      {
-        chainIdAllowlist: [1, 137],
-      }
-    );
+    const out = signEvmRpcBody(evmTx({ chainId: 137 }), privateKeyHex, address, {
+      chainIdAllowlist: [1, 137],
+    });
     assert.equal(out.signed, true);
   });
 
   it("refuses a recipient not on the to-allowlist", () => {
     assert.throws(
       () =>
-        signEvmRpcBody(
-          evmTx({ to: "0x" + "ab".repeat(20) }),
-          privateKeyHex,
-          address,
-          {
-            toAllowlist: ["0x" + "99".repeat(20)],
-          }
-        ),
-      /not in this credential's toAllowlist/
+        signEvmRpcBody(evmTx({ to: "0x" + "ab".repeat(20) }), privateKeyHex, address, {
+          toAllowlist: ["0x" + "99".repeat(20)],
+        }),
+      /not in this credential's toAllowlist/,
     );
   });
 
@@ -102,11 +86,14 @@ describe("evm signing constraints", () => {
   it("pins 'from' to the credential address when omitted", () => {
     // No throw, and the from-mismatch guard still holds for a wrong explicit from.
     assert.doesNotThrow(() => signEvmRpcBody(evmTx(), privateKeyHex, address));
-    assert.throws(() => {
-      const tx = JSON.parse(evmTx());
-      tx.params[0].from = "0x" + "11".repeat(20);
-      signEvmRpcBody(JSON.stringify(tx), privateKeyHex, address);
-    }, /does not match the credential address/);
+    assert.throws(
+      () => {
+        const tx = JSON.parse(evmTx());
+        tx.params[0].from = "0x" + "11".repeat(20);
+        signEvmRpcBody(JSON.stringify(tx), privateKeyHex, address);
+      },
+      /does not match the credential address/,
+    );
   });
 });
 
@@ -122,21 +109,11 @@ describe("solana signing constraints", () => {
       lamports: 1000,
       recentBlockhash: blockhash,
     });
-    return JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "sendTransaction",
-      params: [base58Encode(wire)],
-    });
+    return JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sendTransaction", params: [base58Encode(wire)] });
   }
 
   it("decodes the System Program id from a transfer", () => {
-    const wire = buildSolanaTransferTx({
-      from: publicKey,
-      to: dest,
-      lamports: 1000,
-      recentBlockhash: blockhash,
-    });
+    const wire = buildSolanaTransferTx({ from: publicKey, to: dest, lamports: 1000, recentBlockhash: blockhash });
     assert.deepEqual(solanaProgramIds(wire), [SYSTEM_PROGRAM]);
   });
 
@@ -154,11 +131,8 @@ describe("solana signing constraints", () => {
 
   it("refuses a transfer when only another program is allowed", () => {
     assert.throws(
-      () =>
-        signSolanaRpcBody(transferBody(), secretSeedHex, {
-          programAllowlist: [TOKEN_PROGRAM],
-        }),
-      /program 11111111111111111111111111111111 not in/
+      () => signSolanaRpcBody(transferBody(), secretSeedHex, { programAllowlist: [TOKEN_PROGRAM] }),
+      /program 11111111111111111111111111111111 not in/,
     );
   });
 });
@@ -187,7 +161,7 @@ describe("store validation of constraint fields", () => {
           address: "0x" + "cd".repeat(20),
           chainIdAllowlist: ["mainnet"],
         }),
-      /chainIdAllowlist entries must be positive integers/
+      /chainIdAllowlist entries must be positive integers/,
     );
   });
 
@@ -201,7 +175,7 @@ describe("store validation of constraint fields", () => {
           address: "0x" + "cd".repeat(20),
           toAllowlist: ["not-an-address"],
         }),
-      /toAllowlist entries must be 0x EVM addresses/
+      /toAllowlist entries must be 0x EVM addresses/,
     );
   });
 

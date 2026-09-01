@@ -69,10 +69,7 @@ function nalTypes(buf) {
 }
 
 const startsWithStartCode = (b) =>
-  b.length >= 4 &&
-  b[0] === 0 &&
-  b[1] === 0 &&
-  (b[2] === 1 || (b[2] === 0 && b[3] === 1));
+  b.length >= 4 && b[0] === 0 && b[1] === 0 && (b[2] === 1 || (b[2] === 0 && b[3] === 1));
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -85,13 +82,8 @@ function makeFakeSession(screenshotData) {
       if (method === "Page.captureScreenshot") return { data: screenshotData };
       return {};
     },
-    async detach() {
-      session.detached = true;
-    },
-    emitFrame(
-      data,
-      metadata = { deviceWidth: 640, deviceHeight: 480, timestamp: Date.now() }
-    ) {
+    async detach() { session.detached = true; },
+    emitFrame(data, metadata = { deviceWidth: 640, deviceHeight: 480, timestamp: Date.now() }) {
       handlers.get("Page.screencastFrame")?.({ data, metadata, sessionId: 1 });
     },
   };
@@ -103,17 +95,8 @@ function makeFakeState({ screenshot } = {}) {
   const page = {
     isClosed: () => false,
     viewportSize: () => ({ width: 640, height: 480 }),
-    mouse: {
-      move: async () => {},
-      down: async () => {},
-      up: async () => {},
-      wheel: async () => {},
-    },
-    keyboard: {
-      down: async () => {},
-      up: async () => {},
-      insertText: async () => {},
-    },
+    mouse: { move: async () => {}, down: async () => {}, up: async () => {}, wheel: async () => {} },
+    keyboard: { down: async () => {}, up: async () => {}, insertText: async () => {} },
   };
   return {
     current: page,
@@ -124,9 +107,7 @@ function makeFakeState({ screenshot } = {}) {
         return session;
       },
     },
-    get session() {
-      return session;
-    },
+    get session() { return session; },
   };
 }
 
@@ -146,12 +127,10 @@ if (process.argv.includes("-encoders")) {
   process.stdout.write(" V....D libx264 stub\\n");
   process.exit(0);
 }
-setTimeout(() => process.stdout.write(fs.readFileSync(${JSON.stringify(
-      streamFile
-    )})), 150);
+setTimeout(() => process.stdout.write(fs.readFileSync(${JSON.stringify(streamFile)})), 150);
 setInterval(() => {}, 60000); // outlive the write; the server kills us
 `,
-    { mode: 0o755 }
+    { mode: 0o755 },
   );
   return { dir, stub };
 }
@@ -164,7 +143,7 @@ async function connectStream(port, token, params = "") {
   const key = crypto.randomBytes(16).toString("base64");
   sock.write(
     `GET /?token=${token}${params} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n` +
-      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
+      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
   );
   const queue = [];
   const waiters = [];
@@ -191,10 +170,7 @@ async function connectStream(port, token, params = "") {
     next(timeout = 2000) {
       if (queue.length) return Promise.resolve(queue.shift());
       return new Promise((resolve, reject) => {
-        const waiter = (m) => {
-          clearTimeout(t);
-          resolve(m);
-        };
+        const waiter = (m) => { clearTimeout(t); resolve(m); };
         const t = setTimeout(() => {
           const i = waiters.indexOf(waiter);
           if (i >= 0) waiters.splice(i, 1);
@@ -203,9 +179,7 @@ async function connectStream(port, token, params = "") {
         waiters.push(waiter);
       });
     },
-    close() {
-      sock.destroy();
-    },
+    close() { sock.destroy(); },
   };
 }
 
@@ -223,9 +197,7 @@ test("every h264 message is one whole access unit, however large", async () => {
   ];
   const stream = Buffer.concat(units);
   const { dir, stub } = writeFfmpegStub(stream);
-  const state = makeFakeState({
-    screenshot: Buffer.from("jpeg").toString("base64"),
-  });
+  const state = makeFakeState({ screenshot: Buffer.from("jpeg").toString("base64") });
   const server = await startStreamServer(state, {
     log: () => {},
     h264Config: { ffmpegPath: stub, encoder: "libx264" },
@@ -237,11 +209,7 @@ test("every h264 message is one whole access unit, however large", async () => {
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline && got < stream.length) {
     let m;
-    try {
-      m = await c.next(2000);
-    } catch {
-      break;
-    }
+    try { m = await c.next(2000); } catch { break; }
     if (m.opcode !== 0x2) continue;
     const { header, payload } = decodeFrameBinary(m.payload);
     if (header.codec !== "h264") continue;
@@ -256,35 +224,23 @@ test("every h264 message is one whole access unit, however large", async () => {
   for (const [i, p] of payloads.entries()) {
     assert.ok(
       startsWithStartCode(p),
-      `payload ${i} begins with a start code (got ${p
-        .subarray(0, 4)
-        .toString("hex")}, ` +
-        `${p.length} bytes) — a mid-NAL fragment is undecodable`
+      `payload ${i} begins with a start code (got ${p.subarray(0, 4).toString("hex")}, ` +
+        `${p.length} bytes) — a mid-NAL fragment is undecodable`,
     );
     const types = nalTypes(p);
-    assert.equal(
-      types[0],
-      9,
-      `payload ${i} opens with an access unit delimiter (${types})`
-    );
+    assert.equal(types[0], 9, `payload ${i} opens with an access unit delimiter (${types})`);
     assert.equal(
       types.filter((t) => t === 9).length,
       1,
-      `payload ${i} carries exactly one access unit (${types})`
+      `payload ${i} carries exactly one access unit (${types})`,
     );
   }
   // Whole units, in order, nothing added or lost.
-  assert.deepEqual(
-    payloads.map((p) => p.length),
-    units.map((u) => u.length)
-  );
-  assert.ok(
-    Buffer.concat(payloads).equals(stream),
-    "the byte stream is delivered intact"
-  );
+  assert.deepEqual(payloads.map((p) => p.length), units.map((u) => u.length));
+  assert.ok(Buffer.concat(payloads).equals(stream), "the byte stream is delivered intact");
   assert.ok(
     payloads.some((p) => p.length > 65536),
-    "a unit larger than one pipe read was delivered in a single message"
+    "a unit larger than one pipe read was delivered in a single message",
   );
 });
 
@@ -292,10 +248,7 @@ test("every h264 message is one whole access unit, however large", async () => {
 
 function frameAll(stream, chunker, opts = {}) {
   const out = [];
-  const framer = createAccessUnitFramer({
-    onAccessUnit: (au) => out.push(Buffer.from(au)),
-    ...opts,
-  });
+  const framer = createAccessUnitFramer({ onAccessUnit: (au) => out.push(Buffer.from(au)), ...opts });
   for (const chunk of chunker(stream)) framer.push(chunk);
   return { out, framer };
 }
@@ -315,12 +268,9 @@ test("units survive any chunk split, including one byte at a time", () => {
     assert.deepEqual(
       out.map((u) => u.length),
       units.slice(0, -1).map((u) => u.length),
-      `chunk size ${size}`
+      `chunk size ${size}`,
     );
-    assert.ok(
-      Buffer.concat(out).equals(Buffer.concat(units.slice(0, -1))),
-      `chunk size ${size}`
-    );
+    assert.ok(Buffer.concat(out).equals(Buffer.concat(units.slice(0, -1))), `chunk size ${size}`);
   }
 });
 
@@ -333,38 +283,24 @@ test("3-byte start codes frame the same as 4-byte ones", () => {
   const { out } = frameAll(Buffer.concat(units), function* (s) {
     for (let i = 0; i < s.length; i += 65536) yield s.subarray(i, i + 65536);
   });
-  assert.deepEqual(
-    out.map((u) => u.length),
-    units.slice(0, -1).map((u) => u.length)
-  );
+  assert.deepEqual(out.map((u) => u.length), units.slice(0, -1).map((u) => u.length));
   for (const u of out) assert.ok(startsWithStartCode(u));
 });
 
 test("the idle flush releases the last unit, and close drops a partial one", async () => {
   const unit = accessUnit({ sliceBytes: 200, idr: true });
   const { out, framer } = frameAll(unit, (s) => [s], { flushMs: 20 });
-  assert.equal(
-    out.length,
-    0,
-    "held while the encoder might still be writing it"
-  );
+  assert.equal(out.length, 0, "held while the encoder might still be writing it");
   await sleep(60);
   assert.equal(out.length, 1, "released once the encoder went quiet");
   assert.ok(out[0].equals(unit));
 
   const late = [];
-  const f2 = createAccessUnitFramer({
-    onAccessUnit: (au) => late.push(au),
-    flushMs: 20,
-  });
+  const f2 = createAccessUnitFramer({ onAccessUnit: (au) => late.push(au), flushMs: 20 });
   f2.push(unit.subarray(0, 50));
   f2.close();
   await sleep(60);
-  assert.equal(
-    late.length,
-    0,
-    "a dead encoder's partial unit is never emitted"
-  );
+  assert.equal(late.length, 0, "a dead encoder's partial unit is never emitted");
   framer.close();
 });
 

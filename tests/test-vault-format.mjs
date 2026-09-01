@@ -30,10 +30,7 @@ describe("vault format", () => {
   it("passphrase slot round-trips the master key", () => {
     const mk = generateMasterKey();
     const slot = buildPassphraseSlot(0, mk, "correct horse battery staple");
-    const recovered = unwrapSlotWithPassphrase(
-      slot,
-      "correct horse battery staple"
-    );
+    const recovered = unwrapSlotWithPassphrase(slot, "correct horse battery staple");
     assert.ok(masterKeyEquals(mk, recovered));
   });
 
@@ -66,11 +63,7 @@ describe("vault format", () => {
       buildPassphraseSlot(0, mk, "topsecret"),
       buildAgentKeySlot(1, mk, privateKeyPem),
     ];
-    const file = newVaultFile({
-      masterKey: mk,
-      slots,
-      payloadPlaintext: '{"a":1}',
-    });
+    const file = newVaultFile({ masterKey: mk, slots, payloadPlaintext: '{"a":1}' });
     validateVaultHeader(file);
     assert.equal(findPassphraseSlot(file.slots).id, 0);
     assert.equal(findAgentKeySlot(file.slots).id, 1);
@@ -90,20 +83,16 @@ describe("vault format", () => {
     // Flip a byte in ciphertext
     const tampered = {
       ...encrypted,
-      ct: encrypted.ct.replace(/^./, (c) => (c === "a" ? "b" : "a")),
+      ct: encrypted.ct.replace(/^./, (c) =>
+        c === "a" ? "b" : "a",
+      ),
     };
     assert.throws(() => decryptPayload(mk, tampered));
   });
 
   it("validateVaultHeader rejects bad magic / version", () => {
-    assert.throws(() =>
-      validateVaultHeader({ magic: "wrong", version: 2, slots: [{}] })
-    );
-    assert.throws(() =>
-      validateVaultHeader({ magic: "agent-id-vault", version: 1, slots: [{}] })
-    );
-    assert.throws(() =>
-      validateVaultHeader({ magic: "agent-id-vault", version: 2, slots: [] })
-    );
+    assert.throws(() => validateVaultHeader({ magic: "wrong", version: 2, slots: [{}] }));
+    assert.throws(() => validateVaultHeader({ magic: "agent-id-vault", version: 1, slots: [{}] }));
+    assert.throws(() => validateVaultHeader({ magic: "agent-id-vault", version: 2, slots: [] }));
   });
 });

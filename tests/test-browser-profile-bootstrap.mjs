@@ -30,16 +30,10 @@ function mockVault() {
 }
 
 test("first use creates one sealed anonymous L0 default profile", async () => {
-  const stateDir = await fs.mkdtemp(
-    path.join(os.tmpdir(), "agentid-anon-profile-")
-  );
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-anon-profile-"));
   const vault = mockVault();
   try {
-    const record = await ensureAnonymousDefaultProfile({
-      vault,
-      stateDir,
-      name: "main",
-    });
+    const record = await ensureAnonymousDefaultProfile({ vault, stateDir, name: "main" });
     assert.equal(record.type, "browser-profile");
     assert.equal(record.bootstrap, "anonymous-l0");
     assert.equal(record.exportable, false);
@@ -57,11 +51,7 @@ test("first use creates one sealed anonymous L0 default profile", async () => {
     });
     assert.deepEqual(await fs.readdir(restored), []);
 
-    const same = await ensureAnonymousDefaultProfile({
-      vault,
-      stateDir,
-      name: "main",
-    });
+    const same = await ensureAnonymousDefaultProfile({ vault, stateDir, name: "main" });
     assert.equal(same, record);
     assert.equal(vault.saveCount(), 1, "bootstrap must be idempotent");
   } finally {
@@ -70,14 +60,12 @@ test("first use creates one sealed anonymous L0 default profile", async () => {
 });
 
 test("named profiles never auto-create", async () => {
-  const stateDir = await fs.mkdtemp(
-    path.join(os.tmpdir(), "agentid-named-profile-")
-  );
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-named-profile-"));
   const vault = mockVault();
   try {
     await assert.rejects(
       () => ensureAnonymousDefaultProfile({ vault, stateDir, name: "work" }),
-      (error) => error?.code === "NO_PROFILE"
+      (error) => error?.code === "NO_PROFILE",
     );
     assert.equal(vault.records.size, 0);
     assert.equal(vault.saveCount(), 0);

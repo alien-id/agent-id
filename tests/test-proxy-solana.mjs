@@ -35,10 +35,7 @@ import {
 } from "../plugins/agent-id-core/lib/solana.mjs";
 
 const execFileAsync = promisify(execFile);
-const VAULT_CLI = new URL(
-  "../plugins/agent-id-vault/bin/cli.mjs",
-  import.meta.url
-).pathname;
+const VAULT_CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url).pathname;
 const PASSPHRASE = "test-pass-solana-1234";
 
 const SPKI_ED25519_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -71,10 +68,7 @@ function startMockRpc() {
         }
         let result = null;
         if (msg.method === "getLatestBlockhash") {
-          result = {
-            context: { slot: 1 },
-            value: { blockhash: MOCK_BLOCKHASH, lastValidBlockHeight: 1000 },
-          };
+          result = { context: { slot: 1 }, value: { blockhash: MOCK_BLOCKHASH, lastValidBlockHeight: 1000 } };
         } else if (msg.method === "sendTransaction") {
           const wire = Buffer.from(msg.params[0], "base64");
           const [numSigs, n] = decodeCompactU16(wire, 0);
@@ -82,11 +76,7 @@ function startMockRpc() {
           upstreamSeen.value.numSigs = numSigs;
           upstreamSeen.value.wire = wire;
         }
-        const payload = JSON.stringify({
-          jsonrpc: "2.0",
-          id: msg.id ?? null,
-          result,
-        });
+        const payload = JSON.stringify({ jsonrpc: "2.0", id: msg.id ?? null, result });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(payload);
       });
@@ -116,12 +106,9 @@ function rpcViaProxy({ proxyPort, credname, host, body, method = "POST" }) {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            body: Buffer.concat(chunks).toString("utf8"),
-          })
+          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
         );
-      }
+      },
     );
     req.on("error", reject);
     if (payload) req.write(payload);
@@ -139,9 +126,7 @@ describe("solana wallet via vault + proxy (mock RPC)", () => {
   let walletAddress; // the ONLY thing the agent learns about the key
 
   before(async () => {
-    stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "agent-id-solana-test-")
-    );
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-id-solana-test-"));
     passFile = path.join(stateDir, "pass");
     await fs.writeFile(passFile, PASSPHRASE, { mode: 0o600 });
     await initVault({ stateDir, passphrase: PASSPHRASE });
@@ -202,7 +187,7 @@ describe("solana wallet via vault + proxy (mock RPC)", () => {
         "--passphrase-file",
         passFile,
       ]),
-      (err) => /generate/.test(err.stdout || "") // CLI emits {ok:false, error} JSON on stdout
+      (err) => /generate/.test(err.stdout || ""), // CLI emits {ok:false, error} JSON on stdout
     );
   });
 
@@ -264,7 +249,7 @@ describe("solana wallet via vault + proxy (mock RPC)", () => {
     assert.equal(
       JSON.parse(upstreamSeen.value.body).method,
       "getLatestBlockhash",
-      "passthrough body intact"
+      "passthrough body intact",
     );
 
     // 2. Agent builds an UNSIGNED transfer from only public material.
@@ -300,7 +285,7 @@ describe("solana wallet via vault + proxy (mock RPC)", () => {
     assert.notDeepEqual(sig, Buffer.alloc(64), "signature filled in");
     assert.ok(
       verifySignature(message, sig, base58Decode(walletAddress)),
-      "proxy signature verifies against the wallet address"
+      "proxy signature verifies against the wallet address",
     );
 
     // 5. The RPC's result (tx signature) matches what the proxy injected.
@@ -312,12 +297,7 @@ describe("solana wallet via vault + proxy (mock RPC)", () => {
       proxyPort,
       credname: "sol-hot",
       host: "evil.example.com",
-      body: {
-        jsonrpc: "2.0",
-        id: 3,
-        method: "sendTransaction",
-        params: ["AAAA", { encoding: "base64" }],
-      },
+      body: { jsonrpc: "2.0", id: 3, method: "sendTransaction", params: ["AAAA", { encoding: "base64" }] },
     });
     assert.equal(r.status, 403);
     assert.equal(JSON.parse(r.body).error, "host_not_allowed");
@@ -332,10 +312,7 @@ describe("solana wallet via vault + proxy (mock RPC)", () => {
         jsonrpc: "2.0",
         id: 4,
         method: "sendTransaction",
-        params: [
-          Buffer.from("garbage").toString("base64"),
-          { encoding: "base64" },
-        ],
+        params: [Buffer.from("garbage").toString("base64"), { encoding: "base64" }],
       },
     });
     assert.equal(r.status, 400);

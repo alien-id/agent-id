@@ -15,8 +15,7 @@ import path from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
-const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url)
-  .pathname;
+const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url).pathname;
 const PRF_HEX = "ab".repeat(32); // 32-byte stand-in for the authenticator PRF output
 const REG = { credentialId: "Y3JlZA", rpId: "localhost", prfSecret: PRF_HEX };
 const AUTH = { prfSecret: PRF_HEX };
@@ -25,9 +24,7 @@ const AUTH = { prfSecret: PRF_HEX };
 // POST the simulated ceremony fields, then resolve with the result.
 function runWithCeremony(args, ceremonyFields) {
   return new Promise((resolve, reject) => {
-    const child = spawn("node", [CLI, ...args], {
-      env: { ...process.env, AGENT_ID_NO_BROWSER: "1" },
-    });
+    const child = spawn("node", [CLI, ...args], { env: { ...process.env, AGENT_ID_NO_BROWSER: "1" } });
     let stdout = "";
     let stderr = "";
     let posted = false;
@@ -38,14 +35,8 @@ function runWithCeremony(args, ceremonyFields) {
       if (m && !posted) {
         posted = true;
         const u = new URL(m[0]);
-        const body = new URLSearchParams({
-          _token: u.searchParams.get("t"),
-          ...ceremonyFields,
-        });
-        fetch(`http://localhost:${u.port}/submit`, {
-          method: "POST",
-          body,
-        }).catch(() => {});
+        const body = new URLSearchParams({ _token: u.searchParams.get("t"), ...ceremonyFields });
+        fetch(`http://localhost:${u.port}/submit`, { method: "POST", body }).catch(() => {});
       }
     });
     child.on("exit", (code) => resolve({ code, stdout, stderr }));
@@ -57,18 +48,12 @@ test("init --unlock passkey enrolls a passkey-only vault and unlocks via the cer
   const dir = await mkdtemp(path.join(os.tmpdir(), "pk-cli-"));
   try {
     // Enroll (register ceremony posts credentialId + rpId + prfSecret).
-    const init = await runWithCeremony(
-      ["init", "--unlock", "passkey", "--state-dir", dir],
-      REG
-    );
+    const init = await runWithCeremony(["init", "--unlock", "passkey", "--state-dir", dir], REG);
     assert.equal(init.code, 0, `init failed: ${init.stderr}`);
     const initOut = JSON.parse(init.stdout);
     assert.equal(initOut.ok, true);
     assert.equal(initOut.slots, 1, "passkey-only: a single slot");
-    assert.ok(
-      !init.stdout.includes(PRF_HEX) && !init.stderr.includes(PRF_HEX),
-      "PRF secret must not leak"
-    );
+    assert.ok(!init.stdout.includes(PRF_HEX) && !init.stderr.includes(PRF_HEX), "PRF secret must not leak");
 
     // Unlock: no agent key, so `list` triggers the passkey authenticate ceremony.
     const list = await runWithCeremony(["list", "--state-dir", dir], AUTH);
@@ -76,10 +61,7 @@ test("init --unlock passkey enrolls a passkey-only vault and unlocks via the cer
     const listOut = JSON.parse(list.stdout);
     assert.equal(listOut.slots.length, 1);
     assert.equal(listOut.slots[0].type, "passkey");
-    assert.ok(
-      !list.stdout.includes(PRF_HEX) && !list.stderr.includes(PRF_HEX),
-      "PRF secret must not leak"
-    );
+    assert.ok(!list.stdout.includes(PRF_HEX) && !list.stderr.includes(PRF_HEX), "PRF secret must not leak");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

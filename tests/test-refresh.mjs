@@ -70,10 +70,7 @@ async function cleanupDir(dir) {
   await fs.rm(dir, { recursive: true, force: true });
 }
 
-async function writeTestState(
-  stateDir,
-  { accessToken, refreshToken, ssoBaseUrl, providerAddress }
-) {
+async function writeTestState(stateDir, { accessToken, refreshToken, ssoBaseUrl, providerAddress }) {
   const paths = statePaths(stateDir);
 
   // Generate a real keypair
@@ -136,9 +133,7 @@ function createMockSsoServer(handler) {
 // (RFC 9449 §6.1: rotated tokens remain DPoP-bound; verifying the new
 // id_token catches a compromised/buggy AS that rotates sub or cnf.jkt).
 function generateRsaSsoSigner() {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-  });
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
   return {
     privateKey,
     publicKeyJwk: {
@@ -169,7 +164,7 @@ async function createRsaSsoMock({ rsa, tokenHandler }) {
         JSON.stringify({
           issuer: mock.baseUrl,
           jwks_uri: `${mock.baseUrl}/jwks`,
-        })
+        }),
       );
       return;
     }
@@ -203,7 +198,7 @@ describe("refreshSession()", () => {
           access_token: makeFreshJwt(),
           refresh_token: "new-refresh-token",
           id_token: makeFreshJwt({ sub: "test-owner-sub" }),
-        })
+        }),
       );
     });
     server = mock.server;
@@ -242,7 +237,7 @@ describe("refreshSession()", () => {
           refreshToken: "rt",
           providerAddress: "p",
         }),
-      /Refresh response missing access_token/
+      /Refresh response missing access_token/,
     );
 
     server.close();
@@ -263,7 +258,7 @@ describe("refreshSession()", () => {
           refreshToken: "revoked-rt",
           providerAddress: "p",
         }),
-      /HTTP 401/
+      /HTTP 401/,
     );
 
     server.close();
@@ -315,7 +310,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
           access_token: newFreshToken,
           token_type: "DPoP",
           refresh_token: "new-rt",
-        })
+        }),
       );
     });
 
@@ -355,7 +350,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
           access_token: makeFreshJwt(),
           token_type: "DPoP",
           refresh_token: "rotated-rt",
-        })
+        }),
       );
     });
 
@@ -391,7 +386,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
           access_token: makeFreshJwt(),
           token_type: "DPoP",
           // no refresh_token in response
-        })
+        }),
       );
     });
 
@@ -429,9 +424,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
       ssoBaseUrl: "placeholder", // overwritten below
       providerAddress: "test-provider",
     });
-    const agentJkt = jwkThumbprint(
-      ed25519PublicKeyToJwk(stateInit.pair.publicKeyPem)
-    );
+    const agentJkt = jwkThumbprint(ed25519PublicKeyToJwk(stateInit.pair.publicKeyPem));
 
     let mock;
     const mintIdToken = (overrides = {}) => {
@@ -461,7 +454,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
             access_token: makeFreshJwt(),
             token_type: "DPoP",
             id_token: newIdToken,
-          })
+          }),
         );
       },
     });
@@ -494,9 +487,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
       ssoBaseUrl: "placeholder",
       providerAddress: "test-provider",
     });
-    const agentJkt = jwkThumbprint(
-      ed25519PublicKeyToJwk(stateInit.pair.publicKeyPem)
-    );
+    const agentJkt = jwkThumbprint(ed25519PublicKeyToJwk(stateInit.pair.publicKeyPem));
 
     let mock;
     let attackerIdToken;
@@ -509,7 +500,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
             access_token: makeFreshJwt({ sub: "test-owner-sub" }),
             token_type: "DPoP",
             id_token: attackerIdToken,
-          })
+          }),
         );
       },
     });
@@ -538,16 +529,12 @@ describe("SignatureEngine.ensureValidSession()", () => {
       await engine.init();
       await assert.rejects(
         () => engine.ensureValidSession(),
-        /id_token sub|owner.*mismatch/i
+        /id_token sub|owner.*mismatch/i,
       );
 
       // The on-disk session must NOT have been updated.
       const onDisk = await readJsonFile(sessionFile, null);
-      assert.equal(
-        onDisk.idToken,
-        "fake-id-token",
-        "stale id_token kept on disk after rejection"
-      );
+      assert.equal(onDisk.idToken, "fake-id-token", "stale id_token kept on disk after rejection");
     } finally {
       mock.server.close();
       await cleanupDir(stateDir);
@@ -564,9 +551,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
     });
     // Compute a wrong jkt — different agent keypair.
     const otherAgent = generateEd25519PemPair();
-    const wrongJkt = jwkThumbprint(
-      ed25519PublicKeyToJwk(otherAgent.publicKeyPem)
-    );
+    const wrongJkt = jwkThumbprint(ed25519PublicKeyToJwk(otherAgent.publicKeyPem));
 
     let mock;
     let badJktIdToken;
@@ -579,7 +564,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
             access_token: makeFreshJwt({ sub: "test-owner-sub" }),
             token_type: "DPoP",
             id_token: badJktIdToken,
-          })
+          }),
         );
       },
     });
@@ -608,7 +593,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
       await engine.init();
       await assert.rejects(
         () => engine.ensureValidSession(),
-        /cnf\.jkt|jkt mismatch/i
+        /cnf\.jkt|jkt mismatch/i,
       );
     } finally {
       mock.server.close();
@@ -664,9 +649,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
   it("treats opaque (non-JWT) access_token as expired and refreshes", async () => {
     const mock = await createMockSsoServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ access_token: makeFreshJwt(), token_type: "DPoP" })
-      );
+      res.end(JSON.stringify({ access_token: makeFreshJwt(), token_type: "DPoP" }));
     });
 
     try {
@@ -720,9 +703,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
     const mock = await createMockSsoServer((req, res) => {
       called = true;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ access_token: makeFreshJwt(), token_type: "DPoP" })
-      );
+      res.end(JSON.stringify({ access_token: makeFreshJwt(), token_type: "DPoP" }));
     });
 
     try {
@@ -745,10 +726,7 @@ describe("SignatureEngine.ensureValidSession()", () => {
 
       const result = await engine.ensureValidSession();
       assert.ok(result);
-      assert.ok(
-        called,
-        "should have called the mock server via issuer fallback"
-      );
+      assert.ok(called, "should have called the mock server via issuer fallback");
     } finally {
       mock.server.close();
       await cleanupDir(stateDir);
@@ -768,9 +746,7 @@ describe("Security hardening", () => {
 
     const mock = await createMockSsoServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ access_token: wrongSubToken, token_type: "DPoP" })
-      );
+      res.end(JSON.stringify({ access_token: wrongSubToken, token_type: "DPoP" }));
     });
 
     try {
@@ -786,7 +762,7 @@ describe("Security hardening", () => {
 
       await assert.rejects(
         () => engine.ensureValidSession(),
-        /subject mismatch/
+        /subject mismatch/,
       );
     } finally {
       mock.server.close();
@@ -799,9 +775,7 @@ describe("Security hardening", () => {
 
     const mock = await createMockSsoServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ access_token: correctSubToken, token_type: "DPoP" })
-      );
+      res.end(JSON.stringify({ access_token: correctSubToken, token_type: "DPoP" }));
     });
 
     try {
@@ -834,13 +808,15 @@ describe("Security hardening", () => {
     // as expired (parseJwt throws, caught as expired=true).
     // This is correct behavior: the token can't be parsed, so it triggers refresh.
     // The defense-in-depth is that parseJwt itself rejects it.
-    assert.throws(() => {
-      // Manually invoke the same parsing logic
-      const parts = noneToken.split(".");
-      const h = JSON.parse(fromB64url(parts[0]).toString("utf8"));
-      if (h.alg === "none")
-        throw new Error("Unsigned JWTs (alg: none) are not accepted");
-    }, /alg: none/);
+    assert.throws(
+      () => {
+        // Manually invoke the same parsing logic
+        const parts = noneToken.split(".");
+        const h = JSON.parse(fromB64url(parts[0]).toString("utf8"));
+        if (h.alg === "none") throw new Error("Unsigned JWTs (alg: none) are not accepted");
+      },
+      /alg: none/,
+    );
   });
 });
 
@@ -859,7 +835,7 @@ describe("CLI refresh command (integration)", () => {
           access_token: makeFreshJwt(),
           token_type: "DPoP",
           refresh_token: "cli-new-rt",
-        })
+        }),
       );
     });
 
@@ -875,16 +851,8 @@ describe("CLI refresh command (integration)", () => {
       const { promisify } = await import("node:util");
       const exec = promisify(execFile);
 
-      const cliPath = new URL(
-        "../plugins/agent-id-core/bin/cli.mjs",
-        import.meta.url
-      ).pathname;
-      const { stdout } = await exec("node", [
-        cliPath,
-        "refresh",
-        "--state-dir",
-        stateDir,
-      ]);
+      const cliPath = new URL("../plugins/agent-id-core/bin/cli.mjs", import.meta.url).pathname;
+      const { stdout } = await exec("node", [cliPath, "refresh", "--state-dir", stateDir]);
 
       const result = JSON.parse(stdout);
       assert.equal(result.ok, true);
@@ -921,10 +889,7 @@ describe("CLI refresh command (integration)", () => {
     const { promisify } = await import("node:util");
     const exec = promisify(execFile);
 
-    const cliPath = new URL(
-      "../plugins/agent-id-core/bin/cli.mjs",
-      import.meta.url
-    ).pathname;
+    const cliPath = new URL("../plugins/agent-id-core/bin/cli.mjs", import.meta.url).pathname;
 
     try {
       await exec("node", [cliPath, "refresh", "--state-dir", stateDir]);

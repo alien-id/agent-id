@@ -60,13 +60,8 @@ function makeFakeSession(page, { captureDelayMs = 0 } = {}) {
       }
       return {};
     },
-    async detach() {
-      session.detached = true;
-    },
-    emitFrame(
-      data = CAST_B64,
-      metadata = { deviceWidth: 390, deviceHeight: 844, timestamp: Date.now() }
-    ) {
+    async detach() { session.detached = true; },
+    emitFrame(data = CAST_B64, metadata = { deviceWidth: 390, deviceHeight: 844, timestamp: Date.now() }) {
       handlers.get("Page.screencastFrame")?.({ data, metadata, sessionId: 1 });
     },
   };
@@ -80,17 +75,8 @@ function makeFakePage(inner = { width: 390, height: 844 }) {
     viewportSize: () => ({ ...inner }),
     // measureViewport reads the page's own innerWidth/innerHeight.
     evaluate: async () => ({ ...inner }),
-    mouse: {
-      move: async () => {},
-      down: async () => {},
-      up: async () => {},
-      wheel: async () => {},
-    },
-    keyboard: {
-      down: async () => {},
-      up: async () => {},
-      insertText: async () => {},
-    },
+    mouse: { move: async () => {}, down: async () => {}, up: async () => {}, wheel: async () => {} },
+    keyboard: { down: async () => {}, up: async () => {}, insertText: async () => {} },
   };
 }
 
@@ -102,13 +88,7 @@ function makeFakeState(inner, { attachDelayMs = 0, captureDelayMs = 0 } = {}) {
     sessions,
     sent: () => sessions.flatMap((s) => s.sent),
     liveCast: () =>
-      [...sessions]
-        .reverse()
-        .find(
-          (s) =>
-            !s.detached &&
-            s.sent.some((x) => x.method === "Page.startScreencast")
-        ),
+      [...sessions].reverse().find((s) => !s.detached && s.sent.some((x) => x.method === "Page.startScreencast")),
     ctx: {
       newCDPSession: async (page) => {
         if (attachDelayMs) await sleep(attachDelayMs);
@@ -144,7 +124,7 @@ async function connectStream(port, token) {
   const key = crypto.randomBytes(16).toString("base64");
   sock.write(
     `GET /?token=${token} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n` +
-      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
+      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
   );
   const queue = [];
   const waiters = [];
@@ -171,17 +151,10 @@ async function connectStream(port, token) {
     sock,
     send: (obj) => sock.write(maskedTextFrame(JSON.stringify(obj))),
     async next(timeoutMs = 2000) {
-      if (queue.length)
-        return JSON.parse(queue.shift().payload.toString("utf8"));
+      if (queue.length) return JSON.parse(queue.shift().payload.toString("utf8"));
       const frame = await new Promise((resolve, reject) => {
-        const t = setTimeout(
-          () => reject(new Error("timed out waiting for a frame")),
-          timeoutMs
-        );
-        waiters.push((m) => {
-          clearTimeout(t);
-          resolve(m);
-        });
+        const t = setTimeout(() => reject(new Error("timed out waiting for a frame")), timeoutMs);
+        waiters.push((m) => { clearTimeout(t); resolve(m); });
       });
       return JSON.parse(frame.payload.toString("utf8"));
     },
@@ -203,10 +176,7 @@ test("resize: viewer dimensions reach the callback; the viewport is broadcast", 
   const resizes = [];
   const stream = await startStreamServer(makeFakeState(), {
     // Fake session-side resize: the "window chrome" eats 87px of height.
-    resize: async (w, h) => {
-      resizes.push([w, h]);
-      return { width: w, height: h - 87 };
-    },
+    resize: async (w, h) => { resizes.push([w, h]); return { width: w, height: h - 87 }; },
   });
   const client = await connectStream(stream.port, stream.token);
   try {
@@ -230,30 +200,18 @@ test("resize with unknown extra fields is applied and the extras ignored", async
   // applied, broadcast, extras neither acted on nor echoed.
   const resizes = [];
   const stream = await startStreamServer(makeFakeState(), {
-    resize: async (w, h) => {
-      resizes.push([w, h]);
-      return { width: w, height: h - 87 };
-    },
+    resize: async (w, h) => { resizes.push([w, h]); return { width: w, height: h - 87 }; },
   });
   const client = await connectStream(stream.port, stream.token);
   try {
     const hello = await client.next();
     assert.equal(hello.type, "status");
-    client.send({
-      type: "resize",
-      width: 390,
-      height: 844,
-      tint: "sepia",
-      hdr: true,
-    });
+    client.send({ type: "resize", width: 390, height: 844, tint: "sepia", hdr: true });
     const status = await client.nextStatus();
     assert.deepEqual(resizes, [[390, 844]]);
     assert.deepEqual(status.resized, { width: 390, height: 844, scale: 1 });
     assert.deepEqual(status.viewport, { width: 390, height: 757 });
-    assert.ok(
-      !("tint" in status) && !("hdr" in status),
-      "unknown fields are not echoed back"
-    );
+    assert.ok(!("tint" in status) && !("hdr" in status), "unknown fields are not echoed back");
   } finally {
     client.close();
     stream.close();
@@ -263,10 +221,7 @@ test("resize with unknown extra fields is applied and the extras ignored", async
 test("resize: out-of-range dimensions clamp instead of failing the viewer", async () => {
   const resizes = [];
   const stream = await startStreamServer(makeFakeState(), {
-    resize: async (w, h) => {
-      resizes.push([w, h]);
-      return { width: w, height: h };
-    },
+    resize: async (w, h) => { resizes.push([w, h]); return { width: w, height: h }; },
   });
   const client = await connectStream(stream.port, stream.token);
   try {
@@ -283,10 +238,7 @@ test("resize: out-of-range dimensions clamp instead of failing the viewer", asyn
 test("resize: garbage dimensions are ignored, not resized-to-minimum", async () => {
   const resizes = [];
   const stream = await startStreamServer(makeFakeState(), {
-    resize: async (w, h) => {
-      resizes.push([w, h]);
-      return null;
-    },
+    resize: async (w, h) => { resizes.push([w, h]); return null; },
   });
   const client = await connectStream(stream.port, stream.token);
   try {
@@ -304,10 +256,7 @@ test("resize: garbage dimensions are ignored, not resized-to-minimum", async () 
 test("resize: dropped while a credential fill has the stream suspended", async () => {
   const resizes = [];
   const stream = await startStreamServer(makeFakeState(), {
-    resize: async (w, h) => {
-      resizes.push([w, h]);
-      return null;
-    },
+    resize: async (w, h) => { resizes.push([w, h]); return null; },
   });
   const client = await connectStream(stream.port, stream.token);
   try {
@@ -350,10 +299,7 @@ test("scaled resize: override on the cast session, capture-delivered frames, rem
     const methods = live.sent.map((s) => s.method);
     const dsoAt = methods.indexOf("Emulation.setDeviceMetricsOverride");
     assert.ok(dsoAt >= 0, "the scaled cast session carries the override");
-    assert.ok(
-      dsoAt < methods.indexOf("Page.startScreencast"),
-      "override applied before the cast starts"
-    );
+    assert.ok(dsoAt < methods.indexOf("Page.startScreencast"), "override applied before the cast starts");
     assert.deepEqual(live.sent[dsoAt].params, {
       width: 390,
       height: 844,
@@ -371,62 +317,29 @@ test("scaled resize: override on the cast session, capture-delivered frames, rem
     // deliberately carries TRANSITIONAL metadata (the surface size Chrome
     // reports while an override settles): delivered metadata must be
     // normalized to CSS geometry on every frame, motion and refinement.
-    live.emitFrame(CAST_B64, {
-      deviceWidth: 780,
-      deviceHeight: 1688,
-      timestamp: Date.now(),
-    });
+    live.emitFrame(CAST_B64, { deviceWidth: 780, deviceHeight: 1688, timestamp: Date.now() });
     const frames = [];
     while (!frames.some((f) => f.refinement)) {
       const msg = await client.next(3000);
       if (msg.type === "frame") frames.push(msg);
     }
-    assert.ok(
-      frames.length >= 2,
-      "a motion frame and a refinement frame arrived"
-    );
+    assert.ok(frames.length >= 2, "a motion frame and a refinement frame arrived");
     for (const f of frames) {
-      assert.equal(
-        f.data,
-        SHOT_B64,
-        "every delivered frame comes from captureScreenshot"
-      );
-      assert.equal(
-        f.metadata.deviceWidth,
-        390,
-        "metadata normalized to CSS width on every frame"
-      );
-      assert.equal(
-        f.metadata.deviceHeight,
-        844,
-        "metadata normalized to CSS height on every frame"
-      );
+      assert.equal(f.data, SHOT_B64, "every delivered frame comes from captureScreenshot");
+      assert.equal(f.metadata.deviceWidth, 390, "metadata normalized to CSS width on every frame");
+      assert.equal(f.metadata.deviceHeight, 844, "metadata normalized to CSS height on every frame");
     }
-    assert.ok(
-      frames.some((f) => !f.refinement),
-      "the damage tick produced a motion frame"
-    );
+    assert.ok(frames.some((f) => !f.refinement), "the damage tick produced a motion frame");
 
     // Both capture calls pin clip.scale=1 (the override already renders at
     // device pixels — a further multiply would deliver 4×): motion at the
     // stream quality, refinement at the refinement quality.
-    const shots = live.sent.filter(
-      (s) => s.method === "Page.captureScreenshot"
-    );
-    assert.ok(
-      shots.length >= 2,
-      "motion capture and refinement capture both fired"
-    );
+    const shots = live.sent.filter((s) => s.method === "Page.captureScreenshot");
+    assert.ok(shots.length >= 2, "motion capture and refinement capture both fired");
     assert.equal(shots[0].params.quality, 80);
     assert.equal(shots[shots.length - 1].params.quality, 90);
     for (const s of shots) {
-      assert.deepEqual(s.params.clip, {
-        x: 0,
-        y: 0,
-        width: 390,
-        height: 844,
-        scale: 1,
-      });
+      assert.deepEqual(s.params.clip, { x: 0, y: 0, width: 390, height: 844, scale: 1 });
     }
   } finally {
     client.close();
@@ -450,12 +363,9 @@ test("effectiveScale: nearest-integer rounding, axis and pixel budgets", () => {
 });
 
 test("scale over budget is served at the largest scale that fits", async () => {
-  const stream = await startStreamServer(
-    makeFakeState({ width: 2000, height: 1000 }),
-    {
-      resize: async (w, h) => ({ width: w, height: h }),
-    }
-  );
+  const stream = await startStreamServer(makeFakeState({ width: 2000, height: 1000 }), {
+    resize: async (w, h) => ({ width: w, height: h }),
+  });
   const client = await connectStream(stream.port, stream.token);
   try {
     await client.next(); // greeting
@@ -489,19 +399,9 @@ test("a two-field resize never touches device metrics (pre-scale behavior)", asy
     const status = await client.nextStatus();
     assert.deepEqual(status.resized, { width: 390, height: 844, scale: 1 });
     await sleep(100); // any (wrong) trailing async CDP work gets to surface
-    const emulation = state
-      .sent()
-      .filter((s) => s.method.startsWith("Emulation."));
-    assert.deepEqual(
-      emulation,
-      [],
-      "no device-metrics traffic for a 1× resize"
-    );
-    assert.equal(
-      state.liveCast(),
-      preCast,
-      "a 1×→1× resize does not restart the cast"
-    );
+    const emulation = state.sent().filter((s) => s.method.startsWith("Emulation."));
+    assert.deepEqual(emulation, [], "no device-metrics traffic for a 1× resize");
+    assert.equal(state.liveCast(), preCast, "a 1×→1× resize does not restart the cast");
   } finally {
     client.close();
     stream.close();
@@ -519,46 +419,29 @@ test("the override follows the cast: retargets to the new tab, dies at 1×", asy
     client.send({ type: "resize", width: 390, height: 844, scale: 2 });
     await client.nextStatus();
     const scaledSession = state.liveCast();
-    assert.ok(
-      scaledSession.sent.some(
-        (s) => s.method === "Emulation.setDeviceMetricsOverride"
-      )
-    );
+    assert.ok(scaledSession.sent.some((s) => s.method === "Emulation.setDeviceMetricsOverride"));
 
     // Tab switch: the retarget poll must attach to the NEW page and apply
     // the override THERE (overrides revert with their session, so the old
     // tab needs no explicit cleanup — its session detaches).
     const pageB = makeFakePage({ width: 390, height: 844 });
     state.current = pageB;
-    await until(
-      () =>
-        state.liveCast() !== scaledSession && state.liveCast()?.page === pageB
-    );
+    await until(() => state.liveCast() !== scaledSession && state.liveCast()?.page === pageB);
     const retargeted = state.liveCast();
     assert.equal(retargeted.page, pageB, "the cast follows the current tab");
-    assert.ok(
-      scaledSession.detached,
-      "the old tab's session (and its override) is gone"
-    );
+    assert.ok(scaledSession.detached, "the old tab's session (and its override) is gone");
     // Detach alone leaves a dormant override that re-pins the viewport on
     // every later navigation (measured) — the stop must clear it explicitly.
     assert.ok(
-      scaledSession.sent.some(
-        (s) => s.method === "Emulation.clearDeviceMetricsOverride"
-      ),
-      "the override is explicitly cleared before its session detaches"
+      scaledSession.sent.some((s) => s.method === "Emulation.clearDeviceMetricsOverride"),
+      "the override is explicitly cleared before its session detaches",
     );
     const methods = retargeted.sent.map((s) => s.method);
     const dsoAt = methods.indexOf("Emulation.setDeviceMetricsOverride");
-    assert.ok(
-      dsoAt >= 0 && dsoAt < methods.indexOf("Page.startScreencast"),
-      "the new tab gets the override before its cast starts"
-    );
+    assert.ok(dsoAt >= 0 && dsoAt < methods.indexOf("Page.startScreencast"),
+      "the new tab gets the override before its cast starts");
     assert.deepEqual(retargeted.sent[dsoAt].params, {
-      width: 390,
-      height: 844,
-      deviceScaleFactor: 2,
-      mobile: false,
+      width: 390, height: 844, deviceScaleFactor: 2, mobile: false,
     });
 
     // Back to 1×: the replacement cast session carries no override at all.
@@ -571,7 +454,7 @@ test("the override follows the cast: retargets to the new tab, dies at 1×", asy
     assert.equal(
       flat.sent.filter((s) => s.method.startsWith("Emulation.")).length,
       0,
-      "a 1× session never sees an Emulation call"
+      "a 1× session never sees an Emulation call",
     );
   } finally {
     client.close();
@@ -580,45 +463,22 @@ test("the override follows the cast: retargets to the new tab, dies at 1×", asy
 });
 
 test("budgetedResize: axis clamps, scale-first policy, base pixel clamp", () => {
-  assert.deepEqual(budgetedResize(390, 844, 2), {
-    width: 390,
-    height: 844,
-    scale: 2,
-  });
+  assert.deepEqual(budgetedResize(390, 844, 2), { width: 390, height: 844, scale: 2 });
   // Layout beats density: the scale gives way before the geometry does.
-  assert.deepEqual(budgetedResize(2040, 2040, 2), {
-    width: 2040,
-    height: 2040,
-    scale: 1,
-  });
+  assert.deepEqual(budgetedResize(2040, 2040, 2), { width: 2040, height: 2040, scale: 1 });
   // The base viewport ALONE can exceed the pixel budget (RESIZE_MAX² is ~2×
   // the 4K budget) — scale reduction cannot fix that, so the base shrinks
   // proportionally to fit.
-  assert.deepEqual(budgetedResize(4096, 4096, 1), {
-    width: 2880,
-    height: 2880,
-    scale: 1,
-  });
-  assert.deepEqual(budgetedResize(4096, 4096, 3), {
-    width: 2880,
-    height: 2880,
-    scale: 1,
-  });
+  assert.deepEqual(budgetedResize(4096, 4096, 1), { width: 2880, height: 2880, scale: 1 });
+  assert.deepEqual(budgetedResize(4096, 4096, 3), { width: 2880, height: 2880, scale: 1 });
   // Axis clamps come first, exactly as the pre-scale pipeline did them.
-  assert.deepEqual(budgetedResize(50, 99999, 1), {
-    width: 200,
-    height: 4096,
-    scale: 1,
-  });
+  assert.deepEqual(budgetedResize(50, 99999, 1), { width: 200, height: 4096, scale: 1 });
 });
 
 test("a base viewport over the pixel budget is shrunk and broadcast truthfully", async () => {
-  const stream = await startStreamServer(
-    makeFakeState({ width: 390, height: 844 }),
-    {
-      resize: async (w, h) => ({ width: w, height: h }),
-    }
-  );
+  const stream = await startStreamServer(makeFakeState({ width: 390, height: 844 }), {
+    resize: async (w, h) => ({ width: w, height: h }),
+  });
   const client = await connectStream(stream.port, stream.token);
   try {
     await client.next(); // greeting
@@ -637,10 +497,7 @@ test("overlapping joins settle to exactly one live cast session", async () => {
   // install BOTH sessions (a real-Chrome probe found three live sessions,
   // each keeping overrides and captures alive). Start/stop are serialized,
   // so exactly one session may survive.
-  const state = makeFakeState(
-    { width: 390, height: 844 },
-    { attachDelayMs: 40 }
-  );
+  const state = makeFakeState({ width: 390, height: 844 }, { attachDelayMs: 40 });
   const stream = await startStreamServer(state, {
     resize: async (w, h) => ({ width: w, height: h }),
   });
@@ -651,16 +508,10 @@ test("overlapping joins settle to exactly one live cast session", async () => {
       connectStream(stream.port, stream.token),
       connectStream(stream.port, stream.token),
     ]);
-    await until(
-      () => state.sessions.length > 0 && state.sessions.some((s) => !s.detached)
-    );
+    await until(() => state.sessions.length > 0 && state.sessions.some((s) => !s.detached));
     await sleep(300); // let every queued start settle
     const live = state.sessions.filter((s) => !s.detached);
-    assert.equal(
-      live.length,
-      1,
-      `exactly one live session (got ${live.length})`
-    );
+    assert.equal(live.length, 1, `exactly one live session (got ${live.length})`);
     assert.ok(live[0].sent.some((x) => x.method === "Page.startScreencast"));
   } finally {
     c1?.close();
@@ -673,10 +524,7 @@ test("a cast attach that loses its epoch is discarded, never installed", async (
   // The current tab flips while the attach is in flight (retarget mid-join):
   // the late session must be detached without ever casting — installing it
   // would cast the WRONG tab and leak the session.
-  const state = makeFakeState(
-    { width: 390, height: 844 },
-    { attachDelayMs: 80 }
-  );
+  const state = makeFakeState({ width: 390, height: 844 }, { attachDelayMs: 80 });
   const stream = await startStreamServer(state, {
     resize: async (w, h) => ({ width: w, height: h }),
   });
@@ -688,17 +536,13 @@ test("a cast attach that loses its epoch is discarded, never installed", async (
     state.current = pageB;
     await until(() => state.liveCast()?.page === pageB, 3000);
     const live = state.sessions.filter((s) => !s.detached);
-    assert.equal(
-      live.length,
-      1,
-      `exactly one live session (got ${live.length})`
-    );
+    assert.equal(live.length, 1, `exactly one live session (got ${live.length})`);
     assert.equal(live[0].page, pageB, "the survivor casts the current tab");
     for (const s of state.sessions.filter((x) => x.page === pageA)) {
       assert.ok(s.detached, "the stale attach is detached");
       assert.ok(
         !s.sent.some((x) => x.method === "Page.startScreencast"),
-        "a session that lost its epoch never casts"
+        "a session that lost its epoch never casts",
       );
     }
   } finally {
@@ -708,10 +552,7 @@ test("a cast attach that loses its epoch is discarded, never installed", async (
 });
 
 test("a capture straddling a cast switch cannot strand the next session's first tick", async () => {
-  const state = makeFakeState(
-    { width: 390, height: 844 },
-    { captureDelayMs: 200 }
-  );
+  const state = makeFakeState({ width: 390, height: 844 }, { captureDelayMs: 200 });
   const stream = await startStreamServer(state, {
     resize: async (w, h) => ({ width: w, height: h }),
   });
@@ -734,17 +575,10 @@ test("a capture straddling a cast switch cannot strand the next session's first 
     // dirty flag to the live session — a quality-80 (motion) capture on s2,
     // well before the quality-90 refinement could mask it.
     const shot = await until(
-      () =>
-        s2.sent.find(
-          (x) =>
-            x.method === "Page.captureScreenshot" && x.params.quality === 80
-        ),
-      2000
+      () => s2.sent.find((x) => x.method === "Page.captureScreenshot" && x.params.quality === 80),
+      2000,
     );
-    assert.ok(
-      shot,
-      "the new session's first damage tick is not stranded behind the stale capture"
-    );
+    assert.ok(shot, "the new session's first damage tick is not stranded behind the stale capture");
   } finally {
     c1.close();
     c2?.close();

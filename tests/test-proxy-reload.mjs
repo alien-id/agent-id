@@ -24,10 +24,7 @@ function startUpstream() {
     const requests = [];
     const server = http.createServer((req, res) => {
       req.resume();
-      requests.push({
-        method: req.method,
-        authorization: req.headers.authorization || null,
-      });
+      requests.push({ method: req.method, authorization: req.headers.authorization || null });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end('{"ok":true}');
     });
@@ -51,9 +48,7 @@ function startTokenEndpoint() {
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
         stats.count += 1;
-        const form = new URLSearchParams(
-          Buffer.concat(chunks).toString("utf8")
-        );
+        const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
         stats.refreshTokens.push(form.get("refresh_token"));
         const body = {
           access_token: `at-${stats.count}`,
@@ -68,12 +63,7 @@ function startTokenEndpoint() {
     });
     server.listen(0, "127.0.0.1", () => {
       const a = server.address();
-      resolve({
-        server,
-        url: `http://${a.address}:${a.port}/token`,
-        stats,
-        cfg,
-      });
+      resolve({ server, url: `http://${a.address}:${a.port}/token`, stats, cfg });
     });
   });
 }
@@ -97,9 +87,9 @@ function proxyRequest({ port, target, headers = {} }) {
             status: res.statusCode,
             headers: res.headers,
             body: Buffer.concat(chunks).toString("utf8"),
-          })
+          }),
         );
-      }
+      },
     );
     req.on("error", reject);
     req.end();
@@ -123,9 +113,7 @@ async function waitForLogEvent(logPath, event, timeoutMs = 2000) {
     seen = (await readAccessLog(logPath)).map((e) => e.event);
     if (seen.includes(event)) return true;
     if (Date.now() > deadline) {
-      throw new Error(
-        `no '${event}' in the access log (saw: ${seen.join(",") || "nothing"})`
-      );
+      throw new Error(`no '${event}' in the access log (saw: ${seen.join(",") || "nothing"})`);
     }
     await new Promise((r) => setTimeout(r, 20));
   }
@@ -134,19 +122,13 @@ async function waitForLogEvent(logPath, event, timeoutMs = 2000) {
 // URL-rewrite mode: /<credname>/<host>/<path>.
 function proxyPathRequest({ port, path: reqPath, method = "GET" }) {
   return new Promise((resolve, reject) => {
-    const req = http.request(
-      { host: "127.0.0.1", port, method, path: reqPath },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            body: Buffer.concat(chunks).toString("utf8"),
-          })
-        );
-      }
-    );
+    const req = http.request({ host: "127.0.0.1", port, method, path: reqPath }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () =>
+        resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
+      );
+    });
     req.on("error", reject);
     req.end();
   });
@@ -214,10 +196,7 @@ describe("proxy self-reopen: credential added after start", () => {
       headers: { Authorization: "AgentVault tok" },
     });
     assert.equal(r.status, 200);
-    assert.equal(
-      upstream.requests.at(-1).authorization,
-      "Bearer SECRET-FROM-DISK"
-    );
+    assert.equal(upstream.requests.at(-1).authorization, "Bearer SECRET-FROM-DISK");
   });
 });
 
@@ -276,8 +255,8 @@ describe("proxy self-reopen: single-flight", () => {
           port: proxyPort,
           target: `${upstream.url}/z`,
           headers: { Authorization: "AgentVault tok" },
-        })
-      )
+        }),
+      ),
     );
     for (const r of results) assert.equal(r.status, 200);
     assert.equal(reopenCalls, 1);
@@ -342,10 +321,7 @@ describe("proxy self-reopen: URL-rewrite mode", () => {
       path: `/tok/${upstreamAuthority}/y`,
     });
     assert.equal(r.status, 200);
-    assert.equal(
-      upstream.requests.at(-1).authorization,
-      "Bearer SECRET-REWRITE"
-    );
+    assert.equal(upstream.requests.at(-1).authorization, "Bearer SECRET-REWRITE");
   });
 });
 
@@ -395,10 +371,7 @@ describe("proxy self-reopen: reopen failures fall back to the plain miss", () =>
     const port = await startProxy(async () => {
       throw new Error("agent key unavailable");
     });
-    const r = await proxyPathRequest({
-      port,
-      path: `/tok/${upstreamAuthority}/x`,
-    });
+    const r = await proxyPathRequest({ port, path: `/tok/${upstreamAuthority}/x` });
     assert.equal(r.status, 400);
     assert.equal(JSON.parse(r.body).error, "credential_not_found");
 
@@ -414,23 +387,14 @@ describe("proxy self-reopen: reopen failures fall back to the plain miss", () =>
   it("answers the normal credential_not_found when reopenVault resolves nothing", async () => {
     for (const nothing of [async () => null, async () => undefined]) {
       const port = await startProxy(nothing);
-      const r = await proxyPathRequest({
-        port,
-        path: `/tok/${upstreamAuthority}/x`,
-      });
+      const r = await proxyPathRequest({ port, path: `/tok/${upstreamAuthority}/x` });
       assert.equal(r.status, 400);
       assert.equal(JSON.parse(r.body).error, "credential_not_found");
 
       // The failed reopen must not have displaced the working vault handle.
-      const ok = await proxyPathRequest({
-        port,
-        path: `/present/${upstreamAuthority}/x`,
-      });
+      const ok = await proxyPathRequest({ port, path: `/present/${upstreamAuthority}/x` });
       assert.equal(ok.status, 200);
-      assert.equal(
-        upstream.requests.at(-1).authorization,
-        "Bearer SECRET-PRESENT"
-      );
+      assert.equal(upstream.requests.at(-1).authorization, "Bearer SECRET-PRESENT");
     }
   });
 });
@@ -500,19 +464,13 @@ describe("proxy self-reopen: an oauth2 rotation must not erase another writer's 
     writer.lock();
 
     token.cfg.rotateTo = "rt-2";
-    const r = await proxyPathRequest({
-      port: proxyPort,
-      path: `/api/${upstreamAuthority}/v1/x`,
-    });
+    const r = await proxyPathRequest({ port: proxyPort, path: `/api/${upstreamAuthority}/v1/x` });
     assert.equal(r.status, 200);
     assert.equal(upstream.requests.at(-1).authorization, "Bearer at-1");
     assert.deepEqual(token.stats.refreshTokens, ["rt-1"]);
 
     const disk = await openVault({ stateDir, passphrase: "p" });
-    assert.ok(
-      disk.get("added-later"),
-      "the other process's credential survived the rotation save"
-    );
+    assert.ok(disk.get("added-later"), "the other process's credential survived the rotation save");
     assert.equal(disk.get("api").refreshToken, "rt-2");
     disk.lock();
   });
@@ -599,7 +557,7 @@ describe("proxy self-reopen: the oauth2 token cache does not outlive the vault h
     assert.equal(
       token.stats.refreshTokens.at(-1),
       "rt-2",
-      "the refresh used the record's token, not the cached pre-reopen one"
+      "the refresh used the record's token, not the cached pre-reopen one",
     );
   });
 });
@@ -642,33 +600,16 @@ describe("proxy self-reopen: the displaced vault handle is locked", () => {
   });
 
   it("locks each handle it replaces, keeping only the live one usable", async () => {
-    const first = await proxyPathRequest({
-      port: proxyPort,
-      path: `/tok/${upstreamAuthority}/x`,
-    });
+    const first = await proxyPathRequest({ port: proxyPort, path: `/tok/${upstreamAuthority}/x` });
     assert.equal(first.status, 400);
     assert.equal(opened.length, 1);
-    assert.throws(
-      () => initialVault.list(),
-      /locked/i,
-      "the startup handle was locked"
-    );
+    assert.throws(() => initialVault.list(), /locked/i, "the startup handle was locked");
 
-    const second = await proxyPathRequest({
-      port: proxyPort,
-      path: `/tok/${upstreamAuthority}/y`,
-    });
+    const second = await proxyPathRequest({ port: proxyPort, path: `/tok/${upstreamAuthority}/y` });
     assert.equal(second.status, 400);
     assert.equal(opened.length, 2);
-    assert.throws(
-      () => opened[0].list(),
-      /locked/i,
-      "the first reopened handle was locked"
-    );
-    assert.doesNotThrow(
-      () => opened[1].list(),
-      "the live handle still serves lookups"
-    );
+    assert.throws(() => opened[0].list(), /locked/i, "the first reopened handle was locked");
+    assert.doesNotThrow(() => opened[1].list(), "the live handle still serves lookups");
   });
 });
 
@@ -683,9 +624,7 @@ describe("proxy without a reopen: a rotation must not write the startup snapshot
   const clock = 1_700_000_000_000;
 
   before(async () => {
-    stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-reload-noreopen-")
-    );
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-noreopen-"));
     logPath = path.join(stateDir, "proxy.log");
     await initVault({ stateDir, passphrase: "p" });
 
@@ -736,27 +675,13 @@ describe("proxy without a reopen: a rotation must not write the startup snapshot
     writer.lock();
 
     token.cfg.rotateTo = "rt-2";
-    const r = await proxyPathRequest({
-      port: proxyPort,
-      path: `/api/${upstreamAuthority}/v1/x`,
-    });
-    assert.equal(
-      r.status,
-      200,
-      "the rotated token is served from memory even when unpersistable"
-    );
+    const r = await proxyPathRequest({ port: proxyPort, path: `/api/${upstreamAuthority}/v1/x` });
+    assert.equal(r.status, 200, "the rotated token is served from memory even when unpersistable");
     assert.equal(upstream.requests.at(-1).authorization, "Bearer at-1");
 
     const disk = await openVault({ stateDir, passphrase: "p" });
-    assert.ok(
-      disk.get("added-later"),
-      "the other process's credential survived"
-    );
-    assert.equal(
-      disk.get("api").refreshToken,
-      "rt-1",
-      "no stale snapshot was written back"
-    );
+    assert.ok(disk.get("added-later"), "the other process's credential survived");
+    assert.equal(disk.get("api").refreshToken, "rt-1", "no stale snapshot was written back");
     disk.lock();
 
     await waitForLogEvent(logPath, "oauth_rotate_persist_skipped");
@@ -787,9 +712,7 @@ describe("proxy self-reopen: a rotation the vault refused keeps working from mem
   }
 
   before(async () => {
-    stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-reload-persistfail-")
-    );
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-persistfail-"));
     logPath = path.join(stateDir, "proxy.log");
     await initVault({ stateDir, passphrase: "p" });
 
@@ -811,16 +734,13 @@ describe("proxy self-reopen: a rotation the vault refused keeps working from mem
     await seed.save();
     seed.lock();
 
-    const vault = withFailingSave(
-      await openVault({ stateDir, passphrase: "p" })
-    );
+    const vault = withFailingSave(await openVault({ stateDir, passphrase: "p" }));
     proxy = createProxy({
       vault,
       stateDir,
       logPath,
       now: () => clock,
-      reopenVault: async () =>
-        withFailingSave(await openVault({ stateDir, passphrase: "p" })),
+      reopenVault: async () => withFailingSave(await openVault({ stateDir, passphrase: "p" })),
     });
     const addr = await proxy.listen();
     proxyPort = addr.port;
@@ -835,10 +755,7 @@ describe("proxy self-reopen: a rotation the vault refused keeps working from mem
 
   it("logs the failed persist and keeps the rotated token across a later reopen", async () => {
     token.cfg.rotateEvery = true;
-    const first = await proxyPathRequest({
-      port: proxyPort,
-      path: `/api/${upstreamAuthority}/a`,
-    });
+    const first = await proxyPathRequest({ port: proxyPort, path: `/api/${upstreamAuthority}/a` });
     assert.equal(first.status, 200);
     assert.deepEqual(token.stats.refreshTokens, ["rt-1"]);
 
@@ -846,22 +763,16 @@ describe("proxy self-reopen: a rotation the vault refused keeps working from mem
 
     // Something else makes the proxy re-read the vault, and the access token
     // expires — the only copy of the rotated refresh token is the cache.
-    const miss = await proxyPathRequest({
-      port: proxyPort,
-      path: `/ghost/${upstreamAuthority}/x`,
-    });
+    const miss = await proxyPathRequest({ port: proxyPort, path: `/ghost/${upstreamAuthority}/x` });
     assert.equal(miss.status, 400);
     clock += 3600 * 1000 + 1;
 
-    const second = await proxyPathRequest({
-      port: proxyPort,
-      path: `/api/${upstreamAuthority}/b`,
-    });
+    const second = await proxyPathRequest({ port: proxyPort, path: `/api/${upstreamAuthority}/b` });
     assert.equal(second.status, 200);
     assert.equal(
       token.stats.refreshTokens.at(-1),
       "rot-1",
-      "the unpersisted rotated token must survive the reopen — the vault record is stale"
+      "the unpersisted rotated token must survive the reopen — the vault record is stale",
     );
   });
 });
@@ -934,30 +845,20 @@ describe("proxy self-reopen: a reopen keeps still-valid access tokens", () => {
     assert.equal(
       token.stats.count,
       2,
-      "one token exchange per credential — a reopen must not flush valid access tokens"
+      "one token exchange per credential — a reopen must not flush valid access tokens",
     );
     assert.equal(upstream.requests.at(-1).authorization, "Bearer at-2");
   });
 
   it("keeps the cached access token when a credential miss triggers a reopen", async () => {
     const before = token.stats.count;
-    const miss = await proxyPathRequest({
-      port: proxyPort,
-      path: `/ghost/${upstreamAuthority}/x`,
-    });
+    const miss = await proxyPathRequest({ port: proxyPort, path: `/ghost/${upstreamAuthority}/x` });
     assert.equal(miss.status, 400);
 
-    const r = await proxyPathRequest({
-      port: proxyPort,
-      path: `/api1/${upstreamAuthority}/v1/after`,
-    });
+    const r = await proxyPathRequest({ port: proxyPort, path: `/api1/${upstreamAuthority}/v1/after` });
     assert.equal(r.status, 200);
     assert.equal(upstream.requests.at(-1).authorization, "Bearer at-1");
-    assert.equal(
-      token.stats.count,
-      before,
-      "the cred-miss reopen evicted a valid access token"
-    );
+    assert.equal(token.stats.count, before, "the cred-miss reopen evicted a valid access token");
   });
 });
 
@@ -969,9 +870,7 @@ describe("proxy self-reopen: an in-flight request keeps the credential it resolv
   let upstreamAuthority;
 
   before(async () => {
-    stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-reload-inflight-")
-    );
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-inflight-"));
     await initVault({ stateDir, passphrase: "p" });
 
     upstream = await startUpstream();
@@ -1025,19 +924,13 @@ describe("proxy self-reopen: an in-flight request keeps the credential it resolv
     slow.write('{"query":"query ');
     await new Promise((r) => setTimeout(r, 100));
 
-    const miss = await proxyPathRequest({
-      port: proxyPort,
-      path: `/ghost/${upstreamAuthority}/x`,
-    });
+    const miss = await proxyPathRequest({ port: proxyPort, path: `/ghost/${upstreamAuthority}/x` });
     assert.equal(miss.status, 400);
 
     slow.end('{ me { id } }"}');
     assert.equal(await answered, 200);
     assert.equal(upstream.requests.at(-1).method, "POST");
-    assert.equal(
-      upstream.requests.at(-1).authorization,
-      "Bearer SECRET-INFLIGHT"
-    );
+    assert.equal(upstream.requests.at(-1).authorization, "Bearer SECRET-INFLIGHT");
   });
 });
 
@@ -1048,19 +941,12 @@ describe("proxy pairing: /register must not write the startup snapshot", () => {
   // another process after `openVault` returns the proxy's handle — so that
   // handle's in-memory payload is a pre-write snapshot.
   async function setup() {
-    const stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-reload-pair-")
-    );
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-pair-"));
     dirs.push(stateDir);
     await initVault({ stateDir, passphrase: "p" });
 
     const seed = await openVault({ stateDir, passphrase: "p" });
-    seed.add({
-      name: "tok",
-      type: "bearer",
-      domains: ["example.test"],
-      value: "SECRET-SEED",
-    });
+    seed.add({ name: "tok", type: "bearer", domains: ["example.test"], value: "SECRET-SEED" });
     await seed.save();
     seed.lock();
 
@@ -1107,9 +993,9 @@ describe("proxy pairing: /register must not write the startup snapshot", () => {
             resolve({
               status: res.statusCode,
               body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
-            })
+            }),
           );
-        }
+        },
       );
       req.on("error", reject);
       req.end(payload);
@@ -1126,10 +1012,7 @@ describe("proxy pairing: /register must not write the startup snapshot", () => {
       vault,
       stateDir,
       logPath: path.join(stateDir, "proxy.log"),
-      control: {
-        listen: { port: 0, host: "127.0.0.1" },
-        approvalTimeoutMs: 5000,
-      },
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
     });
     await proxy.listen();
 
@@ -1137,16 +1020,13 @@ describe("proxy pairing: /register must not write the startup snapshot", () => {
       proxy.controlAddress.port,
       "/register",
       { devicePubKey: devicePubKey(), deviceId: "ios-demo" },
-      proxy.controlToken
+      proxy.controlToken,
     );
     assert.equal(reg.status, 409);
     assert.equal(reg.body.error, "vault_reread_unavailable");
 
     const disk = await openVault({ stateDir, passphrase: "p" });
-    assert.ok(
-      disk.get("added-later"),
-      "the other process's credential survived the pairing"
-    );
+    assert.ok(disk.get("added-later"), "the other process's credential survived the pairing");
     assert.equal(disk.slots.filter((s) => s.type === "mobile").length, 0);
     disk.lock();
 
@@ -1160,10 +1040,7 @@ describe("proxy pairing: /register must not write the startup snapshot", () => {
       stateDir,
       logPath: path.join(stateDir, "proxy.log"),
       reopenVault: async () => openVault({ stateDir, passphrase: "p" }),
-      control: {
-        listen: { port: 0, host: "127.0.0.1" },
-        approvalTimeoutMs: 5000,
-      },
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
     });
     await proxy.listen();
 
@@ -1172,16 +1049,13 @@ describe("proxy pairing: /register must not write the startup snapshot", () => {
       proxy.controlAddress.port,
       "/register",
       { devicePubKey: pub, deviceId: "ios-demo" },
-      proxy.controlToken
+      proxy.controlToken,
     );
     assert.equal(reg.status, 200);
     assert.equal(reg.body.ok, true);
 
     const disk = await openVault({ stateDir, passphrase: "p" });
-    assert.ok(
-      disk.get("added-later"),
-      "the other process's credential survived the pairing"
-    );
+    assert.ok(disk.get("added-later"), "the other process's credential survived the pairing");
     assert.equal(disk.slots.filter((s) => s.type === "mobile").length, 1);
     disk.lock();
 
@@ -1190,7 +1064,7 @@ describe("proxy pairing: /register must not write the startup snapshot", () => {
       proxy.controlAddress.port,
       "/register",
       { devicePubKey: pub },
-      proxy.controlToken
+      proxy.controlToken,
     );
     assert.equal(again.body.alreadyPaired, true);
 
@@ -1199,8 +1073,7 @@ describe("proxy pairing: /register must not write the startup snapshot", () => {
 });
 
 describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault", () => {
-  const CLI = new URL("../plugins/agent-id-proxy/bin/cli.mjs", import.meta.url)
-    .pathname;
+  const CLI = new URL("../plugins/agent-id-proxy/bin/cli.mjs", import.meta.url).pathname;
   const dirs = [];
 
   function freePort() {
@@ -1234,18 +1107,15 @@ describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault",
         stateDir,
         ...extraArgs,
       ],
-      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1" } }
+      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1" } },
     );
     let stderrBuf = "";
     child.stderr.on("data", (d) => (stderrBuf += d));
     try {
       return await new Promise((resolve, reject) => {
         const timer = setTimeout(
-          () =>
-            reject(
-              new Error(`timeout waiting for the lock notice\n${stderrBuf}`)
-            ),
-          10_000
+          () => reject(new Error(`timeout waiting for the lock notice\n${stderrBuf}`)),
+          10_000,
         );
         const onData = () => {
           const m = stderrBuf.match(/^Vault locked \(idle_timeout\)\..*$/m);
@@ -1255,9 +1125,7 @@ describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault",
           resolve(m[0]);
         };
         child.stderr.on("data", onData);
-        child.on("exit", () =>
-          reject(new Error(`proxy exited early\n${stderrBuf}`))
-        );
+        child.on("exit", () => reject(new Error(`proxy exited early\n${stderrBuf}`)));
       });
     } finally {
       child.kill("SIGTERM");
@@ -1267,16 +1135,14 @@ describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault",
 
   // An agent-key vault: the proxy unlocks itself at start and can self-reopen.
   async function agentKeyStateDir(tag) {
-    const stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), `proxy-reload-cli-${tag}-`)
-    );
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `proxy-reload-cli-${tag}-`));
     dirs.push(stateDir);
     const { privateKeyPem, publicKeyPem } = generateEd25519PemPair();
     await fs.mkdir(path.join(stateDir, "keys"), { recursive: true });
     await fs.writeFile(
       path.join(stateDir, "keys", "main.json"),
       JSON.stringify({ privateKeyPem, publicKeyPem }),
-      { mode: 0o600 }
+      { mode: 0o600 },
     );
     await initVault({ stateDir, privateKeyPem });
     return { stateDir, privateKeyPem };
@@ -1295,18 +1161,13 @@ describe("proxy CLI: the idle-lock notice matches what can re-unlock the vault",
   });
 
   it("still says restart when the vault needed a human to unlock", async () => {
-    const stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-reload-cli-pass-")
-    );
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-reload-cli-pass-"));
     dirs.push(stateDir);
     await initVault({ stateDir, passphrase: "p" });
     const passFile = path.join(stateDir, "pass.txt");
     await fs.writeFile(passFile, "p", { mode: 0o600 });
 
-    const notice = await lockNotice(
-      ["--no-control", "--passphrase-file", passFile],
-      stateDir
-    );
+    const notice = await lockNotice(["--no-control", "--passphrase-file", passFile], stateDir);
     assert.match(notice, /restart/i);
   });
 

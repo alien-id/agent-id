@@ -12,10 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  calibratePointer,
-  withPointerCal,
-} from "../plugins/agent-id-browser/lib/stream-server.mjs";
+import { calibratePointer, withPointerCal } from "../plugins/agent-id-browser/lib/stream-server.mjs";
 
 // A stub page whose pointer space is displaced by `factor`: the page "sees"
 // every dispatched move at dispatched×factor, the way the affected host
@@ -53,10 +50,7 @@ function stubPage(factor) {
 test("a displaced pointer space yields the measured factors", async () => {
   const cal = await calibratePointer(stubPage(0.5));
   assert.ok(cal, "displacement must be detected");
-  assert.ok(
-    Math.abs(cal.fx - 0.5) < 1e-9 && Math.abs(cal.fy - 0.5) < 1e-9,
-    `got ${JSON.stringify(cal)}`
-  );
+  assert.ok(Math.abs(cal.fx - 0.5) < 1e-9 && Math.abs(cal.fy - 0.5) < 1e-9, `got ${JSON.stringify(cal)}`);
 });
 
 test("an aligned pointer space yields no correction", async () => {
@@ -75,10 +69,7 @@ test("a page that cannot run the probe yields no correction", async () => {
 
 test("withPointerCal pre-scales pointer coordinates by the inverse", () => {
   const cal = { fx: 0.5, fy: 0.5 };
-  const out = withPointerCal(
-    { type: "input_mouse", eventType: "mousePressed", x: 100, y: 200 },
-    cal
-  );
+  const out = withPointerCal({ type: "input_mouse", eventType: "mousePressed", x: 100, y: 200 }, cal);
   assert.equal(out.x, 200);
   assert.equal(out.y, 400);
   assert.equal(out.eventType, "mousePressed");
@@ -92,14 +83,7 @@ test("withPointerCal leaves non-pointer messages and identity untouched", () => 
 });
 
 test("wheel deltas survive correction untouched — only the position moves", () => {
-  const wheel = {
-    type: "input_mouse",
-    eventType: "mouseWheel",
-    x: 100,
-    y: 100,
-    deltaX: 3,
-    deltaY: -24,
-  };
+  const wheel = { type: "input_mouse", eventType: "mouseWheel", x: 100, y: 100, deltaX: 3, deltaY: -24 };
   const out = withPointerCal(wheel, { fx: 0.5, fy: 0.5 });
   assert.equal(out.x, 200);
   assert.equal(out.y, 200);

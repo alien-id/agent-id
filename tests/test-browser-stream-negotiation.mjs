@@ -58,21 +58,13 @@ function stubPage() {
 
 test("char with only `text` inserts it (no `key` required)", async () => {
   const page = stubPage();
-  await applyInput(page, {
-    type: "input_keyboard",
-    eventType: "char",
-    text: "é",
-  });
+  await applyInput(page, { type: "input_keyboard", eventType: "char", text: "é" });
   assert.deepEqual(page.calls, [["insertText", "é"]]);
 });
 
 test("char still falls back to `key` when that is all there is", async () => {
   const page = stubPage();
-  await applyInput(page, {
-    type: "input_keyboard",
-    eventType: "char",
-    key: "a",
-  });
+  await applyInput(page, { type: "input_keyboard", eventType: "char", key: "a" });
   assert.deepEqual(page.calls, [["insertText", "a"]]);
 });
 
@@ -80,7 +72,7 @@ test("a char with neither text nor key is reported, not swallowed", async () => 
   const page = stubPage();
   await assert.rejects(
     () => applyInput(page, { type: "input_keyboard", eventType: "char" }),
-    /needs `text`/
+    /needs `text`/,
   );
   assert.deepEqual(page.calls, [], "nothing was typed");
 });
@@ -89,24 +81,13 @@ test("keyDown without a key is reported — there is no pressing 'nothing'", asy
   const page = stubPage();
   await assert.rejects(
     () => applyInput(page, { type: "input_keyboard", eventType: "keyDown" }),
-    /needs `key`/
+    /needs `key`/,
   );
 });
 
 test("keyDown/keyUp still work normally", async () => {
   const page = stubPage();
-  await applyInput(page, {
-    type: "input_keyboard",
-    eventType: "keyDown",
-    key: "Enter",
-  });
-  await applyInput(page, {
-    type: "input_keyboard",
-    eventType: "keyUp",
-    key: "Enter",
-  });
-  assert.deepEqual(page.calls, [
-    ["down", "Enter"],
-    ["up", "Enter"],
-  ]);
+  await applyInput(page, { type: "input_keyboard", eventType: "keyDown", key: "Enter" });
+  await applyInput(page, { type: "input_keyboard", eventType: "keyUp", key: "Enter" });
+  assert.deepEqual(page.calls, [["down", "Enter"], ["up", "Enter"]]);
 });

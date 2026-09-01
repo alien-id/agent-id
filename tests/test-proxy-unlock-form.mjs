@@ -18,8 +18,7 @@ import { spawn } from "node:child_process";
 
 import { initVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 
-const CLI = new URL("../plugins/agent-id-proxy/bin/cli.mjs", import.meta.url)
-  .pathname;
+const CLI = new URL("../plugins/agent-id-proxy/bin/cli.mjs", import.meta.url).pathname;
 
 function freePort() {
   return new Promise((res) => {
@@ -34,10 +33,7 @@ function freePort() {
 // Resolve when the child's stderr matches `re`; reject on early exit / timeout.
 function waitForStderr(child, re, ms, getBuf) {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(
-      () => reject(new Error(`timeout waiting for ${re}\n${getBuf()}`)),
-      ms
-    );
+    const t = setTimeout(() => reject(new Error(`timeout waiting for ${re}\n${getBuf()}`)), ms);
     const onData = () => {
       const m = getBuf().match(re);
       if (m) {
@@ -62,19 +58,11 @@ test("proxy --unlock-form unlocks via the form; passphrase never hits the agent 
     const child = spawn(
       "node",
       [
-        CLI,
-        "start",
-        "--unlock-form",
-        "--no-control",
-        "--no-agent-key",
-        "--idle-timeout",
-        "never",
-        "--port",
-        String(port),
-        "--state-dir",
-        dir,
+        CLI, "start",
+        "--unlock-form", "--no-control", "--no-agent-key",
+        "--idle-timeout", "never", "--port", String(port), "--state-dir", dir,
       ],
-      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1" } }
+      { env: { ...process.env, AGENT_ID_NO_BROWSER: "1" } },
     );
     let stdout = "";
     let stderr = "";
@@ -82,30 +70,17 @@ test("proxy --unlock-form unlocks via the form; passphrase never hits the agent 
     child.stderr.on("data", (d) => (stderr += d));
 
     try {
-      const url = await waitForStderr(
-        child,
-        /http:\/\/127\.0\.0\.1:\d+\/\?t=[a-f0-9]+/,
-        8000,
-        () => stderr
-      );
+      const url = await waitForStderr(child, /http:\/\/127\.0\.0\.1:\d+\/\?t=[a-f0-9]+/, 8000, () => stderr);
       const u = new URL(url);
 
       const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
         method: "POST",
-        body: new URLSearchParams({
-          _token: u.searchParams.get("t"),
-          passphrase: PASS,
-        }),
+        body: new URLSearchParams({ _token: u.searchParams.get("t"), passphrase: PASS }),
       });
       assert.equal(res.status, 200);
 
       // Unlock succeeded ⇒ the proxy starts listening.
-      await waitForStderr(
-        child,
-        /agent-id-proxy listening on/,
-        8000,
-        () => stderr
-      );
+      await waitForStderr(child, /agent-id-proxy listening on/, 8000, () => stderr);
 
       assert.ok(!stdout.includes(PASS), "stdout leaked the passphrase");
       assert.ok(!stderr.includes(PASS), "stderr leaked the passphrase");

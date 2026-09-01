@@ -14,10 +14,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  closeLiveSession,
-  sessionFilePath,
-} from "../plugins/agent-id-browser/lib/session-server.mjs";
+import { closeLiveSession, sessionFilePath } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 async function tmpStateDir() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aib-close-live-"));
@@ -44,9 +41,7 @@ async function fakeDaemon(stateDir, name, { resealMs = 300 } = {}) {
       }
       sock.end(JSON.stringify({ ok: true, closed: true }) + "\n");
       setTimeout(() => {
-        fs.rm(sessionFilePath(stateDir, name), { force: true }).then(() =>
-          server.close()
-        );
+        fs.rm(sessionFilePath(stateDir, name), { force: true }).then(() => server.close());
       }, resealMs).unref();
     });
   });
@@ -54,13 +49,7 @@ async function fakeDaemon(stateDir, name, { resealMs = 300 } = {}) {
   const { port } = server.address();
   await fs.writeFile(
     sessionFilePath(stateDir, name),
-    JSON.stringify({
-      port,
-      token,
-      pid: process.pid,
-      headless: true,
-      startedAt: 1,
-    })
+    JSON.stringify({ port, token, pid: process.pid, headless: true, startedAt: 1 }),
   );
   return { received, server };
 }
@@ -75,9 +64,7 @@ test("closeLiveSession: sends close and returns only after the session file is g
   const daemon = await fakeDaemon(stateDir, "main", { resealMs: 400 });
   const logs = [];
   const t0 = Date.now();
-  const closed = await closeLiveSession(stateDir, "main", {
-    log: (m) => logs.push(m),
-  });
+  const closed = await closeLiveSession(stateDir, "main", { log: (m) => logs.push(m) });
   assert.equal(closed, true);
   assert.equal(daemon.received.length, 1);
   assert.equal(daemon.received[0].action, "close");
@@ -96,7 +83,7 @@ test("closeLiveSession: a stale session file (daemon gone) is removed and report
   await new Promise((r) => probe.close(r));
   await fs.writeFile(
     sessionFilePath(stateDir, "main"),
-    JSON.stringify({ port, token: "x", pid: 1, headless: true, startedAt: 1 })
+    JSON.stringify({ port, token: "x", pid: 1, headless: true, startedAt: 1 }),
   );
   assert.equal(await closeLiveSession(stateDir, "main"), false);
   await assert.rejects(fs.access(sessionFilePath(stateDir, "main")));
@@ -105,9 +92,6 @@ test("closeLiveSession: a stale session file (daemon gone) is removed and report
 test("closeLiveSession: a daemon that never finishes closing is an error, not a silent race", async () => {
   const stateDir = await tmpStateDir();
   const daemon = await fakeDaemon(stateDir, "main", { resealMs: 60_000 });
-  await assert.rejects(
-    closeLiveSession(stateDir, "main", { timeoutMs: 600 }),
-    (err) => err.code === "SESSION_BUSY"
-  );
+  await assert.rejects(closeLiveSession(stateDir, "main", { timeoutMs: 600 }), (err) => err.code === "SESSION_BUSY");
   daemon.server.close();
 });

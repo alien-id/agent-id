@@ -18,23 +18,15 @@ import { spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
-import {
-  writeJsonFile,
-  statePaths,
-} from "../plugins/agent-id-core/lib/state.mjs";
+import { writeJsonFile, statePaths } from "../plugins/agent-id-core/lib/state.mjs";
 import { fingerprintPublicKeyPem } from "../plugins/agent-id-core/lib/crypto.mjs";
 
-const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url)
-  .pathname;
+const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url).pathname;
 
 async function makeVault(dir) {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey
-    .export({ format: "pem", type: "spki" })
-    .toString();
-  const privateKeyPem = privateKey
-    .export({ format: "pem", type: "pkcs8" })
-    .toString();
+  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
+  const privateKeyPem = privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   await writeJsonFile(statePaths(dir).mainKey, {
     version: 1,
     agentId: "main",
@@ -50,9 +42,7 @@ async function makeVault(dir) {
 
 function run(args, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn("node", [CLI, ...args], {
-      env: { ...process.env, ...env },
-    });
+    const child = spawn("node", [CLI, ...args], { env: { ...process.env, ...env } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -66,11 +56,7 @@ function run(args, env = {}) {
 function runWithFormConfirm(args, confirm) {
   return new Promise((resolve, reject) => {
     const child = spawn("node", [CLI, ...args], {
-      env: {
-        ...process.env,
-        AGENT_ID_NO_BROWSER: "1",
-        AGENT_ID_SECURE_PROMPT: "browser",
-      },
+      env: { ...process.env, AGENT_ID_NO_BROWSER: "1", AGENT_ID_SECURE_PROMPT: "browser" },
     });
     let stdout = "";
     let stderr = "";
@@ -85,10 +71,7 @@ function runWithFormConfirm(args, confirm) {
           const u = new URL(m[0]);
           await fetch(`http://127.0.0.1:${u.port}/submit`, {
             method: "POST",
-            body: new URLSearchParams({
-              _token: u.searchParams.get("t"),
-              confirm,
-            }),
+            body: new URLSearchParams({ _token: u.searchParams.get("t"), confirm }),
           });
         } catch (err) {
           reject(err);
@@ -100,9 +83,7 @@ function runWithFormConfirm(args, confirm) {
 }
 
 async function getRecord(dir, name) {
-  const { privateKeyPem } = JSON.parse(
-    await readFile(statePaths(dir).mainKey, "utf8")
-  );
+  const { privateKeyPem } = JSON.parse(await readFile(statePaths(dir).mainKey, "utf8"));
   const vault = await openVault({ stateDir: dir, privateKeyPem });
   const rec = vault.get(name);
   const copy = rec ? { ...rec } : null;
@@ -117,22 +98,9 @@ test("access-level lifecycle via the CLI", async (t) => {
 
     await t.test("add --access ro stores the level", async () => {
       const r = await run(
-        [
-          "add",
-          "--name",
-          "mail",
-          "--type",
-          "bearer",
-          "--domains",
-          "mail.example.com",
-          "--access",
-          "ro",
-          "--value-env",
-          "TOK",
-          "--state-dir",
-          dir,
-        ],
-        { TOK: "sekret_token_1" }
+        ["add", "--name", "mail", "--type", "bearer", "--domains", "mail.example.com",
+         "--access", "ro", "--value-env", "TOK", "--state-dir", dir],
+        { TOK: "sekret_token_1" },
       );
       assert.equal(r.code, 0, r.stderr);
       assert.equal(JSON.parse(r.stdout).access, "ro");
@@ -141,24 +109,13 @@ test("access-level lifecycle via the CLI", async (t) => {
     await t.test("show redacts a ro credential's secret", async () => {
       const r = await run(["show", "--name", "mail", "--state-dir", dir]);
       assert.equal(r.code, 0, r.stderr);
-      assert.ok(
-        !r.stdout.includes("sekret_token_1"),
-        "show leaked a ro secret"
-      );
+      assert.ok(!r.stdout.includes("sekret_token_1"), "show leaked a ro secret");
       assert.equal(JSON.parse(r.stdout).sealed, true);
     });
 
     await t.test("exec refuses a ro credential's secret field", async () => {
       const r = await run([
-        "exec",
-        "--env",
-        "T=mail.value",
-        "--state-dir",
-        dir,
-        "--",
-        "node",
-        "-e",
-        "0",
+        "exec", "--env", "T=mail.value", "--state-dir", dir, "--", "node", "-e", "0",
       ]);
       assert.notEqual(r.code, 0);
       assert.match(r.stderr + r.stdout, /access-restricted/);
@@ -166,116 +123,60 @@ test("access-level lifecycle via the CLI", async (t) => {
 
     await t.test("add cannot widen an existing ro credential", async () => {
       const r = await run(
-        [
-          "add",
-          "--name",
-          "mail",
-          "--type",
-          "bearer",
-          "--domains",
-          "mail.example.com",
-          "--access",
-          "rw",
-          "--value-env",
-          "TOK",
-          "--state-dir",
-          dir,
-        ],
-        { TOK: "attacker_supplied" }
+        ["add", "--name", "mail", "--type", "bearer", "--domains", "mail.example.com",
+         "--access", "rw", "--value-env", "TOK", "--state-dir", dir],
+        { TOK: "attacker_supplied" },
       );
       assert.notEqual(r.code, 0);
       assert.match(r.stderr + r.stdout, /widen|set-access/);
       assert.equal((await getRecord(dir, "mail")).access, "ro");
     });
 
-    await t.test(
-      "set-access relax with a WRONG confirmation is refused",
-      async () => {
-        const r = await runWithFormConfirm(
-          [
-            "set-access",
-            "--name",
-            "mail",
-            "--access",
-            "rw",
-            "--state-dir",
-            dir,
-          ],
-          "not-the-name"
-        );
-        assert.notEqual(r.code, 0);
-        assert.match(r.stderr + r.stdout, /did not match/);
-        assert.equal((await getRecord(dir, "mail")).access, "ro");
-      }
-    );
+    await t.test("set-access relax with a WRONG confirmation is refused", async () => {
+      const r = await runWithFormConfirm(
+        ["set-access", "--name", "mail", "--access", "rw", "--state-dir", dir],
+        "not-the-name",
+      );
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr + r.stdout, /did not match/);
+      assert.equal((await getRecord(dir, "mail")).access, "ro");
+    });
 
-    await t.test(
-      "set-access relax with the owner's confirmation applies",
-      async () => {
-        const r = await runWithFormConfirm(
-          [
-            "set-access",
-            "--name",
-            "mail",
-            "--access",
-            "rw",
-            "--state-dir",
-            dir,
-          ],
-          "mail"
-        );
-        assert.equal(r.code, 0, r.stderr);
-        assert.equal(JSON.parse(r.stdout).access, "rw");
-        assert.equal((await getRecord(dir, "mail")).access, "rw");
-      }
-    );
+    await t.test("set-access relax with the owner's confirmation applies", async () => {
+      const r = await runWithFormConfirm(
+        ["set-access", "--name", "mail", "--access", "rw", "--state-dir", dir],
+        "mail",
+      );
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(JSON.parse(r.stdout).access, "rw");
+      assert.equal((await getRecord(dir, "mail")).access, "rw");
+    });
 
     await t.test("set-access tighten needs no ceremony", async () => {
-      const r = await run([
-        "set-access",
-        "--name",
-        "mail",
-        "--access",
-        "ro",
-        "--state-dir",
-        dir,
-      ]);
+      const r = await run(["set-access", "--name", "mail", "--access", "ro", "--state-dir", dir]);
       assert.equal(r.code, 0, r.stderr);
       assert.equal((await getRecord(dir, "mail")).access, "ro");
     });
 
-    await t.test(
-      "set-access adding a deny rule needs no ceremony; an allow rule does",
-      async () => {
-        const deny = await run([
-          "set-access",
-          "--name",
-          "mail",
-          "--rules",
-          '[{"effect":"deny","methods":["GET"],"path":"/admin/*"}]',
-          "--state-dir",
-          dir,
-        ]);
-        assert.equal(deny.code, 0, deny.stderr);
+    await t.test("set-access adding a deny rule needs no ceremony; an allow rule does", async () => {
+      const deny = await run([
+        "set-access", "--name", "mail",
+        "--rules", '[{"effect":"deny","methods":["GET"],"path":"/admin/*"}]',
+        "--state-dir", dir,
+      ]);
+      assert.equal(deny.code, 0, deny.stderr);
 
-        const allow = await runWithFormConfirm(
-          [
-            "set-access",
-            "--name",
-            "mail",
-            "--rules",
-            '[{"effect":"allow","methods":["POST"],"path":"/search"}]',
-            "--state-dir",
-            dir,
-          ],
-          "mail"
-        );
-        assert.equal(allow.code, 0, allow.stderr);
-        const rec = await getRecord(dir, "mail");
-        assert.equal(rec.accessRules.length, 1);
-        assert.equal(rec.accessRules[0].effect, "allow");
-      }
-    );
+      const allow = await runWithFormConfirm(
+        ["set-access", "--name", "mail",
+         "--rules", '[{"effect":"allow","methods":["POST"],"path":"/search"}]',
+         "--state-dir", dir],
+        "mail",
+      );
+      assert.equal(allow.code, 0, allow.stderr);
+      const rec = await getRecord(dir, "mail");
+      assert.equal(rec.accessRules.length, 1);
+      assert.equal(rec.accessRules[0].effect, "allow");
+    });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -288,51 +189,25 @@ test("a rw credential with deny accessRules is sealed too (show redacts, exec re
     // rw level, but a deny rule — the proxy enforces the rule, so the plaintext
     // must not leak or the rule is theater.
     const add = await run(
-      [
-        "add",
-        "--name",
-        "svc",
-        "--type",
-        "bearer",
-        "--domains",
-        "api.svc.com",
-        "--value-env",
-        "TOK",
-        "--state-dir",
-        dir,
-      ],
-      { TOK: "rw_rules_secret" }
+      ["add", "--name", "svc", "--type", "bearer", "--domains", "api.svc.com",
+       "--value-env", "TOK", "--state-dir", dir],
+      { TOK: "rw_rules_secret" },
     );
     assert.equal(add.code, 0, add.stderr);
     // Attach a deny rule (tightening → no ceremony).
     const setr = await run([
-      "set-access",
-      "--name",
-      "svc",
-      "--rules",
-      '[{"effect":"deny","methods":["POST","PUT","PATCH","DELETE"]}]',
-      "--state-dir",
-      dir,
+      "set-access", "--name", "svc",
+      "--rules", '[{"effect":"deny","methods":["POST","PUT","PATCH","DELETE"]}]',
+      "--state-dir", dir,
     ]);
     assert.equal(setr.code, 0, setr.stderr);
 
     const show = await run(["show", "--name", "svc", "--state-dir", dir]);
-    assert.ok(
-      !show.stdout.includes("rw_rules_secret"),
-      "show leaked a rule-restricted secret"
-    );
+    assert.ok(!show.stdout.includes("rw_rules_secret"), "show leaked a rule-restricted secret");
     assert.equal(JSON.parse(show.stdout).sealed, true);
 
     const exec = await run([
-      "exec",
-      "--env",
-      "T=svc.value",
-      "--state-dir",
-      dir,
-      "--",
-      "node",
-      "-e",
-      "0",
+      "exec", "--env", "T=svc.value", "--state-dir", dir, "--", "node", "-e", "0",
     ]);
     assert.notEqual(exec.code, 0);
     assert.match(exec.stderr + exec.stdout, /access-restricted/);

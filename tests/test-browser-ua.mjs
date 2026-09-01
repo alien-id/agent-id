@@ -22,10 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 
-import {
-  resolvePatchright,
-  launchContext,
-} from "../plugins/agent-id-browser/lib/launch.mjs";
+import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
 
 const patchrightAvailable = !!resolvePatchright();
 
@@ -37,10 +34,7 @@ async function fingerprint(headless) {
     const page = ctx.pages()[0] || (await ctx.newPage());
     return await page.evaluate(() => ({
       ua: navigator.userAgent,
-      uaGetterNative: Object.getOwnPropertyDescriptor(
-        Navigator.prototype,
-        "userAgent"
-      )
+      uaGetterNative: Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent")
         ?.get?.toString()
         .includes("[native code]"),
       webdriver: navigator.webdriver,
@@ -59,18 +53,14 @@ test(
 
     assert.ok(
       !/Headless/i.test(headless.ua),
-      `headless UA must not contain "Headless": ${headless.ua}`
+      `headless UA must not contain "Headless": ${headless.ua}`,
     );
     assert.equal(
       headless.uaGetterNative,
       true,
-      "the UA override must be native (CDP), not a detectable JS patch"
+      "the UA override must be native (CDP), not a detectable JS patch",
     );
-    assert.equal(
-      headless.webdriver,
-      false,
-      "navigator.webdriver must stay false"
-    );
+    assert.equal(headless.webdriver, false, "navigator.webdriver must stay false");
 
     // Parity with headed is the real goal, but a headed launch needs a display
     // (CI runners have none → "Missing X server"). Best-effort: only assert it
@@ -82,11 +72,7 @@ test(
       headed = null; // headless environment — skip the cross-check
     }
     if (headed) {
-      assert.equal(
-        headless.ua,
-        headed.ua,
-        "headed and headless must report the same UA"
-      );
+      assert.equal(headless.ua, headed.ua, "headed and headless must report the same UA");
     }
-  }
+  },
 );

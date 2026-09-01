@@ -6,7 +6,10 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
+import {
+  generateKeyPairSync,
+  sign as cryptoSign,
+} from "node:crypto";
 
 import {
   b64url,
@@ -49,10 +52,9 @@ function startSsoMock({ jwk, issuerOverride }) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
-            issuer:
-              issuerOverride || `http://127.0.0.1:${server.address().port}`,
+            issuer: issuerOverride || `http://127.0.0.1:${server.address().port}`,
             jwks_uri: `http://127.0.0.1:${server.address().port}/jwks`,
-          })
+          }),
         );
         return;
       }
@@ -107,7 +109,7 @@ describe("verifyIdToken — RFC 7519 §4.1.5 nbf", () => {
           providerAddress,
           idToken,
         }),
-      /not yet valid|nbf/i
+      /not yet valid|nbf/i,
     );
   });
 
@@ -175,9 +177,7 @@ describe("verifyIdToken — RFC 9449 §6.1 cnf.jkt at bind time", () => {
   it("rejects id_token whose cnf.jkt does not match the agent public key", async () => {
     const agent = generateEd25519PemPair();
     const otherAgent = generateEd25519PemPair();
-    const wrongJkt = jwkThumbprint(
-      ed25519PublicKeyToJwk(otherAgent.publicKeyPem)
-    );
+    const wrongJkt = jwkThumbprint(ed25519PublicKeyToJwk(otherAgent.publicKeyPem));
 
     const now = Math.floor(Date.now() / 1000);
     const idToken = makeRs256IdToken({
@@ -201,7 +201,7 @@ describe("verifyIdToken — RFC 9449 §6.1 cnf.jkt at bind time", () => {
           idToken,
           agentPublicKeyPem: agent.publicKeyPem,
         }),
-      /cnf\.jkt|cnf jkt|jkt mismatch/i
+      /cnf\.jkt|cnf jkt|jkt mismatch/i,
     );
   });
 
@@ -228,7 +228,7 @@ describe("verifyIdToken — RFC 9449 §6.1 cnf.jkt at bind time", () => {
           idToken,
           agentPublicKeyPem: agent.publicKeyPem,
         }),
-      /cnf\.jkt|missing cnf/i
+      /cnf\.jkt|missing cnf/i,
     );
   });
 
@@ -294,10 +294,9 @@ describe("verifyIdToken — RFC 7515 §10.7 alg allowlist", () => {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              issuer:
-                issuerOverride || `http://127.0.0.1:${server.address().port}`,
+              issuer: issuerOverride || `http://127.0.0.1:${server.address().port}`,
               jwks_uri: `http://127.0.0.1:${server.address().port}/jwks`,
-            })
+            }),
           );
           return;
         }
@@ -390,9 +389,8 @@ describe("verifyIdToken — RFC 7515 §4.1.11 crit", () => {
     });
 
     await assert.rejects(
-      () =>
-        verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
-      /crit/i
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
+      /crit/i,
     );
   });
 });
@@ -409,7 +407,7 @@ describe("verifyIdToken — RFC 6749 §10 ssoBaseUrl scheme guard", () => {
           providerAddress: "0xprovider",
           idToken: "x.y.z",
         }),
-      /https/i
+      /https/i,
     );
   });
 
@@ -421,7 +419,7 @@ describe("verifyIdToken — RFC 6749 §10 ssoBaseUrl scheme guard", () => {
           providerAddress: "0xprovider",
           idToken: "x.y.z",
         }),
-      /ssoBaseUrl/i
+      /ssoBaseUrl/i,
     );
   });
 
@@ -436,7 +434,7 @@ describe("verifyIdToken — RFC 6749 §10 ssoBaseUrl scheme guard", () => {
           providerAddress: "0xprovider",
           idToken: "x.y.z",
         }),
-      (err) => !/https/i.test(err.message)
+      (err) => !/https/i.test(err.message),
     );
   });
 
@@ -448,7 +446,7 @@ describe("verifyIdToken — RFC 6749 §10 ssoBaseUrl scheme guard", () => {
           providerAddress: "0xprovider",
           idToken: "x.y.z",
         }),
-      (err) => !/https/i.test(err.message)
+      (err) => !/https/i.test(err.message),
     );
   });
 });
@@ -478,73 +476,48 @@ describe("verifyIdToken — OIDC §3.1.3.7 azp / multi-aud handling", () => {
     };
   }
   function mint(payload) {
-    return makeRs256IdToken({
-      privateKey: rsa.privateKey,
-      kid: rsa.publicKeyJwk.kid,
-      payload,
-    });
+    return makeRs256IdToken({ privateKey: rsa.privateKey, kid: rsa.publicKeyJwk.kid, payload });
   }
 
   it("rejects multi-aud id_token without an azp claim", async () => {
     const idToken = mint(basePayload({ aud: [providerAddress, "0xother"] }));
     await assert.rejects(
-      () =>
-        verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
-      /azp/i
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
+      /azp/i,
     );
   });
 
   it("rejects multi-aud id_token whose azp does not equal client id", async () => {
-    const idToken = mint(
-      basePayload({ aud: [providerAddress, "0xother"], azp: "0xother" })
-    );
+    const idToken = mint(basePayload({ aud: [providerAddress, "0xother"], azp: "0xother" }));
     await assert.rejects(
-      () =>
-        verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
-      /azp/i
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
+      /azp/i,
     );
   });
 
   it("accepts multi-aud id_token whose azp equals client id", async () => {
-    const idToken = mint(
-      basePayload({ aud: [providerAddress, "0xother"], azp: providerAddress })
-    );
-    const result = await verifyIdToken({
-      ssoBaseUrl: mock.baseUrl,
-      providerAddress,
-      idToken,
-    });
+    const idToken = mint(basePayload({ aud: [providerAddress, "0xother"], azp: providerAddress }));
+    const result = await verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken });
     assert.equal(result.payload.sub, "owner-sub");
   });
 
   it("rejects single-aud id_token whose azp is set but does not match client id", async () => {
     const idToken = mint(basePayload({ aud: providerAddress, azp: "0xother" }));
     await assert.rejects(
-      () =>
-        verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
-      /azp/i
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
+      /azp/i,
     );
   });
 
   it("accepts single-aud id_token without azp", async () => {
     const idToken = mint(basePayload({ aud: providerAddress }));
-    const result = await verifyIdToken({
-      ssoBaseUrl: mock.baseUrl,
-      providerAddress,
-      idToken,
-    });
+    const result = await verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken });
     assert.equal(result.payload.sub, "owner-sub");
   });
 
   it("accepts single-aud id_token with azp matching client id", async () => {
-    const idToken = mint(
-      basePayload({ aud: providerAddress, azp: providerAddress })
-    );
-    const result = await verifyIdToken({
-      ssoBaseUrl: mock.baseUrl,
-      providerAddress,
-      idToken,
-    });
+    const idToken = mint(basePayload({ aud: providerAddress, azp: providerAddress }));
+    const result = await verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken });
     assert.equal(result.payload.sub, "owner-sub");
   });
 });
@@ -606,7 +579,7 @@ describe("verifyIdToken — RFC 7519 §7.2 strict JWS structural validation", ()
           providerAddress: "0xprovider",
           idToken: tampered,
         }),
-      /alphabet|format|JWT/i
+      /alphabet|format|JWT/i,
     );
   });
 
@@ -619,7 +592,7 @@ describe("verifyIdToken — RFC 7519 §7.2 strict JWS structural validation", ()
           providerAddress: "0xprovider",
           idToken: "only.two",
         }),
-      /JWT format/i
+      /JWT format/i,
     );
   });
 
@@ -632,7 +605,7 @@ describe("verifyIdToken — RFC 7519 §7.2 strict JWS structural validation", ()
           providerAddress: "0xprovider",
           idToken: "eyJ..",
         }),
-      /JWT format/i
+      /JWT format/i,
     );
   });
 });
@@ -665,9 +638,8 @@ describe("verifyIdToken — RFC 7519 §4.1.6 iat / §4.1.5 nbf NumericDate", () 
       },
     });
     await assert.rejects(
-      () =>
-        verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
-      /iat/i
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
+      /iat/i,
     );
   });
 
@@ -685,9 +657,8 @@ describe("verifyIdToken — RFC 7519 §4.1.6 iat / §4.1.5 nbf NumericDate", () 
       },
     });
     await assert.rejects(
-      () =>
-        verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
-      /iat/i
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
+      /iat/i,
     );
   });
 
@@ -706,9 +677,8 @@ describe("verifyIdToken — RFC 7519 §4.1.6 iat / §4.1.5 nbf NumericDate", () 
       },
     });
     await assert.rejects(
-      () =>
-        verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
-      /nbf/i
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken }),
+      /nbf/i,
     );
   });
 
@@ -725,11 +695,7 @@ describe("verifyIdToken — RFC 7519 §4.1.6 iat / §4.1.5 nbf NumericDate", () 
         exp: now + 3600,
       },
     });
-    const result = await verifyIdToken({
-      ssoBaseUrl: mock.baseUrl,
-      providerAddress,
-      idToken,
-    });
+    const result = await verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken });
     assert.equal(result.payload.sub, "owner-sub");
   });
 });
@@ -774,7 +740,7 @@ describe("verifyIdToken — OIDC §3.1.3.7 nonce", () => {
           idToken,
           expectedNonce: "right-nonce",
         }),
-      /nonce/i
+      /nonce/i,
     );
   });
 
@@ -788,7 +754,7 @@ describe("verifyIdToken — OIDC §3.1.3.7 nonce", () => {
           idToken,
           expectedNonce: "right-nonce",
         }),
-      /nonce/i
+      /nonce/i,
     );
   });
 
@@ -805,11 +771,7 @@ describe("verifyIdToken — OIDC §3.1.3.7 nonce", () => {
 
   it("accepts id_token without nonce when expectedNonce is omitted (refresh flow)", async () => {
     const idToken = mint({});
-    const result = await verifyIdToken({
-      ssoBaseUrl: mock.baseUrl,
-      providerAddress,
-      idToken,
-    });
+    const result = await verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken });
     assert.equal(result.payload.sub, "owner-sub");
   });
 });
@@ -848,55 +810,32 @@ describe("verifyIdToken — RFC 8725 §3.11 typ confusion", () => {
 
   it("rejects typ=at+jwt (RFC 9068 access token)", async () => {
     await assert.rejects(
-      () =>
-        verifyIdToken({
-          ssoBaseUrl: mock.baseUrl,
-          providerAddress,
-          idToken: mint("at+jwt"),
-        }),
-      /Unsupported id_token typ/
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken: mint("at+jwt") }),
+      /Unsupported id_token typ/,
     );
   });
 
   it("rejects typ=dpop+jwt (RFC 9449 proof)", async () => {
     await assert.rejects(
-      () =>
-        verifyIdToken({
-          ssoBaseUrl: mock.baseUrl,
-          providerAddress,
-          idToken: mint("dpop+jwt"),
-        }),
-      /Unsupported id_token typ/
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken: mint("dpop+jwt") }),
+      /Unsupported id_token typ/,
     );
   });
 
   it("rejects typ=application/at+jwt", async () => {
     await assert.rejects(
-      () =>
-        verifyIdToken({
-          ssoBaseUrl: mock.baseUrl,
-          providerAddress,
-          idToken: mint("application/at+jwt"),
-        }),
-      /Unsupported id_token typ/
+      () => verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken: mint("application/at+jwt") }),
+      /Unsupported id_token typ/,
     );
   });
 
   it("accepts typ=JWT", async () => {
-    const result = await verifyIdToken({
-      ssoBaseUrl: mock.baseUrl,
-      providerAddress,
-      idToken: mint("JWT"),
-    });
+    const result = await verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken: mint("JWT") });
     assert.equal(result.payload.sub, "owner-sub");
   });
 
   it("accepts typ=application/jwt (case-insensitive per RFC 6838 §4.2)", async () => {
-    const result = await verifyIdToken({
-      ssoBaseUrl: mock.baseUrl,
-      providerAddress,
-      idToken: mint("application/JWT"),
-    });
+    const result = await verifyIdToken({ ssoBaseUrl: mock.baseUrl, providerAddress, idToken: mint("application/JWT") });
     assert.equal(result.payload.sub, "owner-sub");
   });
 

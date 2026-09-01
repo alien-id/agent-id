@@ -66,18 +66,14 @@ describe("classifyAssurance", () => {
   it("cnf.jkt + canonical sub → L2 linked", () => {
     assert.equal(
       classifyAssurance({ sub: "0xAlice", cnf: { jkt: "abc" } }),
-      ASSURANCE.LINKED
+      ASSURANCE.LINKED,
     );
   });
 
   it("alien_assurance:anonymous + pairwise sub → L1 anonymous", () => {
     assert.equal(
-      classifyAssurance({
-        sub: "ppid-xyz",
-        cnf: { jkt: "abc" },
-        alien_assurance: "anonymous",
-      }),
-      ASSURANCE.ANONYMOUS
+      classifyAssurance({ sub: "ppid-xyz", cnf: { jkt: "abc" }, alien_assurance: "anonymous" }),
+      ASSURANCE.ANONYMOUS,
     );
   });
 
@@ -110,22 +106,13 @@ describe("verifyBundle assurance levels", () => {
     const issuer = "https://sso.example";
 
     const verifyWith = (payload) => ({
-      verifyIdToken: async ({ ssoBaseUrl }) => ({
-        payload,
-        issuer: ssoBaseUrl,
-      }),
+      verifyIdToken: async ({ ssoBaseUrl }) => ({ payload, issuer: ssoBaseUrl }),
       ssoBaseUrl: issuer,
     });
 
     const linked = await verifyBundle(
       buildV3Bundle({ idToken: "a.b.c", agentJwk: jwk }),
-      verifyWith({
-        sub: "0xAlice",
-        cnf: { jkt },
-        iss: issuer,
-        aud: "0xprov",
-        iat: 1,
-      })
+      verifyWith({ sub: "0xAlice", cnf: { jkt }, iss: issuer, aud: "0xprov", iat: 1 }),
     );
     assert.equal(linked.level, ASSURANCE.LINKED);
     assert.equal(linked.assurance, "linked");
@@ -140,7 +127,7 @@ describe("verifyBundle assurance levels", () => {
         iss: issuer,
         aud: "0xprov",
         iat: 1,
-      })
+      }),
     );
     assert.equal(anon.level, ASSURANCE.ANONYMOUS);
     assert.equal(anon.assurance, "anonymous-human");
@@ -154,15 +141,11 @@ describe("verifyBundle assurance levels", () => {
       verifyBundle(buildV3Bundle({ idToken: "a.b.c", agentJwk: jwk }), {
         ssoBaseUrl: "https://sso.example",
         verifyIdToken: async () => ({
-          payload: {
-            sub: "0xAlice",
-            cnf: { jkt: other.jkt },
-            iss: "https://sso.example",
-          },
+          payload: { sub: "0xAlice", cnf: { jkt: other.jkt }, iss: "https://sso.example" },
           issuer: "https://sso.example",
         }),
       }),
-      /does not match id_token cnf\.jkt/
+      /does not match id_token cnf\.jkt/,
     );
   });
 });

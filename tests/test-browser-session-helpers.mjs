@@ -33,18 +33,13 @@ test("refuseRef: a ref on a focus-typing action is refused, not dropped", () => 
   // into whatever held focus and reported success, so the country combobox
   // never saw the text and answered "There were no results".
   assert.throws(
-    () =>
-      refuseRef(
-        "type-text",
-        { ref: "e27", text: "Switzerland" },
-        "type --ref eN --text T"
-      ),
+    () => refuseRef("type-text", { ref: "e27", text: "Switzerland" }, "type --ref eN --text T"),
     (err) => {
       assert.match(err.message, /takes no --ref/);
       assert.match(err.message, /e27/); // names the ref it was handed
       assert.match(err.message, /type --ref eN/); // and the tool that accepts one
       return true;
-    }
+    },
   );
 });
 
@@ -109,27 +104,15 @@ test("chromeCompensatedBounds: grows the outer size by the chrome the window ate
   // 390×757 — the window chrome ate 87px of height. The second pass must ask
   // for exactly that much more.
   assert.deepEqual(
-    chromeCompensatedBounds(
-      { width: 390, height: 844 },
-      { width: 390, height: 757 }
-    ),
-    { width: 390, height: 931 }
+    chromeCompensatedBounds({ width: 390, height: 844 }, { width: 390, height: 757 }),
+    { width: 390, height: 931 },
   );
 });
 
 test("chromeCompensatedBounds: no second pass when the first one landed", () => {
-  assert.equal(
-    chromeCompensatedBounds(
-      { width: 390, height: 844 },
-      { width: 390, height: 844 }
-    ),
-    null
-  );
+  assert.equal(chromeCompensatedBounds({ width: 390, height: 844 }, { width: 390, height: 844 }), null);
   // Unmeasurable page (JS-hostile): nothing to compensate against.
-  assert.equal(
-    chromeCompensatedBounds({ width: 390, height: 844 }, null),
-    null
-  );
+  assert.equal(chromeCompensatedBounds({ width: 390, height: 844 }, null), null);
 });
 
 test("chromeCompensatedBounds: an OVERSHOOT never shrinks the request", () => {
@@ -137,19 +120,10 @@ test("chromeCompensatedBounds: an OVERSHOOT never shrinks the request", () => {
   // Compensating downward would fight the WM forever — the delta clamps at 0,
   // and if both axes overshot there is no second pass at all.
   assert.deepEqual(
-    chromeCompensatedBounds(
-      { width: 200, height: 844 },
-      { width: 500, height: 757 }
-    ),
-    { width: 200, height: 931 }
+    chromeCompensatedBounds({ width: 200, height: 844 }, { width: 500, height: 757 }),
+    { width: 200, height: 931 },
   );
-  assert.equal(
-    chromeCompensatedBounds(
-      { width: 200, height: 200 },
-      { width: 500, height: 400 }
-    ),
-    null
-  );
+  assert.equal(chromeCompensatedBounds({ width: 200, height: 200 }, { width: 500, height: 400 }), null);
 });
 
 test("safeFilename: empty / dot-only names fall back, long names are bounded", () => {
@@ -204,16 +178,10 @@ function daemonStub(expectedToken) {
 test("probeSession: token identity, not connectability, decides the verdict", async (t) => {
   const stub = await daemonStub("right-token");
   t.after(() => stub.close());
-  assert.equal(
-    await probeSession({ port: stub.port, token: "right-token" }),
-    "ours"
-  );
+  assert.equal(await probeSession({ port: stub.port, token: "right-token" }), "ours");
   // The incident shape: the port answers, but it is not this session's
   // daemon — a recycled port after a container restart.
-  assert.equal(
-    await probeSession({ port: stub.port, token: "stale-token" }),
-    "gone"
-  );
+  assert.equal(await probeSession({ port: stub.port, token: "stale-token" }), "gone");
   // Nothing listening at all.
   const vacated = await daemonStub("x");
   vacated.close();
@@ -226,7 +194,7 @@ test("probeSession: token identity, not connectability, decides the verdict", as
   t.after(() => silent.close());
   assert.equal(
     await probeSession({ port: silent.address().port, token: "x" }, 200),
-    "unsure"
+    "unsure",
   );
 });
 
@@ -242,27 +210,11 @@ test("pruneDeadSessions: drops orphans, keeps live sessions and young work dirs"
     fs.writeFile(path.join(sessions, `${name}.json`), JSON.stringify(info));
   // A dead daemon with the NEWEST startedAt — the shape that hijacks a viewer
   // picking "the newest session advertising a stream".
-  await write("dead", {
-    pid: 0x7ffffff,
-    startedAt: Date.now() + 1e6,
-    streamPort: 1,
-  });
-  await write("live", {
-    pid: process.pid,
-    startedAt: 1,
-    streamPort: 2,
-    port: stub.port,
-    token: "live-token",
-  });
+  await write("dead", { pid: 0x7ffffff, startedAt: Date.now() + 1e6, streamPort: 1 });
+  await write("live", { pid: process.pid, startedAt: 1, streamPort: 2, port: stub.port, token: "live-token" });
   // A live pid whose port is answered by a STRANGER (recycled port after a
   // container restart): the token handshake is what unmasks it.
-  await write("impostor", {
-    pid: process.pid,
-    startedAt: 2,
-    streamPort: 3,
-    port: stub.port,
-    token: "someone-elses-token",
-  });
+  await write("impostor", { pid: process.pid, startedAt: 2, streamPort: 3, port: stub.port, token: "someone-elses-token" });
   // No control coordinates at all: the pid answer is all there is — kept.
   await write("legacy", { pid: process.pid, startedAt: 3, streamPort: 4 });
   await fs.writeFile(path.join(sessions, "junk.json"), "not json");
@@ -278,13 +230,7 @@ test("pruneDeadSessions: drops orphans, keeps live sessions and young work dirs"
   const pruned = await pruneDeadSessions(dir);
 
   const left = (await fs.readdir(sessions)).sort();
-  assert.deepEqual(left, [
-    "fresh.work",
-    "junk.json",
-    "legacy.json",
-    "live.json",
-    "live.work",
-  ]);
+  assert.deepEqual(left, ["fresh.work", "junk.json", "legacy.json", "live.json", "live.work"]);
   assert.ok(pruned.includes("dead"));
   assert.ok(pruned.includes("impostor"));
   assert.ok(pruned.includes("dead.work"));

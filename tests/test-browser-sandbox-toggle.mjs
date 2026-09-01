@@ -12,35 +12,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  sandboxDisabled,
-  windowSize,
-  launchOptions,
-} from "../plugins/agent-id-browser/lib/launch.mjs";
+import { sandboxDisabled, windowSize, launchOptions } from "../plugins/agent-id-browser/lib/launch.mjs";
 
 test("windowSize: defaults to 1440,900 and accepts x/comma overrides", () => {
   assert.equal(windowSize({}), "1440,900");
-  assert.equal(
-    windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1600x1000" }),
-    "1600,1000"
-  );
-  assert.equal(
-    windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1600,1000" }),
-    "1600,1000"
-  );
-  assert.equal(
-    windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: " 800 x 600 " }),
-    "800,600"
-  );
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1600x1000" }), "1600,1000");
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1600,1000" }), "1600,1000");
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: " 800 x 600 " }), "800,600");
   // Garbage / injection attempts fall back to the default (no arbitrary flag text).
-  assert.equal(
-    windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1440,900 --foo" }),
-    "1440,900"
-  );
-  assert.equal(
-    windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "huge" }),
-    "1440,900"
-  );
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "1440,900 --foo" }), "1440,900");
+  assert.equal(windowSize({ AGENT_ID_BROWSER_WINDOW_SIZE: "huge" }), "1440,900");
 });
 
 test("sandboxDisabled: only the literal '1' opts out", () => {

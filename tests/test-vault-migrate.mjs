@@ -15,14 +15,21 @@ import {
   statePaths,
   writeJsonFile,
 } from "../plugins/agent-id-core/lib/state.mjs";
-import { deriveLegacyVaultKey } from "../plugins/agent-id-vault/lib/legacy.mjs";
+import {
+  deriveLegacyVaultKey,
+} from "../plugins/agent-id-vault/lib/legacy.mjs";
 import { openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 import { generateEd25519PemPair } from "../plugins/agent-id-core/lib/crypto.mjs";
 
-import { createCipheriv, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  randomBytes,
+} from "node:crypto";
 
 const execFile = promisify(execFileCb);
-const VAULT_CLI = path.resolve("plugins/agent-id-vault/bin/cli.mjs");
+const VAULT_CLI = path.resolve(
+  "plugins/agent-id-vault/bin/cli.mjs",
+);
 
 function legacyEncryptForTest(key, plaintext) {
   const iv = randomBytes(12);
@@ -61,16 +68,19 @@ describe("vault migration v4 → v5", () => {
       ["openai", "sk-legacy-2"],
     ]) {
       const enc = legacyEncryptForTest(legacyKey, value);
-      await writeJsonFile(path.join(paths.vaultDir, `${service}.json`), {
-        version: 1,
-        service,
-        type: "api-key",
-        url: null,
-        username: null,
-        encrypted: enc,
-        createdAt: 1,
-        updatedAt: 1,
-      });
+      await writeJsonFile(
+        path.join(paths.vaultDir, `${service}.json`),
+        {
+          version: 1,
+          service,
+          type: "api-key",
+          url: null,
+          username: null,
+          encrypted: enc,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      );
     }
 
     passphraseFile = path.join(stateDir, "pass.txt");
@@ -92,7 +102,7 @@ describe("vault migration v4 → v5", () => {
         "--state-dir",
         stateDir,
       ],
-      { encoding: "utf8" }
+      { encoding: "utf8" },
     );
     const result = JSON.parse(stdout);
     assert.equal(result.ok, true);
@@ -104,10 +114,7 @@ describe("vault migration v4 → v5", () => {
       passphrase: "migration-pass-9999",
     });
     try {
-      const names = vault
-        .list()
-        .map((c) => c.name)
-        .sort();
+      const names = vault.list().map((c) => c.name).sort();
       assert.deepEqual(names, ["github", "openai"]);
       assert.equal(vault.get("github").value, "ghp_legacy_1");
       assert.equal(vault.get("openai").value, "sk-legacy-2");

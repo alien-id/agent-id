@@ -33,10 +33,7 @@ test("user mode: no passphrase, agent-key unlock, REFUSES a passphrase slot", as
     const v = await openVault({ stateDir: dir, privateKeyPem: pem });
     assert.equal(v.mode, "user");
     // The agent cannot enable a passphrase on a user-mode vault.
-    assert.throws(
-      () => v.addPassphraseSlot("hunter2"),
-      /only allowed in dev-mode/i
-    );
+    assert.throws(() => v.addPassphraseSlot("hunter2"), /only allowed in dev-mode/i);
     v.lock();
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -46,10 +43,7 @@ test("user mode: no passphrase, agent-key unlock, REFUSES a passphrase slot", as
 test("init with no unlock method at all is refused", async () => {
   const dir = await tmp();
   try {
-    await assert.rejects(
-      initVault({ stateDir: dir }),
-      /at least one unlock method/i
-    );
+    await assert.rejects(initVault({ stateDir: dir }), /at least one unlock method/i);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -78,11 +72,7 @@ test("dev mode via --dev + agent key (no passphrase): passphrase addable later",
   const dir = await tmp();
   try {
     const pem = agentPem();
-    const res = await initVault({
-      stateDir: dir,
-      privateKeyPem: pem,
-      dev: true,
-    });
+    const res = await initVault({ stateDir: dir, privateKeyPem: pem, dev: true });
     assert.equal(res.mode, "dev");
     const v = await openVault({ stateDir: dir, privateKeyPem: pem });
     v.addPassphraseSlot("added");
@@ -107,7 +97,7 @@ test("tampering the mode (user→dev in the file) is detected on unlock", async 
     await writeFile(vf, JSON.stringify(file, null, 2));
     await assert.rejects(
       openVault({ stateDir: dir, privateKeyPem: pem }),
-      /mode tag mismatch|tampered/i
+      /mode tag mismatch|tampered/i,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -127,7 +117,7 @@ test("stripping the modeTag while flipping the mode is detected (QW-3)", async (
     await writeFile(vf, JSON.stringify(file, null, 2));
     await assert.rejects(
       openVault({ stateDir: dir, privateKeyPem: pem }),
-      /modeTag was stripped|tampered/i
+      /modeTag was stripped|tampered/i,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -145,7 +135,7 @@ test("openVaultWithMasterKey: a wrong key is an unlock failure, not 'tampered' (
       (err) => {
         assert.equal(err.code, "VAULT_UNLOCK_FAILED");
         return true;
-      }
+      },
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

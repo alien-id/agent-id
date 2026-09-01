@@ -125,12 +125,7 @@ const WATCHDOG_MS = envInt("AGENT_ID_STREAM_WATCHDOG_MS", 15000, 0, 600000);
 // entry), which the url-keyed reuse below cannot see. This bounds how long such
 // a move can leave the flags wrong, at one CDP call per interval instead of one
 // per poll tick.
-const NAV_FLAGS_MAX_AGE_MS = envInt(
-  "AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS",
-  10000,
-  0,
-  600000
-);
+const NAV_FLAGS_MAX_AGE_MS = envInt("AGENT_ID_STREAM_NAV_FLAGS_MAX_AGE_MS", 10000, 0, 600000);
 const BIND_HOST = process.env.AGENT_ID_STREAM_BIND || "127.0.0.1";
 // Per-second counter rows (stream-counters.mjs). On by default — a freeze is
 // diagnosed from the rows it produces, and a host that cannot carry two lines
@@ -267,9 +262,7 @@ export function parseStreamParams(url) {
     binary: url.searchParams.get("binary") === "1" || codec !== "jpeg",
     codec,
     pacing: url.searchParams.get("pacing") === "ack" ? "ack" : "push",
-    maxFps: Number.isFinite(rawFps)
-      ? Math.min(120, Math.max(0, Math.floor(rawFps)))
-      : 0,
+    maxFps: Number.isFinite(rawFps) ? Math.min(120, Math.max(0, Math.floor(rawFps))) : 0,
   };
 }
 
@@ -317,7 +310,7 @@ export async function calibratePointer(page) {
           window.__aibPtrCal = { x: e.clientX, y: e.clientY };
           window.removeEventListener("mousemove", probe, true);
         },
-        { capture: true }
+        { capture: true },
       );
     });
     await page.mouse.move(CAL_PROBE_PX, CAL_PROBE_PX);
@@ -332,8 +325,7 @@ export async function calibratePointer(page) {
     if (!seen || !(seen.x > 0) || !(seen.y > 0)) return null;
     const fx = seen.x / CAL_PROBE_PX;
     const fy = seen.y / CAL_PROBE_PX;
-    if (Math.abs(fx - 1) <= CAL_TOLERANCE && Math.abs(fy - 1) <= CAL_TOLERANCE)
-      return null;
+    if (Math.abs(fx - 1) <= CAL_TOLERANCE && Math.abs(fy - 1) <= CAL_TOLERANCE) return null;
     return { fx, fy };
   } catch {
     return null;
@@ -373,9 +365,7 @@ export async function applyInput(page, msg) {
   if (msg.type === "input_mouse") {
     const x = Number(msg.x) || 0;
     const y = Number(msg.y) || 0;
-    const button = ["left", "middle", "right"].includes(msg.button)
-      ? msg.button
-      : "left";
+    const button = ["left", "middle", "right"].includes(msg.button) ? msg.button : "left";
     const clickCount = Number(msg.clickCount) || 1;
     switch (msg.eventType) {
       case "mouseMoved":
@@ -386,10 +376,7 @@ export async function applyInput(page, msg) {
       case "mouseReleased":
         return page.mouse.up({ button, clickCount });
       case "mouseWheel":
-        return page.mouse.wheel(
-          Number(msg.deltaX) || 0,
-          Number(msg.deltaY) || 0
-        );
+        return page.mouse.wheel(Number(msg.deltaX) || 0, Number(msg.deltaY) || 0);
       default:
         return;
     }
@@ -402,12 +389,9 @@ export async function applyInput(page, msg) {
     // a word — silently losing the character. keyDown/keyUp genuinely need a
     // key, since there is no such thing as pressing "nothing".
     if (msg.eventType === "char") {
-      const text =
-        typeof msg.text === "string" && msg.text !== "" ? msg.text : key;
+      const text = typeof msg.text === "string" && msg.text !== "" ? msg.text : key;
       if (typeof text !== "string" || text === "") {
-        throw new Error(
-          "input_keyboard char needs `text` (or a `key` to fall back to)"
-        );
+        throw new Error("input_keyboard char needs `text` (or a `key` to fall back to)");
       }
       return page.keyboard.insertText(text);
     }
@@ -430,10 +414,8 @@ export async function applyInput(page, msg) {
 // must be invalidated before viewer control is applied.
 function mutatesPage(msg) {
   return (
-    (msg.type === "input_mouse" &&
-      ["mousePressed", "mouseWheel"].includes(msg.eventType)) ||
-    (msg.type === "input_keyboard" &&
-      ["keyDown", "char"].includes(msg.eventType))
+    (msg.type === "input_mouse" && ["mousePressed", "mouseWheel"].includes(msg.eventType)) ||
+    (msg.type === "input_keyboard" && ["keyDown", "char"].includes(msg.eventType))
   );
 }
 
@@ -503,12 +485,7 @@ export function budgetedResize(width, height, requested) {
 
 export async function startStreamServer(
   state,
-  {
-    log = () => {},
-    h264Config = null,
-    resize = null,
-    onActivity = () => {},
-  } = {}
+  { log = () => {}, h264Config = null, resize = null, onActivity = () => {} } = {},
 ) {
   const token = crypto.randomBytes(24).toString("hex");
   const clients = new Set();
@@ -577,26 +554,15 @@ export async function startStreamServer(
   // number; then a proper WS close (2-byte big-endian code + UTF-8 reason).
   function closeClient(client, code, reason) {
     try {
-      sendText(client, {
-        type: "status",
-        source: "alien",
-        error: reason,
-        code,
-      });
+      sendText(client, { type: "status", source: "alien", error: reason, code });
       const body = Buffer.from(reason, "utf8").subarray(0, 123);
       const payload = Buffer.alloc(2 + body.length);
       payload.writeUInt16BE(code, 0);
       body.copy(payload, 2);
       client.sock.write(encodeControlFrame(0x8, payload));
-    } catch {
-      /* socket already gone */
-    }
+    } catch { /* socket already gone */ }
     clients.delete(client);
-    try {
-      client.sock.end();
-    } catch {
-      /* already closed */
-    }
+    try { client.sock.end(); } catch { /* already closed */ }
   }
 
   function broadcastStatus(obj) {
@@ -621,13 +587,8 @@ export async function startStreamServer(
 
   function inputFocus(payload) {
     if (suspended > 0) return;
-    const next =
-      payload && typeof payload === "object" ? payload : { editable: false };
-    if (
-      lastInputFocus &&
-      JSON.stringify(lastInputFocus) === JSON.stringify(next)
-    )
-      return;
+    const next = payload && typeof payload === "object" ? payload : { editable: false };
+    if (lastInputFocus && JSON.stringify(lastInputFocus) === JSON.stringify(next)) return;
     lastInputFocus = next;
     broadcastStatus({ type: "status", source: "alien", input_focus: next });
   }
@@ -654,41 +615,26 @@ export async function startStreamServer(
 
   async function readInputFocus() {
     const page = state.current;
-    if (!page || page.isClosed?.() || typeof page.frames !== "function")
-      return null;
+    if (!page || page.isClosed?.() || typeof page.frames !== "function") return null;
     for (const frame of page.frames()) {
       try {
         const found = await frame.evaluate(() => {
           if (!document.hasFocus()) return null;
           const NON_TEXT = new Set([
-            "button",
-            "submit",
-            "reset",
-            "image",
-            "checkbox",
-            "radio",
-            "range",
-            "color",
-            "file",
-            "hidden",
+            "button", "submit", "reset", "image", "checkbox", "radio",
+            "range", "color", "file", "hidden",
           ]);
           let el = document.activeElement;
-          while (el && el.shadowRoot && el.shadowRoot.activeElement)
-            el = el.shadowRoot.activeElement;
-          if (!el || el === document.body || el === document.documentElement)
-            return null;
+          while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+          if (!el || el === document.body || el === document.documentElement) return null;
           const tag = (el.tagName || "").toLowerCase();
-          const type =
-            tag === "input"
-              ? (el.getAttribute("type") || "text").toLowerCase()
-              : null;
+          const type = tag === "input" ? (el.getAttribute("type") || "text").toLowerCase() : null;
           const editable =
             tag === "textarea" ||
             el.isContentEditable === true ||
             (tag === "input" && !NON_TEXT.has(type));
           if (!editable) return null;
-          const inputmode =
-            (el.getAttribute && el.getAttribute("inputmode")) || null;
+          const inputmode = (el.getAttribute && el.getAttribute("inputmode")) || null;
           return {
             editable: true,
             ...(type ? { type } : {}),
@@ -734,11 +680,7 @@ export async function startStreamServer(
     const sameUrl = lastNav?.url === url;
     const fresh = Date.now() - navFlagsAt < NAV_FLAGS_MAX_AGE_MS;
     if (sameUrl && navFlagsHadSession && fresh) {
-      return {
-        url,
-        canGoBack: lastNav.canGoBack,
-        canGoForward: lastNav.canGoForward,
-      };
+      return { url, canGoBack: lastNav.canGoBack, canGoForward: lastNav.canGoForward };
     }
     try {
       const h = await cdp.send("Page.getNavigationHistory");
@@ -811,7 +753,7 @@ export async function startStreamServer(
         data: f.data,
         metadata: f.metadata,
         ...(f.refinement ? { refinement: true } : {}),
-      })
+      }),
     );
     return f._text;
   }
@@ -827,8 +769,8 @@ export async function startStreamServer(
           metadata: f.metadata,
           ...(f.refinement ? { refinement: true } : {}),
         },
-        Buffer.from(f.data, "base64")
-      )
+        Buffer.from(f.data, "base64"),
+      ),
     );
     return f._bin;
   }
@@ -853,9 +795,7 @@ export async function startStreamServer(
     }
     const frame = client.pending;
     client.pending = null;
-    const ok = client.sock.write(
-      client.binary ? frameBinary(frame) : frameText(frame)
-    );
+    const ok = client.sock.write(client.binary ? frameBinary(frame) : frameText(frame));
     // The write IS the handoff — `ok` false is backpressure, not refusal: the
     // payload was accepted and will go out.
     handedOn(frame);
@@ -884,14 +824,7 @@ export async function startStreamServer(
   /** Stage one captured frame for every jpeg viewer. Returns it so the encoder
    *  feed that follows shares its handoff latch. */
   function deliverFrame({ data, metadata, refinement = false }) {
-    const frame = {
-      seq: ++frameSeq,
-      data,
-      metadata,
-      refinement,
-      bytes: b64Bytes(data),
-      out: false,
-    };
+    const frame = { seq: ++frameSeq, data, metadata, refinement, bytes: b64Bytes(data), out: false };
     for (const client of clients) {
       if (client.codec !== "jpeg") continue;
       // Replacing an undelivered frame is the latest-wins behaviour working as
@@ -973,8 +906,8 @@ export async function startStreamServer(
               codec: "h264",
               metadata: streamScale > 1 ? scaledMetadata() : lastMetadata,
             },
-            au
-          )
+            au,
+          ),
         );
       }
       client.sock.write(msg);
@@ -996,9 +929,7 @@ export async function startStreamServer(
   // ensures must not double-spawn ffmpeg.
   let annexBChain = Promise.resolve();
   function ensureAnnexBEncoder(opts) {
-    annexBChain = annexBChain
-      .then(() => ensureAnnexBEncoderNow(opts))
-      .catch(() => {});
+    annexBChain = annexBChain.then(() => ensureAnnexBEncoderNow(opts)).catch(() => {});
     return annexBChain;
   }
 
@@ -1048,11 +979,7 @@ export async function startStreamServer(
         if (client.strict) {
           // Asked for h264 and nothing else: say so and close, rather than
           // serve a format the client did not agree to.
-          closeClient(
-            client,
-            CLOSE_CODEC_UNAVAILABLE,
-            `h264 unavailable: ${why}`
-          );
+          closeClient(client, CLOSE_CODEC_UNAVAILABLE, `h264 unavailable: ${why}`);
           continue;
         }
         client.codec = "jpeg";
@@ -1073,15 +1000,7 @@ export async function startStreamServer(
       format: "jpeg",
       quality,
       ...(vp
-        ? {
-            clip: {
-              x: 0,
-              y: 0,
-              width: Math.round(vp.width),
-              height: Math.round(vp.height),
-              scale: 1,
-            },
-          }
+        ? { clip: { x: 0, y: 0, width: Math.round(vp.width), height: Math.round(vp.height), scale: 1 } }
         : {}),
     });
   }
@@ -1113,9 +1032,7 @@ export async function startStreamServer(
   function scaledMetadata() {
     return {
       ...(lastMetadata ?? {}),
-      ...(streamDims
-        ? { deviceWidth: streamDims.width, deviceHeight: streamDims.height }
-        : {}),
+      ...(streamDims ? { deviceWidth: streamDims.width, deviceHeight: streamDims.height } : {}),
     };
   }
 
@@ -1127,12 +1044,8 @@ export async function startStreamServer(
         scaledDirty = false;
         const shot = await captureShot(session, STREAM_QUALITY);
         if (closed || suspended > 0 || session !== cdp) return;
-        const frame = deliverFrame({
-          data: shot.data,
-          metadata: scaledMetadata(),
-        });
-        if (encoderSinks.size > 0)
-          feedEncoders(Buffer.from(shot.data, "base64"), 1, frame);
+        const frame = deliverFrame({ data: shot.data, metadata: scaledMetadata() });
+        if (encoderSinks.size > 0) feedEncoders(Buffer.from(shot.data, "base64"), 1, frame);
       }
     } catch {
       /* navigating/detached — the next damage tick retries */
@@ -1142,8 +1055,7 @@ export async function startStreamServer(
       // still set (its session lost the cast mid-flight) — re-dispatch for
       // the live session, or the new tab's first damage tick would sit
       // stranded behind the stale busy flag until the next tick.
-      if (scaledDirty && !closed && cdp && cdp !== session)
-        void pumpScaledCapture(cdp);
+      if (scaledDirty && !closed && cdp && cdp !== session) void pumpScaledCapture(cdp);
     }
   }
 
@@ -1157,24 +1069,16 @@ export async function startStreamServer(
     let got = null;
     for (let attempt = 0; attempt < 20; attempt++) {
       const page = state.current;
-      if (!page || page.isClosed?.() || typeof page.evaluate !== "function")
-        return got;
+      if (!page || page.isClosed?.() || typeof page.evaluate !== "function") return got;
       let next = null;
       try {
-        next = await page.evaluate(() => ({
-          width: window.innerWidth,
-          height: window.innerHeight,
-        }));
+        next = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
       } catch {
         return got;
       }
       if (!next) return got;
       got = next;
-      if (
-        !expected ||
-        (got.width === expected.width && got.height === expected.height)
-      )
-        return got;
+      if (!expected || (got.width === expected.width && got.height === expected.height)) return got;
       await new Promise((r) => setTimeout(r, 50));
     }
     return got;
@@ -1220,22 +1124,10 @@ export async function startStreamServer(
     // 390×844 on goto until a clear was sent). Sent only when this session
     // applied one, so never-scaled sessions still see zero Emulation traffic.
     if (hadOverride) {
-      try {
-        await session.send("Emulation.clearDeviceMetricsOverride");
-      } catch {
-        /* page gone */
-      }
+      try { await session.send("Emulation.clearDeviceMetricsOverride"); } catch { /* page gone */ }
     }
-    try {
-      await session.send("Page.stopScreencast");
-    } catch {
-      /* page gone */
-    }
-    try {
-      await session.detach();
-    } catch {
-      /* already detached */
-    }
+    try { await session.send("Page.stopScreencast"); } catch { /* page gone */ }
+    try { await session.detach(); } catch { /* already detached */ }
   }
 
   async function startScreencastNow() {
@@ -1254,20 +1146,14 @@ export async function startStreamServer(
     // The world may have moved during the attach (close, retarget to another
     // tab, a newer start/stop): discard the session — detach, never install.
     if (closed || epoch !== castEpoch || state.current !== page) {
-      try {
-        await session.detach();
-      } catch {
-        /* already gone */
-      }
+      try { await session.detach(); } catch { /* already gone */ }
       return;
     }
     cdp = session;
     cdpPage = page;
     session.on("Page.screencastFrame", (ev) => {
       // Ack ALWAYS (even suspended/stale) or Chrome stops sending frames.
-      session
-        .send("Page.screencastFrameAck", { sessionId: ev.sessionId })
-        .catch(() => {});
+      session.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
       cap.in(b64Bytes(ev.data));
       if (suspended > 0 || session !== cdp) return;
       lastFrameAt = Date.now();
@@ -1282,8 +1168,7 @@ export async function startStreamServer(
         return;
       }
       const frame = deliverFrame({ data: ev.data, metadata: ev.metadata });
-      if (encoderSinks.size > 0)
-        feedEncoders(Buffer.from(ev.data, "base64"), 1, frame);
+      if (encoderSinks.size > 0) feedEncoders(Buffer.from(ev.data, "base64"), 1, frame);
     });
     // A scaled session's device-metrics override lives on THIS session, so
     // it spans exactly the life of the capture: a retarget applies it to the
@@ -1302,11 +1187,7 @@ export async function startStreamServer(
         });
         castOverride = true;
       } catch (err) {
-        log(
-          `stream: device-scale override failed, continuing at 1x: ${
-            err.message || err
-          }`
-        );
+        log(`stream: device-scale override failed, continuing at 1x: ${err.message || err}`);
         streamScale = 1;
       }
     }
@@ -1385,11 +1266,8 @@ export async function startStreamServer(
       // arrives, so a single write would sit in ffmpeg's parser until the
       // next repaint. Copy #1 flushes whatever was stuck AND gets encoded
       // (flushed by copy #2); the stuck copy #2 is identical, so no loss.
-      if (encoderSinks.size > 0)
-        feedEncoders(Buffer.from(shot.data, "base64"), 2, frame);
-    } catch {
-      /* navigating/closed — the next screencast frame rearms */
-    }
+      if (encoderSinks.size > 0) feedEncoders(Buffer.from(shot.data, "base64"), 2, frame);
+    } catch { /* navigating/closed — the next screencast frame rearms */ }
   }, REFINE_POLL_MS);
   refine.unref?.();
 
@@ -1397,14 +1275,7 @@ export async function startStreamServer(
   // always means the picture is wrong, whatever the cause (dead CDP session,
   // a screencast Chrome stopped feeding, an encoder that never started).
   const watchdog = setInterval(() => {
-    if (
-      closed ||
-      WATCHDOG_MS <= 0 ||
-      suspended > 0 ||
-      clients.size === 0 ||
-      reshaping
-    )
-      return;
+    if (closed || WATCHDOG_MS <= 0 || suspended > 0 || clients.size === 0 || reshaping) return;
     const page = state.current;
     if (!page || page.isClosed?.()) return;
     if (cdp && Date.now() - lastFrameAt < WATCHDOG_MS) return;
@@ -1412,9 +1283,7 @@ export async function startStreamServer(
       void startScreencast();
       return;
     }
-    log(
-      `stream: no frames for ${WATCHDOG_MS}ms with ${clients.size} viewer(s) — restarting screencast`
-    );
+    log(`stream: no frames for ${WATCHDOG_MS}ms with ${clients.size} viewer(s) — restarting screencast`);
     void stopScreencast().then(() => startScreencast());
   }, Math.max(1000, Math.floor(WATCHDOG_MS / 3)));
   watchdog.unref?.();
@@ -1433,10 +1302,7 @@ export async function startStreamServer(
       }
       await webrtc.signal(client, msg);
     } catch (err) {
-      sendText(client, {
-        type: "webrtc_error",
-        error: String(err?.message || err),
-      });
+      sendText(client, { type: "webrtc_error", error: String(err?.message || err) });
     }
   }
 
@@ -1449,12 +1315,8 @@ export async function startStreamServer(
         return;
       }
       try {
-        viewerHtml ??= await fs.readFile(
-          new URL("./stream-viewer.html", import.meta.url)
-        );
-        res
-          .writeHead(200, { "content-type": "text/html; charset=utf-8" })
-          .end(viewerHtml);
+        viewerHtml ??= await fs.readFile(new URL("./stream-viewer.html", import.meta.url));
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(viewerHtml);
       } catch {
         res.writeHead(404).end();
       }
@@ -1470,14 +1332,11 @@ export async function startStreamServer(
       socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
-    const accept = crypto
-      .createHash("sha1")
-      .update(key + WS_MAGIC)
-      .digest("base64");
+    const accept = crypto.createHash("sha1").update(key + WS_MAGIC).digest("base64");
     socket.write(
       "HTTP/1.1 101 Switching Protocols\r\n" +
         "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
-        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
     );
 
     const client = {
@@ -1500,7 +1359,7 @@ export async function startStreamServer(
       closeClient(
         client,
         CLOSE_CODEC_UNAVAILABLE,
-        "h264 requested with strict=1 but this host has no encoder — run `agent-id-browser install-codecs`"
+        "h264 requested with strict=1 but this host has no encoder — run `agent-id-browser install-codecs`",
       );
       return;
     }
@@ -1520,18 +1379,11 @@ export async function startStreamServer(
       }
       if (opcode !== 0x1) return;
       let msg;
-      try {
-        msg = JSON.parse(payload.toString("utf8"));
-      } catch {
-        return;
-      }
+      try { msg = JSON.parse(payload.toString("utf8")); } catch { return; }
       // Flow-control messages stay live even during a suspend blackout — an
       // ack for a pre-suspend frame must still release the pipeline.
       if (msg.type === "ack") {
-        if (
-          client.awaitingAck !== null &&
-          Number(msg.seq) >= client.awaitingAck
-        ) {
+        if (client.awaitingAck !== null && Number(msg.seq) >= client.awaitingAck) {
           client.awaitingAck = null;
           pump(client);
         }
@@ -1544,8 +1396,7 @@ export async function startStreamServer(
         }
         if (msg.maxFps !== undefined) {
           const n = Number(msg.maxFps);
-          if (Number.isFinite(n))
-            client.maxFps = Math.min(120, Math.max(0, Math.floor(n)));
+          if (Number.isFinite(n)) client.maxFps = Math.min(120, Math.max(0, Math.floor(n)));
         }
         pump(client);
         return;
@@ -1576,14 +1427,10 @@ export async function startStreamServer(
         // request then passes the geometry policy (axis clamps, integer
         // scale, axis + pixel budgets — see budgetedResize).
         const requestedScale = Number(msg.scale);
-        const {
-          width: w,
-          height: h,
-          scale,
-        } = budgetedResize(
+        const { width: w, height: h, scale } = budgetedResize(
           width,
           height,
-          Number.isFinite(requestedScale) ? requestedScale : SCALE_MIN
+          Number.isFinite(requestedScale) ? requestedScale : SCALE_MIN,
         );
         inputChain = inputChain
           .then(async () => {
@@ -1629,12 +1476,7 @@ export async function startStreamServer(
               // downscaled out of agreement with the refinement pass — grow
               // into fresh caps. Resizes within the caps keep the classic
               // no-restart behavior.
-              if (
-                cdp &&
-                castCaps &&
-                (streamView.width > castCaps.width ||
-                  streamView.height > castCaps.height)
-              ) {
+              if (cdp && castCaps && (streamView.width > castCaps.width || streamView.height > castCaps.height)) {
                 await stopScreencast();
                 await startScreencast();
               }
@@ -1672,8 +1514,7 @@ export async function startStreamServer(
           });
         return;
       }
-      if (mutatesPage(msg))
-        state.invalidateRefs?.("owner used live browser control");
+      if (mutatesPage(msg)) state.invalidateRefs?.("owner used live browser control");
       // Queue, don't fire-and-forget: the suspend/page checks re-run at apply
       // time so a fill starting mid-queue still blacks out the queued tail.
       inputChain = inputChain
@@ -1691,10 +1532,8 @@ export async function startStreamServer(
               // measures wrong would look exactly like the original bug.
               log(
                 pointerCal
-                  ? `stream: pointer calibration measured fx=${pointerCal.fx.toFixed(
-                      4
-                    )} fy=${pointerCal.fy.toFixed(4)}, correcting input`
-                  : "stream: pointer calibration measured identity, no correction"
+                  ? `stream: pointer calibration measured fx=${pointerCal.fx.toFixed(4)} fy=${pointerCal.fy.toFixed(4)}, correcting input`
+                  : "stream: pointer calibration measured identity, no correction",
               );
             }
             msg = withPointerCal(msg, pointerCal);

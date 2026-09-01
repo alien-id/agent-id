@@ -15,10 +15,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
-import {
-  createProxy,
-  PROXY_AUTH_HEADER,
-} from "../plugins/agent-id-proxy/lib/proxy.mjs";
+import { createProxy, PROXY_AUTH_HEADER } from "../plugins/agent-id-proxy/lib/proxy.mjs";
 
 const TOKEN = "s3cret-proxy-token";
 
@@ -65,11 +62,7 @@ function rawConnect({ port, target, headers = {}, timeoutMs = 4000 }) {
       if (settled) return;
       settled = true;
       socket.destroy();
-      reject(
-        new Error(
-          `timeout waiting for a CONNECT response (got: ${JSON.stringify(buf)})`
-        )
-      );
+      reject(new Error(`timeout waiting for a CONNECT response (got: ${JSON.stringify(buf)})`));
     }, timeoutMs);
     const settle = () => {
       if (settled) return;
@@ -116,9 +109,7 @@ async function makeVault(stateDir) {
 }
 
 function closeServer(server) {
-  return new Promise((resolve) =>
-    server ? server.close(() => resolve()) : resolve()
-  );
+  return new Promise((resolve) => (server ? server.close(() => resolve()) : resolve()));
 }
 
 async function readAccessLog(logFile) {
@@ -236,10 +227,7 @@ describe("CONNECT: SSRF guard", () => {
   });
 
   it("refuses a link-local literal (cloud metadata) even with private hosts allowed", async () => {
-    const r = await rawConnect({
-      port: openPort,
-      target: "169.254.169.254:80",
-    });
+    const r = await rawConnect({ port: openPort, target: "169.254.169.254:80" });
     assert.equal(r.statusLine, "HTTP/1.1 403 Forbidden");
     assert.match(r.head, /X-AgentVault-Proxy-Error: upstream_blocked/i);
     assert.equal(await r.closedSoon(), true);
@@ -287,9 +275,7 @@ describe("CONNECT: self-reopen after an idle lock", () => {
   let reopenCalls;
 
   before(async () => {
-    stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-connect-reopen-")
-    );
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-connect-reopen-"));
     upstream = await startTcpUpstream();
     reopenCalls = 0;
     proxy = createProxy({
@@ -336,9 +322,7 @@ describe("CONNECT: self-reopen never bypasses the control plane", () => {
   let reopenCalls;
 
   before(async () => {
-    stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-connect-consent-")
-    );
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-connect-consent-"));
     upstream = await startTcpUpstream();
     reopenCalls = 0;
     proxy = createProxy({
@@ -346,10 +330,7 @@ describe("CONNECT: self-reopen never bypasses the control plane", () => {
       stateDir,
       logPath: path.join(stateDir, "proxy.log"),
       authToken: TOKEN,
-      control: {
-        listen: { port: 0, host: "127.0.0.1" },
-        approvalTimeoutMs: 1000,
-      },
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 1000 },
       reopenVault: async () => {
         reopenCalls += 1;
         return openVault({ stateDir, passphrase: "p" });
@@ -375,11 +356,7 @@ describe("CONNECT: self-reopen never bypasses the control plane", () => {
     });
     assert.equal(r.statusLine, "HTTP/1.1 401 Vault Locked");
     assert.match(r.head, /X-AgentVault-Proxy-Error: vault_locked/i);
-    assert.equal(
-      reopenCalls,
-      0,
-      "the control plane owns the unlock — no self-reopen"
-    );
+    assert.equal(reopenCalls, 0, "the control plane owns the unlock — no self-reopen");
     assert.equal(proxy.locked, true);
     assert.equal(upstream.state.connections, before);
   });
@@ -395,9 +372,7 @@ describe("CONNECT: a malformed target is refused, not fatal", () => {
   let proxyPort;
 
   before(async () => {
-    stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-connect-malformed-")
-    );
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-connect-malformed-"));
     upstream = await startTcpUpstream();
     proxy = createProxy({
       vault: await makeVault(stateDir),
@@ -413,13 +388,7 @@ describe("CONNECT: a malformed target is refused, not fatal", () => {
     if (stateDir) await fs.rm(stateDir, { recursive: true, force: true });
   });
 
-  for (const target of [
-    "bad-target",
-    "example.com:not-a-port",
-    "example.com:0",
-    ":443",
-    "",
-  ]) {
+  for (const target of ["bad-target", "example.com:not-a-port", "example.com:0", ":443", ""]) {
     it(`refuses ${JSON.stringify(target)} and keeps serving`, async () => {
       const before = upstream.state.connections;
       const r = await rawConnect({ port: proxyPort, target });
@@ -443,9 +412,7 @@ describe("CONNECT: a malformed target is refused, not fatal", () => {
 // every teardown (and every operator reading the log after a stop) relies on.
 describe("close() settles the access log", () => {
   it("has the refusal on disk by the time close() resolves", async () => {
-    const stateDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "proxy-connect-quiesce-")
-    );
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxy-connect-quiesce-"));
     const logFile = path.join(stateDir, "proxy.log");
     const proxy = createProxy({
       vault: await makeVault(stateDir),
@@ -453,20 +420,13 @@ describe("close() settles the access log", () => {
     });
     const proxyPort = (await proxy.listen()).port;
     try {
-      const r = await rawConnect({
-        port: proxyPort,
-        target: "169.254.169.254:80",
-      });
+      const r = await rawConnect({ port: proxyPort, target: "169.254.169.254:80" });
       assert.equal(r.statusLine, "HTTP/1.1 403 Forbidden");
       await proxy.close();
       const blocked = (await readAccessLog(logFile)).filter(
-        (e) => e.error === "upstream_blocked" && e.method === "CONNECT"
+        (e) => e.error === "upstream_blocked" && e.method === "CONNECT",
       );
-      assert.equal(
-        blocked.length,
-        1,
-        "close() must not leave an access-log write in flight"
-      );
+      assert.equal(blocked.length, 1, "close() must not leave an access-log write in flight");
     } finally {
       destroyOpenSockets();
       await proxy.close();

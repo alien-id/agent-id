@@ -25,10 +25,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { once } from "node:events";
 
-import {
-  resolvePatchright,
-  launchContext,
-} from "../plugins/agent-id-browser/lib/launch.mjs";
+import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
 import {
   startStreamServer,
   makeFrameParser,
@@ -42,17 +39,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // A page that repaints continuously (screencast damage); refinement needs a
 // QUIET page, so tests navigate to the static page when they want it.
-const ANIMATED =
-  "data:text/html," +
-  encodeURIComponent(`<!doctype html>
+const ANIMATED = "data:text/html," + encodeURIComponent(`<!doctype html>
 <title>scale probe</title><body style="margin:0">
 <div id="t" style="font:20px monospace">tick</div>
 <script>
   setInterval(() => { t.textContent = Date.now() + " " + Math.random(); }, 30);
 </script>`);
-const STATIC =
-  "data:text/html," +
-  encodeURIComponent(`<!doctype html>
+const STATIC = "data:text/html," + encodeURIComponent(`<!doctype html>
 <title>quiet probe</title><body style="margin:0"><p style="font:20px monospace">still</p>`);
 
 // ── jpeg dimensions (SOF scan) ───────────────────────────────────────────────
@@ -61,20 +54,10 @@ function jpegDims(b64) {
   const buf = Buffer.from(b64, "base64");
   let i = 2;
   while (i < buf.length - 9) {
-    if (buf[i] !== 0xff) {
-      i++;
-      continue;
-    }
+    if (buf[i] !== 0xff) { i++; continue; }
     const marker = buf[i + 1];
-    if (
-      marker >= 0xc0 &&
-      marker <= 0xcf &&
-      ![0xc4, 0xc8, 0xcc].includes(marker)
-    ) {
-      return {
-        height: buf.readUInt16BE(i + 5),
-        width: buf.readUInt16BE(i + 7),
-      };
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+      return { height: buf.readUInt16BE(i + 5), width: buf.readUInt16BE(i + 7) };
     }
     i += 2 + buf.readUInt16BE(i + 2);
   }
@@ -87,23 +70,13 @@ async function resizeWindowOnce(ctx, page, width, height) {
   const cdp = await ctx.newCDPSession(page);
   try {
     const { windowId } = await cdp.send("Browser.getWindowForTarget");
-    await cdp
-      .send("Browser.setWindowBounds", {
-        windowId,
-        bounds: { windowState: "normal" },
-      })
-      .catch(() => {});
-    await cdp.send("Browser.setWindowBounds", {
-      windowId,
-      bounds: { width, height },
-    });
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }).catch(() => {});
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { width, height } });
   } finally {
     await cdp.detach().catch(() => {});
   }
   await sleep(250);
-  return page
-    .evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
-    .catch(() => null);
+  return page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })).catch(() => null);
 }
 
 async function resizeToViewport(ctx, state, width, height) {
@@ -112,9 +85,7 @@ async function resizeToViewport(ctx, state, width, height) {
   const first = await resizeWindowOnce(ctx, page, width, height);
   const second = chromeCompensatedBounds({ width, height }, first);
   if (!second) return first;
-  return (
-    (await resizeWindowOnce(ctx, page, second.width, second.height)) ?? first
-  );
+  return (await resizeWindowOnce(ctx, page, second.width, second.height)) ?? first;
 }
 
 // ── minimal WS client (masked frames, RFC 6455) ──────────────────────────────
@@ -141,7 +112,7 @@ async function connectStream(port, token, params = "") {
   const key = crypto.randomBytes(16).toString("base64");
   sock.write(
     `GET /?token=${token}${params} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n` +
-      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
+      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
   );
   const queue = [];
   const waiters = [];
@@ -169,14 +140,8 @@ async function connectStream(port, token, params = "") {
     async nextRaw(timeoutMs = 5000) {
       if (queue.length) return queue.shift();
       return new Promise((resolve, reject) => {
-        const t = setTimeout(
-          () => reject(new Error("timed out waiting for a ws message")),
-          timeoutMs
-        );
-        waiters.push((m) => {
-          clearTimeout(t);
-          resolve(m);
-        });
+        const t = setTimeout(() => reject(new Error("timed out waiting for a ws message")), timeoutMs);
+        waiters.push((m) => { clearTimeout(t); resolve(m); });
       });
     },
     async next(timeoutMs = 5000) {
@@ -198,11 +163,7 @@ async function connectStream(port, token, params = "") {
 // timeout). Returns every frame seen, tagged with its decoded dimensions.
 async function collectFrames(client, { want, dims, timeoutMs = 15000 }) {
   const frames = [];
-  const matches = () =>
-    frames.filter(
-      (f) =>
-        f.dims && f.dims.width === dims.width && f.dims.height === dims.height
-    );
+  const matches = () => frames.filter((f) => f.dims && f.dims.width === dims.width && f.dims.height === dims.height);
   const deadline = Date.now() + timeoutMs;
   while (matches().length < want && Date.now() < deadline) {
     let msg;
@@ -212,11 +173,7 @@ async function collectFrames(client, { want, dims, timeoutMs = 15000 }) {
       break;
     }
     if (msg.type !== "frame") continue;
-    frames.push({
-      refinement: !!msg.refinement,
-      metadata: msg.metadata,
-      dims: jpegDims(msg.data),
-    });
+    frames.push({ refinement: !!msg.refinement, metadata: msg.metadata, dims: jpegDims(msg.data) });
   }
   return frames;
 }
@@ -225,24 +182,14 @@ async function collectFrames(client, { want, dims, timeoutMs = 15000 }) {
 // late). The invariant is: once the first frame at the NEW dimensions
 // arrives, every later frame has exactly those dimensions.
 function assertStableAfterSwitch(frames, dims, label) {
-  const at = frames.findIndex(
-    (f) =>
-      f.dims && f.dims.width === dims.width && f.dims.height === dims.height
-  );
-  const seen = frames
-    .map((f) => (f.dims ? `${f.dims.width}x${f.dims.height}` : "?"))
-    .join(",");
-  assert.ok(
-    at >= 0,
-    `${label}: at least one ${dims.width}×${dims.height} frame arrived (saw: ${
-      seen || "none"
-    })`
-  );
+  const at = frames.findIndex((f) => f.dims && f.dims.width === dims.width && f.dims.height === dims.height);
+  const seen = frames.map((f) => (f.dims ? `${f.dims.width}x${f.dims.height}` : "?")).join(",");
+  assert.ok(at >= 0, `${label}: at least one ${dims.width}×${dims.height} frame arrived (saw: ${seen || "none"})`);
   for (const f of frames.slice(at)) {
     assert.deepEqual(
       { width: f.dims.width, height: f.dims.height },
       dims,
-      `${label}: no dimension flips after the switch (motion and refinement identical)`
+      `${label}: no dimension flips after the switch (motion and refinement identical)`,
     );
   }
 }
@@ -266,14 +213,7 @@ test(
       stream = await startStreamServer(state, {
         log: () => {},
         resize: (w, h) => resizeToViewport(ctx, state, w, h),
-        ...(encoder
-          ? {
-              h264Config: {
-                ffmpegPath: process.env.AGENT_ID_FFMPEG || null,
-                encoder,
-              },
-            }
-          : {}),
+        ...(encoder ? { h264Config: { ffmpegPath: process.env.AGENT_ID_FFMPEG || null, encoder } } : {}),
       });
       client = await connectStream(stream.port, stream.token);
       await client.next(); // greeting
@@ -292,11 +232,7 @@ test(
       // pins the viewport to the request. This assert fails without the
       // remeasure.
       assert.deepEqual(status.viewport, { width: 390, height: 844 });
-      assert.equal(
-        await pageA.evaluate(() => devicePixelRatio),
-        2,
-        "the override is live on the page"
-      );
+      assert.equal(await pageA.evaluate(() => devicePixelRatio), 2, "the override is live on the page");
 
       // Overlapping joins while scaled: two more viewers connect
       // concurrently. Start/stop are serialized, so exactly one cast session
@@ -313,16 +249,8 @@ test(
         // device-pixel metadata frame doubles the viewer's tap coordinates.
         for (const f of frames) {
           if (!f.dims || f.dims.width !== want.width) continue;
-          assert.equal(
-            f.metadata.deviceWidth,
-            390,
-            "metadata stays CSS px on every frame"
-          );
-          assert.equal(
-            f.metadata.deviceHeight,
-            844,
-            "metadata stays CSS px on every frame"
-          );
+          assert.equal(f.metadata.deviceWidth, 390, "metadata stays CSS px on every frame");
+          assert.equal(f.metadata.deviceHeight, 844, "metadata stays CSS px on every frame");
         }
       };
       const motion = await collectFrames(client, { want: 4, dims: scaled });
@@ -334,11 +262,7 @@ test(
       // shipping device-pixel metadata (780×1688) on every chunk while the
       // jpeg path was already normalized. Self-skips with no encoder.
       if (encoder) {
-        const h264 = await connectStream(
-          stream.port,
-          stream.token,
-          "&codec=h264"
-        );
+        const h264 = await connectStream(stream.port, stream.token, "&codec=h264");
         let h264Frames = 0;
         const h264Deadline = Date.now() + 15000;
         while (h264Frames < 10 && Date.now() < h264Deadline) {
@@ -351,52 +275,29 @@ test(
           if (m.opcode !== 0x2) continue; // join/status text frames
           const { header } = decodeFrameBinary(m.payload);
           if (header.codec !== "h264") continue;
-          assert.equal(
-            header.metadata.deviceWidth,
-            390,
-            "h264 envelope metadata is CSS width"
-          );
-          assert.equal(
-            header.metadata.deviceHeight,
-            844,
-            "h264 envelope metadata is CSS height"
-          );
+          assert.equal(header.metadata.deviceWidth, 390, "h264 envelope metadata is CSS width");
+          assert.equal(header.metadata.deviceHeight, 844, "h264 envelope metadata is CSS height");
           h264Frames++;
         }
-        assert.ok(
-          h264Frames >= 10,
-          `h264 chunks flowed at scale (got ${h264Frames})`
-        );
+        assert.ok(h264Frames >= 10, `h264 chunks flowed at scale (got ${h264Frames})`);
         h264.close();
       }
 
       // Quiet page → the refinement path must produce the SAME dimensions.
       await pageA.goto(STATIC);
-      const refined = await collectFrames(client, {
-        want: 1,
-        dims: scaled,
-        timeoutMs: 10000,
-      }).then(async (frames) => {
-        // keep collecting until a refinement-flagged frame shows up
-        const deadline = Date.now() + 10000;
-        while (!frames.some((f) => f.refinement) && Date.now() < deadline) {
-          frames.push(
-            ...(await collectFrames(client, {
-              want: 1,
-              dims: scaled,
-              timeoutMs: 2000,
-            }))
-          );
-        }
-        return frames;
-      });
+      const refined = await collectFrames(client, { want: 1, dims: scaled, timeoutMs: 10000 }).then(
+        async (frames) => {
+          // keep collecting until a refinement-flagged frame shows up
+          const deadline = Date.now() + 10000;
+          while (!frames.some((f) => f.refinement) && Date.now() < deadline) {
+            frames.push(...(await collectFrames(client, { want: 1, dims: scaled, timeoutMs: 2000 })));
+          }
+          return frames;
+        },
+      );
       const refinement = refined.find((f) => f.refinement);
       assert.ok(refinement, "a refinement frame arrived on the quiet page");
-      assert.deepEqual(
-        refinement.dims,
-        scaled,
-        "refinement pixels match motion pixels exactly"
-      );
+      assert.deepEqual(refinement.dims, scaled, "refinement pixels match motion pixels exactly");
       cssOf(refined, scaled);
 
       // ── tab switch: the override follows the cast to the new tab ─────────
@@ -412,15 +313,8 @@ test(
         dprB = await pageB.evaluate(() => devicePixelRatio);
       }
       assert.equal(dprB, 2, "the new tab gets the override");
-      assert.equal(
-        await pageA.evaluate(() => devicePixelRatio),
-        1,
-        "the old tab reverts (override died with its session)"
-      );
-      const afterSwitch = await collectFrames(client, {
-        want: 3,
-        dims: scaled,
-      });
+      assert.equal(await pageA.evaluate(() => devicePixelRatio), 1, "the old tab reverts (override died with its session)");
+      const afterSwitch = await collectFrames(client, { want: 3, dims: scaled });
       assertStableAfterSwitch(afterSwitch, scaled, "post-retarget");
       cssOf(afterSwitch, scaled);
       extraA.close();
@@ -434,20 +328,9 @@ test(
       }
       assert.equal(status.resized.scale, 1);
       assert.ok(status.viewport, "the 1× resize still reports a viewport");
-      assert.equal(
-        await pageB.evaluate(() => devicePixelRatio),
-        1,
-        "1× drops the override"
-      );
-      const flat = {
-        width: status.viewport.width,
-        height: status.viewport.height,
-      };
-      assert.notDeepEqual(
-        flat,
-        scaled,
-        "the 1× viewport is not the scaled pixel size"
-      );
+      assert.equal(await pageB.evaluate(() => devicePixelRatio), 1, "1× drops the override");
+      const flat = { width: status.viewport.width, height: status.viewport.height };
+      assert.notDeepEqual(flat, scaled, "the 1× viewport is not the scaled pixel size");
       const flatFrames = await collectFrames(client, { want: 2, dims: flat });
       assertStableAfterSwitch(flatFrames, flat, "back-to-1x");
 
@@ -464,59 +347,27 @@ test(
         if (status.resized) break;
       }
       assert.deepEqual(status.resized, { width: 2040, height: 2040, scale: 1 });
-      assert.equal(
-        await pageB.evaluate(() => devicePixelRatio),
-        1,
-        "an effective 1× applies no override"
-      );
+      assert.equal(await pageB.evaluate(() => devicePixelRatio), 1, "an effective 1× applies no override");
       assert.ok(status.viewport, "the over-budget resize reports its viewport");
-      const big = {
-        width: status.viewport.width,
-        height: status.viewport.height,
-      };
-      const bigMotion = await collectFrames(client, {
-        want: 3,
-        dims: big,
-        timeoutMs: 20000,
-      });
+      const big = { width: status.viewport.width, height: status.viewport.height };
+      const bigMotion = await collectFrames(client, { want: 3, dims: big, timeoutMs: 20000 });
       assertStableAfterSwitch(bigMotion, big, "over-budget motion");
       await pageB.goto(STATIC);
       const bigFrames = await (async () => {
         const frames = [];
         const deadline = Date.now() + 12000;
         while (!frames.some((f) => f.refinement) && Date.now() < deadline) {
-          frames.push(
-            ...(await collectFrames(client, {
-              want: 1,
-              dims: big,
-              timeoutMs: 3000,
-            }))
-          );
+          frames.push(...(await collectFrames(client, { want: 1, dims: big, timeoutMs: 3000 })));
         }
         return frames;
       })();
       const bigRefinement = bigFrames.find((f) => f.refinement);
-      assert.ok(
-        bigRefinement,
-        "a refinement frame arrived on the quiet over-budget page"
-      );
-      assert.deepEqual(
-        bigRefinement.dims,
-        big,
-        "over-budget refinement matches motion exactly"
-      );
+      assert.ok(bigRefinement, "a refinement frame arrived on the quiet over-budget page");
+      assert.deepEqual(bigRefinement.dims, big, "over-budget refinement matches motion exactly");
       for (const f of [...bigMotion, ...bigFrames]) {
         if (!f.dims || f.dims.width !== big.width) continue;
-        assert.equal(
-          f.metadata.deviceWidth,
-          big.width,
-          "metadata stays CSS px at 1×"
-        );
-        assert.equal(
-          f.metadata.deviceHeight,
-          big.height,
-          "metadata stays CSS px at 1×"
-        );
+        assert.equal(f.metadata.deviceWidth, big.width, "metadata stays CSS px at 1×");
+        assert.equal(f.metadata.deviceHeight, big.height, "metadata stays CSS px at 1×");
       }
     } finally {
       client?.close();
@@ -524,5 +375,5 @@ test(
       if (ctx) await ctx.close().catch(() => {});
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
-  }
+  },
 );

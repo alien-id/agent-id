@@ -32,10 +32,7 @@ import path from "node:path";
 import { suppressWebAuthn } from "./webauthn-off.mjs";
 
 const require = createRequire(import.meta.url);
-const PLUGIN_DIR = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  ".."
-);
+const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // Directories whose node_modules may hold patchright, highest priority first:
 //   1. CLAUDE_PLUGIN_DATA — the per-plugin persistent dir the SessionStart hook
@@ -70,7 +67,7 @@ export async function loadChromium() {
         "plugin data dir via a SessionStart hook; if that has not run (e.g. first use\n" +
         "while offline), install it into the same dir and retry:\n" +
         '  cd "${CLAUDE_PLUGIN_DATA:-plugins/agent-id-browser}" && npm install\n' +
-        'It drives your installed Chrome via channel="chrome" (no extra browser download).'
+        'It drives your installed Chrome via channel="chrome" (no extra browser download).',
     );
     err.code = "PATCHRIGHT_MISSING";
     throw err;
@@ -78,9 +75,7 @@ export async function loadChromium() {
   const mod = require(entry);
   const chromium = mod?.chromium ?? mod?.default?.chromium;
   if (!chromium) {
-    const err = new Error(
-      `patchright loaded from ${entry} but exposes no chromium API`
-    );
+    const err = new Error(`patchright loaded from ${entry} but exposes no chromium API`);
     err.code = "PATCHRIGHT_BROKEN";
     throw err;
   }
@@ -104,9 +99,7 @@ export function sandboxDisabled(env = process.env) {
 // size (the `resize` action changes it later, but only once a page exists).
 // Exported for tests.
 export function windowSize(env = process.env) {
-  const m = /^\s*(\d{3,5})\s*[x,]\s*(\d{3,5})\s*$/.exec(
-    env.AGENT_ID_BROWSER_WINDOW_SIZE || ""
-  );
+  const m = /^\s*(\d{3,5})\s*[x,]\s*(\d{3,5})\s*$/.exec(env.AGENT_ID_BROWSER_WINDOW_SIZE || "");
   return m ? `${m[1]},${m[2]}` : "1440,900";
 }
 

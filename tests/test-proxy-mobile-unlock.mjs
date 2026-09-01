@@ -56,22 +56,14 @@ function startUpstream(record) {
 function rewriteRequest({ port, cred, upstream, path: p = "/x" }) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      {
-        host: "127.0.0.1",
-        port,
-        method: "GET",
-        path: `/${cred}/${upstream}${p}`,
-      },
+      { host: "127.0.0.1", port, method: "GET", path: `/${cred}/${upstream}${p}` },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            body: Buffer.concat(chunks).toString("utf8"),
-          })
+          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
         );
-      }
+      },
     );
     req.on("error", reject);
     req.end();
@@ -82,19 +74,12 @@ function controlGet(port, p, token) {
   return new Promise((resolve, reject) => {
     http
       .get(
-        {
-          host: "127.0.0.1",
-          port,
-          path: p,
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        },
+        { host: "127.0.0.1", port, path: p, headers: token ? { Authorization: `Bearer ${token}` } : {} },
         (res) => {
           const chunks = [];
           res.on("data", (c) => chunks.push(c));
-          res.on("end", () =>
-            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")))
-          );
-        }
+          res.on("end", () => resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
+        },
       )
       .on("error", reject);
   });
@@ -103,10 +88,7 @@ function controlGet(port, p, token) {
 function controlPost(port, p, body, token) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
-    const headers = {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(payload),
-    };
+    const headers = { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) };
     if (token) headers.Authorization = `Bearer ${token}`;
     const req = http.request(
       {
@@ -120,12 +102,9 @@ function controlPost(port, p, body, token) {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
-          })
+          resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }),
         );
-      }
+      },
     );
     req.on("error", reject);
     req.end(payload);
@@ -133,18 +112,8 @@ function controlPost(port, p, body, token) {
 }
 
 // Background "phone": handles each pending request once.
-function startPhone({
-  port,
-  devicePrivRaw,
-  denyAuthorize = false,
-  token,
-  controlPubKey,
-}) {
-  const state = {
-    stop: false,
-    handled: { unlock: 0, authorize: 0 },
-    seen: new Set(),
-  };
+function startPhone({ port, devicePrivRaw, denyAuthorize = false, token, controlPubKey }) {
+  const state = { stop: false, handled: { unlock: 0, authorize: 0 }, seen: new Set() };
   (async function loop() {
     while (!state.stop) {
       try {
@@ -154,28 +123,15 @@ function startPhone({
           state.seen.add(entry.id);
           if (entry.action === "unlock") {
             const ch = entry.challenges[0];
-            const mk = deviceUnsealMasterKey(
-              { ...ch, type: "mobile" },
-              devicePrivRaw
-            );
+            const mk = deviceUnsealMasterKey({ ...ch, type: "mobile" }, devicePrivRaw);
             // Seal the master key to the proxy's control key (pinned via the
             // pairing QR) — never POST it in cleartext.
             const sealedMasterKey = sealToPublicKey(mk, controlPubKey);
-            await controlPost(
-              port,
-              "/approve",
-              { id: entry.id, sealedMasterKey },
-              token
-            );
+            await controlPost(port, "/approve", { id: entry.id, sealedMasterKey }, token);
             state.handled.unlock++;
           } else if (entry.action === "authorize") {
             if (denyAuthorize) {
-              await controlPost(
-                port,
-                "/deny",
-                { id: entry.id, reason: "consent_denied" },
-                token
-              );
+              await controlPost(port, "/deny", { id: entry.id, reason: "consent_denied" }, token);
             } else {
               await controlPost(port, "/approve", { id: entry.id }, token);
             }
@@ -225,12 +181,7 @@ describe("format: mobile slot seals and unseals the master key", () => {
     const masterKey = Buffer.alloc(32, 7);
     const device = createECDH("prime256v1");
     device.generateKeys();
-    const slot = buildMobileSlot(
-      2,
-      masterKey,
-      device.getPublicKey().toString("hex"),
-      "dev"
-    );
+    const slot = buildMobileSlot(2, masterKey, device.getPublicKey().toString("hex"), "dev");
     assert.equal(slot.type, "mobile");
     assert.equal(slot.alg, "ecdh-p256-hkdf-sha256-aes256gcm");
     const recovered = deviceUnsealMasterKey(slot, device.getPrivateKey());
@@ -241,27 +192,18 @@ describe("format: mobile slot seals and unseals the master key", () => {
     const masterKey = Buffer.alloc(32, 9);
     const device = createECDH("prime256v1");
     device.generateKeys();
-    const slot = buildMobileSlot(
-      2,
-      masterKey,
-      device.getPublicKey().toString("hex")
-    );
+    const slot = buildMobileSlot(2, masterKey, device.getPublicKey().toString("hex"));
     const wrong = createECDH("prime256v1");
     wrong.generateKeys();
     assert.throws(() => deviceUnsealMasterKey(slot, wrong.getPrivateKey()));
   });
 
   it("openVaultWithMasterKey opens the payload with the recovered key", async () => {
-    const { stateDir, devicePrivRaw } = await setupVault({
-      requireConsent: false,
-    });
-    const challenges = await import(
-      "../plugins/agent-id-vault/lib/vault.mjs"
-    ).then((m) => m.readMobileSlotChallenges(stateDir));
-    const mk = deviceUnsealMasterKey(
-      { ...challenges[0], type: "mobile" },
-      devicePrivRaw
+    const { stateDir, devicePrivRaw } = await setupVault({ requireConsent: false });
+    const challenges = await import("../plugins/agent-id-vault/lib/vault.mjs").then((m) =>
+      m.readMobileSlotChallenges(stateDir),
     );
+    const mk = deviceUnsealMasterKey({ ...challenges[0], type: "mobile" }, devicePrivRaw);
     const vault = await openVaultWithMasterKey({ stateDir, masterKey: mk });
     assert.equal(vault.get("tok").value, "SECRET-TOKEN");
     vault.lock();
@@ -282,19 +224,11 @@ describe("proxy: phone-approved unlock", () => {
       stateDir: ctx.stateDir,
       logPath: path.join(ctx.stateDir, "proxy.log"),
       idleTimeoutMs: Infinity,
-      control: {
-        listen: { port: 0, host: "127.0.0.1" },
-        approvalTimeoutMs: 5000,
-      },
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
     });
     dataPort = (await proxy.listen()).port;
     controlPort = proxy.controlAddress.port;
-    phone = startPhone({
-      port: controlPort,
-      devicePrivRaw: ctx.devicePrivRaw,
-      token: proxy.controlToken,
-      controlPubKey: proxy.controlPublicKey,
-    });
+    phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, token: proxy.controlToken, controlPubKey: proxy.controlPublicKey });
   });
 
   after(async () => {
@@ -310,11 +244,7 @@ describe("proxy: phone-approved unlock", () => {
 
   it("a request parks until the phone unlocks, then completes with the credential injected", async () => {
     ctx.record.value = null;
-    const r = await rewriteRequest({
-      port: dataPort,
-      cred: "tok",
-      upstream: ctx.upstream.host,
-    });
+    const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: ctx.upstream.host });
     assert.equal(r.status, 200);
     assert.equal(proxy.locked, false);
     assert.equal(ctx.record.value.authorization, "Bearer SECRET-TOKEN");
@@ -323,11 +253,7 @@ describe("proxy: phone-approved unlock", () => {
 
   it("once unlocked, further requests do not re-prompt", async () => {
     const before = phone.handled.unlock;
-    const r = await rewriteRequest({
-      port: dataPort,
-      cred: "tok",
-      upstream: ctx.upstream.host,
-    });
+    const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: ctx.upstream.host });
     assert.equal(r.status, 200);
     assert.equal(phone.handled.unlock, before);
   });
@@ -336,11 +262,7 @@ describe("proxy: phone-approved unlock", () => {
     proxy.forceLock("test_idle");
     assert.equal(proxy.locked, true);
     const before = phone.handled.unlock;
-    const r = await rewriteRequest({
-      port: dataPort,
-      cred: "tok",
-      upstream: ctx.upstream.host,
-    });
+    const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: ctx.upstream.host });
     assert.equal(r.status, 200);
     assert.equal(proxy.locked, false);
     assert.equal(phone.handled.unlock, before + 1);
@@ -376,10 +298,7 @@ describe("proxy: self-registration (no rekey)", () => {
       logPath: path.join(stateDir, "proxy.log"),
       idleTimeoutMs: Infinity,
       reopenVault: async () => openVault({ stateDir, passphrase: "p" }),
-      control: {
-        listen: { port: 0, host: "127.0.0.1" },
-        approvalTimeoutMs: 5000,
-      },
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
     });
     const dataPort = (await proxy.listen()).port;
     const controlPort = proxy.controlAddress.port;
@@ -392,25 +311,15 @@ describe("proxy: self-registration (no rekey)", () => {
     const devicePrivRaw = device.getPrivateKey();
 
     // Pair over the control plane — no CLI rekey.
-    const reg = await controlPost(
-      controlPort,
-      "/register",
-      {
-        devicePubKey: devicePubHex,
-        deviceId: "ios-demo",
-      },
-      proxy.controlToken
-    );
+    const reg = await controlPost(controlPort, "/register", {
+      devicePubKey: devicePubHex,
+      deviceId: "ios-demo",
+    }, proxy.controlToken);
     assert.equal(reg.status, 200);
     assert.equal(reg.body.ok, true);
 
     // Idempotent.
-    const reg2 = await controlPost(
-      controlPort,
-      "/register",
-      { devicePubKey: devicePubHex },
-      proxy.controlToken
-    );
+    const reg2 = await controlPost(controlPort, "/register", { devicePubKey: devicePubHex }, proxy.controlToken);
     assert.equal(reg2.body.alreadyPaired, true);
 
     // /status now lists the paired device.
@@ -419,18 +328,9 @@ describe("proxy: self-registration (no rekey)", () => {
 
     // Idle lock, then the registered device unlocks on the next request.
     proxy.forceLock("test_idle");
-    const phone = startPhone({
-      port: controlPort,
-      devicePrivRaw,
-      token: proxy.controlToken,
-      controlPubKey: proxy.controlPublicKey,
-    });
+    const phone = startPhone({ port: controlPort, devicePrivRaw, token: proxy.controlToken, controlPubKey: proxy.controlPublicKey });
     record.value = null;
-    const r = await rewriteRequest({
-      port: dataPort,
-      cred: "tok",
-      upstream: upstream.host,
-    });
+    const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: upstream.host });
     assert.equal(r.status, 200);
     assert.equal(record.value.authorization, "Bearer SECRET-TOKEN");
 
@@ -446,10 +346,7 @@ describe("proxy: self-registration (no rekey)", () => {
       stateDir: ctx.stateDir,
       logPath: path.join(ctx.stateDir, "proxy.log"),
       idleTimeoutMs: Infinity,
-      control: {
-        listen: { port: 0, host: "127.0.0.1" },
-        approvalTimeoutMs: 5000,
-      },
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
     });
     await proxy.listen();
     const controlPort = proxy.controlAddress.port;
@@ -457,15 +354,10 @@ describe("proxy: self-registration (no rekey)", () => {
 
     const device = createECDH("prime256v1");
     device.generateKeys();
-    const reg = await controlPost(
-      controlPort,
-      "/register",
-      {
-        devicePubKey: device.getPublicKey().toString("hex"),
-        deviceId: "late",
-      },
-      proxy.controlToken
-    );
+    const reg = await controlPost(controlPort, "/register", {
+      devicePubKey: device.getPublicKey().toString("hex"),
+      deviceId: "late",
+    }, proxy.controlToken);
     assert.equal(reg.status, 409);
     assert.equal(reg.body.error, "vault_locked");
 
@@ -484,35 +376,19 @@ describe("proxy: per-credential consent", () => {
       idleTimeoutMs: Infinity,
       requireConsent: true,
       grantTtlMs: 60_000,
-      control: {
-        listen: { port: 0, host: "127.0.0.1" },
-        approvalTimeoutMs: 5000,
-      },
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
     });
     const dataPort = (await proxy.listen()).port;
     const controlPort = proxy.controlAddress.port;
-    const phone = startPhone({
-      port: controlPort,
-      devicePrivRaw: ctx.devicePrivRaw,
-      token: proxy.controlToken,
-      controlPubKey: proxy.controlPublicKey,
-    });
+    const phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, token: proxy.controlToken, controlPubKey: proxy.controlPublicKey });
 
-    const r1 = await rewriteRequest({
-      port: dataPort,
-      cred: "tok",
-      upstream: ctx.upstream.host,
-    });
+    const r1 = await rewriteRequest({ port: dataPort, cred: "tok", upstream: ctx.upstream.host });
     assert.equal(r1.status, 200);
     assert.equal(phone.handled.unlock, 1);
     assert.equal(phone.handled.authorize, 1);
 
     // Second request to the same (cred,host): grant cached, no new prompt.
-    const r2 = await rewriteRequest({
-      port: dataPort,
-      cred: "tok",
-      upstream: ctx.upstream.host,
-    });
+    const r2 = await rewriteRequest({ port: dataPort, cred: "tok", upstream: ctx.upstream.host });
     assert.equal(r2.status, 200);
     assert.equal(phone.handled.authorize, 1);
 
@@ -529,27 +405,14 @@ describe("proxy: per-credential consent", () => {
       logPath: path.join(ctx.stateDir, "proxy.log"),
       idleTimeoutMs: Infinity,
       requireConsent: true,
-      control: {
-        listen: { port: 0, host: "127.0.0.1" },
-        approvalTimeoutMs: 5000,
-      },
+      control: { listen: { port: 0, host: "127.0.0.1" }, approvalTimeoutMs: 5000 },
     });
     const dataPort = (await proxy.listen()).port;
     const controlPort = proxy.controlAddress.port;
-    const phone = startPhone({
-      port: controlPort,
-      devicePrivRaw: ctx.devicePrivRaw,
-      denyAuthorize: true,
-      token: proxy.controlToken,
-      controlPubKey: proxy.controlPublicKey,
-    });
+    const phone = startPhone({ port: controlPort, devicePrivRaw: ctx.devicePrivRaw, denyAuthorize: true, token: proxy.controlToken, controlPubKey: proxy.controlPublicKey });
 
     ctx.record.value = null;
-    const r = await rewriteRequest({
-      port: dataPort,
-      cred: "tok",
-      upstream: ctx.upstream.host,
-    });
+    const r = await rewriteRequest({ port: dataPort, cred: "tok", upstream: ctx.upstream.host });
     assert.equal(r.status, 403);
     assert.equal(ctx.record.value, null); // upstream never hit
     assert.equal(proxy.locked, false); // unlock still succeeded

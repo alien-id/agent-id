@@ -149,9 +149,7 @@ export function createAccessUnitFramer({
       }
       searchFrom = Math.max(0, buf.length - 3);
       if (buf.length > maxPending) {
-        log(
-          "stream: no access unit delimiter within the frame buffer — resyncing"
-        );
+        log("stream: no access unit delimiter within the frame buffer — resyncing");
         onResync();
         reset();
       }

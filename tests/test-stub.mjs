@@ -43,32 +43,28 @@ describe("materialize", () => {
   it("bearer prepends Bearer", () => {
     assert.equal(
       materializeCredential({ type: "bearer", value: "ghp_xxx" }),
-      "Bearer ghp_xxx"
+      "Bearer ghp_xxx",
     );
   });
 
   it("basic encodes user:pass in b64", () => {
     assert.equal(
       materializeCredential({ type: "basic", username: "u", password: "p" }),
-      "Basic dTpw"
+      "Basic dTpw",
     );
   });
 
   it("header returns raw value", () => {
     assert.equal(
       materializeCredential({ type: "header", value: "raw-value" }),
-      "raw-value"
+      "raw-value",
     );
   });
 
   it("cookie produces name=value", () => {
     assert.equal(
-      materializeCredential({
-        type: "cookie",
-        cookieName: "sid",
-        value: "abc",
-      }),
-      "sid=abc"
+      materializeCredential({ type: "cookie", cookieName: "sid", value: "abc" }),
+      "sid=abc",
     );
   });
 
@@ -78,7 +74,7 @@ describe("materialize", () => {
         type: "cookie-jar",
         cookies: { a: "1", b: "2" },
       }),
-      "a=1; b=2"
+      "a=1; b=2",
     );
   });
 });
@@ -103,24 +99,20 @@ describe("replaceStubs", () => {
 
   it("throws StubError on unknown credential", () => {
     assert.throws(
-      () =>
-        replaceStubs("AgentVault missing", { lookup, host: "api.github.com" }),
-      (err) => err instanceof StubError && err.code === "credential_not_found"
+      () => replaceStubs("AgentVault missing", { lookup, host: "api.github.com" }),
+      (err) => err instanceof StubError && err.code === "credential_not_found",
     );
   });
 
   it("throws StubError on host not in allowlist", () => {
     assert.throws(
       () => replaceStubs("AgentVault gh", { lookup, host: "evil.example.com" }),
-      (err) => err instanceof StubError && err.code === "host_not_allowed"
+      (err) => err instanceof StubError && err.code === "host_not_allowed",
     );
   });
 
   it("wildcard domain matches subdomain", () => {
-    const r = replaceStubs("AgentVault gh", {
-      lookup,
-      host: "x.api.github.com",
-    });
+    const r = replaceStubs("AgentVault gh", { lookup, host: "x.api.github.com" });
     assert.equal(r.value, "Bearer ghp_xxx");
   });
 });
@@ -134,7 +126,7 @@ describe("rewriteHeaders", () => {
   it("rewrites only stubbed headers", () => {
     const r = rewriteHeaders(
       { "X-Api-Key": "AgentVault api", Accept: "application/json" },
-      { lookup, host: "api.example.com" }
+      { lookup, host: "api.example.com" },
     );
     assert.equal(r.headers["X-Api-Key"], "xyz");
     assert.equal(r.headers.Accept, "application/json");
@@ -145,23 +137,9 @@ describe("injection-site enforcement (stub mode)", () => {
   const lookup = (name) => {
     const creds = {
       tok: { type: "bearer", value: "ghp_xxx", domains: ["api.example.com"] },
-      jar: {
-        type: "cookie-jar",
-        cookies: { sid: "abc" },
-        domains: ["api.example.com"],
-      },
-      key: {
-        type: "header",
-        headerName: "X-Api-Key",
-        value: "xyz",
-        domains: ["api.example.com"],
-      },
-      q: {
-        type: "query",
-        paramName: "k",
-        value: "v",
-        domains: ["api.example.com"],
-      },
+      jar: { type: "cookie-jar", cookies: { sid: "abc" }, domains: ["api.example.com"] },
+      key: { type: "header", headerName: "X-Api-Key", value: "xyz", domains: ["api.example.com"] },
+      q: { type: "query", paramName: "k", value: "v", domains: ["api.example.com"] },
     };
     return creds[name] || null;
   };
@@ -175,16 +153,14 @@ describe("injection-site enforcement (stub mode)", () => {
   it("refuses a bearer placed in some other (reflectable) header", () => {
     assert.throws(
       () => rewriteHeaders({ "X-Debug": "AgentVault tok" }, opts),
-      (err) =>
-        err instanceof StubError && err.code === "injection_site_not_allowed"
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
     );
   });
 
   it("refuses a cookie-jar placed outside the Cookie header", () => {
     assert.throws(
       () => rewriteHeaders({ "X-Leak": "AgentVault jar" }, opts),
-      (err) =>
-        err instanceof StubError && err.code === "injection_site_not_allowed"
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
     );
     const ok = rewriteHeaders({ Cookie: "AgentVault jar" }, opts);
     assert.equal(ok.headers.Cookie, "sid=abc");
@@ -195,16 +171,14 @@ describe("injection-site enforcement (stub mode)", () => {
     assert.equal(ok.headers["X-Api-Key"], "xyz");
     assert.throws(
       () => rewriteHeaders({ "X-Wrong": "AgentVault key" }, opts),
-      (err) =>
-        err instanceof StubError && err.code === "injection_site_not_allowed"
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
     );
   });
 
   it("refuses a bearer smuggled into a query parameter", () => {
     assert.throws(
       () => rewriteUrl("http://api.example.com/x?leak=AgentVault%20tok", opts),
-      (err) =>
-        err instanceof StubError && err.code === "injection_site_not_allowed"
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
     );
   });
 
@@ -213,8 +187,7 @@ describe("injection-site enforcement (stub mode)", () => {
     assert.equal(new URL(ok.url).searchParams.get("k"), "v");
     assert.throws(
       () => rewriteUrl("http://api.example.com/x?other=AgentVault%20q", opts),
-      (err) =>
-        err instanceof StubError && err.code === "injection_site_not_allowed"
+      (err) => err instanceof StubError && err.code === "injection_site_not_allowed",
     );
   });
 });
@@ -222,22 +195,14 @@ describe("injection-site enforcement (stub mode)", () => {
 describe("rewriteUrl", () => {
   const lookup = (name) =>
     name === "key"
-      ? {
-          type: "query",
-          paramName: "k",
-          value: "abc def",
-          domains: ["api.example.com"],
-        }
+      ? { type: "query", paramName: "k", value: "abc def", domains: ["api.example.com"] }
       : null;
 
   it("rewrites query parameter and URL-encodes spaces", () => {
-    const r = rewriteUrl(
-      "http://api.example.com/foo?k=AgentVault%20key&z=plain",
-      {
-        lookup,
-        host: "api.example.com",
-      }
-    );
+    const r = rewriteUrl("http://api.example.com/foo?k=AgentVault%20key&z=plain", {
+      lookup,
+      host: "api.example.com",
+    });
     const url = new URL(r.url);
     assert.equal(url.searchParams.get("k"), "abc def");
     assert.equal(url.searchParams.get("z"), "plain");

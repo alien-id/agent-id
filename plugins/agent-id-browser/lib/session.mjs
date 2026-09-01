@@ -13,11 +13,7 @@ const AUTH_HOST_RE =
 const LOGIN_BODY_RE =
   /(couldn.?t sign you in|sign in to continue|your session has expired|please (sign|log) ?in|enter your password)/i;
 
-export function looksLoggedOut({
-  finalUrl = "",
-  bodyText = "",
-  httpStatus = null,
-} = {}) {
+export function looksLoggedOut({ finalUrl = "", bodyText = "", httpStatus = null } = {}) {
   if (httpStatus === 401 || httpStatus === 403) return true;
   if (finalUrl) {
     try {

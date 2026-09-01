@@ -26,9 +26,7 @@ function makeFakeSession() {
   const handlers = new Map();
   return {
     on: (event, fn) => handlers.set(event, fn),
-    async send() {
-      return {};
-    },
+    async send() { return {}; },
     async detach() {},
   };
 }
@@ -36,17 +34,8 @@ function makeFakeSession() {
 function makeFakeState() {
   const page = {
     isClosed: () => false,
-    mouse: {
-      move: async () => {},
-      down: async () => {},
-      up: async () => {},
-      wheel: async () => {},
-    },
-    keyboard: {
-      down: async () => {},
-      up: async () => {},
-      insertText: async () => {},
-    },
+    mouse: { move: async () => {}, down: async () => {}, up: async () => {}, wheel: async () => {} },
+    keyboard: { down: async () => {}, up: async () => {}, insertText: async () => {} },
   };
   return {
     current: page,
@@ -79,7 +68,7 @@ async function connectStream(port, token) {
   const key = crypto.randomBytes(16).toString("base64");
   sock.write(
     `GET /?token=${token} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n` +
-      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
+      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
   );
   const queue = [];
   const waiters = [];
@@ -106,17 +95,10 @@ async function connectStream(port, token) {
     sock,
     send: (obj) => sock.write(maskedTextFrame(JSON.stringify(obj))),
     async next(timeoutMs = 2000) {
-      if (queue.length)
-        return JSON.parse(queue.shift().payload.toString("utf8"));
+      if (queue.length) return JSON.parse(queue.shift().payload.toString("utf8"));
       const frame = await new Promise((resolve, reject) => {
-        const t = setTimeout(
-          () => reject(new Error("timed out waiting for a frame")),
-          timeoutMs
-        );
-        waiters.push((m) => {
-          clearTimeout(t);
-          resolve(m);
-        });
+        const t = setTimeout(() => reject(new Error("timed out waiting for a frame")), timeoutMs);
+        waiters.push((m) => { clearTimeout(t); resolve(m); });
       });
       return JSON.parse(frame.payload.toString("utf8"));
     },
@@ -157,7 +139,7 @@ test("identical consecutive reports are deduplicated", async () => {
   assert.deepEqual(
     focus,
     { editable: false },
-    "the duplicate must be swallowed, so the NEXT message is the blur"
+    "the duplicate must be swallowed, so the NEXT message is the blur",
   );
   client.close();
   await stream.close();
@@ -176,7 +158,7 @@ test("focus reports are suppressed while a credential fill suspends the feed", a
   assert.deepEqual(
     focus,
     { editable: true, type: "email" },
-    "the suspended-era report must never surface; the first visible one is post-resume"
+    "the suspended-era report must never surface; the first visible one is post-resume",
   );
   client.close();
   await stream.close();
@@ -190,11 +172,7 @@ test("a viewer joining with a field already focused learns it from the join stat
   await nextInputFocus(early);
   const late = await connectStream(stream.port, stream.token);
   const join = await late.next();
-  assert.deepEqual(join.input_focus, {
-    editable: true,
-    type: "email",
-    inputmode: "email",
-  });
+  assert.deepEqual(join.input_focus, { editable: true, type: "email", inputmode: "email" });
   early.close();
   late.close();
   await stream.close();

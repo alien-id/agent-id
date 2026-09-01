@@ -14,14 +14,8 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 
-import {
-  resolvePatchright,
-  launchContext,
-} from "../plugins/agent-id-browser/lib/launch.mjs";
-import {
-  humanClick,
-  humanType,
-} from "../plugins/agent-id-browser/lib/human-input.mjs";
+import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
+import { humanClick, humanType } from "../plugins/agent-id-browser/lib/human-input.mjs";
 
 const patchrightAvailable = !!resolvePatchright();
 
@@ -34,12 +28,8 @@ async function installRecorder(page) {
   await page.evaluate(() => {
     window.__ev = { mousemoves: 0, clicks: 0, keys: [] };
     document.addEventListener("mousemove", () => window.__ev.mousemoves++);
-    document
-      .getElementById("btn")
-      .addEventListener("click", () => window.__ev.clicks++);
-    document
-      .getElementById("inp")
-      .addEventListener("keydown", (e) => window.__ev.keys.push(e.key));
+    document.getElementById("btn").addEventListener("click", () => window.__ev.clicks++);
+    document.getElementById("inp").addEventListener("keydown", (e) => window.__ev.keys.push(e.key));
   });
 }
 
@@ -68,21 +58,14 @@ test(
         mousemoves: window.__ev.mousemoves,
         keys: window.__ev.keys.slice(),
       }));
-      assert.equal(
-        afterType.value,
-        "hello",
-        "the field received the typed text (replaced, not appended)"
-      );
-      assert.ok(
-        afterType.mousemoves > 0,
-        "the cursor moved before focusing (no teleport)"
-      );
+      assert.equal(afterType.value, "hello", "the field received the typed text (replaced, not appended)");
+      assert.ok(afterType.mousemoves > 0, "the cursor moved before focusing (no teleport)");
       // Each character produced its own keydown (the leading Delete is the
       // clear-before-type step; filter to the single-character keys).
       assert.deepEqual(
         afterType.keys.filter((k) => k.length === 1),
         ["h", "e", "l", "l", "o"],
-        "each character produced a keydown"
+        "each character produced a keydown",
       );
 
       // Empty value must CLEAR the field (parity with fill), not leave it.
@@ -90,7 +73,7 @@ test(
       assert.equal(
         await page.evaluate(() => document.getElementById("inp").value),
         "",
-        "typing an empty string clears the field"
+        "typing an empty string clears the field",
       );
 
       // Click the button: cursor should travel further before the click lands.
@@ -99,13 +82,13 @@ test(
       assert.equal(afterClick.clicks, 1, "the button was clicked exactly once");
       assert.ok(
         afterClick.mousemoves > afterType.mousemoves,
-        "more mousemove events fired on the way to the button"
+        "more mousemove events fired on the way to the button",
       );
     } finally {
       if (ctx) await ctx.close().catch(() => {});
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
-  }
+  },
 );
 
 test(
@@ -122,17 +105,14 @@ test(
       await page.setContent(PAGE);
       await installRecorder(page);
       await humanType(page, "#inp", "abc");
-      assert.equal(
-        await page.evaluate(() => document.getElementById("inp").value),
-        "abc"
-      );
+      assert.equal(await page.evaluate(() => document.getElementById("inp").value), "abc");
     } finally {
       if (prev === undefined) delete process.env.AGENT_ID_HUMAN_INPUT;
       else process.env.AGENT_ID_HUMAN_INPUT = prev;
       if (ctx) await ctx.close().catch(() => {});
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
-  }
+  },
 );
 
 test(
@@ -144,9 +124,7 @@ test(
     try {
       ctx = await launchContext({ profileDir: dir, headless: true });
       const page = ctx.pages()[0] || (await ctx.newPage());
-      await page.setContent(
-        `<iframe id="f" srcdoc="<input id='inp'>"></iframe>`
-      );
+      await page.setContent(`<iframe id="f" srcdoc="<input id='inp'>"></iframe>`);
       const frame = page.frames().find((f) => f !== page.mainFrame());
       assert.ok(frame, "the child frame exists");
       // The session server resolves an iframe ref to its Frame and passes it as
@@ -158,7 +136,7 @@ test(
       if (ctx) await ctx.close().catch(() => {});
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
-  }
+  },
 );
 
 test(
@@ -175,7 +153,7 @@ test(
       // copy and fills nothing; the fix is to target the first VISIBLE match.
       await page.setContent(
         `<input id="hidden" type="email" style="display:none">` +
-          `<input id="shown" type="email">`
+          `<input id="shown" type="email">`,
       );
       // Fill via the same kind of broad, multi-match selector the auto-login
       // heuristic uses (matches BOTH inputs).
@@ -183,16 +161,16 @@ test(
       assert.equal(
         await page.locator("#shown").inputValue(),
         "visible@example.com",
-        "the visible field is the one that gets filled"
+        "the visible field is the one that gets filled",
       );
       assert.equal(
         await page.locator("#hidden").inputValue(),
         "",
-        "the hidden duplicate is left untouched"
+        "the hidden duplicate is left untouched",
       );
     } finally {
       if (ctx) await ctx.close().catch(() => {});
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
-  }
+  },
 );

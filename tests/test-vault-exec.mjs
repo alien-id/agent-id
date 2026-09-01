@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 
 const CLI = fileURLToPath(
-  new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url)
+  new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url),
 );
 
 function runCli(args, env = {}) {
@@ -50,35 +50,24 @@ test("exec injects credential fields into the child env; values never hit stderr
   const dir = await tmp();
   try {
     await seed(dir);
-    const childJs =
-      "process.stdout.write((process.env.A||'')+'|'+(process.env.B||''))";
+    const childJs = "process.stdout.write((process.env.A||'')+'|'+(process.env.B||''))";
     const { code, out, err } = await runCli(
       [
         "exec",
-        "--state-dir",
-        dir,
+        "--state-dir", dir,
         "--no-agent-key",
-        "--passphrase-env",
-        "VPASS",
-        "--env",
-        "A=svc.username",
-        "--env",
-        "B=svc.password",
-        "--",
-        process.execPath,
-        "-e",
-        childJs,
+        "--passphrase-env", "VPASS",
+        "--env", "A=svc.username",
+        "--env", "B=svc.password",
+        "--", process.execPath, "-e", childJs,
       ],
-      { VPASS: "test-pass" }
+      { VPASS: "test-pass" },
     );
     assert.equal(code, 0);
     // The child saw exactly the stored values…
     assert.equal(out, "the-user-id|the-secret-value");
     // …but the secret was never logged, only the variable names + sources.
-    assert.ok(
-      !err.includes("the-secret-value"),
-      "secret must not appear on stderr"
-    );
+    assert.ok(!err.includes("the-secret-value"), "secret must not appear on stderr");
     assert.match(err, /Injecting A=svc\.username, B=svc\.password/);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -91,20 +80,10 @@ test("exec passes the child's exit code through", async () => {
     await seed(dir);
     const { code } = await runCli(
       [
-        "exec",
-        "--state-dir",
-        dir,
-        "--no-agent-key",
-        "--passphrase-env",
-        "VPASS",
-        "--env",
-        "A=svc.username",
-        "--",
-        process.execPath,
-        "-e",
-        "process.exit(7)",
+        "exec", "--state-dir", dir, "--no-agent-key", "--passphrase-env", "VPASS",
+        "--env", "A=svc.username", "--", process.execPath, "-e", "process.exit(7)",
       ],
-      { VPASS: "test-pass" }
+      { VPASS: "test-pass" },
     );
     assert.equal(code, 7);
   } finally {
@@ -117,11 +96,7 @@ test("exec without a `--` separator errors", async () => {
   try {
     await seed(dir);
     const { out } = await runCli([
-      "exec",
-      "--state-dir",
-      dir,
-      "--env",
-      "A=svc.username",
+      "exec", "--state-dir", dir, "--env", "A=svc.username",
     ]);
     const res = JSON.parse(out);
     assert.equal(res.ok, false);
@@ -137,20 +112,10 @@ test("exec errors on an unknown credential", async () => {
     await seed(dir);
     const { out } = await runCli(
       [
-        "exec",
-        "--state-dir",
-        dir,
-        "--no-agent-key",
-        "--passphrase-env",
-        "VPASS",
-        "--env",
-        "A=nope.value",
-        "--",
-        process.execPath,
-        "-e",
-        "0",
+        "exec", "--state-dir", dir, "--no-agent-key", "--passphrase-env", "VPASS",
+        "--env", "A=nope.value", "--", process.execPath, "-e", "0",
       ],
-      { VPASS: "test-pass" }
+      { VPASS: "test-pass" },
     );
     const res = JSON.parse(out);
     assert.equal(res.ok, false);

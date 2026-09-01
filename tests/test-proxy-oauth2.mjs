@@ -53,14 +53,10 @@ function startTokenEndpoint() {
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
         stats.count += 1;
-        stats.lastBody = new URLSearchParams(
-          Buffer.concat(chunks).toString("utf8")
-        );
+        stats.lastBody = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
         if (cfg.mode === "invalid_grant") {
           res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(
-            '{"error":"invalid_grant","error_description":"Token revoked"}'
-          );
+          res.end('{"error":"invalid_grant","error_description":"Token revoked"}');
           return;
         }
         const body = {
@@ -75,31 +71,20 @@ function startTokenEndpoint() {
     });
     server.listen(0, "127.0.0.1", () => {
       const a = server.address();
-      resolve({
-        server,
-        url: `http://${a.address}:${a.port}/token`,
-        stats,
-        cfg,
-      });
+      resolve({ server, url: `http://${a.address}:${a.port}/token`, stats, cfg });
     });
   });
 }
 
 function callProxy({ port, path: p }) {
   return new Promise((resolve, reject) => {
-    const req = http.request(
-      { host: "127.0.0.1", port, method: "GET", path: p },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            body: Buffer.concat(chunks).toString("utf8"),
-          })
-        );
-      }
-    );
+    const req = http.request({ host: "127.0.0.1", port, method: "GET", path: p }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () =>
+        resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }),
+      );
+    });
     req.on("error", reject);
     req.end();
   });
@@ -139,7 +124,7 @@ describe("oauth.refreshAccessToken (unit)", () => {
           clientId: "cid",
           refreshToken: "rt-bad",
         }),
-      (err) => err instanceof OAuthError && err.oauthError === "invalid_grant"
+      (err) => err instanceof OAuthError && err.oauthError === "invalid_grant",
     );
     token.cfg.mode = "ok";
   });
@@ -191,20 +176,14 @@ describe("oauth2 credential through the proxy", () => {
   });
 
   it("first use refreshes and injects Authorization: Bearer <access token>", async () => {
-    const r = await callProxy({
-      port: proxyPort,
-      path: `/gmail/${upstream.host}/v1/messages`,
-    });
+    const r = await callProxy({ port: proxyPort, path: `/gmail/${upstream.host}/v1/messages` });
     assert.equal(r.status, 200);
     assert.equal(token.stats.count, 1, "token endpoint hit once");
     assert.equal(upstream.seen.authorization, "Bearer at-1");
   });
 
   it("second use within expiry serves the cached token (no refresh)", async () => {
-    const r = await callProxy({
-      port: proxyPort,
-      path: `/gmail/${upstream.host}/v1/labels`,
-    });
+    const r = await callProxy({ port: proxyPort, path: `/gmail/${upstream.host}/v1/labels` });
     assert.equal(r.status, 200);
     assert.equal(token.stats.count, 1, "still one refresh — cache hit");
     assert.equal(upstream.seen.authorization, "Bearer at-1");
@@ -212,10 +191,7 @@ describe("oauth2 credential through the proxy", () => {
 
   it("re-refreshes once the access token has expired", async () => {
     clock += 3600 * 1000 + 1; // past expires_in
-    const r = await callProxy({
-      port: proxyPort,
-      path: `/gmail/${upstream.host}/v1/messages`,
-    });
+    const r = await callProxy({ port: proxyPort, path: `/gmail/${upstream.host}/v1/messages` });
     assert.equal(r.status, 200);
     assert.equal(token.stats.count, 2, "expiry triggered a second refresh");
     assert.equal(upstream.seen.authorization, "Bearer at-2");
@@ -224,16 +200,9 @@ describe("oauth2 credential through the proxy", () => {
   it("persists a rotated refresh token back to the vault", async () => {
     token.cfg.rotateTo = "rt-2";
     clock += 3600 * 1000 + 1;
-    const r = await callProxy({
-      port: proxyPort,
-      path: `/gmail/${upstream.host}/v1/messages`,
-    });
+    const r = await callProxy({ port: proxyPort, path: `/gmail/${upstream.host}/v1/messages` });
     assert.equal(r.status, 200);
-    assert.equal(
-      token.stats.lastBody.get("refresh_token"),
-      "rt-1",
-      "used the old token to refresh"
-    );
+    assert.equal(token.stats.lastBody.get("refresh_token"), "rt-1", "used the old token to refresh");
 
     // Re-open the vault from disk: the rotated token was saved.
     const reopened = await openVault({ stateDir, passphrase: "test-pass" });
@@ -245,10 +214,7 @@ describe("oauth2 credential through the proxy", () => {
   it("invalid_grant from the token endpoint surfaces as 401", async () => {
     token.cfg.mode = "invalid_grant";
     clock += 3600 * 1000 + 1;
-    const r = await callProxy({
-      port: proxyPort,
-      path: `/gmail/${upstream.host}/v1/messages`,
-    });
+    const r = await callProxy({ port: proxyPort, path: `/gmail/${upstream.host}/v1/messages` });
     assert.equal(r.status, 401);
     assert.equal(JSON.parse(r.body).error, "oauth_refresh_token_invalid");
     token.cfg.mode = "ok";
@@ -271,11 +237,7 @@ describe("loadOauthSecretsFile (unit)", () => {
   }
 
   it("loads a 0600 JSON object keyed by clientId", async () => {
-    const p = await write(
-      "ok.json",
-      '{"cid-1":"secret-1","cid-2":"secret-2"}',
-      0o600
-    );
+    const p = await write("ok.json", '{"cid-1":"secret-1","cid-2":"secret-2"}', 0o600);
     const secrets = await loadOauthSecretsFile(p);
     assert.equal(secrets["cid-1"], "secret-1");
     assert.equal(secrets["cid-2"], "secret-2");
@@ -287,7 +249,7 @@ describe("loadOauthSecretsFile (unit)", () => {
     async () => {
       const p = await write("loose.json", '{"cid":"s"}', 0o644);
       await assert.rejects(() => loadOauthSecretsFile(p), /chmod 600/);
-    }
+    },
   );
 
   it("refuses non-object JSON and non-string values", async () => {
@@ -360,30 +322,21 @@ describe("config-supplied client secret (platform connectors)", () => {
   });
 
   it("a cred without clientSecret refreshes with the config-supplied secret", async () => {
-    const r = await callProxy({
-      port: proxyPort,
-      path: `/platform/${upstream.host}/v1/a`,
-    });
+    const r = await callProxy({ port: proxyPort, path: `/platform/${upstream.host}/v1/a` });
     assert.equal(r.status, 200);
     assert.equal(token.stats.lastBody.get("client_id"), "cid-platform");
     assert.equal(token.stats.lastBody.get("client_secret"), "config-secret");
   });
 
   it("a cred with its own clientSecret behaves exactly as today (cred wins)", async () => {
-    const r = await callProxy({
-      port: proxyPort,
-      path: `/personal/${upstream.host}/v1/b`,
-    });
+    const r = await callProxy({ port: proxyPort, path: `/personal/${upstream.host}/v1/b` });
     assert.equal(r.status, 200);
     assert.equal(token.stats.lastBody.get("client_id"), "cid-personal");
     assert.equal(token.stats.lastBody.get("client_secret"), "personal-secret");
   });
 
   it("no secret on the cred or in the config sends none (current behavior)", async () => {
-    const r = await callProxy({
-      port: proxyPort,
-      path: `/bare/${upstream.host}/v1/c`,
-    });
+    const r = await callProxy({ port: proxyPort, path: `/bare/${upstream.host}/v1/c` });
     assert.equal(r.status, 200);
     assert.equal(token.stats.lastBody.get("client_id"), "cid-bare");
     assert.equal(token.stats.lastBody.get("client_secret"), null);

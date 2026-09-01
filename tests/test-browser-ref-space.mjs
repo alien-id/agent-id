@@ -27,10 +27,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  resolvePatchright,
-  launchContext,
-} from "../plugins/agent-id-browser/lib/launch.mjs";
+import { resolvePatchright, launchContext } from "../plugins/agent-id-browser/lib/launch.mjs";
 import {
   snapshotInPage,
   formSnapshotInPage,
@@ -65,116 +62,77 @@ let page;
 before(async () => {
   if (!patchrightAvailable) return;
   workDir = await fs.mkdtemp(path.join(os.tmpdir(), "aib-refspace-"));
-  ctx = await launchContext({
-    profileDir: workDir,
-    headless: true,
-    contextOptions: {},
-  });
+  ctx = await launchContext({ profileDir: workDir, headless: true, contextOptions: {} });
   page = ctx.pages()[0] || (await ctx.newPage());
   await page.setContent(PAGE, { waitUntil: "domcontentloaded" });
 });
 
 after(async () => {
   if (ctx) await ctx.close().catch(() => {});
-  if (workDir)
-    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  if (workDir) await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
 });
 
 const skip = patchrightAvailable ? false : "patchright/Chrome not installed";
 
-test(
-  "a ref denotes the same element in both observation modes",
-  { skip },
-  async () => {
-    // Take each observation independently, exactly as the two tools do — each
-    // clears the previous tagging and renumbers.
-    const snap = await page.evaluate(snapshotInPage, {
-      prefix: "",
-      generation: 1,
-    });
-    const snapById = await page.evaluate(() =>
-      Object.fromEntries(
-        Array.from(document.querySelectorAll("[data-aibref]")).map((el) => [
-          el.id,
-          el.getAttribute("data-aibref"),
-        ])
-      )
-    );
+test("a ref denotes the same element in both observation modes", { skip }, async () => {
 
-    const form = await page.evaluate(formSnapshotInPage, {
-      prefix: "",
-      generation: 2,
-    });
-    const formById = await page.evaluate(() =>
-      Object.fromEntries(
-        Array.from(document.querySelectorAll("[data-aibref]")).map((el) => [
-          el.id,
-          el.getAttribute("data-aibref"),
-        ])
-      )
-    );
+  // Take each observation independently, exactly as the two tools do — each
+  // clears the previous tagging and renumbers.
+  const snap = await page.evaluate(snapshotInPage, { prefix: "", generation: 1 });
+  const snapById = await page.evaluate(() =>
+    Object.fromEntries(
+      Array.from(document.querySelectorAll("[data-aibref]")).map((el) => [el.id, el.getAttribute("data-aibref")]),
+    ),
+  );
 
-    // The version prefix is expected to differ (these are two observations);
-    // the invariant under test is the ELEMENT NUMBERING behind it.
-    const bare = (ref) => String(ref).replace(/^\d+:/, "");
+  const form = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 2 });
+  const formById = await page.evaluate(() =>
+    Object.fromEntries(
+      Array.from(document.querySelectorAll("[data-aibref]")).map((el) => [el.id, el.getAttribute("data-aibref")]),
+    ),
+  );
 
-    // Every element both modes tag must carry the same number.
-    for (const [id, ref] of Object.entries(snapById)) {
-      if (!(id in formById)) continue;
-      assert.equal(
-        bare(formById[id]),
-        bare(ref),
-        `element #${id} changed ref between modes (${ref} → ${formById[id]})`
-      );
-    }
+  // The version prefix is expected to differ (these are two observations);
+  // the invariant under test is the ELEMENT NUMBERING behind it.
+  const bare = (ref) => String(ref).replace(/^\d+:/, "");
 
-    // And specifically the case that broke: the first form field must not
-    // collide with a nav control that precedes it in document order.
-    assert.ok(snapById.first, "first-name input should be tagged by snapshot");
-    assert.equal(bare(formById.first), bare(snapById.first));
-    assert.notEqual(bare(formById.first), bare(snapById.nav));
-
-    // Reported sets still differ — form-inspect describes controls, snapshot
-    // describes everything interactive — even though the numbering agrees.
-    const formRefs = form.controls.map((c) => bare(c.ref));
-    assert.ok(
-      formRefs.includes(bare(formById.country)),
-      "combobox should be reported by form-inspect"
-    );
-    assert.ok(
-      snap.elements.some((e) => bare(e.ref) === bare(snapById.nav)),
-      "nav button should be reported by snapshot"
+  // Every element both modes tag must carry the same number.
+  for (const [id, ref] of Object.entries(snapById)) {
+    if (!(id in formById)) continue;
+    assert.equal(
+      bare(formById[id]),
+      bare(ref),
+      `element #${id} changed ref between modes (${ref} → ${formById[id]})`,
     );
   }
-);
+
+  // And specifically the case that broke: the first form field must not
+  // collide with a nav control that precedes it in document order.
+  assert.ok(snapById.first, "first-name input should be tagged by snapshot");
+  assert.equal(bare(formById.first), bare(snapById.first));
+  assert.notEqual(bare(formById.first), bare(snapById.nav));
+
+  // Reported sets still differ — form-inspect describes controls, snapshot
+  // describes everything interactive — even though the numbering agrees.
+  const formRefs = form.controls.map((c) => bare(c.ref));
+  assert.ok(formRefs.includes(bare(formById.country)), "combobox should be reported by form-inspect");
+  assert.ok(
+    snap.elements.some((e) => bare(e.ref) === bare(snapById.nav)),
+    "nav button should be reported by snapshot",
+  );
+});
 
 test("refs carry the observation that minted them", { skip }, async () => {
-  const first = await page.evaluate(snapshotInPage, {
-    prefix: "",
-    generation: 1,
-  });
-  const second = await page.evaluate(snapshotInPage, {
-    prefix: "",
-    generation: 2,
-  });
+  const first = await page.evaluate(snapshotInPage, { prefix: "", generation: 1 });
+  const second = await page.evaluate(snapshotInPage, { prefix: "", generation: 2 });
 
   // The version prefix is what makes staleness checkable without touching the
   // DOM — a ref held across an observation is refused by name.
-  assert.ok(
-    first.elements[0].ref.startsWith("1:"),
-    `expected a 1: prefix, got ${first.elements[0].ref}`
-  );
-  assert.ok(
-    second.elements[0].ref.startsWith("2:"),
-    `expected a 2: prefix, got ${second.elements[0].ref}`
-  );
+  assert.ok(first.elements[0].ref.startsWith("1:"), `expected a 1: prefix, got ${first.elements[0].ref}`);
+  assert.ok(second.elements[0].ref.startsWith("2:"), `expected a 2: prefix, got ${second.elements[0].ref}`);
   assert.equal(refGenerationOf(first.elements[0].ref), 1);
   assert.equal(refGenerationOf(second.elements[0].ref), 2);
-  assert.equal(
-    refGenerationOf("e7"),
-    null,
-    "unversioned refs stay recognisable"
-  );
+  assert.equal(refGenerationOf("e7"), null, "unversioned refs stay recognisable");
 
   // The frame id must survive the version prefix, or child-frame refs break.
   assert.equal(frameRefId("3:f1e2"), "f1");
@@ -183,10 +141,7 @@ test("refs carry the observation that minted them", { skip }, async () => {
 });
 
 test("form-inspect reports the combobox as a combobox", { skip }, async () => {
-  const form = await page.evaluate(formSnapshotInPage, {
-    prefix: "",
-    generation: 1,
-  });
+  const form = await page.evaluate(formSnapshotInPage, { prefix: "", generation: 1 });
   const country = form.controls.find((c) => c.label === "Country");
   assert.ok(country, "country control should be reported");
   // form-fill dispatches on this: role=combobox must not be driven with

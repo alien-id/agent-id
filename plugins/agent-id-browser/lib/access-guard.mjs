@@ -29,13 +29,7 @@ import {
 // DOM-interactive stays available; mutations die at the network gate.
 // `upload` is denied too: feeding the owner's local files into a page is a
 // write in spirit (and page JS could exfiltrate the content over allowed GETs).
-const RO_DENIED_ACTIONS = Object.freeze([
-  "eval",
-  "fill-secret",
-  "fill-otp",
-  "upload",
-  "form-fill",
-]);
+const RO_DENIED_ACTIONS = Object.freeze(["eval", "fill-secret", "fill-otp", "upload", "form-fill"]);
 
 // Pure — unit-tests without a browser. Throws on a denied action.
 export function assertActionAllowed(rec, action) {
@@ -43,7 +37,7 @@ export function assertActionAllowed(rec, action) {
   if (RO_DENIED_ACTIONS.includes(action)) {
     throw new Error(
       `action '${action}' is not available on a read-only session — ` +
-        "the owner can widen it with `agent-id-vault set-access`"
+        "the owner can widen it with `agent-id-vault set-access`",
     );
   }
 }
@@ -132,9 +126,7 @@ export async function applyAccessGuard(ctx, rec, { log = () => {} } = {}) {
       return;
     }
     log(
-      `access-guard: blocked ${request.method()} ${request
-        .url()
-        .slice(0, 200)} (${decision.reason})`
+      `access-guard: blocked ${request.method()} ${request.url().slice(0, 200)} (${decision.reason})`,
     );
     await route.abort("accessdenied");
   });

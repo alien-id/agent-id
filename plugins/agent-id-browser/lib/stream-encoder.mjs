@@ -38,8 +38,7 @@ const GOP = 30;
 // what flips `codec=auto` clients from jpeg to h264. An un-provisioned host
 // never spawns ffmpeg implicitly; explicit `?codec=h264` still probes PATH.
 
-export const codecConfigPath = (stateDir) =>
-  path.join(stateDir, "browser-codecs.json");
+export const codecConfigPath = (stateDir) => path.join(stateDir, "browser-codecs.json");
 
 /**
  * The codec provisioning for this host: the `install-codecs` record from
@@ -60,14 +59,9 @@ export const codecConfigPath = (stateDir) =>
  */
 export async function loadCodecConfig(stateDir) {
   try {
-    const cfg = JSON.parse(
-      await fsp.readFile(codecConfigPath(stateDir), "utf8")
-    );
-    if (cfg?.ffmpegPath && (await detectH264Encoder(cfg.ffmpegPath)))
-      return cfg;
-  } catch {
-    /* absent or stale */
-  }
+    const cfg = JSON.parse(await fsp.readFile(codecConfigPath(stateDir), "utf8"));
+    if (cfg?.ffmpegPath && (await detectH264Encoder(cfg.ffmpegPath))) return cfg;
+  } catch { /* absent or stale */ }
   const envPath = process.env.AGENT_ID_FFMPEG;
   if (envPath) {
     const encoder = await detectH264Encoder(envPath);
@@ -82,11 +76,7 @@ export async function loadCodecConfig(stateDir) {
  * only — BtbN's gpl build, the ffmpeg-project-recommended static binaries,
  * which include libx264). Records the result in browser-codecs.json.
  */
-export async function installCodecs({
-  stateDir,
-  allowDownload = true,
-  log = () => {},
-}) {
+export async function installCodecs({ stateDir, allowDownload = true, log = () => {} }) {
   const candidates = [
     process.env.AGENT_ID_FFMPEG,
     "ffmpeg",
@@ -97,17 +87,10 @@ export async function installCodecs({
     if (encoder) return record(stateDir, cand, encoder, "probed");
   }
   if (!allowDownload) {
-    throw new Error(
-      "no usable ffmpeg found (install one: dnf/apt/brew install ffmpeg) — or rerun without --no-download"
-    );
+    throw new Error("no usable ffmpeg found (install one: dnf/apt/brew install ffmpeg) — or rerun without --no-download");
   }
-  if (
-    process.platform !== "linux" ||
-    !["x64", "arm64"].includes(process.arch)
-  ) {
-    throw new Error(
-      `no usable ffmpeg found and static download is Linux-only — install ffmpeg with your package manager (${process.platform}/${process.arch})`
-    );
+  if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)) {
+    throw new Error(`no usable ffmpeg found and static download is Linux-only — install ffmpeg with your package manager (${process.platform}/${process.arch})`);
   }
   const flavor = process.arch === "arm64" ? "linuxarm64" : "linux64";
   const url = `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${flavor}-gpl.tar.xz`;
@@ -118,9 +101,7 @@ export async function installCodecs({
   const archive = path.join(tmp, "ffmpeg.tar.xz");
   await fsp.writeFile(archive, Buffer.from(await res.arrayBuffer()));
   await execFileP("tar", ["-xJf", archive, "-C", tmp]);
-  const [root] = (await fsp.readdir(tmp)).filter((f) =>
-    f.startsWith("ffmpeg-")
-  );
+  const [root] = (await fsp.readdir(tmp)).filter((f) => f.startsWith("ffmpeg-"));
   const extracted = path.join(tmp, root, "bin", "ffmpeg");
   const dest = path.join(stateDir, "tools", "ffmpeg");
   await fsp.mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
@@ -128,26 +109,14 @@ export async function installCodecs({
   await fsp.chmod(dest, 0o755);
   await fsp.rm(tmp, { recursive: true, force: true });
   const encoder = await detectH264Encoder(dest);
-  if (!encoder)
-    throw new Error(
-      "downloaded ffmpeg has no usable h264 encoder (unexpected)"
-    );
+  if (!encoder) throw new Error("downloaded ffmpeg has no usable h264 encoder (unexpected)");
   return record(stateDir, dest, encoder, "downloaded");
 }
 
 async function record(stateDir, ffmpegPath, encoder, source) {
-  const cfg = {
-    ffmpegPath,
-    encoder,
-    source,
-    installedAt: new Date().toISOString(),
-  };
+  const cfg = { ffmpegPath, encoder, source, installedAt: new Date().toISOString() };
   await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
-  await fsp.writeFile(
-    codecConfigPath(stateDir),
-    JSON.stringify(cfg, null, 2) + "\n",
-    { mode: 0o600 }
-  );
+  await fsp.writeFile(codecConfigPath(stateDir), JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
   return cfg;
 }
 
@@ -157,24 +126,21 @@ const detected = new Map(); // ffmpeg path → cached probe promise
 export function detectH264Encoder(ffmpegPath) {
   const path = ffmpegPath || FFMPEG();
   if (!detected.has(path)) {
-    detected.set(
-      path,
-      new Promise((resolve) => {
-        const forced = process.env.AGENT_ID_STREAM_H264_ENCODER;
-        if (forced) return resolve(forced);
-        const probe = spawn(path, ["-hide_banner", "-encoders"], {
-          stdio: ["ignore", "pipe", "ignore"],
-        });
-        let out = "";
-        probe.stdout.on("data", (d) => (out += d));
-        probe.on("error", () => resolve(null));
-        probe.on("close", () => {
-          if (/\blibx264\b/.test(out)) return resolve("libx264");
-          if (/\blibopenh264\b/.test(out)) return resolve("libopenh264");
-          resolve(null);
-        });
-      })
-    );
+    detected.set(path, new Promise((resolve) => {
+      const forced = process.env.AGENT_ID_STREAM_H264_ENCODER;
+      if (forced) return resolve(forced);
+      const probe = spawn(path, ["-hide_banner", "-encoders"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      let out = "";
+      probe.stdout.on("data", (d) => (out += d));
+      probe.on("error", () => resolve(null));
+      probe.on("close", () => {
+        if (/\blibx264\b/.test(out)) return resolve("libx264");
+        if (/\blibopenh264\b/.test(out)) return resolve("libopenh264");
+        resolve(null);
+      });
+    }));
   }
   return detected.get(path);
 }
@@ -192,44 +158,28 @@ function codecArgs(encoder) {
     // every consumer decodes the feed.
     return [
       ...scale,
-      "-c:v",
-      "libx264",
-      "-preset",
-      "veryfast",
-      "-tune",
-      "zerolatency",
-      "-profile:v",
-      "baseline",
-      "-crf",
-      "20",
-      "-maxrate",
-      "4M",
-      "-bufsize",
-      "8M",
-      "-pix_fmt",
-      "yuv420p",
-      "-g",
-      String(GOP),
-      "-bf",
-      "0",
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-tune", "zerolatency",
+      "-profile:v", "baseline",
+      "-crf", "20",
+      "-maxrate", "4M",
+      "-bufsize", "8M",
+      "-pix_fmt", "yuv420p",
+      "-g", String(GOP),
+      "-bf", "0",
     ];
   }
   // openh264 has no preset/tune/crf — it is rate-controlled. Built for
   // real-time (WebRTC) use, so it is already zero-latency shaped.
   return [
     ...scale,
-    "-c:v",
-    "libopenh264",
-    "-profile:v",
-    "constrained_baseline",
-    "-pix_fmt",
-    "yuv420p",
-    "-g",
-    String(GOP),
-    "-b:v",
-    "4000k",
-    "-maxrate",
-    "6000k",
+    "-c:v", "libopenh264",
+    "-profile:v", "constrained_baseline",
+    "-pix_fmt", "yuv420p",
+    "-g", String(GOP),
+    "-b:v", "4000k",
+    "-maxrate", "6000k",
   ];
 }
 
@@ -258,46 +208,26 @@ export async function createH264Encoder({
   // Annex-B gets AUD NALs inserted so WebCodecs viewers can split the byte
   // stream into access units without parsing slice headers.
   const output = rtp
-    ? [
-        "-f",
-        "rtp",
-        "-payload_type",
-        String(rtp.payloadType ?? 96),
-        ...(rtp.ssrc ? ["-ssrc", String(rtp.ssrc)] : []),
-        `rtp://127.0.0.1:${rtp.port}?pkt_size=1200`,
-      ]
+    ? ["-f", "rtp", "-payload_type", String(rtp.payloadType ?? 96),
+       ...(rtp.ssrc ? ["-ssrc", String(rtp.ssrc)] : []),
+       `rtp://127.0.0.1:${rtp.port}?pkt_size=1200`]
     : ["-bsf:v", "h264_metadata=aud=insert", "-f", "h264", "pipe:1"];
 
   const proc = spawn(
     ffmpeg,
     [
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-fflags",
-      "nobuffer",
+      "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer",
       // Without these, find_stream_info sits on the default 5MB probe window
       // and the first frames never reach the encoder (measured: 3 frames in,
       // 0 bytes out). Dimensions come from the first JPEG's SOF either way.
-      "-analyzeduration",
-      "0",
-      "-probesize",
-      "32",
-      "-f",
-      "mjpeg",
-      "-use_wallclock_as_timestamps",
-      "1",
-      "-i",
-      "pipe:0",
+      "-analyzeduration", "0", "-probesize", "32",
+      "-f", "mjpeg", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
       // The demuxer's nominal 25 fps becomes a constant output rate, and a
       // screencast repaints on no grid: measured 78 frames in, 2 encoded.
-      "-fps_mode",
-      "passthrough",
-      "-an",
-      ...codecArgs(encoder),
-      ...output,
+      "-fps_mode", "passthrough",
+      "-an", ...codecArgs(encoder), ...output,
     ],
-    { stdio: ["pipe", rtp ? "ignore" : "pipe", "pipe"] }
+    { stdio: ["pipe", rtp ? "ignore" : "pipe", "pipe"] },
   );
 
   await new Promise((resolve, reject) => {
@@ -311,11 +241,7 @@ export async function createH264Encoder({
   });
   const framer = rtp
     ? null
-    : createAccessUnitFramer({
-        onAccessUnit: (au, info) => onChunk?.(au, info),
-        onResync,
-        log,
-      });
+    : createAccessUnitFramer({ onAccessUnit: (au, info) => onChunk?.(au, info), onResync, log });
   const onStdout = framer ? (chunk) => framer.push(chunk) : null;
   if (onStdout) proc.stdout.on("data", onStdout);
 
@@ -327,10 +253,7 @@ export async function createH264Encoder({
   proc.once("close", (code) => {
     alive = false;
     framer?.close(); // a dead encoder's partial unit belongs to no stream
-    if (code)
-      log(
-        `stream: h264 encoder (${encoder}) exited ${code}: ${stderrTail.trim()}`
-      );
+    if (code) log(`stream: h264 encoder (${encoder}) exited ${code}: ${stderrTail.trim()}`);
     onExit?.();
   });
 
@@ -352,16 +275,8 @@ export async function createH264Encoder({
       // sink its replacement writes to (it references the old parameter sets).
       if (onStdout) proc.stdout.off("data", onStdout);
       framer?.close();
-      try {
-        proc.stdin.destroy();
-      } catch {
-        /* already gone */
-      }
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        /* already dead */
-      }
+      try { proc.stdin.destroy(); } catch { /* already gone */ }
+      try { proc.kill("SIGKILL"); } catch { /* already dead */ }
     },
   };
 }
