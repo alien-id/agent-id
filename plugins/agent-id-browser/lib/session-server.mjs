@@ -1479,8 +1479,8 @@ export async function dispatch(state, msg, policy = null) {
     case "fill-card": {
       // A stored card typed into a checkout: all four fields, one blackout, no
       // value returned and none logged. Whether this payment may happen at all is
-      // not decided here — lethe holds the owner-approved intent and has already
-      // spent it — but the merchant the owner approved is re-checked against the
+      // not decided here — the caller holds the owner-approved intent and has
+      // already spent it — but the merchant the owner approved is re-checked against the
       // page THIS process can see, because a host the caller passes is a claim
       // and page.url() is state.
       const credName = String(p.cred || "");
@@ -1566,7 +1566,7 @@ export async function dispatch(state, msg, policy = null) {
       // credential is named, because there is nothing stored to name: this value
       // is a one-shot the owner reads off their phone, so a domain allowlist has
       // no secret here to protect and the issuer's host is not knowable in
-      // advance anyway. What stands in its place is the caller's check — lethe
+      // advance anyway. What stands in its place is the caller's own check — it
       // reaches this only for a payment it has already made, on the merchant the
       // owner approved — and the card below, which quotes that payment rather
       // than anything the page says about itself.
