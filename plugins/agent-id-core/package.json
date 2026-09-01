@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-core",
-  "version": "7.3.1",
+  "version": "7.4.0",
   "type": "module",
   "description": "Alien Agent ID core: crypto primitives, v3 bundle format, universal verifier, SignatureEngine, OIDC, state I/O. Shared by every other agent-id-* plugin.",
   "bin": {
