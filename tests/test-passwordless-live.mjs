@@ -228,6 +228,20 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
 <div role="dialog"><p>We use cookies</p><button>Accept</button></div>`);
       return;
     }
+    if (url.pathname === "/password-step") {
+      // The ordinary second-factor shape, and the one a live report was about:
+      // identifier and password together, then a mailed code. Nothing about it is
+      // passwordless, so the whole path — the stored password, the code screen
+      // after it, the card raised for that code — has to work as a sequence.
+      res.end(`<!doctype html><meta charset=utf-8><title>sign-in</title>
+<h1>Sign in</h1>
+<form action="/code" method="get">
+  <label for=u>Username</label><input id=u name=username autocomplete=username>
+  <label for=p>Password</label><input id=p name=password type=password autocomplete=current-password>
+  <button type=submit>Sign in</button>
+</form>`);
+      return;
+    }
     if (url.pathname === "/staged") {
       // Booking.com's shape: the password step is fully built and laid out on
       // the e-mail screen — sized, opaque, inside the viewport — and taken out
@@ -916,3 +930,44 @@ test(
     }
   }
 );
+
+test("a sign-in with a password AND a code runs end to end", { skip }, async () => {
+  // Everything before this exercised passwordless sign-ins. The reported failure
+  // was the other shape: username, password, and only then a code — where the
+  // card for that code never appeared at all.
+  const { server, port } = await fixtureServer();
+  try {
+    const cards = [];
+    const result = await withBrowser(async (context) => {
+      const page = await context.newPage();
+      return autoLogin({
+        page,
+        cred: {
+          name: "fixture-2fa",
+          type: "login",
+          username: IDENTIFIER,
+          password: "hunter2",
+          passwordless: false,
+          otp: "interactive",
+          loginUrl: `http://127.0.0.1:${port}/password-step`,
+          domains: ["127.0.0.1"],
+          warmup: false,
+        },
+        settleMs: 400,
+        resolveOtpFn: async (cred, opts) => {
+          cards.push({ length: opts?.length ?? null, destination: opts?.destination ?? null });
+          return "423124";
+        },
+      });
+    });
+
+    assert.equal(result.ok, true, `auto-login failed: ${result.outcome}`);
+    assert.match(result.finalUrl, /code=423124$/, "the code reached the site");
+    assert.equal(cards.length, 1, "exactly one card, raised when the site asked");
+    // The card the owner would have seen: six cells, and where the code went.
+    assert.equal(cards[0].length, 6);
+    assert.equal(cards[0].destination, IDENTIFIER);
+  } finally {
+    server.close();
+  }
+});
