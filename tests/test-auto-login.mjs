@@ -738,6 +738,24 @@ test("autoLogin reports an expired code card as an outcome, so the caller learns
   assert.equal(result.finalUrl, "https://x.test/otp");
 });
 
+test("a card closed for the browser asks for the browser, not for another card", async () => {
+  const useBrowser = () => {
+    const err = new Error("hosted secure prompt: the owner will sign in through the browser instead");
+    err.code = "FORM_USE_BROWSER";
+    return err;
+  };
+  const result = await autoLogin({
+    page: recipePage("https://x.test/otp"),
+    cred: PWLESS_CRED,
+    resolveOtpFn: async () => {
+      throw useBrowser();
+    },
+  });
+
+  assert.equal(result.outcome, "owner-will-drive");
+  assert.notEqual(result.outcome, "otp-declined", "they did not refuse, they took it over");
+});
+
 test("a card the owner dismissed is reported as their answer, not as a fault", async () => {
   // The hosted host answers 409 when the owner closes the card. Arriving as a
   // bare HTTP error it read as "something broke", and the sensible response to

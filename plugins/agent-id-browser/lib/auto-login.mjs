@@ -1129,6 +1129,16 @@ export async function autoLogin({
     finalUrl: page.url(),
     errorText,
   });
+  // Not a refusal at all: the owner pressed the card's own button and means to
+  // finish the sign-in themselves, in a browser they can see. Reported apart from
+  // a dismissal because the answer to it is the opposite — hand them the browser
+  // rather than leave the sign-in alone.
+  const ownerWillDrive = () => ({
+    ok: false,
+    outcome: "owner-will-drive",
+    finalUrl: page.url(),
+    errorText,
+  });
   // The stored `otp` said this site has no codes, and it has just been shown
   // wrong. Called once a code is in hand, because that is the whole of the
   // evidence — `otp-required` is also what a signed-in landing page inviting the
@@ -1163,6 +1173,7 @@ export async function autoLogin({
         domains: cred.domains,
       });
     } catch (err) {
+      if (err?.code === "FORM_USE_BROWSER") return ownerWillDrive();
       if (err?.code === "FORM_CANCELLED") return otpDeclined();
       if (err?.code !== "FORM_TIMEOUT") throw err;
       return otpTimedOut();
@@ -1262,6 +1273,7 @@ export async function autoLogin({
         await recordOtpModeCorrection();
         await typeOtp(page, code);
       } catch (err) {
+        if (err?.code === "FORM_USE_BROWSER") return ownerWillDrive();
         if (err?.code === "FORM_CANCELLED") return otpDeclined();
         if (err?.code !== "FORM_TIMEOUT") throw err;
         return otpTimedOut();

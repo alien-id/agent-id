@@ -102,6 +102,21 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           "Either way the password is FINE: do not re-check it and do not ask for one. " +
           "Run auto-login again once the cause is addressed.",
       };
+    // The owner pressed "use the browser instead". They are not refusing the
+    // sign-in — they are asking to do it where they can see it, which is exactly
+    // what the viewport is for. Anything else here (another card, a retry, a
+    // question about the password) ignores what they just said.
+    case "owner-will-drive":
+      return {
+        action: OWNER_MUST_DRIVE,
+        reason: "owner_chose_the_browser",
+        message:
+          `The owner closed the secure card for '${credName}' and asked to sign in through the ` +
+          `browser themselves. Open the browser view for profile '${profile}', parked on the ` +
+          "sign-in page, and let them finish there — then continue. Do NOT raise another card, " +
+          "do NOT ask for the password, and do NOT report the sign-in refused: they did not " +
+          "refuse it, they took it over.",
+      };
     // The owner closed the card. Nothing is broken and nothing timed out — they
     // were asked and declined, so the one thing that must not happen is the same
     // card going back up unbidden.
