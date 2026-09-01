@@ -29,8 +29,7 @@ import {
 } from "../plugins/agent-id-core/lib/state.mjs";
 import { fingerprintPublicKeyPem } from "../plugins/agent-id-core/lib/crypto.mjs";
 
-const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url)
-  .pathname;
+const CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url).pathname;
 
 function loginRec(over = {}) {
   return {
@@ -45,12 +44,8 @@ function loginRec(over = {}) {
 
 async function makeVault(dir) {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey
-    .export({ format: "pem", type: "spki" })
-    .toString();
-  const privateKeyPem = privateKey
-    .export({ format: "pem", type: "pkcs8" })
-    .toString();
+  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
+  const privateKeyPem = privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   await writeJsonFile(statePaths(dir).mainKey, {
     version: 1,
     agentId: "main",
@@ -76,9 +71,7 @@ function waitForUrl(child) {
       }
     };
     child.stderr.on("data", onData);
-    child.on("exit", () =>
-      reject(new Error(`CLI exited before printing a URL:\n${buf}`))
-    );
+    child.on("exit", () => reject(new Error(`CLI exited before printing a URL:\n${buf}`)));
   });
 }
 
@@ -88,9 +81,7 @@ test("validateRecord: a valid login passes (otp defaults to interactive)", () =>
   assert.doesNotThrow(() => validateRecord(loginRec()));
   assert.doesNotThrow(() => validateRecord(loginRec({ otp: "none" })));
   assert.doesNotThrow(() => validateRecord(loginRec({ otp: "interactive" })));
-  assert.doesNotThrow(() =>
-    validateRecord(loginRec({ loginUrl: "https://example.com/login" }))
-  );
+  assert.doesNotThrow(() => validateRecord(loginRec({ loginUrl: "https://example.com/login" })));
 });
 
 test("loginOtpMode: one answer for a silent field, wherever it is read", () => {
@@ -204,42 +195,24 @@ test("validateRecord: a recipe is checked against the action vocabulary on the w
       ])
     )
   );
-  assert.throws(
-    () => validateRecord(withRecipe([{ action: "frobnicate" }])),
-    /must be one of/i
-  );
-  assert.throws(
-    () => validateRecord(withRecipe(["fill #u"])),
-    /step 0 must be an object/i
-  );
-  assert.throws(
-    () => validateRecord(withRecipe({ action: "fill" })),
-    /must be an array of steps/i
-  );
+  assert.throws(() => validateRecord(withRecipe([{ action: "frobnicate" }])), /must be one of/i);
+  assert.throws(() => validateRecord(withRecipe(["fill #u"])), /step 0 must be an object/i);
+  assert.throws(() => validateRecord(withRecipe({ action: "fill" })), /must be an array of steps/i);
 });
 
 test("validateRecord: rejects a bad otp mode", () => {
-  assert.throws(
-    () => validateRecord(loginRec({ otp: "sms" })),
-    /otp must be one of/i
-  );
+  assert.throws(() => validateRecord(loginRec({ otp: "sms" })), /otp must be one of/i);
 });
 
 test("validateRecord: otp=totp requires a totpSecret", () => {
-  assert.throws(
-    () => validateRecord(loginRec({ otp: "totp" })),
-    /totpSecret.*required/i
-  );
+  assert.throws(() => validateRecord(loginRec({ otp: "totp" })), /totpSecret.*required/i);
   assert.doesNotThrow(() =>
     validateRecord(loginRec({ otp: "totp", totpSecret: "GEZDGNBVGY3TQOJQ" }))
   );
 });
 
 test("validateRecord: rejects an invalid loginUrl", () => {
-  assert.throws(
-    () => validateRecord(loginRec({ loginUrl: "not a url" })),
-    /loginUrl/i
-  );
+  assert.throws(() => validateRecord(loginRec({ loginUrl: "not a url" })), /loginUrl/i);
 });
 
 // ─── add --type login --form (secret never leaks) ──────────────────────────────────
@@ -255,19 +228,9 @@ test("add --type login --form stores username/password/totpSecret; nothing leaks
     const child = spawn(
       "node",
       [
-        CLI,
-        "add",
-        "--name",
-        "demo",
-        "--type",
-        "login",
-        "--otp",
-        "totp",
-        "--login-url",
-        "https://example.com/login",
-        "--form",
-        "--state-dir",
-        dir,
+        CLI, "add", "--name", "demo", "--type", "login",
+        "--otp", "totp", "--login-url", "https://example.com/login",
+        "--form", "--state-dir", dir,
       ],
       {
         env: {
@@ -300,10 +263,7 @@ test("add --type login --form stores username/password/totpSecret; nothing leaks
 
     // The username is non-secret context, but the password and seed must not leak.
     assert.ok(!stdout.includes(PW) && !stderr.includes(PW), "password leaked");
-    assert.ok(
-      !stdout.includes(SEED) && !stderr.includes(SEED),
-      "TOTP seed leaked"
-    );
+    assert.ok(!stdout.includes(SEED) && !stderr.includes(SEED), "TOTP seed leaked");
     assert.equal(JSON.parse(stdout).type, "login");
 
     const vault = await openVault({ stateDir: dir, privateKeyPem });
@@ -330,20 +290,10 @@ test("add --type login --passwordless --form shows a single identifier field, an
     const child = spawn(
       "node",
       [
-        CLI,
-        "add",
-        "--name",
-        "booking",
-        "--type",
-        "login",
-        "--passwordless",
-        "--otp",
-        "interactive",
-        "--login-url",
-        "https://account.example.com/sign-in",
-        "--form",
-        "--state-dir",
-        dir,
+        CLI, "add", "--name", "booking", "--type", "login",
+        "--passwordless", "--otp", "interactive",
+        "--login-url", "https://account.example.com/sign-in",
+        "--form", "--state-dir", dir,
       ],
       {
         env: {
@@ -366,15 +316,8 @@ test("add --type login --passwordless --form shows a single identifier field, an
     const names = [...html.matchAll(/<input[^>]*\bname="([^"]+)"/g)]
       .map((m) => m[1])
       .filter((n) => n !== "_token");
-    assert.deepEqual(
-      names,
-      ["username"],
-      `expected one identifier field, got ${names.join(", ")}`
-    );
-    assert.ok(
-      !/type="password"/.test(html),
-      "a passwordless card must render no password input"
-    );
+    assert.deepEqual(names, ["username"], `expected one identifier field, got ${names.join(", ")}`);
+    assert.ok(!/type="password"/.test(html), "a passwordless card must render no password input");
 
     const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
       method: "POST",
@@ -389,11 +332,7 @@ test("add --type login --passwordless --form shows a single identifier field, an
     const rec = vault.get("booking");
     assert.equal(rec.username, USER);
     assert.equal(rec.passwordless, true);
-    assert.equal(
-      rec.password,
-      undefined,
-      "nothing may be stored as a password"
-    );
+    assert.equal(rec.password, undefined, "nothing may be stored as a password");
     assert.equal(rec.otp, "interactive");
     assert.deepEqual(rec.domains, ["account.example.com"]);
     vault.lock();
@@ -561,11 +500,7 @@ test("listMetadata surfaces a login's shape without surfacing its secrets", () =
   assert.equal(meta.hasRecipe, true);
   assert.equal(meta.username, undefined, "the identifier is a secret field");
   assert.equal(meta.password, undefined);
-  assert.equal(
-    meta.recipe,
-    undefined,
-    "the steps themselves stay in the record"
-  );
+  assert.equal(meta.recipe, undefined, "the steps themselves stay in the record");
 });
 
 test("the card names the site, not the credential the agent invented", async () => {
@@ -576,20 +511,10 @@ test("the card names the site, not the credential the agent invented", async () 
     const child = spawn(
       "node",
       [
-        CLI,
-        "add",
-        "--name",
-        "airbnb-passwordless-again",
-        "--type",
-        "login",
-        "--passwordless",
-        "--otp",
-        "interactive",
-        "--login-url",
-        "https://www.airbnb.com/login",
-        "--form",
-        "--state-dir",
-        dir,
+        CLI, "add", "--name", "airbnb-passwordless-again", "--type", "login",
+        "--passwordless", "--otp", "interactive",
+        "--login-url", "https://www.airbnb.com/login",
+        "--form", "--state-dir", dir,
       ],
       {
         env: {
@@ -608,48 +533,25 @@ test("the card names the site, not the credential the agent invented", async () 
     // The name is the vault's key and the agent's to choose; it named its own
     // second attempt, and the owner was asked to "Add credential:
     // airbnb-passwordless-again" while looking at Airbnb's sign-in page.
-    assert.ok(
-      !html.includes("airbnb-passwordless-again"),
-      "the credential's name must not reach the card"
-    );
+    assert.ok(!html.includes("airbnb-passwordless-again"), "the credential's name must not reach the card");
     // The title says what is being asked, the line below says what it is for.
     assert.match(html, /Enter it securely/);
-    assert.match(
-      html,
-      /Airbnb\.com sign-in/,
-      "the site, as the owner calls it"
-    );
+    assert.match(html, /Airbnb\.com sign-in/, "the site, as the owner calls it");
     assert.ok(!html.includes("www.Airbnb"), "a sign-in subdomain is noise");
     // Metadata for addressing a credential, not for a person: `*.airbnb.com` reads
     // as a typo, and the type is the agent's vocabulary.
-    assert.ok(
-      !html.includes("login ·"),
-      "the type does not belong on the card"
-    );
-    assert.ok(
-      !/\*\.airbnb\.com/.test(html),
-      "the allowlist does not belong on the card"
-    );
+    assert.ok(!html.includes("login ·"), "the type does not belong on the card");
+    assert.ok(!/\*\.airbnb\.com/.test(html), "the allowlist does not belong on the card");
     // The primitive told the owner nothing they could act on, and read as a warning
     // label on a screen meant to reassure.
     assert.ok(!/AES-256-GCM|HKDF/.test(html), "no cipher names on a card");
     // "isn't saved anywhere" was false on the one card whose whole purpose is to
     // save it. What is true is where it goes, and that is the reassuring part.
-    assert.match(
-      html,
-      /I never see it\. It goes straight into your encrypted vault\./
-    );
-    assert.ok(
-      !/isn't saved anywhere/.test(html),
-      "the card must not deny what it is doing"
-    );
+    assert.match(html, /I never see it\. It goes straight into your encrypted vault\./);
+    assert.ok(!/isn't saved anywhere/.test(html), "the card must not deny what it is doing");
     // Airbnb's own first screen says "Phone number or email"; the old label
     // promised a mailbox and the code arrived as an SMS.
-    assert.match(
-      html,
-      /Email or phone number/,
-      "a passwordless identifier is not email-only"
-    );
+    assert.match(html, /Email or phone number/, "a passwordless identifier is not email-only");
     // Step one of two: submitting it looks like nothing happened unless it says so.
     assert.match(html, /The code comes at sign-in/);
 

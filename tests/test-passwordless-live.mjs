@@ -68,11 +68,7 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
 <p>We've sent a six-digit code to ${IDENTIFIER}. It expires shortly.</p>
 <form action="/search"><input name=q><button type=submit>Search</button></form>
 <form id=f>${field}
-  ${
-    submit === "button"
-      ? "<button type=button id=go>Verify</button><button type=button id=resend>Resend code</button>"
-      : ""
-  }
+  ${submit === "button" ? "<button type=button id=go>Verify</button><button type=button id=resend>Resend code</button>" : ""}
 </form>
 <script>
   const boxes = [...document.querySelectorAll('.box')];
@@ -107,10 +103,7 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
     if (url.pathname === "/otp-boxes") {
       res.end(`<!doctype html><meta charset=utf-8><title>code</title>
 <h1>Enter the code we sent you</h1>
-<form>${Array.from(
-        { length: 6 },
-        (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`
-      ).join("")}</form>`);
+<form>${Array.from({ length: 6 }, (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`).join("")}</form>`);
       return;
     }
     if (url.pathname === "/otp-boxes-self-submitting") {
@@ -418,34 +411,20 @@ test(
         });
         const step1 = await detectPageState(page);
         assert.equal(step1.hasPasswordField, false);
-        assert.equal(
-          step1.hasIdentifierField,
-          true,
-          "the e-mail input must be seen"
-        );
+        assert.equal(step1.hasIdentifierField, true, "the e-mail input must be seen");
         // The whole point: a screen with no password is not a finished login —
         // while we are still standing on it. `onLoginPage` is what the caller
         // knows and the snapshot does not; off the sign-in page the same e-mail
         // input is a newsletter box.
         assert.equal(classifyLogin({ ...step1, onLoginPage: true }), "unknown");
-        assert.equal(
-          classifyLogin({ ...step1, onLoginPage: false }),
-          "logged-in"
-        );
+        assert.equal(classifyLogin({ ...step1, onLoginPage: false }), "logged-in");
 
         await page.goto(`http://127.0.0.1:${port}/code`, {
           waitUntil: "domcontentloaded",
         });
         const step2 = await detectPageState(page);
-        assert.equal(
-          step2.hasOtpField,
-          true,
-          "the one-time-code box must be seen"
-        );
-        assert.equal(
-          classifyLogin({ ...step2, onLoginPage: true }),
-          "otp-required"
-        );
+        assert.equal(step2.hasOtpField, true, "the one-time-code box must be seen");
+        assert.equal(classifyLogin({ ...step2, onLoginPage: true }), "otp-required");
 
         await page.goto(`http://127.0.0.1:${port}/done?code=483920`, {
           waitUntil: "domcontentloaded",
@@ -498,10 +477,7 @@ test(
       assert.equal(result.outcome, "otp-rejected");
       // Two attempts, not one per round. The second waits out the TOTP window so
       // it is a different code — which is the only retry that can succeed.
-      assert.ok(
-        asks <= 4,
-        `asked ${asks} times; the budget is meant to stop it`
-      );
+      assert.ok(asks <= 4, `asked ${asks} times; the budget is meant to stop it`);
     } finally {
       server.close();
     }
@@ -537,10 +513,7 @@ test(
       });
       assert.equal(result.ok, true, `auto-login failed: ${result.outcome}`);
       assert.match(result.finalUrl, /code=\d{6}$/);
-      assert.ok(
-        !result.finalUrl.includes("/search"),
-        "the decoy form must not win"
-      );
+      assert.ok(!result.finalUrl.includes("/search"), "the decoy form must not win");
     } finally {
       server.close();
     }
@@ -579,16 +552,8 @@ test(
         });
 
         const state = await detectPageState(page);
-        assert.equal(
-          state.hasPasswordField,
-          false,
-          "a staged password is not being asked for"
-        );
-        assert.equal(
-          state.hasIdentifierField,
-          true,
-          "the identifier keeps the looser test"
-        );
+        assert.equal(state.hasPasswordField, false, "a staged password is not being asked for");
+        assert.equal(state.hasIdentifierField, true, "the identifier keeps the looser test");
         assert.equal(classifyLogin({ ...state, onLoginPage: true }), "unknown");
 
         // The same rule where the agent reads it. Seeing a password control here
@@ -601,10 +566,7 @@ test(
           !snapshot.controls.some((c) => c.type === "password"),
           "a staged control is not one of the fields on offer"
         );
-        assert.ok(
-          snapshot.controls.some((c) => c.type === "email"),
-          "the identifier is"
-        );
+        assert.ok(snapshot.controls.some((c) => c.type === "email"), "the identifier is");
         // The conclusion, not the evidence. Reporting the password flagged was tried
         // and read straight past: an agent said it saw "a technical password field in
         // the markup" and stored a credential the site has no use for.
@@ -635,11 +597,7 @@ test(
         // no password and no identifier, which is the shape of a finished login: the
         // run sealed an unauthenticated profile and called it a success.
         const state = await detectPageState(page);
-        assert.equal(
-          state.hasPasswordField,
-          true,
-          "the page is asking for this password"
-        );
+        assert.equal(state.hasPasswordField, true, "the page is asking for this password");
         assert.notEqual(
           classifyLogin({ ...state, onLoginPage: false }),
           "logged-in",
@@ -656,11 +614,7 @@ test(
         );
         // Nothing here asks for an identifier, so no verdict is offered. Claiming one
         // on every page would make the field worthless where it matters.
-        assert.equal(
-          snapshot.signIn,
-          undefined,
-          "a page with no identifier gets no verdict"
-        );
+        assert.equal(snapshot.signIn, undefined, "a page with no identifier gets no verdict");
       });
     } finally {
       server.close();
@@ -701,10 +655,7 @@ test(
               staged.map((c) => c.type)
             )}`
           );
-          assert.ok(
-            staged.every((c) => c.ref),
-            `${route}: reachable means it has a ref`
-          );
+          assert.ok(staged.every((c) => c.ref), `${route}: reachable means it has a ref`);
         }
       });
     } finally {

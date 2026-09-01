@@ -60,9 +60,7 @@ async function typeSecret(page, selector, value, opts = {}) {
   try {
     await humanType(page, selector, value, opts);
   } catch {
-    throw new Error(
-      `could not type into "${selector}" — element not visible/editable`
-    );
+    throw new Error(`could not type into "${selector}" — element not visible/editable`);
   }
 }
 
@@ -100,8 +98,7 @@ export function isDeepLoginUrl(url) {
 // A URL path segment that names a login / auth / challenge step. Matched against
 // whole segments (so "/authors/x" is NOT login-ish, but "/login/" and
 // "/oauth2/authorize" are) to keep the "still on the login page" check precise.
-const LOGIN_SEGMENT_RE =
-  /^(log[-_]?in|sign[-_]?in|signin|auth|authorize|sso|oauth2?|challenge|checkpoint|verify)$/i;
+const LOGIN_SEGMENT_RE = /^(log[-_]?in|sign[-_]?in|signin|auth|authorize|sso|oauth2?|challenge|checkpoint|verify)$/i;
 
 export function isLoginishPath(pathname) {
   return String(pathname || "")
@@ -190,16 +187,13 @@ export async function runRecipe(
   // A step whose template injects the password/otp must never surface the raw
   // value in an error. Run it under a value-free catch.
   const carriesSecret = (tpl) =>
-    typeof tpl === "string" &&
-    (tpl.includes("{password}") || tpl.includes("{otp}"));
+    typeof tpl === "string" && (tpl.includes("{password}") || tpl.includes("{otp}"));
   const guarded = async (tpl, run) => {
     if (!carriesSecret(tpl)) return run();
     try {
       return await run();
     } catch {
-      throw new Error(
-        `recipe step '${tpl}' failed while entering a secret value`
-      );
+      throw new Error(`recipe step '${tpl}' failed while entering a secret value`);
     }
   };
   // Refuse a secret-bearing step on an origin the credential was never scoped to.
@@ -220,9 +214,7 @@ export async function runRecipe(
         // exfiltration channel this gate exists to close — refuse before `sub`
         // can resolve it.
         if (stepCarriesSecret(step)) {
-          throw new Error(
-            "recipe navigate: a URL must not carry {password} or {otp}"
-          );
+          throw new Error("recipe navigate: a URL must not carry {password} or {otp}");
         }
         const url = await sub(step.url);
         assertHostAllowed(hostOf(url), domains, "recipe navigate: refusing");
@@ -305,26 +297,18 @@ export function fromAuthenticatorApp(cred) {
   return cred.otp === "totp" && !cred.totpSecret;
 }
 
-export function otpPromptWording(
-  cred,
-  { retry = false, destination = null } = {}
-) {
+export function otpPromptWording(cred, { retry = false, destination = null } = {}) {
   // Named the way the first card named it. The two arrive a minute apart, and this
   // one saying `account.booking.com` where the other said `Booking.com` reads as a
   // different site at the moment the owner is deciding whether to type a code into
   // it. The credential's name is the last resort, for the same reason as there: a
   // card naming nothing is worse than one naming a key the agent chose.
-  const site =
-    siteName(
-      credentialHost({ loginUrl: cred.loginUrl, domains: cred.domains })
-    ) || cred.name;
+  const site = siteName(credentialHost({ loginUrl: cred.loginUrl, domains: cred.domains })) || cred.name;
   // A retry card has to say why it is there. Without it the owner sees the same
   // prompt twice and cannot tell a refused code from a lost one — and for a
   // time-based code the right move is to read the CURRENT one, not retype the
   // one they just sent.
-  const retryNote = retry
-    ? "That code was not accepted — enter the current one. "
-    : "";
+  const retryNote = retry ? "That code was not accepted — enter the current one. " : "";
   // Where the code went. Three tiers, and the wording weakens with each: what the
   // page itself said, then the identifier the sign-in was started with, then
   // nothing. The middle one is a guess — a site can text a code to an account
@@ -336,8 +320,8 @@ export function otpPromptWording(
   const sentence = destination
     ? `${site} sent a code to ${destination} — enter it to finish signing in`
     : guess
-    ? `The code should reach ${guess} — enter it to finish signing in`
-    : `${site} sent you a code — check your email or messages, then enter it here`;
+      ? `The code should reach ${guess} — enter it to finish signing in`
+      : `${site} sent you a code — check your email or messages, then enter it here`;
   if (fromAuthenticatorApp(cred)) {
     return {
       title: `2FA code for ${site}`,
@@ -413,9 +397,7 @@ export async function resolveOtp(
     });
   }
   const spec = otpCardSpec(cred, { retry, destination, length });
-  log(
-    `Waiting for the ${spec.fields[0].label.toLowerCase()} via the secure prompt…`
-  );
+  log(`Waiting for the ${spec.fields[0].label.toLowerCase()} via the secure prompt…`);
   const { values } = await collectSecret(spec, { env });
 
   return String(values.otp || "").trim();
@@ -433,15 +415,10 @@ const CODE_CELL_RANGE = [4, 8];
 
 export function otpCardLength(length) {
   const [low, high] = CODE_CELL_RANGE;
-  return Number.isInteger(length) && length >= low && length <= high
-    ? length
-    : null;
+  return Number.isInteger(length) && length >= low && length <= high ? length : null;
 }
 
-export function otpCardSpec(
-  cred,
-  { retry = false, destination = null, length = null } = {}
-) {
+export function otpCardSpec(cred, { retry = false, destination = null, length = null } = {}) {
   const wording = otpPromptWording(cred, { retry, destination });
   const cells = otpCardLength(length);
 
@@ -465,8 +442,7 @@ export function otpCardSpec(
       },
     ],
     label: wording.ask,
-    security:
-      "Used once to complete sign-in; never stored or shown to the agent.",
+    security: "Used once to complete sign-in; never stored or shown to the agent.",
     timeoutMs: otpCardBudgetMs(cred, { retry }),
   };
 }
@@ -845,13 +821,8 @@ async function submitCode(page, fieldSel) {
   // Vendor-specific first: these have stable ids and no useful text.
   for (const known of ["#submitButton", "#idSubmit_SAOTCC_Continue"]) {
     const button = page.locator(known).first();
-    if (
-      (await button.count()) &&
-      (await button.isVisible().catch(() => false))
-    ) {
-      await humanClick(page, known, { timeout: SUBMIT_TIMEOUT }).catch(
-        () => {}
-      );
+    if ((await button.count()) && (await button.isVisible().catch(() => false))) {
+      await humanClick(page, known, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
       return;
     }
   }
@@ -859,15 +830,9 @@ async function submitCode(page, fieldSel) {
   // hand the click to a header search box or a newsletter footer, and the label
   // branch below would never run.
   const SUBMIT_SEL = 'button[type="submit"], input[type="submit"]';
-  const ownForm = page
-    .locator(fieldSel)
-    .first()
-    .locator("xpath=ancestor::form[1]");
+  const ownForm = page.locator(fieldSel).first().locator("xpath=ancestor::form[1]");
   const ownSubmit = ownForm.locator(SUBMIT_SEL).first();
-  if (
-    (await ownSubmit.count()) &&
-    (await ownSubmit.isVisible().catch(() => false))
-  ) {
+  if ((await ownSubmit.count()) && (await ownSubmit.isVisible().catch(() => false))) {
     await ownSubmit.click({ timeout: SUBMIT_TIMEOUT }).catch(() => {});
     return;
   }
@@ -879,8 +844,7 @@ async function submitCode(page, fieldSel) {
     const button = buttons.nth(i);
     if (!(await button.isVisible().catch(() => false))) continue;
     const label = (
-      (await button.textContent({ timeout: SUBMIT_TIMEOUT }).catch(() => "")) ||
-      ""
+      (await button.textContent({ timeout: SUBMIT_TIMEOUT }).catch(() => "")) || ""
     ).trim();
     if (!CODE_SUBMIT_TEXT_RE.test(label)) continue;
     await humanClick(page, button, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
@@ -904,10 +868,7 @@ async function submitCode(page, fieldSel) {
 async function detectMicrosoftFlow(page) {
   return page
     .evaluate(() => {
-      if (
-        document.getElementById("userNameInput") &&
-        document.getElementById("submitButton")
-      ) {
+      if (document.getElementById("userNameInput") && document.getElementById("submitButton")) {
         return "adfs";
       }
       if (document.querySelector('input[name="loginfmt"]')) return "entra";
@@ -927,15 +888,8 @@ async function clickIfPresent(page, selector) {
 
 // Fill a field with human cadence once it's visible. `secret:true` routes through
 // the value-free error guard (for passwords).
-async function fillWhenVisible(
-  page,
-  selector,
-  value,
-  { timeout = 15000, secret = false } = {}
-) {
-  await page
-    .waitForSelector(selector, { state: "visible", timeout })
-    .catch(() => {});
+async function fillWhenVisible(page, selector, value, { timeout = 15000, secret = false } = {}) {
+  await page.waitForSelector(selector, { state: "visible", timeout }).catch(() => {});
   if (secret) await typeSecret(page, selector, value, { timeout });
   else await humanType(page, selector, value, { timeout });
 }
@@ -1009,12 +963,7 @@ async function heuristicLogin(page, { username, password, passwordless }) {
     await page.waitForTimeout(1500);
   }
   const filledPw = await fillFirst(pwSel, password, true);
-  if (filledPw)
-    await page
-      .locator(pwSel)
-      .first()
-      .press("Enter")
-      .catch(() => {});
+  if (filledPw) await page.locator(pwSel).first().press("Enter").catch(() => {});
 }
 
 /**
@@ -1024,22 +973,14 @@ async function heuristicLogin(page, { username, password, passwordless }) {
  * The prompt text is lifted from the page so the card can echo a number-match
  * challenge ("tap 42"), which is useless to the owner if we paraphrase it.
  */
-async function awaitDeviceConfirmation(
-  page,
-  cred,
-  { log, settleMs, budgetMs }
-) {
+async function awaitDeviceConfirmation(page, cred, { log, settleMs, budgetMs }) {
   const hint = await page
     .evaluate(() => (document.body ? document.body.innerText : ""))
     .catch(() => "");
   const prompt = String(hint)
     .split("\n")
     .map((line) => line.trim())
-    .find((line) =>
-      /tap (?:yes|\d{1,3})\b|check your phone|sent a (?:notification|prompt)/i.test(
-        line
-      )
-    );
+    .find((line) => /tap (?:yes|\d{1,3})\b|check your phone|sent a (?:notification|prompt)/i.test(line));
 
   log("auto-login: awaiting device confirmation");
   await notifyHost("browser.confirmation_required", {
@@ -1114,10 +1055,7 @@ export async function autoLogin({
   // to write the correction.
   onOtpModeCorrected = null,
 }) {
-  if (!cred.loginUrl)
-    throw new Error(
-      `login '${cred.name}': loginUrl is required for auto-login`
-    );
+  if (!cred.loginUrl) throw new Error(`login '${cred.name}': loginUrl is required for auto-login`);
   // The whole run — warmup, the login page, every recipe step — happens on the
   // credential's own origins. Checked once here so a loginUrl pointing off the
   // allowlist fails before a browser goes anywhere, not after.
@@ -1242,15 +1180,10 @@ export async function autoLogin({
     const state = { ...(await detectPageState(page)), onLoginPage };
     const outcome = classifyLogin(state);
     errorText = state.errorText || errorText;
-    log(
-      `auto-login: round ${round + 1}/${maxRounds} ${outcome} (${describeState(
-        state
-      )}) at ${page.url()}`
-    );
+    log(`auto-login: round ${round + 1}/${maxRounds} ${outcome} (${describeState(state)}) at ${page.url()}`);
     // A bot-block / human-verification wall never clears by waiting — stop and
     // report it (the caller advises a headed login, which a human can clear).
-    if (outcome === "blocked")
-      return { ok: false, outcome: "blocked", finalUrl: page.url(), errorText };
+    if (outcome === "blocked") return { ok: false, outcome: "blocked", finalUrl: page.url(), errorText };
     // Neither of these can be finished from here at all: a mailed link
     // authenticates whichever browser the owner opens it in — never this sealed
     // profile — and a QR code is drawn inside a browser they cannot see. There is
@@ -1268,9 +1201,7 @@ export async function autoLogin({
       // as terse), but a second look after a settle can: an unrendered page has
       // moved on by then, a signed-in one says the same thing twice.
       if (round === 0) {
-        log(
-          "auto-login: looks signed in on the first look — settling and re-checking"
-        );
+        log("auto-login: looks signed in on the first look — settling and re-checking");
         await page.waitForTimeout(settleMs);
         continue;
       }
@@ -1280,9 +1211,7 @@ export async function autoLogin({
       if (!onLoginPage) {
         return { ok: true, outcome, finalUrl: page.url() };
       }
-      log(
-        "auto-login: form cleared but still on the login page — awaiting redirect"
-      );
+      log("auto-login: form cleared but still on the login page — awaiting redirect");
     } else if (outcome === "failed") {
       return { ok: false, outcome, finalUrl: page.url(), errorText };
     } else if (outcome === "confirm-on-device") {

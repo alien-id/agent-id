@@ -76,8 +76,7 @@ before(async () => {
 
 after(async () => {
   if (ctx) await ctx.close().catch(() => {});
-  if (workDir)
-    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  if (workDir) await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
 });
 
 const skip = patchrightAvailable ? false : "patchright/Chrome not installed";
@@ -109,13 +108,9 @@ test(
       "no field value may appear anywhere in a snapshot name"
     );
 
-    // A submit button's value is a visible caption, not user content — still shown.
-    assert.ok(
-      names.includes("Sign in"),
-      "a submit button's value is its label and stays visible"
-    );
-  }
-);
+  // A submit button's value is a visible caption, not user content — still shown.
+  assert.ok(names.includes("Sign in"), "a submit button's value is its label and stays visible");
+});
 
 test(
   "form snapshot is compact, labelled, and includes hidden native controls",
@@ -135,36 +130,24 @@ test(
       "text value must never appear"
     );
 
-    const password = snap.controls.find(
-      (control) => control.type === "password"
-    );
-    assert.equal(password.label, "Password");
-    assert.equal(password.required, true);
+  const password = snap.controls.find((control) => control.type === "password");
+  assert.equal(password.label, "Password");
+  assert.equal(password.required, true);
 
-    const plain = snap.controls.find((control) => control.name === "plain");
-    assert.equal(
-      plain.type,
-      "text",
-      "an input without an explicit type defaults to text"
-    );
+  const plain = snap.controls.find((control) => control.name === "plain");
+  assert.equal(plain.type, "text", "an input without an explicit type defaults to text");
 
-    const checkbox = snap.controls.find(
-      (control) => control.type === "checkbox"
-    );
-    assert.equal(checkbox.hidden, true);
-    assert.match(checkbox.label, /Agree to terms/);
+  const checkbox = snap.controls.find((control) => control.type === "checkbox");
+  assert.equal(checkbox.hidden, true);
+  assert.match(checkbox.label, /Agree to terms/);
 
-    const upload = snap.controls.find((control) => control.type === "file");
-    assert.equal(upload.hidden, true);
-    assert.equal(upload.accept, ".pdf");
+  const upload = snap.controls.find((control) => control.type === "file");
+  assert.equal(upload.hidden, true);
+  assert.equal(upload.accept, ".pdf");
 
-    const degree = snap.controls.find((control) => control.type === "select");
-    assert.deepEqual(
-      degree.options.map((option) => option.value),
-      ["bs", "ms"]
-    );
-  }
-);
+  const degree = snap.controls.find((control) => control.type === "select");
+  assert.deepEqual(degree.options.map((option) => option.value), ["bs", "ms"]);
+});
 
 test(
   "atomic form fill handles text, hidden checks, selects, and verifies each",

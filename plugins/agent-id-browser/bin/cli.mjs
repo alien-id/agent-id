@@ -103,10 +103,7 @@ for (let i = 2; i < process.argv.length - 1; i++) {
   if (typeof v !== "string" || v.includes("${")) continue; // skip unsubstituted
   if (process.argv[i] === "--plugin-data" && !process.env.CLAUDE_PLUGIN_DATA) {
     process.env.CLAUDE_PLUGIN_DATA = v;
-  } else if (
-    process.argv[i] === "--plugin-root" &&
-    !process.env.CLAUDE_PLUGIN_ROOT
-  ) {
+  } else if (process.argv[i] === "--plugin-root" && !process.env.CLAUDE_PLUGIN_ROOT) {
     process.env.CLAUDE_PLUGIN_ROOT = v;
   }
 }
@@ -120,16 +117,11 @@ for (let i = 2; i < process.argv.length - 1; i++) {
 async function openVaultUnlocked(flags, { allowOwnerApproval = true } = {}) {
   const stateDir = resolveStateDir(flags);
   const useAgentKey = flags["agent-key"] !== false; // --no-agent-key opts out
-  const privateKeyPem = useAgentKey
-    ? await loadAgentPrivateKey(stateDir)
-    : null;
+  const privateKeyPem = useAgentKey ? await loadAgentPrivateKey(stateDir) : null;
 
   let passphrase = null;
   if (flags["passphrase-file"]) {
-    passphrase = (await fs.readFile(flags["passphrase-file"], "utf8")).replace(
-      /\n$/,
-      ""
-    );
+    passphrase = (await fs.readFile(flags["passphrase-file"], "utf8")).replace(/\n$/, "");
   } else if (flags["passphrase-env"]) {
     passphrase = process.env[flags["passphrase-env"]];
     if (!passphrase) {
@@ -150,15 +142,9 @@ async function openVaultUnlocked(flags, { allowOwnerApproval = true } = {}) {
   }
 
   // 2) App unlock: owner-approval (unless --no-owner-approval, or caller opted out).
-  if (
-    allowOwnerApproval &&
-    flags["owner-approval"] !== false &&
-    (await hasOwnerApproval(stateDir))
-  ) {
+  if (allowOwnerApproval && flags["owner-approval"] !== false && (await hasOwnerApproval(stateDir))) {
     try {
-      stderr(
-        "Vault locked — approval request sent to your Alien app; approve it to continue…"
-      );
+      stderr("Vault locked — approval request sent to your Alien app; approve it to continue…");
       return await unlockViaOwnerApproval({
         stateDir,
         onPrompt: ({ deepLink }) =>
@@ -176,9 +162,7 @@ async function openVaultUnlocked(flags, { allowOwnerApproval = true } = {}) {
   }
 
   // 3) Nothing available.
-  const e = new Error(
-    "no agent-key slot, no passphrase, and no owner-approval slot"
-  );
+  const e = new Error("no agent-key slot, no passphrase, and no owner-approval slot");
   e.code = "VAULT_LOCKED";
   throw e;
 }
@@ -254,16 +238,12 @@ async function withProfile({ flags, name, headless, action }) {
   try {
     const cred = await ensureAnonymousDefaultProfile({ vault, stateDir, name });
     if (!cred || cred.type !== "browser-profile") {
-      const e = new Error(
-        `no browser-profile named '${name}' — ${noProfileHint(name)}`
-      );
+      const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
       e.code = "NO_PROFILE";
       throw e;
     }
     if (!(await sealedProfileExists(stateDir, cred.profileFile))) {
-      const e = new Error(
-        `sealed profile for '${name}' is missing — re-run ${loginHint(name)}`
-      );
+      const e = new Error(`sealed profile for '${name}' is missing — re-run ${loginHint(name)}`);
       e.code = "NO_PROFILE";
       throw e;
     }
@@ -363,15 +343,9 @@ async function cmdLogin(flags) {
       }
       const file = reuse ? reuse.profileFile : `${name}.tar.enc`;
       const dek = reuse ? reuse.dek : newDek();
-      const account = flags.account
-        ? String(flags.account)
-        : reuse?.account || null;
+      const account = flags.account ? String(flags.account) : reuse?.account || null;
       const headlessDefault =
-        flags["headed-default"] === true
-          ? false
-          : reuse
-          ? reuse.headless !== false
-          : true;
+        flags["headed-default"] === true ? false : reuse ? reuse.headless !== false : true;
 
       // The owner sits at this window — a real platform authenticator (Touch
       // ID, a security key) may exist and complete, so WebAuthn stays native.
@@ -382,9 +356,7 @@ async function cmdLogin(flags) {
       });
       stderr(
         resuming
-          ? `A browser opened with your '${name}' session loaded${
-              flags.url ? " at " + startUrl : ""
-            }. ` +
+          ? `A browser opened with your '${name}' session loaded${flags.url ? " at " + startUrl : ""}. ` +
               "Sign into the new site (your existing logins are kept), then CLOSE the window."
           : `A browser window opened${flags.url ? " at " + startUrl : ""}. ` +
               "Sign in, then CLOSE the window when you're done."
@@ -463,9 +435,7 @@ async function cmdLogin(flags) {
 async function cmdAutoLogin(flags) {
   const credName = flags.cred ? String(flags.cred) : null;
   if (!credName) {
-    return outputError(
-      "--cred <LOGIN_CRED> is required (the name of a `login` credential)"
-    );
+    return outputError("--cred <LOGIN_CRED> is required (the name of a `login` credential)");
   }
   const requestedAccess = flags.access != null ? String(flags.access) : null;
   if (requestedAccess && !ACCESS_LEVELS.includes(requestedAccess)) {
@@ -491,9 +461,7 @@ async function cmdAutoLogin(flags) {
       throw e;
     }
     if (!cred.loginUrl) {
-      return outputError(
-        `login '${credName}' has no loginUrl — set one so auto-login knows where to start`
-      );
+      return outputError(`login '${credName}' has no loginUrl — set one so auto-login knows where to start`);
     }
 
     const targetProfile = profileName(flags.name || cred.profile);
@@ -506,8 +474,7 @@ async function cmdAutoLogin(flags) {
       );
     }
     const existing = vault.get(targetProfile);
-    const reuse =
-      existing && existing.type === "browser-profile" ? existing : null;
+    const reuse = existing && existing.type === "browser-profile" ? existing : null;
 
     // The session's access level is the STRICTEST of: the login credential's
     // (a read-only credential can only mint read-only sessions), the existing
@@ -520,11 +487,7 @@ async function cmdAutoLogin(flags) {
           `The owner can widen it: agent-id-vault set-access --name ${credName} --access rw`
       );
     }
-    if (
-      reuse &&
-      requestedAccess &&
-      isAccessRelaxation(reuse, { ...reuse, access: requestedAccess })
-    ) {
+    if (reuse && requestedAccess && isAccessRelaxation(reuse, { ...reuse, access: requestedAccess })) {
       return outputError(
         `session '${targetProfile}' has access level '${effectiveAccess(
           reuse
@@ -595,9 +558,7 @@ async function cmdAutoLogin(flags) {
           reason,
           profile: targetProfile,
           finalUrl: result ? result.finalUrl : null,
-          ...(result && result.errorText
-            ? { pageError: result.errorText }
-            : {}),
+          ...(result && result.errorText ? { pageError: result.errorText } : {}),
           trace,
           message,
         });
@@ -617,9 +578,7 @@ async function cmdAutoLogin(flags) {
         name: targetProfile,
         type: "browser-profile",
         domains: ["*"],
-        description:
-          reuse?.description ||
-          `Auto-login session for '${credName}' (agent-id-browser)`,
+        description: reuse?.description || `Auto-login session for '${credName}' (agent-id-browser)`,
         dek,
         profileFile: file,
         headless: reuse ? reuse.headless !== false : true,
@@ -627,12 +586,8 @@ async function cmdAutoLogin(flags) {
         ...(sessionAccess !== "rw" ? { access: sessionAccess } : {}),
         // A fresh profile inherits the login credential's rules; an existing
         // profile keeps its own (carried by the reuse spread).
-        ...(!reuse && Array.isArray(cred.accessRules)
-          ? { accessRules: cred.accessRules }
-          : {}),
-        ...(reuse?.account || cred.username
-          ? { account: reuse?.account || cred.username }
-          : {}),
+        ...(!reuse && Array.isArray(cred.accessRules) ? { accessRules: cred.accessRules } : {}),
+        ...(reuse?.account || cred.username ? { account: reuse?.account || cred.username } : {}),
         lastSyncedAt: Date.now(),
       });
       vault.touchLastUsed(credName);
@@ -729,21 +684,13 @@ async function cmdRead(flags) {
     });
 
   try {
-    const out = await liveOrOneShot(
-      flags,
-      name,
-      "read",
-      { url, maxChars },
-      oneShot
-    );
+    const out = await liveOrOneShot(flags, name, "read", { url, maxChars }, oneShot);
     if (out.loggedOut) {
       outputJson({
         ok: true,
         sessionExpired: true,
         action: "re_login",
-        message: `Session looks logged out (landed on ${
-          out.finalUrl
-        }). Re-run ${loginHint(name)}.`,
+        message: `Session looks logged out (landed on ${out.finalUrl}). Re-run ${loginHint(name)}.`,
         ...out,
       });
     } else {
@@ -801,21 +748,13 @@ async function cmdFetch(flags) {
     });
 
   try {
-    const out = await liveOrOneShot(
-      flags,
-      name,
-      "fetch",
-      { url, maxChars },
-      oneShot
-    );
+    const out = await liveOrOneShot(flags, name, "fetch", { url, maxChars }, oneShot);
     if (out.loggedOut) {
       outputJson({
         ok: true,
         sessionExpired: true,
         action: "re_login",
-        message: `Request looks logged out (status ${
-          out.httpStatus
-        }). Re-run ${loginHint(name)}.`,
+        message: `Request looks logged out (status ${out.httpStatus}). Re-run ${loginHint(name)}.`,
         ...out,
       });
     } else {
@@ -901,16 +840,12 @@ async function cmdOpen(flags) {
       allowCreate: flags["bootstrap-profile"] === true,
     });
     if (!cred || cred.type !== "browser-profile") {
-      const e = new Error(
-        `no browser-profile named '${name}' — ${noProfileHint(name)}`
-      );
+      const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
       e.code = "NO_PROFILE";
       throw e;
     }
     if (!(await sealedProfileExists(stateDir, cred.profileFile))) {
-      const e = new Error(
-        `sealed profile for '${name}' missing — re-run ${loginHint(name)}`
-      );
+      const e = new Error(`sealed profile for '${name}' missing — re-run ${loginHint(name)}`);
       e.code = "NO_PROFILE";
       throw e;
     }
@@ -1086,11 +1021,7 @@ runCli({
     sessions: cmdSessions,
     snapshot: actionCmd("snapshot"),
     "form-inspect": actionCmd("form-inspect"),
-    "form-fill": actionCmd(
-      "form-fill",
-      (f) => JSON.parse(f.spec || "{}"),
-      120000
-    ),
+    "form-fill": actionCmd("form-fill", (f) => JSON.parse(f.spec || "{}"), 120000),
     navigate: actionCmd("navigate", (f) => ({ url: requireUrl(f) })),
     back: actionCmd("back"),
     "page-text": actionCmd("text", (f) => ({ maxChars: f["max-chars"] })),
@@ -1116,11 +1047,7 @@ runCli({
     // Must outlast the secure-prompt card this can raise (10 min): a shorter
     // budget kills the child while the owner is still fetching the code from
     // their mail, dropping a secret that was on its way back.
-    "fill-otp": actionCmd(
-      "fill-otp",
-      (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit !== false }),
-      11 * 60 * 1000
-    ),
+    "fill-otp": actionCmd("fill-otp", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit !== false }), 11 * 60 * 1000),
     select: actionCmd("select", (f) => ({ ref: f.ref, values: csv(f.values) })),
     press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
     hover: actionCmd("hover", (f) => ({ ref: f.ref })),
@@ -1205,11 +1132,7 @@ runCli({
     downloads: actionCmd("downloads", (f) => ({ max: f.max })),
     console: actionCmd("console", (f) => ({ level: f.level, max: f.max })),
     cookies: actionCmd("cookies", (f) => ({ url: f.url })),
-    batch: actionCmd(
-      "batch",
-      (f) => ({ actions: JSON.parse(f.actions || "[]"), delay: f.delay }),
-      320000
-    ),
+    batch: actionCmd("batch", (f) => ({ actions: JSON.parse(f.actions || "[]"), delay: f.delay }), 320000),
   },
   printHelp: () =>
     stderr(
