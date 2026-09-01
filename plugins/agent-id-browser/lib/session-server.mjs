@@ -1594,6 +1594,16 @@ export async function dispatch(state, msg, policy = null) {
         state.stream?.resume();
       }
     }
+    case "ref-text": {
+      // One element's own text. `text` returns the whole body, which is no use to
+      // a caller that has to compare the same figure twice — a total read off the
+      // page before the owner approves it, and re-read before anything is typed.
+      const target = frameForRef(state, p.ref);
+      const text = await target
+        .locator(sel(p.ref))
+        .evaluate((el) => ("value" in el && el.value ? el.value : el.textContent || ""));
+      return { ref: p.ref, text: String(text).trim().slice(0, 200) };
+    }
     case "select": {
       // Same dispatch as form-fill's selects — a bare `select` on an ARIA
       // combobox would otherwise fail identically here.

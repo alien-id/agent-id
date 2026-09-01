@@ -958,6 +958,7 @@ runCli({
       }),
       11 * 60 * 1000,
     ),
+    "ref-text": actionCmd("ref-text", (f) => ({ ref: f.ref })),
     select: actionCmd("select", (f) => ({ ref: f.ref, values: csv(f.values) })),
     press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
     hover: actionCmd("hover", (f) => ({ ref: f.ref })),
