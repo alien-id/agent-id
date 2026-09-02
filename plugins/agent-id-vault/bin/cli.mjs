@@ -786,12 +786,22 @@ async function cmdSetTotp(flags) {
       });
       seedInput = out.values.seed;
     } catch (err) {
-      // No `action` even for `use_browser`: a seed lives behind the site's own
-      // 2FA settings, and a browser view can show it to the owner but cannot put
-      // it in the vault. Handing one over would land them back on this card.
       const ended = ownerEndedTheCard(err, { name });
       if (ended) {
-        outputJson({ ok: false, stored: false, ...ended, action: undefined });
+        // A seed lives behind the site's own 2FA settings: a browser view can
+        // show it to the owner but cannot put it in the vault, so handing one
+        // over would land them back on this card. Dropping the `action` stops
+        // the caller acting — but the model can open a viewport itself, and the
+        // stock wording invites exactly that. So the message has to say it.
+        if (ended.error === "FORM_USE_BROWSER") {
+          delete ended.action;
+          ended.message =
+            "The owner closed the card and asked for the browser, but a browser cannot finish " +
+            "this one: the seed lives behind the site's own two-factor settings and nothing in " +
+            "a view can put it in the vault. Do not raise this card again, do not open a " +
+            "browser for it, and do not ask for the seed in the chat.";
+        }
+        outputJson({ ok: false, stored: false, ...ended });
         process.exitCode = 1;
         return;
       }

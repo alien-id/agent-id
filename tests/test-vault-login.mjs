@@ -612,6 +612,62 @@ async function addAgainstCard({ dir, reason }) {
   }
 }
 
+// Same stubbed card host, driving `set-totp --form` instead. The credential has
+// to exist first, which `add` without `--form` does without raising anything.
+async function setTotpAgainstCard({ dir, reason }) {
+  const { sock, server } = await hostedSocket(reason);
+  try {
+    const child = spawn(
+      "node",
+      [CLI, "set-totp", "--name", "booking", "--form", "--state-dir", dir],
+      {
+        env: {
+          ...process.env,
+          AGENT_ID_SECURE_PROMPT: "hosted",
+          AGENT_ID_SECURE_PROMPT_SOCK: sock,
+        },
+      }
+    );
+    let stdout = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    const code = await new Promise((r) => child.on("exit", r));
+
+    return { code, out: JSON.parse(stdout) };
+  } finally {
+    server.close();
+  }
+}
+
+// Stripping the `action` stops the CALLER handing a browser over. It does not
+// stop the model opening one itself — that tool is model-callable, and it is the
+// whole premise of the pair. So the decline has to say why, or it is the same
+// loop one step longer.
+test("a seed card closed for the browser declines, and says a browser cannot finish it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-card-"));
+  try {
+    await makeVault(dir);
+    // The credential has to exist before a seed can be set on it; plain `add`
+    // raises no card.
+    await new Promise((resolve) => {
+      const child = spawn("node", [
+        CLI, "add", "--name", "booking", "--type", "login",
+        "--domains", "account.example.com", "--state-dir", dir,
+      ]);
+      child.on("exit", resolve);
+    });
+    const { code, out } = await setTotpAgainstCard({ dir, reason: "use_browser" });
+
+    assert.equal(code, 1);
+    assert.equal(out.error, "FORM_USE_BROWSER");
+    assert.equal(out.stored, false);
+    assert.equal(out.action, undefined, "a browser cannot put a seed in the vault");
+    assert.match(out.message, /browser cannot finish this one/);
+    assert.match(out.message, /do not open a browser for it/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("a card closed for the browser says so, and stores nothing", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "vault-card-"));
   try {

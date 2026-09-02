@@ -691,8 +691,36 @@ function activateRefs(state, generation) {
 export function errorReply(err) {
   const detail = err && typeof err.detail === "object" && err.detail ? err.detail : {};
 
-  return { ok: false, error: (err && err.message) || String(err), ...detail };
+  // Detail first: it adds fields, it does not get to rewrite the two that say
+  // this is a failure. A thrower carrying `ok` in its detail would otherwise
+  // turn its own error into a success, and this is now the one funnel every
+  // failure leaves the daemon through.
+  return { ...detail, ok: false, error: (err && err.message) || String(err) };
 }
+
+// How the OWNER ended the card, as fields the caller can match on rather than a
+// sentence it has to parse. None of the three is a fault, and a model reads a
+// fault as something to retry — which on this path means the same card going
+// straight back up. Only the browser ending carries an `action`, because it is
+// the only one where something else should happen instead.
+export const CARD_ENDINGS = {
+  FORM_USE_BROWSER: {
+    message: "fill-otp: the owner closed the code card and asked to sign in from the browser.",
+    detail: { action: "owner_must_drive", reason: "owner_chose_the_browser" },
+  },
+  FORM_CANCELLED: {
+    message:
+      "fill-otp: the owner dismissed the code card — they were asked and said no. " +
+      "Do not raise it again unless they ask for it.",
+    detail: { reason: "owner_dismissed_the_card" },
+  },
+  FORM_TIMEOUT: {
+    message:
+      "fill-otp: the code card expired before the owner answered. " +
+      "Ask them to be ready, then run this again.",
+    detail: { reason: "card_timed_out" },
+  },
+};
 
 // The hosted secure-prompt socket for ONE action, off the request rather than the
 // daemon's environment. A daemon that carried it in `process.env` could raise a
@@ -1534,33 +1562,17 @@ export async function dispatch(state, msg, policy = null) {
             // standing right to raise cards.
             code = await resolveOtp(otpCred, { ...hints, env: promptEnv(p) });
           } catch (err) {
-            // The owner closed the card. Nothing broke and nothing timed out, so
-            // the one thing that must not happen is the same card going straight
-            // back up — which is what a bare fault invites, because the sensible
-            // reply to a fault is a retry.
-            if (err?.code === "FORM_CANCELLED") {
-              throw new Error(
-                "fill-otp: the owner dismissed the code card — they were asked and said no. " +
-                  "Do not raise it again unless they ask for it."
-              );
-            }
-            // Not a refusal: they want the sign-in, they just want to finish it
-            // themselves. The caller hands the browser over on this pair, so it
-            // travels as fields rather than prose — the socket reply is all it
-            // sees, and a sentence is not something it can match on.
-            if (err?.code === "FORM_USE_BROWSER") {
-              const handover = new Error(
-                "fill-otp: the owner closed the code card and asked to sign in from the browser."
-              );
-              handover.detail = {
-                action: "owner_must_drive",
-                reason: "owner_chose_the_browser",
-                profile: state.name,
-                url: page.url(),
-              };
-              throw handover;
-            }
-            throw err;
+            const ending = CARD_ENDINGS[err?.code];
+            if (!ending) throw err;
+
+            const ended = new Error(ending.message);
+            ended.detail = {
+              ...ending.detail,
+              retryable: false,
+              profile: state.name,
+              url: page.url(),
+            };
+            throw ended;
           }
 
           // Written only now, and only if the owner answered. `fill_otp` inspects
