@@ -1,5 +1,18 @@
 # @alien-id/agent-id-vault
 
+## 7.8.0
+
+### Minor Changes
+
+- [#148](https://github.com/alien-id/agent-id/pull/148) [`cd0f741`](https://github.com/alien-id/agent-id/commit/cd0f74180768077d3be79c129776e2320514c517) Thanks [@stelchankad](https://github.com/stelchankad)! - Tell a card the owner ended from a card that broke, and say which ending it was.
+
+### Patch Changes
+
+- [#148](https://github.com/alien-id/agent-id/pull/148) [`9aa1a4f`](https://github.com/alien-id/agent-id/commit/9aa1a4f2a8d7ea4143cda33324d20b068e74aaa9) Thanks [@stelchankad](https://github.com/stelchankad)! - Name all three endings a code card can have, not one of them, and say plainly when a browser cannot finish the job it was handed.
+
+- Updated dependencies [[`6e893dc`](https://github.com/alien-id/agent-id/commit/6e893dc44c2b0054c129319144673fa5f268868c)]:
+  - @alien-id/agent-id-core@7.6.0
+
 ## 7.7.1
 
 ### Patch Changes

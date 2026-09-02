@@ -1,5 +1,21 @@
 # @alien-id/agent-id-browser
 
+## 8.4.0
+
+### Minor Changes
+
+- [#148](https://github.com/alien-id/agent-id/pull/148) [`cd0f741`](https://github.com/alien-id/agent-id/commit/cd0f74180768077d3be79c129776e2320514c517) Thanks [@stelchankad](https://github.com/stelchankad)! - Tell a card the owner ended from a card that broke, and say which ending it was.
+
+- [#148](https://github.com/alien-id/agent-id/pull/148) [`6e893dc`](https://github.com/alien-id/agent-id/commit/6e893dc44c2b0054c129319144673fa5f268868c) Thanks [@stelchankad](https://github.com/stelchankad)! - Send a one-time code where the caller's selector points rather than into whichever row the predicate found first, tag every field auto-login types a secret into against read-back (passwords included), and say which backend a card is going through on every path, the operator override included.
+
+### Patch Changes
+
+- [#148](https://github.com/alien-id/agent-id/pull/148) [`9aa1a4f`](https://github.com/alien-id/agent-id/commit/9aa1a4f2a8d7ea4143cda33324d20b068e74aaa9) Thanks [@stelchankad](https://github.com/stelchankad)! - Name all three endings a code card can have, not one of them, and say plainly when a browser cannot finish the job it was handed.
+
+- Updated dependencies [[`9aa1a4f`](https://github.com/alien-id/agent-id/commit/9aa1a4f2a8d7ea4143cda33324d20b068e74aaa9), [`cd0f741`](https://github.com/alien-id/agent-id/commit/cd0f74180768077d3be79c129776e2320514c517), [`6e893dc`](https://github.com/alien-id/agent-id/commit/6e893dc44c2b0054c129319144673fa5f268868c)]:
+  - @alien-id/agent-id-vault@7.8.0
+  - @alien-id/agent-id-core@7.6.0
+
 ## 8.3.0
 
 ### Minor Changes
