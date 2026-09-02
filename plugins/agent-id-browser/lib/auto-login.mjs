@@ -48,26 +48,43 @@ import {
   classifyLogin,
   codeDestination,
   codeLengthFromText,
+  maskDestination,
   OTP_BODY_RE,
 } from "./login-detect.mjs";
 import {
+  firstVisible,
   humanClick,
   humanDriver,
   humanType,
   typeCodeAcrossBoxes,
 } from "./human-input.mjs";
-import { markSecretBoxes } from "./secret-taint.mjs";
+import { markSecretBoxes, markSecretLocator } from "./secret-taint.mjs";
 
 // Type a secret (password / OTP) with human cadence, guarding against a
 // keyboard/fill error that could echo the value — auto-login errors propagate to
 // the agent, so the raw error must never carry the secret. Mirrors the
 // session-server fill-secret guard.
+//
+// The taint belongs here rather than at the call sites because this function IS
+// the definition of "auto-login typed a secret into this field": the code screen's
+// single field, the Entra/ADFS password, the heuristic password. `fill-secret` and
+// `fill-otp` have tagged their fields since the read-back guard existed; every
+// field auto-login typed stayed readable through `get --what value`, passwords
+// included.
+//
+// Tagged through the same `firstVisible` the typing resolved through, not through
+// the selector again: where a site renders a hidden copy of the form first, those
+// two name different elements, and the one left readable would be the filled one.
 async function typeSecret(page, selector, value, opts = {}) {
+  const { root = page, timeout = 15000 } = opts;
+
   try {
     await humanType(page, selector, value, opts);
   } catch {
     throw new Error(`could not type into "${selector}" — element not visible/editable`);
   }
+
+  await markSecretLocator(await firstVisible(root, selector, timeout));
 }
 
 const PLACEHOLDER_FIELDS = ["url", "value", "text", "selector", "key"];
@@ -183,7 +200,7 @@ function stepCarriesSecret(step) {
 // than in `human-input` because recognising the row is this layer's job.
 export const recipeDriver = {
   ...humanDriver,
-  fillCode: (page, selector, value) => typeCodeInto(page, selector, value),
+  fillCode: typeCodeInto,
 };
 
 export async function runRecipe(
@@ -204,7 +221,11 @@ export async function runRecipe(
   // value in an error. Run it under a value-free catch.
   const carriesSecret = (tpl) =>
     typeof tpl === "string" && (tpl.includes("{password}") || tpl.includes("{otp}"));
-  const carriesOtp = (tpl) => typeof tpl === "string" && tpl.includes("{otp}");
+  // The WHOLE value, not a value containing one. `fillCode` spreads what it is
+  // given one character per box, so a template like "code: {otp}" routed here
+  // would put "c", "o", "d"… across the row. A code embedded in a longer string
+  // is not a code screen's row; it goes through the ordinary verbs.
+  const carriesOtp = (tpl) => typeof tpl === "string" && tpl.trim() === "{otp}";
   const guarded = async (tpl, run) => {
     if (!carriesSecret(tpl)) return run();
     try {
@@ -661,6 +682,41 @@ export async function otpBoxes(target) {
   return Array.from({ length: count }, (_, index) => all.nth(index));
 }
 
+// The row a CALLER'S selector is asking about, which is not always the row on the
+// page. `otpBoxes` searches the whole document and takes the first group that
+// looks like a code row — right for a heuristic selector, wrong for an explicit
+// one: a recipe naming `#email-code` beside an SMS row, or a `fill_otp` whose ref
+// points at the second of two code fields, would have its instruction silently
+// replaced by whatever the predicate found first.
+//
+// Three answers, because the selector is not always an instruction:
+//   in the row  → the row (the caller and the predicate agree)
+//   elsewhere   → no row (the caller named something else, and meant it)
+//   no match    → the row (a heuristic net that catches nothing cannot outvote it)
+//
+// The last case is what keeps `typeOtp` working: its selector is a wide net that
+// does not cover a row of bare `<input type=text maxlength=1>`, and reading a
+// no-match as "the caller meant elsewhere" would strand exactly the shape this
+// whole path exists for. `$$eval` and not `$eval` for the same reason — a wide
+// net matches many elements, and any one of them landing in the row is agreement.
+export async function otpBoxesFor(target, selector) {
+  const boxes = await otpBoxes(target);
+  if (boxes.length === 0) return [];
+
+  const fit = await target
+    .$$eval(
+      selector,
+      (elements, attr) => {
+        if (elements.length === 0) return "no-match";
+        return elements.some((el) => el.hasAttribute(attr)) ? "in-row" : "elsewhere";
+      },
+      OTP_ROW_ATTR
+    )
+    .catch(() => "no-match");
+
+  return fit === "elsewhere" ? [] : boxes;
+}
+
 export async function otpCardHints(target) {
   // Only an exact count. A row of boxes is one — there are as many as the code
   // has characters. A single field's maxlength is NOT: it says "no more than",
@@ -818,12 +874,16 @@ function describeState(s) {
 // character — `fill_otp` has spread since the row predicate existed, and the two
 // paths auto-login drives, its own OTP step and a recipe's `{otp}`, did not.
 export async function typeCodeInto(page, selector, code) {
-  const boxes = await otpBoxes(page);
+  // A second row detection, after the one `otpCardHints` ran to build the card.
+  // Deliberate: minutes pass between them while the owner reads their mail, and
+  // a row carried over from before that wait describes a page that may already
+  // have re-rendered. The saving would be one `evaluate`; the cost would be
+  // typing into locators that no longer point anywhere.
+  const boxes = await otpBoxesFor(page, selector);
   if (boxes.length === 0) {
     // The OTP code is low-sensitivity (single-use, seconds-lived) but still typed
     // with human cadence and the value-free error guard, for consistency.
-    await typeSecret(page, selector, code);
-    return;
+    return typeSecret(page, selector, code);
   }
 
   // Tainted before the code goes in: every way out of the typing below — a throw,
@@ -831,7 +891,8 @@ export async function typeCodeInto(page, selector, code) {
   // and the tag is the only thing that stops them being read back one at a time
   // through `get --what value`.
   await markSecretBoxes(boxes);
-  await typeCodeAcrossBoxes(page, boxes, code);
+
+  return typeCodeAcrossBoxes(page, boxes, code);
 }
 
 async function typeOtp(page, code) {
@@ -1325,7 +1386,7 @@ export async function autoLogin({
         // written; this path, which raises most of the cards, logged nothing.
         log(
           `auto-login: code hints length=${hints.length ?? "?"} destination=${
-            hints.destination ?? "?"
+            maskDestination(hints.destination) ?? "?"
           } at ${page.url()}`
         );
         const code = await getOtp(retry, hints.destination, hints.length);

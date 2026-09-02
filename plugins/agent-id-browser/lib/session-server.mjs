@@ -39,8 +39,9 @@ import {
   SECRET_FIELDS,
   assertHostAllowed,
 } from "@alien-id/agent-id-vault/lib/store.mjs";
+import { maskDestination } from "./login-detect.mjs";
 import {
-  otpBoxes,
+  otpBoxesFor,
   otpCardHints,
   otpModeCorrection,
   resolveOtp,
@@ -64,7 +65,7 @@ import {
 // Re-exported: the readback tests and any future writer reach them from here,
 // where the taint has always lived, while the definitions sit low enough for
 // auto-login to reach too.
-export { SECRET_TAINT_ATTR, markSecretField, markSecretBoxes } from "./secret-taint.mjs";
+export * from "./secret-taint.mjs";
 import { SECRET_TAINT_ATTR, markSecretField, markSecretBoxes } from "./secret-taint.mjs";
 
 function sessionsDir(stateDir) {
@@ -698,8 +699,12 @@ export function errorReply(err) {
 // card at any moment for the rest of its life; taking it per call keeps the right
 // to interrupt the owner with the caller that was granted it. Absent, the
 // resolver's own chain decides — which is correct for a local run with no hub.
-function promptEnv(params, msg) {
-  const sock = String(params.promptSock || msg._promptSock || "");
+// It arrives in `params`, which is the caller speaking, not in an `_`-prefixed
+// field, which by convention here is the server injecting a fact of its own
+// (`msg._stateDir`). The session token is the trust boundary that makes that
+// acceptable: whoever can send this action can already drive the browser.
+function promptEnv(params) {
+  const sock = String(params.promptSock || "");
   if (!sock) return process.env;
 
   return { ...process.env, AGENT_ID_SECURE_PROMPT_SOCK: sock, AGENT_ID_SECURE_PROMPT: "hosted" };
@@ -1510,7 +1515,7 @@ export async function dispatch(state, msg, policy = null) {
           process.stderr.write(`fill-otp: row shape ${shape}\n`);
           process.stderr.write(
             `fill-otp: code hints length=${hints.length ?? "?"} destination=${
-              hints.destination ?? "?"
+              maskDestination(hints.destination) ?? "?"
             }\n`
           );
           // Reaching this line means a code is being asked for, which settles what
@@ -1527,7 +1532,7 @@ export async function dispatch(state, msg, policy = null) {
             // which on a fleet host nobody can ever open. The caller passes the
             // path per call rather than per daemon, so the daemon holds no
             // standing right to raise cards.
-            code = await resolveOtp(otpCred, { ...hints, env: promptEnv(p, msg) });
+            code = await resolveOtp(otpCred, { ...hints, env: promptEnv(p) });
           } catch (err) {
             // The owner closed the card. Nothing broke and nothing timed out, so
             // the one thing that must not happen is the same card going straight
@@ -1590,7 +1595,9 @@ export async function dispatch(state, msg, policy = null) {
           // A row of boxes needs the code spread across it, and the ref names only
           // the first one. Typing into that one and trusting the page to advance
           // the focus is what leaves the row half-entered and the submit dead.
-          const boxes = await otpBoxes(target);
+          // Anchored on the ref, because a page can hold two code fields (an
+          // e-mail one and an SMS one) and the ref is the caller saying which.
+          const boxes = await otpBoxesFor(target, sel(p.ref));
           if (boxes.length > 0) {
             // Tainted before the code goes in, not after: every path out of the
             // typing below — a throw mid-row, a partial fill, a row that submits

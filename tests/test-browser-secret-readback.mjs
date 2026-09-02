@@ -38,7 +38,7 @@ import {
   markSecretBoxes,
   SECRET_TAINT_ATTR,
 } from "../plugins/agent-id-browser/lib/session-server.mjs";
-import { otpBoxes } from "../plugins/agent-id-browser/lib/auto-login.mjs";
+import { otpBoxes, typeCodeInto } from "../plugins/agent-id-browser/lib/auto-login.mjs";
 import { typeCodeAcrossBoxes } from "../plugins/agent-id-browser/lib/human-input.mjs";
 
 const patchrightAvailable = !!resolvePatchright();
@@ -287,6 +287,90 @@ const CODE_ROW = `<!doctype html><meta charset=utf-8><title>code</title>
   ).join("")}</div>
   <input id="nickname" type="text" value="alice">
 </form>`;
+
+// Where the caller's selector and the row predicate disagree, the caller wins —
+// unless the caller's selector caught nothing at all. `otpBoxes` searches the
+// whole document and takes the first group that looks like a code row, which is
+// right for a heuristic net and wrong for an instruction: a recipe naming one of
+// two code fields, or a `fill_otp` ref pointing at the second one, would have had
+// its instruction silently replaced.
+test(
+  "a code goes where the selector says, not where the row predicate looked",
+  { skip },
+  async () => {
+    const onCodeRow = async (selector, code) => {
+      const page = await ctx.newPage();
+      try {
+        await page.setContent(CODE_ROW, { waitUntil: "domcontentloaded" });
+        await typeCodeInto(page, selector, code);
+
+        return {
+          row: (
+            await Promise.all(
+              Array.from({ length: 6 }, (_, i) => page.locator(`#d${i}`).inputValue())
+            )
+          ).join(""),
+          nickname: await page.locator("#nickname").inputValue(),
+        };
+      } finally {
+        await page.close().catch(() => {});
+      }
+    };
+
+    // In the row: the two agree, and the code is spread.
+    assert.deepEqual(await onCodeRow("#d0", "423124"), {
+      row: "423124",
+      nickname: "alice",
+    });
+
+    // Elsewhere: the selector named a field outside the row and meant it. The
+    // row must not be touched — writing a code into six boxes nobody asked about
+    // is a code typed into the wrong screen.
+    assert.deepEqual(await onCodeRow("#nickname", "423124"), {
+      row: "",
+      nickname: "423124",
+    });
+
+    // No match: a heuristic net that catches nothing cannot outvote the row.
+    // This is `typeOtp`'s own selector against a row of bare text inputs — the
+    // shape the whole spreading path exists for.
+    assert.deepEqual(
+      await onCodeRow('input[autocomplete="one-time-code"]', "423124"),
+      { row: "423124", nickname: "alice" }
+    );
+  }
+);
+
+// The other half of the row's taint. `fill-secret` and `fill-otp` have tagged
+// their fields since the read-back guard existed; every field AUTO-LOGIN typed —
+// the code screen's single field, and every password — stayed readable.
+test(
+  "a secret auto-login typed into a single field is refused a read-back",
+  { skip },
+  async () => {
+    const page = await ctx.newPage();
+    try {
+      await page.setContent(CODE_ROW, { waitUntil: "domcontentloaded" });
+
+      await assert.doesNotReject(
+        () => refusePasswordRead(page, "#nickname"),
+        "readable before anything was typed into it"
+      );
+
+      await typeCodeInto(page, "#nickname", "423124");
+
+      await assert.rejects(
+        () => refusePasswordRead(page, "#nickname"),
+        /secret/i,
+        "a field auto-login typed a secret into must not read back"
+      );
+      // The taint is the field's, not the form's.
+      await assert.doesNotReject(() => refusePasswordRead(page, "#d0"));
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+);
 
 test(
   "a code spread across a row taints every box, not just the ref",

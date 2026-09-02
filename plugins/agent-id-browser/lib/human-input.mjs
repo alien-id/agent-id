@@ -109,7 +109,7 @@ export async function humanMove(page, x, y, { rng = Math.random } = {}) {
 // which is exactly how an auto-login silently fails to fill anything. Poll for a
 // visible match; fall back to `.first()` if none turns up so `locate`'s own
 // waitFor still yields a normal "not visible" timeout. `root` is a Page OR Frame.
-async function firstVisible(root, selector, timeout) {
+export async function firstVisible(root, selector, timeout) {
   // An already-narrowed Locator passes through. A caller that walked the DOM
   // itself — picking a button by its visible label, say — should not have to
   // invent a selector string to get human-shaped input, and inventing one is how

@@ -44,6 +44,57 @@ function startHostedSocket(handler) {
   return new Promise((resolve) => server.listen(sock, () => resolve({ sock, server })));
 }
 
+// Capture what the resolver says about itself. Every resolution writes one line,
+// and the line is the whole point of the change: without it a card that never
+// left the machine and a card the owner ignored produced identical logs.
+function announced(resolve) {
+  const written = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    resolve();
+  } finally {
+    process.stderr.write = original;
+  }
+  return written.join("");
+}
+
+test("resolver: a fallback to a local backend says so, and why", () => {
+  const said = announced(() => resolveSecurePrompt({ env: {} }));
+  assert.match(said, /NOT the owner's device/);
+  assert.match(said, /AGENT_ID_SECURE_PROMPT_SOCK is not set/);
+});
+
+// The override is not the rare path: the runtime sets AGENT_ID_SECURE_PROMPT on
+// every child it spawns, so a resolver that only spoke for the ordinary chain
+// would be silent on the exact path this diagnostic was written for.
+test("resolver: a forced backend is announced too, and names the force as the reason", () => {
+  const said = announced(() =>
+    resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "browser" } })
+  );
+  assert.match(said, /asking through 'browser'/);
+  assert.match(said, /forced by AGENT_ID_SECURE_PROMPT=browser/);
+});
+
+// Forcing hosted skips the availability check by design. That is exactly when a
+// dead socket needs saying out loud: `collect()` would only reject with a generic
+// "not configured", minutes after the card was supposed to appear.
+test("resolver: hosted forced onto a socket that isn't there is announced as doomed", () => {
+  const said = announced(() =>
+    resolveSecurePrompt({
+      env: {
+        AGENT_ID_SECURE_PROMPT: "hosted",
+        AGENT_ID_SECURE_PROMPT_SOCK: "/nonexistent/agentid.sock",
+      },
+    })
+  );
+  assert.match(said, /no usable socket/);
+  assert.match(said, /this will fail/);
+});
+
 test("resolver: default environment selects the browser form", () => {
   assert.equal(resolveSecurePrompt({ env: {} }).name, "browser");
 });

@@ -262,10 +262,10 @@ export function resolveSecurePrompt({
   const forced = env.AGENT_ID_SECURE_PROMPT;
   if (forced) {
     const extra = extraProviders.find((p) => p && p.name === forced);
-    if (extra) return extra;
-    if (forced === "browser") return browser;
-    if (forced === "tty") return new TtyProvider();
-    if (forced === "hosted") return new HostedHarnessProvider({ env });
+    if (extra) return announce(extra, env, forced);
+    if (forced === "browser") return announce(browser, env, forced);
+    if (forced === "tty") return announce(new TtyProvider(), env, forced);
+    if (forced === "hosted") return announce(new HostedHarnessProvider({ env }), env, forced);
   }
   const chain = [
     new HostedHarnessProvider({ env }),
@@ -286,17 +286,40 @@ export function resolveSecurePrompt({
 // not the hosted one — why not. Silence here cost a production week: a card that
 // never left the machine and a card the owner ignored produced exactly the same
 // logs, so the only visible symptom was a tool that waited and asked nobody.
-function announce(provider, env) {
+//
+// Every return goes through here, the operator override included. That branch is
+// not the rare one: the runtime sets AGENT_ID_SECURE_PROMPT=hosted on every child
+// it spawns, so a version of this that only spoke for the ordinary chain would be
+// silent on the exact path it was written for. The hosted line is worth its space
+// too — "the card went to the device" is otherwise unprovable from the logs.
+function announce(provider, env, forced = null) {
   const name = provider && provider.name ? provider.name : "unknown";
-  if (name !== "hosted") {
-    const sock = env.AGENT_ID_SECURE_PROMPT_SOCK;
-    const why = !sock
+  const sock = env.AGENT_ID_SECURE_PROMPT_SOCK;
+  const available = provider && provider.isAvailable ? provider.isAvailable() : true;
+
+  if (name === "hosted") {
+    // The override skips the availability check on purpose — it is documented as
+    // forcing a backend "regardless of the usual ordering". Say what that is
+    // about to cost, because `collect()` will only reject with a generic line.
+    if (!available) {
+      process.stderr.write(
+        `secure prompt: forced to 'hosted' with no usable socket (${sock || "unset"}) — this will fail\n`
+      );
+    } else {
+      process.stderr.write("secure prompt: asking the owner's device through 'hosted'\n");
+    }
+
+    return provider;
+  }
+
+  const why = forced
+    ? `forced by AGENT_ID_SECURE_PROMPT=${forced}`
+    : !sock
       ? "AGENT_ID_SECURE_PROMPT_SOCK is not set"
       : `no socket at ${sock}`;
-    process.stderr.write(
-      `secure prompt: asking through '${name}', NOT the owner's device — ${why}\n`
-    );
-  }
+  process.stderr.write(
+    `secure prompt: asking through '${name}', NOT the owner's device — ${why}\n`
+  );
 
   return provider;
 }
