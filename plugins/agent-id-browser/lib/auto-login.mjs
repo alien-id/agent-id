@@ -1317,6 +1317,17 @@ export async function autoLogin({
         // characters is a fact, "6-digit code" is copy that may describe the last
         // step rather than this one.
         const hints = await otpCardHints(page);
+        // What the card is about to be built from, and the page it was read off.
+        // The screen draws cells only for a length that was stated, so a card that
+        // arrives as a plain field has one of two histories — the row was not
+        // recognised, or this ran before the code screen existed — and the URL is
+        // what tells them apart. `fill_otp` has logged its hints since it was
+        // written; this path, which raises most of the cards, logged nothing.
+        log(
+          `auto-login: code hints length=${hints.length ?? "?"} destination=${
+            hints.destination ?? "?"
+          } at ${page.url()}`
+        );
         const code = await getOtp(retry, hints.destination, hints.length);
         await recordOtpModeCorrection();
         await typeOtp(page, code);
