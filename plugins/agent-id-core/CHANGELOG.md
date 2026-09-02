@@ -1,5 +1,11 @@
 # @alien-id/agent-id-core
 
+## 7.6.0
+
+### Minor Changes
+
+- [#148](https://github.com/alien-id/agent-id/pull/148) [`6e893dc`](https://github.com/alien-id/agent-id/commit/6e893dc44c2b0054c129319144673fa5f268868c) Thanks [@stelchankad](https://github.com/stelchankad)! - Send a one-time code where the caller's selector points rather than into whichever row the predicate found first, tag every field auto-login types a secret into against read-back (passwords included), and say which backend a card is going through on every path, the operator override included.
+
 ## 7.5.0
 
 ### Minor Changes
