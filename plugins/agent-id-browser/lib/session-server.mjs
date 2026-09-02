@@ -682,6 +682,17 @@ function activateRefs(state, generation) {
   return generation;
 }
 
+// A failure the caller can act on rather than only read. An action that ends
+// because the OWNER chose something — closed the card, asked for the browser —
+// is not the same fault as a page that would not load, and the difference has to
+// survive the socket: this reply is all the caller sees, and a flattened message left
+// it guessing from prose. Anything a thrower puts on `err.detail` rides along.
+export function errorReply(err) {
+  const detail = err && typeof err.detail === "object" && err.detail ? err.detail : {};
+
+  return { ok: false, error: (err && err.message) || String(err), ...detail };
+}
+
 // The hosted secure-prompt socket for ONE action, off the request rather than the
 // daemon's environment. A daemon that carried it in `process.env` could raise a
 // card at any moment for the rest of its life; taking it per call keeps the right
@@ -1528,6 +1539,22 @@ export async function dispatch(state, msg, policy = null) {
                   "Do not raise it again unless they ask for it."
               );
             }
+            // Not a refusal: they want the sign-in, they just want to finish it
+            // themselves. The caller hands the browser over on this pair, so it
+            // travels as fields rather than prose — the socket reply is all it
+            // sees, and a sentence is not something it can match on.
+            if (err?.code === "FORM_USE_BROWSER") {
+              const handover = new Error(
+                "fill-otp: the owner closed the code card and asked to sign in from the browser."
+              );
+              handover.detail = {
+                action: "owner_must_drive",
+                reason: "owner_chose_the_browser",
+                profile: state.name,
+                url: page.url(),
+              };
+              throw handover;
+            }
             throw err;
           }
 
@@ -2104,6 +2131,10 @@ export async function runSession({
   const state = {
     ctx,
     stateDir,
+    // The session this daemon IS. An action that hands the browser back to the
+    // owner has to name the session they are being handed, and only the daemon
+    // knows it — the caller's `--name` reached the client that forwarded here.
+    name,
     current: page,
     frames: new Map(),
     refsValid: false,
@@ -2238,7 +2269,7 @@ export async function runSession({
         const result = await dispatch(state, msg, policy);
         sock.end(JSON.stringify({ ok: true, ...result }) + "\n");
       } catch (err) {
-        sock.end(JSON.stringify({ ok: false, error: err.message || String(err) }) + "\n");
+        sock.end(JSON.stringify(errorReply(err)) + "\n");
       }
     });
     sock.on("error", () => {});

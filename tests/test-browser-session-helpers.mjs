@@ -26,6 +26,7 @@ import {
   safeFilename,
   sessionAlive,
   sessionRecord,
+  errorReply,
 } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 test("refuseRef: a ref on a focus-typing action is refused, not dropped", () => {
@@ -234,4 +235,34 @@ test("pruneDeadSessions: drops orphans, keeps live sessions and young work dirs"
   assert.ok(pruned.includes("dead"));
   assert.ok(pruned.includes("impostor"));
   assert.ok(pruned.includes("dead.work"));
+});
+
+// ─── a failure the caller can act on ──────────────────────────────────────────────
+
+// The socket reply is everything the caller sees of an action. Flattening a throw to
+// its message left "the owner chose the browser" and "the page would not load"
+// indistinguishable, so whatever a thrower attaches as `detail` has to survive.
+test("errorReply carries the thrower's detail beside the message", () => {
+  const err = new Error("fill-otp: the owner closed the code card");
+  err.detail = { action: "owner_must_drive", reason: "owner_chose_the_browser", profile: "main" };
+
+  assert.deepEqual(errorReply(err), {
+    ok: false,
+    error: "fill-otp: the owner closed the code card",
+    action: "owner_must_drive",
+    reason: "owner_chose_the_browser",
+    profile: "main",
+  });
+});
+
+test("errorReply is unchanged for an ordinary failure", () => {
+  assert.deepEqual(errorReply(new Error("boom")), { ok: false, error: "boom" });
+});
+
+test("errorReply ignores a detail that is not an object, and never loses the error", () => {
+  const err = new Error("boom");
+  err.detail = "not an object";
+
+  assert.deepEqual(errorReply(err), { ok: false, error: "boom" });
+  assert.equal(errorReply({}).error, "[object Object]");
 });
