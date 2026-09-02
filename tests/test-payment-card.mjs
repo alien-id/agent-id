@@ -16,6 +16,7 @@ import { CREDENTIAL_TYPES, SECRET_FIELDS, validateRecord } from "../plugins/agen
 import {
   assertCardFieldShape,
   cardFieldShape,
+  isCardField,
   codeFieldLength,
   threeDsCardSpec,
 } from "../plugins/agent-id-browser/lib/session-server.mjs";
@@ -163,6 +164,21 @@ test("the notes-to-seller box is refused however it is dressed up", () => {
       ),
     /does not identify itself/,
   );
+});
+
+// The plaintext fill path takes its value from the caller, so a card must never
+// arrive through it — and the DOM gives it nothing to notice, because a card number
+// input is type="text". This is the check that closes it.
+test("a card box is recognised as one even when it cannot be filled", () => {
+  assert.ok(isCardField(cardInput()));
+  assert.ok(isCardField(cardInput({ hasValue: true })), "already filled is still a card box");
+  assert.ok(isCardField(cardInput({ maxLength: 3 })), "a short one is still a card box");
+  assert.ok(isCardField(cardInput({ autocomplete: "cc-csc", label: "" })));
+  assert.ok(isCardField(cardInput({ autocomplete: "", label: "nameOnCard" })));
+
+  assert.ok(!isCardField(cardInput({ autocomplete: "", label: "order notes for the seller" })));
+  assert.ok(!isCardField(cardInput({ autocomplete: "email", label: "your email" })));
+  assert.ok(!isCardField({ autocomplete: "", label: "" }));
 });
 
 test("a field too short for the value is not the field for it", () => {

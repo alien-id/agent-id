@@ -704,6 +704,21 @@ export async function cardFieldShape(target, ref) {
   }));
 }
 
+// Does this element announce itself as SOME card field? A different question from
+// the one assertCardFieldShape answers ("is it the specific field I was told it
+// is"), and it has to stay different: a card box that already holds a value, or
+// whose maxlength is too small for what was claimed, is still a card box — and the
+// plaintext path must refuse it either way.
+export function isCardField(shape) {
+  const autocomplete = String(shape.autocomplete || "").toLowerCase().split(/\s+/);
+  const label = String(shape.label || "").toLowerCase().replace(/\s+/g, "");
+  return Object.values(CARD_FIELD_SIGNALS).some(
+    (signals) =>
+      autocomplete.some((token) => signals.autocomplete.includes(token)) ||
+      signals.words.some((word) => label.includes(word.replace(/[-_]/g, ""))),
+  );
+}
+
 export function assertCardFieldShape(field, shape) {
   const signals = CARD_FIELD_SIGNALS[field];
   if (!signals) throw new Error(`fill-card: unknown card field "${field}"`);
@@ -1032,6 +1047,15 @@ export async function fillForm(state, p) {
         SECRET_TAINT_ATTR,
       );
       if (secretTarget) throw new Error("password/secret fields require fill-secret or fill-otp");
+      // And a card field, which the check above cannot see: a card number input is
+      // type="text", so nothing about it looks secret to the DOM. This is the
+      // plaintext path — the value comes from the caller — and a card must only
+      // ever arrive from the vault, through fill-card, under an approval the owner
+      // gave. Same rule as the password check, applied to the fields that do not
+      // announce themselves.
+      if (isCardField(await cardFieldShape(target, ref))) {
+        throw new Error("card fields require fill-card, with a payment the owner approved");
+      }
       await locator.fill(value, { timeout: ACTION_TIMEOUT });
       const matches = await locator.evaluate((el, expected) => {
         const actual = "value" in el ? el.value : el.textContent || "";
