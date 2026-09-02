@@ -277,9 +277,28 @@ export function resolveSecurePrompt({
     if (!p.isAvailable || !p.isAvailable()) continue;
     const caps = (p.capabilities && p.capabilities()) || {};
     if (need.multiline && !caps.multiline) continue;
-    return p;
+    return announce(p, env);
   }
-  return browser; // guaranteed last resort (prints the URL when it can't open)
+  return announce(browser, env); // guaranteed last resort (prints the URL when it can't open)
+}
+
+// Which backend the owner's card is about to be asked through, and — when it is
+// not the hosted one — why not. Silence here cost a production week: a card that
+// never left the machine and a card the owner ignored produced exactly the same
+// logs, so the only visible symptom was a tool that waited and asked nobody.
+function announce(provider, env) {
+  const name = provider && provider.name ? provider.name : "unknown";
+  if (name !== "hosted") {
+    const sock = env.AGENT_ID_SECURE_PROMPT_SOCK;
+    const why = !sock
+      ? "AGENT_ID_SECURE_PROMPT_SOCK is not set"
+      : `no socket at ${sock}`;
+    process.stderr.write(
+      `secure prompt: asking through '${name}', NOT the owner's device — ${why}\n`
+    );
+  }
+
+  return provider;
 }
 
 /**

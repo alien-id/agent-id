@@ -165,10 +165,16 @@ function stepCarriesSecret(step) {
 // The recipe action vocabulary mapped onto the page adapter. Injectable the way
 // it always was, so runRecipe's substitution and {otp}-laziness unit-test
 // against a recording driver with no browser at all.
+//
+// `fillCode` is the one verb the recipe vocabulary adds on top of the page's own:
+// writing a one-time code. A row of one-character boxes takes the code spread
+// across it, and only the caller knows a value IS a code — the selector does not
+// say so, so teaching `fill` to guess would reshape ordinary fills too.
 export const pageDriver = {
   navigate: (page, url) => page.goto(url),
   fill: (page, selector, value) => page.fill(selector, value),
   type: (page, selector, value) => page.fill(selector, value),
+  fillCode: (page, selector, value) => typeCodeInto(page, selector, value),
   click: (page, selector) => page.click(selector),
   press: (page, selector, key) => page.press(selector, key),
   wait: (page, ms) => page.waitForTimeout(ms),
@@ -204,6 +210,7 @@ export async function runRecipe(
   // value in an error. Run it under a value-free catch.
   const carriesSecret = (tpl) =>
     typeof tpl === "string" && (tpl.includes("{password}") || tpl.includes("{otp}"));
+  const carriesOtp = (tpl) => typeof tpl === "string" && tpl.includes("{otp}");
   const guarded = async (tpl, run) => {
     if (!carriesSecret(tpl)) return run();
     try {
@@ -246,7 +253,11 @@ export async function runRecipe(
         const selector = await sub(step.selector);
         const value = await sub(step.value);
         gateSecret(step, "recipe fill");
-        await guarded(step.value, () => driver.fill(page, selector, value));
+        await guarded(step.value, () =>
+          carriesOtp(step.value)
+            ? driver.fillCode(page, selector, value)
+            : driver.fill(page, selector, value)
+        );
         break;
       }
       case "type": {
@@ -255,7 +266,11 @@ export async function runRecipe(
         const selector = await sub(step.selector);
         const text = await sub(step.text);
         gateSecret(step, "recipe type");
-        await guarded(step.text, () => driver.type(page, selector, text));
+        await guarded(step.text, () =>
+          carriesOtp(step.text)
+            ? driver.fillCode(page, selector, text)
+            : driver.type(page, selector, text)
+        );
         break;
       }
       case "click": {
@@ -801,16 +816,43 @@ function describeState(s) {
   return bits.join(" ");
 }
 
+// Write a one-time code, whatever shape the screen takes it in. A row of
+// one-character boxes gets the code spread across it, one character per box in
+// document order; anything else gets the ordinary fill. Typing the whole code
+// into the first box and trusting the page to move the focus is what left
+// Booking.com's six-box screen holding one character, on both paths that write a
+// code — auto-login's own OTP step and a recipe's `{otp}`.
+export async function typeCodeInto(page, selector, code) {
+  const boxes = await otpBoxes(page);
+  if (boxes.length === 0) {
+    // The OTP code is low-sensitivity (single-use, seconds-lived) but still goes
+    // through the value-free error guard, for consistency.
+    await typeSecret(page, selector, code);
+    return;
+  }
+
+  // Each box takes the character at its own index. A row that submits itself does
+  // so from the last character, so a box that is gone by the time its turn comes
+  // is left alone rather than reported — the page has already moved on, and the
+  // login loop reads where it went.
+  const characters = Array.from(String(code));
+  for (const [index, box] of boxes.entries()) {
+    const character = characters[index];
+    if (character == null) break;
+    await box.fill(character).catch(() => {});
+  }
+}
+
 // Best-effort fill of the OTP field, then submit.
 async function typeOtp(page, code) {
   const sel =
     'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i], ' +
     'input[name*="code" i], input[id*="code" i], input[name*="verif" i], input[id*="verif" i], ' +
     'input[inputmode="numeric"]';
-  // The OTP code is low-sensitivity (single-use, seconds-lived) but still typed
-  // with human cadence and the value-free error guard, for consistency.
   const before = page.url();
-  await typeSecret(page, sel, code);
+
+  await typeCodeInto(page, sel, code);
+
   // Many code screens submit themselves the moment the last box is filled. Then
   // there is nothing left to click, and hunting for a button on the page we just
   // landed on costs a full element-wait per candidate.
@@ -1286,6 +1328,17 @@ export async function autoLogin({
         // characters is a fact, "6-digit code" is copy that may describe the last
         // step rather than this one.
         const hints = await otpCardHints(page);
+        // What the card is about to be built from, and the page it was read off.
+        // The screen draws cells only for a length that was stated, so a card that
+        // arrives as a plain field has one of two histories — the row was not
+        // recognised, or this ran before the code screen existed — and the URL is
+        // what tells them apart. `fill_otp` has logged its hints since it was
+        // written; this path, which raises most of the cards, logged nothing.
+        log(
+          `auto-login: code hints length=${hints.length ?? "?"} destination=${
+            hints.destination ?? "?"
+          } at ${page.url()}`
+        );
         const code = await getOtp(retry, hints.destination, hints.length);
         await recordOtpModeCorrection();
         await typeOtp(page, code);

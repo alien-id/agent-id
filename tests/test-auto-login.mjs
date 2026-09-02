@@ -65,6 +65,9 @@ function recordingDriver(calls) {
     navigate: async (_p, url) => calls.push(["goto", url]),
     fill: async (_p, sel, val) => calls.push(["fill", sel, val]),
     type: async (_p, sel, val) => calls.push(["type", sel, val]),
+    // Separate from `fill` on purpose: a code goes to the row-aware verb, and a
+    // recipe that sent it through the ordinary one is the Booking.com failure.
+    fillCode: async (_p, sel, val) => calls.push(["fillCode", sel, val]),
     click: async (_p, sel) => calls.push(["click", sel]),
     press: async (_p, sel, key) => calls.push(["press", sel, key]),
     wait: async (_p, ms) => calls.push(["wait", ms]),
@@ -98,7 +101,7 @@ test("runRecipe maps steps to driver calls, substitutes vars, resolves {otp} onc
     ["fill", "#user", "alice"],
     ["fill", "#pass", "s3cret"],
     ["click", "#submit"],
-    ["fill", "#otp", "654321"],
+    ["fillCode", "#otp", "654321"],
     ["press", "#otp", "Enter"],
   ]);
   assert.equal(otpCalls, 1);
@@ -577,7 +580,7 @@ test("a wildcard covering the whole sign-in flow lets the hop through", async ()
     domains: ["*.example.com"],
     driver: recordingDriver(calls),
   });
-  assert.deepEqual(calls, [["fill", "#code", "654321"]]);
+  assert.deepEqual(calls, [["fillCode", "#code", "654321"]]);
 });
 
 test("the code-screen submit vocabulary never matches a control that discards the code", () => {
@@ -648,7 +651,7 @@ test("a step whose origin stays put is unaffected by the second check", async ()
       driver: recordingDriver(calls),
     }
   );
-  assert.deepEqual(calls, [["fill", "#code", "654321"]]);
+  assert.deepEqual(calls, [["fillCode", "#code", "654321"]]);
 });
 
 // ─── retrying a generated code only means something across a window ───────────────

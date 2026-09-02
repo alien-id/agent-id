@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-browser",
-  "version": "8.2.0",
+  "version": "8.3.0",
   "publishConfig": {
     "access": "public"
   },
@@ -33,7 +33,11 @@
   "author": "Alien Org <support@alien.org>",
   "license": "MIT",
   "dependencies": {
-    "@alien-id/agent-id-core": "^7.4.0",
-    "@alien-id/agent-id-vault": "^7.7.0"
+    "@alien-id/agent-id-core": "^7.5.0",
+    "@alien-id/agent-id-vault": "^7.7.1"
+  },
+  "optionalDependencies": {
+    "patchright": "^1.61.0",
+    "werift": "0.24.2"
   }
 }
