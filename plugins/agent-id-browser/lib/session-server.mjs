@@ -61,6 +61,11 @@ import {
   typeCodeAcrossBoxes,
   humanTypeFocused,
 } from "./human-input.mjs";
+// Re-exported: the readback tests and any future writer reach them from here,
+// where the taint has always lived, while the definitions sit low enough for
+// auto-login to reach too.
+export { SECRET_TAINT_ATTR, markSecretField, markSecretBoxes } from "./secret-taint.mjs";
+import { SECRET_TAINT_ATTR, markSecretField, markSecretBoxes } from "./secret-taint.mjs";
 
 function sessionsDir(stateDir) {
   return path.join(stateDir, "browser-sessions");
@@ -677,40 +682,16 @@ function activateRefs(state, generation) {
   return generation;
 }
 
-// A field the vault typed a secret into is tagged with this attribute (see
-// markSecretField). It rides on the DOM element, not the ref — a re-snapshot
-// invalidates refs but only clears "data-aibref", so the taint survives across
-// snapshots as long as the site keeps the node. Kept in sync with the literal
-// hard-coded inside snapshotInPage (page functions can't close over module scope).
-export const SECRET_TAINT_ATTR = "data-aib-secret";
+// The hosted secure-prompt socket for ONE action, off the request rather than the
+// daemon's environment. A daemon that carried it in `process.env` could raise a
+// card at any moment for the rest of its life; taking it per call keeps the right
+// to interrupt the owner with the caller that was granted it. Absent, the
+// resolver's own chain decides — which is correct for a local run with no hub.
+function promptEnv(params, msg) {
+  const sock = String(params.promptSock || msg._promptSock || "");
+  if (!sock) return process.env;
 
-// Tag the element a fill-secret/fill-otp just wrote to, so every later read-back
-// (get --what value, get --what attr value, and the snapshot el.value name
-// fallback) refuses it — REGARDLESS of the input's `type`. This is what closes
-// the leak for non-password fields: OTP/2FA inputs are type=text/tel, and a
-// show-password toggle flips a password field to type=text, so a type-only test
-// misses them. Best-effort: if the site has already swapped the node out there
-// is nothing (and no value) left to tag.
-export async function markSecretField(target, selector) {
-  await target
-    .$eval(selector, (el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
-    .catch(() => {});
-}
-
-// The same tag, for a code spread across a row of boxes. `markSecretField` names
-// one element through the ref's selector, and a row holds one character of the
-// code in each of its boxes — so tagging the ref alone leaves the rest readable
-// through `get --what value`. Every box written to is tainted, including after a
-// partial fill, because a partial fill is exactly when those characters are still
-// sitting there.
-export async function markSecretBoxes(boxes) {
-  await Promise.all(
-    boxes.map((box) =>
-      box
-        .evaluate((el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
-        .catch(() => {})
-    )
-  );
+  return { ...process.env, AGENT_ID_SECURE_PROMPT_SOCK: sock, AGENT_ID_SECURE_PROMPT: "hosted" };
 }
 
 // `get --what value|attr value` must not read back a field that holds an injected
@@ -1528,7 +1509,14 @@ export async function dispatch(state, msg, policy = null) {
           const correction = otpModeCorrection(rec);
 
           try {
-            code = await resolveOtp(otpCred, hints);
+            // The hosted card channel is wired to the CLI CHILD that forwarded
+            // this action, not to us — the child only speaks one line of JSON and
+            // exits, while the card is raised here. Without the socket the
+            // resolver falls back to a loopback browser form inside this machine,
+            // which on a fleet host nobody can ever open. The caller passes the
+            // path per call rather than per daemon, so the daemon holds no
+            // standing right to raise cards.
+            code = await resolveOtp(otpCred, { ...hints, env: promptEnv(p, msg) });
           } catch (err) {
             // The owner closed the card. Nothing broke and nothing timed out, so
             // the one thing that must not happen is the same card going straight
