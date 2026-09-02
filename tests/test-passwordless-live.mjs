@@ -54,7 +54,7 @@ const CODE_BOXES = Array.from(
 // `submit` picks how the code screen accepts the code — the three ways real
 // services do it. "auto" fires on the last box, "button" needs a Verify click,
 // "enter" is a single wide field that submits implicitly.
-function fixtureServer({ submit = "button", acceptCode = true } = {}) {
+function fixtureServer({ submit = "button", acceptCode = true, stubborn = false } = {}) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
     res.setHeader("content-type", "text/html; charset=utf-8");
@@ -75,7 +75,7 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
   const read = () => boxes.length ? boxes.map(b => b.value).join('') : document.getElementById('code').value;
   const go = () => { location.href = '/done?code=' + read(); };
   boxes.forEach((b, i) => b.addEventListener('input', () => {
-    if (b.value && boxes[i + 1]) boxes[i + 1].focus();
+    ${stubborn ? "" : "if (b.value && boxes[i + 1]) boxes[i + 1].focus();"}
     ${submit === "auto" ? "if (read().length === 6) go();" : ""}
   }));
   const btn = document.getElementById('go');
@@ -137,6 +137,29 @@ function fixtureServer({ submit = "button", acceptCode = true } = {}) {
         { length: 6 },
         (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`
       ).join("")}</form>`);
+      return;
+    }
+    if (url.pathname === "/otp-boxes-stubborn-self-submitting") {
+      // Booking.com's shape, and the one that has neither of the two properties
+      // the other fixtures rely on: the row will not move the focus, AND it
+      // navigates the moment the last box is filled. The navigation therefore
+      // starts from OUR last write, so anything that reads `page.url()` or the
+      // boxes straight after sees the old URL and an emptying document — a
+      // sign-in that just succeeded, reported as a code that never landed.
+      res.end(`<!doctype html><meta charset=utf-8><title>code</title>
+<h1>Enter the code we sent you</h1>
+<form>${Array.from(
+        { length: 6 },
+        (_, i) => `<input name=d${i} type=text inputmode=numeric maxlength=1>`
+      ).join("")}</form>
+<script>
+ var boxes = Array.from(document.querySelectorAll("input"));
+ boxes.forEach(function (box) {
+   box.addEventListener("input", function () {
+     if (boxes.every(function (b) { return b.value; })) location.href = "/done";
+   });
+ });
+</script>`);
       return;
     }
     if (url.pathname === "/otp-declared-twice") {
@@ -390,6 +413,50 @@ for (const submit of ["button", "auto", "enter"]) {
         // for a reason that has nothing to do with what it is testing. Exact-code
         // equality is covered by the injectable-`now` test in test-auto-login.mjs.
         assert.match(result.finalUrl, /code=\d{6}$/);
+      } finally {
+        server.close();
+      }
+    }
+  );
+}
+
+// The shape auto-login had never been driven against, and the one Booking.com
+// draws: a row that will not move the focus. The cooperative fixtures above pass
+// on key-by-key typing alone, because the page distributes the characters for us
+// — so for as long as auto-login typed the whole code into the first box, every
+// end-to-end test here still went green while a live sign-in delivered one digit.
+for (const submit of ["button", "auto"]) {
+  test(
+    `a sign-in ends in a row that will not move the focus (submits by: ${submit})`,
+    { skip },
+    async () => {
+      const { server, port } = await fixtureServer({ submit, stubborn: true });
+      try {
+        const result = await withBrowser(async (context) => {
+          const page = await context.newPage();
+          return autoLogin({
+            page,
+            cred: {
+              name: "fixture",
+              type: "login",
+              username: IDENTIFIER,
+              passwordless: true,
+              otp: "totp",
+              totpSecret: SEED,
+              loginUrl: `http://127.0.0.1:${port}/`,
+              domains: ["127.0.0.1"],
+              warmup: false,
+            },
+            settleMs: 400,
+          });
+        });
+
+        assert.equal(result.ok, true, `auto-login failed: ${result.outcome}`);
+        assert.match(
+          result.finalUrl,
+          /code=\d{6}$/,
+          "six digits reached the site, so every box took its own character"
+        );
       } finally {
         server.close();
       }
@@ -967,6 +1034,37 @@ test(
           ["4", "2", "3", "1", "2", "4"],
           `no digit of the refused code survives: got ${values.join("|")}`
         );
+      });
+    } finally {
+      server.close();
+    }
+  }
+);
+
+test(
+  "a row that will not move the focus AND submits itself is a success, not a failure",
+  { skip },
+  async () => {
+    const { server, port } = await fixtureServer();
+    try {
+      await withBrowser(async (context) => {
+        const page = await context.newPage();
+        await page.goto(
+          `http://127.0.0.1:${port}/otp-boxes-stubborn-self-submitting`,
+          { waitUntil: "domcontentloaded" }
+        );
+
+        const boxes = await otpBoxes(page);
+        assert.equal(boxes.length, 6, "the row is recognised");
+
+        const typed = await typeCodeAcrossBoxes(page, boxes, "423124");
+
+        assert.deepEqual(
+          typed,
+          { complete: true, submitted: true },
+          "the row took the page with it, which is the code landing — not failing to land"
+        );
+        assert.match(page.url(), /\/done$/, "the sign-in actually went through");
       });
     } finally {
       server.close();

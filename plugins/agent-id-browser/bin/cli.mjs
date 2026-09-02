@@ -1047,7 +1047,20 @@ runCli({
     // Must outlast the secure-prompt card this can raise (10 min): a shorter
     // budget kills the child while the owner is still fetching the code from
     // their mail, dropping a secret that was on its way back.
-    "fill-otp": actionCmd("fill-otp", (f) => ({ ref: f.ref, cred: f.cred, submit: f.submit !== false }), 11 * 60 * 1000),
+    "fill-otp": actionCmd(
+      "fill-otp",
+      // `--prompt-sock` travels to the daemon because the card is raised THERE,
+      // not in this process: this command forwards one line and exits, so the
+      // hosted-prompt environment the runtime gave it would otherwise be spent
+      // on a process that never asks anyone anything.
+      (f) => ({
+        ref: f.ref,
+        cred: f.cred,
+        submit: f.submit !== false,
+        promptSock: f["prompt-sock"] || undefined,
+      }),
+      11 * 60 * 1000
+    ),
     select: actionCmd("select", (f) => ({ ref: f.ref, values: csv(f.values) })),
     press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
     hover: actionCmd("hover", (f) => ({ ref: f.ref })),

@@ -208,6 +208,11 @@ export async function humanType(
 // it, which is the one outcome that cannot be verified by reading the boxes back
 // — they are gone. Keeping the two apart is the point: a bare `true` made "the
 // row holds the code" and "something navigated" the same answer.
+// How long a row gets to take the page with it after the last character lands.
+// Short: this is a navigation the page has already started, not one we are
+// waiting to see whether it wants to start.
+const SELF_SUBMIT_SETTLE = 2000;
+
 export async function typeCodeAcrossBoxes(
   page,
   boxes,
@@ -221,6 +226,19 @@ export async function typeCodeAcrossBoxes(
 
   const startedAt = page.url();
   const navigated = () => page.url() !== startedAt;
+  // A row that submits itself does so from the LAST character we write, so the
+  // navigation is always in flight at the moment we would check for it —
+  // `page.url()` still reads the old URL while the document is already being
+  // torn down, and the boxes we then read back answer "". That reported a
+  // sign-in that had just succeeded as a code that never landed. Give the
+  // navigation the beat it needs before concluding anything from the row.
+  const settledNavigation = async () => {
+    if (navigated()) return true;
+    await page
+      .waitForURL((url) => String(url) !== startedAt, { timeout: SELF_SUBMIT_SETTLE })
+      .catch(() => {});
+    return navigated();
+  };
   const values = async () =>
     Promise.all(boxes.map((box) => box.inputValue().catch(() => "")));
   // Each box must hold the character at its own index. A total character count
@@ -252,7 +270,7 @@ export async function typeCodeAcrossBoxes(
     await box.fill(character).catch(() => {});
   }
 
-  if (navigated()) return afterSelfSubmit(page);
+  if (await settledNavigation()) return afterSelfSubmit(page);
 
   return { complete: holdsCode(await values()), submitted: false };
 }
