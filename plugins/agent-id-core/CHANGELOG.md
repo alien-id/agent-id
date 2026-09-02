@@ -1,5 +1,11 @@
 # @alien-id/agent-id-core
 
+## 7.5.0
+
+### Minor Changes
+
+- [#146](https://github.com/alien-id/agent-id/pull/146) [`64f8c6c`](https://github.com/alien-id/agent-id/commit/64f8c6c5e4e2c0d2761921db16cad2e62e9a6865) Thanks [@stelchankad](https://github.com/stelchankad)! - Reach the owner from the daemon, and spread a code across every box that asks for one.
+
 ## 7.4.0
 
 ### Minor Changes
