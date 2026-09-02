@@ -39,8 +39,9 @@ import {
   SECRET_FIELDS,
   assertHostAllowed,
 } from "@alien-id/agent-id-vault/lib/store.mjs";
+import { maskDestination } from "./login-detect.mjs";
 import {
-  otpBoxes,
+  otpBoxesFor,
   otpCardHints,
   otpModeCorrection,
   resolveOtp,
@@ -64,7 +65,7 @@ import {
 // Re-exported: the readback tests and any future writer reach them from here,
 // where the taint has always lived, while the definitions sit low enough for
 // auto-login to reach too.
-export { SECRET_TAINT_ATTR, markSecretField, markSecretBoxes } from "./secret-taint.mjs";
+export * from "./secret-taint.mjs";
 import { SECRET_TAINT_ATTR, markSecretField, markSecretBoxes } from "./secret-taint.mjs";
 
 function sessionsDir(stateDir) {
@@ -682,13 +683,56 @@ function activateRefs(state, generation) {
   return generation;
 }
 
+// A failure the caller can act on rather than only read. An action that ends
+// because the OWNER chose something — closed the card, asked for the browser —
+// is not the same fault as a page that would not load, and the difference has to
+// survive the socket: this reply is all the caller sees, and a flattened message left
+// it guessing from prose. Anything a thrower puts on `err.detail` rides along.
+export function errorReply(err) {
+  const detail = err && typeof err.detail === "object" && err.detail ? err.detail : {};
+
+  // Detail first: it adds fields, it does not get to rewrite the two that say
+  // this is a failure. A thrower carrying `ok` in its detail would otherwise
+  // turn its own error into a success, and this is now the one funnel every
+  // failure leaves the daemon through.
+  return { ...detail, ok: false, error: (err && err.message) || String(err) };
+}
+
+// How the OWNER ended the card, as fields the caller can match on rather than a
+// sentence it has to parse. None of the three is a fault, and a model reads a
+// fault as something to retry — which on this path means the same card going
+// straight back up. Only the browser ending carries an `action`, because it is
+// the only one where something else should happen instead.
+export const CARD_ENDINGS = {
+  FORM_USE_BROWSER: {
+    message: "fill-otp: the owner closed the code card and asked to sign in from the browser.",
+    detail: { action: "owner_must_drive", reason: "owner_chose_the_browser" },
+  },
+  FORM_CANCELLED: {
+    message:
+      "fill-otp: the owner dismissed the code card — they were asked and said no. " +
+      "Do not raise it again unless they ask for it.",
+    detail: { reason: "owner_dismissed_the_card" },
+  },
+  FORM_TIMEOUT: {
+    message:
+      "fill-otp: the code card expired before the owner answered. " +
+      "Ask them to be ready, then run this again.",
+    detail: { reason: "card_timed_out" },
+  },
+};
+
 // The hosted secure-prompt socket for ONE action, off the request rather than the
 // daemon's environment. A daemon that carried it in `process.env` could raise a
 // card at any moment for the rest of its life; taking it per call keeps the right
 // to interrupt the owner with the caller that was granted it. Absent, the
 // resolver's own chain decides — which is correct for a local run with no hub.
-function promptEnv(params, msg) {
-  const sock = String(params.promptSock || msg._promptSock || "");
+// It arrives in `params`, which is the caller speaking, not in an `_`-prefixed
+// field, which by convention here is the server injecting a fact of its own
+// (`msg._stateDir`). The session token is the trust boundary that makes that
+// acceptable: whoever can send this action can already drive the browser.
+function promptEnv(params) {
+  const sock = String(params.promptSock || "");
   if (!sock) return process.env;
 
   return { ...process.env, AGENT_ID_SECURE_PROMPT_SOCK: sock, AGENT_ID_SECURE_PROMPT: "hosted" };
@@ -1499,7 +1543,7 @@ export async function dispatch(state, msg, policy = null) {
           process.stderr.write(`fill-otp: row shape ${shape}\n`);
           process.stderr.write(
             `fill-otp: code hints length=${hints.length ?? "?"} destination=${
-              hints.destination ?? "?"
+              maskDestination(hints.destination) ?? "?"
             }\n`
           );
           // Reaching this line means a code is being asked for, which settles what
@@ -1516,19 +1560,19 @@ export async function dispatch(state, msg, policy = null) {
             // which on a fleet host nobody can ever open. The caller passes the
             // path per call rather than per daemon, so the daemon holds no
             // standing right to raise cards.
-            code = await resolveOtp(otpCred, { ...hints, env: promptEnv(p, msg) });
+            code = await resolveOtp(otpCred, { ...hints, env: promptEnv(p) });
           } catch (err) {
-            // The owner closed the card. Nothing broke and nothing timed out, so
-            // the one thing that must not happen is the same card going straight
-            // back up — which is what a bare fault invites, because the sensible
-            // reply to a fault is a retry.
-            if (err?.code === "FORM_CANCELLED") {
-              throw new Error(
-                "fill-otp: the owner dismissed the code card — they were asked and said no. " +
-                  "Do not raise it again unless they ask for it."
-              );
-            }
-            throw err;
+            const ending = CARD_ENDINGS[err?.code];
+            if (!ending) throw err;
+
+            const ended = new Error(ending.message);
+            ended.detail = {
+              ...ending.detail,
+              retryable: false,
+              profile: state.name,
+              url: page.url(),
+            };
+            throw ended;
           }
 
           // Written only now, and only if the owner answered. `fill_otp` inspects
@@ -1563,7 +1607,9 @@ export async function dispatch(state, msg, policy = null) {
           // A row of boxes needs the code spread across it, and the ref names only
           // the first one. Typing into that one and trusting the page to advance
           // the focus is what leaves the row half-entered and the submit dead.
-          const boxes = await otpBoxes(target);
+          // Anchored on the ref, because a page can hold two code fields (an
+          // e-mail one and an SMS one) and the ref is the caller saying which.
+          const boxes = await otpBoxesFor(target, sel(p.ref));
           if (boxes.length > 0) {
             // Tainted before the code goes in, not after: every path out of the
             // typing below — a throw mid-row, a partial fill, a row that submits
@@ -2104,6 +2150,10 @@ export async function runSession({
   const state = {
     ctx,
     stateDir,
+    // The session this daemon IS. An action that hands the browser back to the
+    // owner has to name the session they are being handed, and only the daemon
+    // knows it — the caller's `--name` reached the client that forwarded here.
+    name,
     current: page,
     frames: new Map(),
     refsValid: false,
@@ -2238,7 +2288,7 @@ export async function runSession({
         const result = await dispatch(state, msg, policy);
         sock.end(JSON.stringify({ ok: true, ...result }) + "\n");
       } catch (err) {
-        sock.end(JSON.stringify({ ok: false, error: err.message || String(err) }) + "\n");
+        sock.end(JSON.stringify(errorReply(err)) + "\n");
       }
     });
     sock.on("error", () => {});

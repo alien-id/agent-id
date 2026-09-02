@@ -24,6 +24,17 @@ export async function markSecretField(target, selector) {
     .catch(() => {});
 }
 
+// The same tag on an element a caller has ALREADY resolved. Preferred over
+// `markSecretField` wherever the writer resolved its own target: a site may render
+// a hidden duplicate of a field before the visible one (see `firstVisible`), and
+// then the selector's first match and the field the value went into are two
+// different elements — tagging by selector would leave the filled one readable.
+export async function markSecretLocator(locator) {
+  await locator
+    .evaluate((el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
+    .catch(() => {});
+}
+
 // The same tag, for a code spread across a row of boxes. `markSecretField` names
 // one element through the ref's selector, and a row holds one character of the
 // code in each of its boxes — so tagging the ref alone leaves the rest readable
@@ -31,11 +42,5 @@ export async function markSecretField(target, selector) {
 // partial fill, because a partial fill is exactly when those characters are still
 // sitting there.
 export async function markSecretBoxes(boxes) {
-  await Promise.all(
-    boxes.map((box) =>
-      box
-        .evaluate((el, attr) => el.setAttribute(attr, "1"), SECRET_TAINT_ATTR)
-        .catch(() => {})
-    )
-  );
+  await Promise.all(boxes.map(markSecretLocator));
 }

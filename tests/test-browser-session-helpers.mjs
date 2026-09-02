@@ -26,6 +26,8 @@ import {
   safeFilename,
   sessionAlive,
   sessionRecord,
+  errorReply,
+  CARD_ENDINGS,
 } from "../plugins/agent-id-browser/lib/session-server.mjs";
 
 test("refuseRef: a ref on a focus-typing action is refused, not dropped", () => {
@@ -234,4 +236,76 @@ test("pruneDeadSessions: drops orphans, keeps live sessions and young work dirs"
   assert.ok(pruned.includes("dead"));
   assert.ok(pruned.includes("impostor"));
   assert.ok(pruned.includes("dead.work"));
+});
+
+// ─── a failure the caller can act on ──────────────────────────────────────────────
+
+// `fill-otp` used to give this shape to one ending out of three: a dismissal
+// travelled as prose and a timeout not at all, so the path most likely to want
+// the hand-off was the one that lost it.
+test("every way the owner can end a card is an ending fill-otp names", () => {
+  // The three `FORM_*` codes the secure-prompt layer mints. A fourth added
+  // without a line here falls through to a bare throw, which is the opaque
+  // string this whole change exists to stop.
+  assert.deepEqual(Object.keys(CARD_ENDINGS).sort(), [
+    "FORM_CANCELLED",
+    "FORM_TIMEOUT",
+    "FORM_USE_BROWSER",
+  ]);
+
+  for (const [code, ending] of Object.entries(CARD_ENDINGS)) {
+    assert.ok(ending.message, `${code} says nothing`);
+    assert.ok(ending.detail.reason, `${code} carries no machine reason`);
+  }
+
+  // Only the browser ending asks for something else to happen instead — and on
+  // exactly the pair the caller matches on. Nothing compiles across that
+  // boundary; this assertion is the contract.
+  const withAction = Object.entries(CARD_ENDINGS).filter(([, e]) => e.detail.action);
+  assert.equal(withAction.length, 1);
+  assert.deepEqual(CARD_ENDINGS.FORM_USE_BROWSER.detail, {
+    action: "owner_must_drive",
+    reason: "owner_chose_the_browser",
+  });
+});
+
+// The socket reply is everything the caller sees of an action. Flattening a throw to
+// its message left "the owner chose the browser" and "the page would not load"
+// indistinguishable, so whatever a thrower attaches as `detail` has to survive.
+test("errorReply carries the thrower's detail beside the message", () => {
+  const err = new Error("fill-otp: the owner closed the code card");
+  err.detail = { action: "owner_must_drive", reason: "owner_chose_the_browser", profile: "main" };
+
+  assert.deepEqual(errorReply(err), {
+    ok: false,
+    error: "fill-otp: the owner closed the code card",
+    action: "owner_must_drive",
+    reason: "owner_chose_the_browser",
+    profile: "main",
+  });
+});
+
+// The one funnel every daemon failure leaves through. A detail that could rewrite
+// `ok` would turn a thrower's own error into a success on the way out.
+test("errorReply does not let a detail rewrite ok or error", () => {
+  const err = new Error("real failure");
+  err.detail = { ok: true, error: "not this", reason: "owner_dismissed_the_card" };
+
+  assert.deepEqual(errorReply(err), {
+    ok: false,
+    error: "real failure",
+    reason: "owner_dismissed_the_card",
+  });
+});
+
+test("errorReply is unchanged for an ordinary failure", () => {
+  assert.deepEqual(errorReply(new Error("boom")), { ok: false, error: "boom" });
+});
+
+test("errorReply ignores a detail that is not an object, and never loses the error", () => {
+  const err = new Error("boom");
+  err.detail = "not an object";
+
+  assert.deepEqual(errorReply(err), { ok: false, error: "boom" });
+  assert.equal(errorReply({}).error, "[object Object]");
 });

@@ -408,6 +408,49 @@ function formFieldsForType(type, flags) {
   }
 }
 
+// A card the OWNER ended, told apart from a card that broke. All three are
+// `ok:false`, and the difference is what the caller does next: a fault invites a
+// retry, and a decision must not — re-raising a card someone just closed is the
+// loop this exists to stop. `use_browser` is the one that carries an `action`,
+// because it is the only one where something else should happen instead.
+function ownerEndedTheCard(err, extra = {}) {
+  if (err?.code === "FORM_USE_BROWSER") {
+    return {
+      error: "FORM_USE_BROWSER",
+      action: "owner_must_drive",
+      reason: "owner_chose_the_browser",
+      retryable: false,
+      message:
+        "The owner closed the card and asked to sign in from the browser themselves. " +
+        "That is not a refusal. Do not raise this card again and do not ask for the value here.",
+      ...extra,
+    };
+  }
+  if (err?.code === "FORM_CANCELLED") {
+    return {
+      error: "FORM_CANCELLED",
+      reason: "owner_dismissed_the_card",
+      retryable: false,
+      message:
+        "The owner dismissed the card — they were asked and said no. " +
+        "Do not raise it again unless they ask for it.",
+      ...extra,
+    };
+  }
+  if (err?.code === "FORM_TIMEOUT") {
+    return {
+      error: "FORM_TIMEOUT",
+      reason: "card_timed_out",
+      retryable: false,
+      message:
+        "The card expired before the owner answered. Ask them to be ready, then run this again.",
+      ...extra,
+    };
+  }
+
+  return null;
+}
+
 async function cmdAdd(flags) {
   const name = flags.name;
   const type = flags.type;
@@ -512,6 +555,16 @@ async function cmdAdd(flags) {
       });
       formValues = out.values;
     } catch (err) {
+      const ended = ownerEndedTheCard(err, {
+        name,
+        type,
+        url: flags["login-url"] || null,
+      });
+      if (ended) {
+        outputJson({ ok: false, stored: false, ...ended });
+        process.exitCode = 1;
+        return;
+      }
       return outputError(`secure form: ${err.message}`);
     }
   }
@@ -733,6 +786,25 @@ async function cmdSetTotp(flags) {
       });
       seedInput = out.values.seed;
     } catch (err) {
+      const ended = ownerEndedTheCard(err, { name });
+      if (ended) {
+        // A seed lives behind the site's own 2FA settings: a browser view can
+        // show it to the owner but cannot put it in the vault, so handing one
+        // over would land them back on this card. Dropping the `action` stops
+        // the caller acting — but the model can open a viewport itself, and the
+        // stock wording invites exactly that. So the message has to say it.
+        if (ended.error === "FORM_USE_BROWSER") {
+          delete ended.action;
+          ended.message =
+            "The owner closed the card and asked for the browser, but a browser cannot finish " +
+            "this one: the seed lives behind the site's own two-factor settings and nothing in " +
+            "a view can put it in the vault. Do not raise this card again, do not open a " +
+            "browser for it, and do not ask for the seed in the chat.";
+        }
+        outputJson({ ok: false, stored: false, ...ended });
+        process.exitCode = 1;
+        return;
+      }
       return outputError(`secure form: ${err.message}`);
     }
   } else {
@@ -1087,6 +1159,22 @@ async function cmdSetAccess(flags) {
           security: "Typed by you, out of the agent's sight. Mismatch = no change.",
         }));
       } catch (err) {
+        // This card is an APPROVAL, not a secret. Nothing in a browser can
+        // approve it, so any way the owner ends it leaves the access alone —
+        // and asking again in the same turn is the loop, not the recovery.
+        if (ownerEndedTheCard(err)) {
+          outputJson({
+            ok: false,
+            error: "OWNER_DID_NOT_APPROVE",
+            reason: "owner_ended_the_card",
+            retryable: false,
+            access: describeAccess(rec),
+            message:
+              "Access unchanged — the owner did not approve the widen. Do not ask again in this turn.",
+          });
+          process.exitCode = 1;
+          return;
+        }
         return outputError(`owner confirmation: ${err.message}`);
       }
       if (String(values.confirm || "").trim() !== name) {
