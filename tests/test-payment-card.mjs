@@ -169,6 +169,53 @@ test("the notes-to-seller box is refused however it is dressed up", () => {
 // The plaintext fill path takes its value from the caller, so a card must never
 // arrive through it — and the DOM gives it nothing to notice, because a card number
 // input is type="text". This is the check that closes it.
+// The attributes Stripe Elements actually emits, read off a live mount rather than
+// remembered — both the split fields and the combined element expose these same
+// three inputs. Recorded here so the guard is pinned against the real thing
+// without the suite needing Stripe, a network, or a key.
+const STRIPE_FIELDS = {
+  number: { autocomplete: "cc-number", label: "cardnumber Card number cardNumber" },
+  expiry: { autocomplete: "cc-exp", label: "exp-date MM / YY cardExpiry" },
+  security_code: { autocomplete: "cc-csc", label: "cvc CVC cardCvc" },
+};
+// Stripe plants these to spoil browser autofill. Nothing may ever type into one.
+const STRIPE_DECOY = { autocomplete: "fake", label: "hidden" };
+
+test("the guard accepts what Stripe Elements really emits", () => {
+  for (const [field, attrs] of Object.entries(STRIPE_FIELDS)) {
+    assert.doesNotThrow(
+      () => assertCardFieldShape(field, cardInput({ ...attrs, maxLength: null })),
+      `${field}: ${attrs.autocomplete}`,
+    );
+    assert.ok(isCardField(cardInput({ ...attrs, maxLength: null })));
+  }
+  // Stripe serves no cardholder-name field; that one is the merchant's own input.
+  assert.doesNotThrow(() =>
+    assertCardFieldShape("holder", cardInput({ autocomplete: "cc-name", label: "ccname", maxLength: null })),
+  );
+});
+
+test("Stripe's autofill decoy is not a card field", () => {
+  assert.ok(!isCardField(cardInput({ ...STRIPE_DECOY, maxLength: null })));
+  assert.throws(
+    () => assertCardFieldShape("number", cardInput({ ...STRIPE_DECOY, maxLength: null })),
+    /does not identify itself/,
+  );
+});
+
+// Separators are stripped from both the element's names and the word lists, so a
+// form is matched however it spells one. Before that they were stripped from only
+// one side, and a merchant writing `card-number` went unrecognised.
+test("a name is matched however the form spells it", () => {
+  for (const label of ["card-number", "card_number", "cardNumber", "CARDNUMBER"]) {
+    assert.ok(isCardField(cardInput({ autocomplete: "", label, maxLength: null })), label);
+  }
+  // And the refusal stays narrow: this list also decides what form-fill turns away.
+  for (const label of ["export", "experience", "expand"]) {
+    assert.ok(!isCardField(cardInput({ autocomplete: "", label, maxLength: null })), label);
+  }
+});
+
 test("a card box is recognised as one even when it cannot be filled", () => {
   assert.ok(isCardField(cardInput()));
   assert.ok(isCardField(cardInput({ hasValue: true })), "already filled is still a card box");

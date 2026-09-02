@@ -58,6 +58,8 @@ const PSP_PAGE = `<!doctype html><meta charset="utf-8"><body style="margin:0;fon
   <input data-aibref="f1e2" name="exp-date" autocomplete="cc-exp" inputmode="numeric" maxlength="7" placeholder="MM / YY">
   <input data-aibref="f1e3" name="cvc" autocomplete="cc-csc" inputmode="numeric" maxlength="4" placeholder="CVC">
   <input data-aibref="f1e4" name="ccname" autocomplete="cc-name" placeholder="Name on card">
+  <!-- Stripe plants one of these to spoil browser autofill. Nothing may type into it. -->
+  <input data-aibref="f1e9" name="hidden" autocomplete="fake">
 </body>`;
 
 // The merchant's own page: the total the owner is shown, a note box that is not a
@@ -226,6 +228,19 @@ test("the plaintext path refuses a card box", { skip }, async () => {
       () => document.querySelector('[data-aibref="f1e1"]').value,
     );
     assert.equal(number, "", "form-fill typed a card number anyway");
+  });
+});
+
+test("the provider's autofill decoy is never typed into", { skip }, async () => {
+  await withCheckout(async ({ dir, frame, host, state }) => {
+    await assert.rejects(
+      fillCard(state, dir, { cred: "visa", merchantHost: host, refs: { ...refs, number: "f1e9" } }),
+      /does not identify itself/,
+    );
+    const decoy = await frame.evaluate(
+      () => document.querySelector('[data-aibref="f1e9"]').value,
+    );
+    assert.equal(decoy, "", "the number reached the decoy input");
   });
 });
 

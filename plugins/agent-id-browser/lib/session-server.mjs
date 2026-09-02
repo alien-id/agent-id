@@ -655,15 +655,26 @@ export const SECRET_TAINT_ATTR = "data-aib-secret";
 // Deliberately not "autocomplete must be cc-*": provider frames set it, plenty of
 // merchant-hosted forms do not, and a rule that refuses every honest form is a
 // rule that gets widened.
+// Names are compared with separators removed on BOTH sides — see fieldWords — so
+// each entry is written once and matches `card-number`, `card_number` and
+// `cardNumber` alike. What Stripe Elements actually emits, checked against a live
+// mount rather than remembered: `cardnumber` / `exp-date` / `cvc` with
+// `cc-number` / `cc-exp` / `cc-csc` and a `data-elements-stable-field-name`.
 const CARD_FIELD_SIGNALS = {
   number: {
     autocomplete: ["cc-number"],
-    words: ["cardnumber", "card-number", "card_number", "ccnumber", "pan"],
+    // No bare "pan": matching is by substring, and it sits inside "expand",
+    // "panel" and "company". This list also decides what the plaintext path
+    // refuses, so a word that common costs more than it catches — a form that
+    // really names a field `pan` is covered by `autocomplete="cc-number"`.
+    words: ["cardnumber", "ccnumber"],
     minLength: 12,
   },
   expiry: {
+    // Not a bare "exp": this list also decides what the plaintext path REFUSES,
+    // and a field called "export" is not an expiry date.
     autocomplete: ["cc-exp", "cc-exp-month", "cc-exp-year"],
-    words: ["exp", "expiry", "expiration", "mmyy"],
+    words: ["expdate", "expiry", "expiration", "expmonth", "expyear", "mmyy"],
     minLength: 4,
   },
   security_code: {
@@ -673,10 +684,18 @@ const CARD_FIELD_SIGNALS = {
   },
   holder: {
     autocomplete: ["cc-name", "cc-given-name", "cc-family-name", "name"],
-    words: ["holder", "cardname", "card-name", "nameoncard", "name_on_card"],
+    words: ["holder", "cardname", "nameoncard"],
     minLength: 2,
   },
 };
+
+// Everything an element calls itself, as one comparable string. Separators go from
+// both this and the word lists, so a form is matched however it spells a name.
+function fieldWords(shape) {
+  return String(shape.label || "")
+    .toLowerCase()
+    .replace(/[\s\-_]+/g, "");
+}
 
 // Input types a card value can legitimately go into. `search` and `email` are
 // absent on purpose — those are the shapes of the boxes an injection aims at.
@@ -711,11 +730,11 @@ export async function cardFieldShape(target, ref) {
 // plaintext path must refuse it either way.
 export function isCardField(shape) {
   const autocomplete = String(shape.autocomplete || "").toLowerCase().split(/\s+/);
-  const label = String(shape.label || "").toLowerCase().replace(/\s+/g, "");
+  const label = fieldWords(shape);
   return Object.values(CARD_FIELD_SIGNALS).some(
     (signals) =>
       autocomplete.some((token) => signals.autocomplete.includes(token)) ||
-      signals.words.some((word) => label.includes(word.replace(/[-_]/g, ""))),
+      signals.words.some((word) => label.includes(word)),
   );
 }
 
@@ -748,9 +767,9 @@ export function assertCardFieldShape(field, shape) {
   // a guard that depends on its caller having normalised the input is a guard with
   // a way around it.
   const autocomplete = String(shape.autocomplete || "").toLowerCase();
-  const label = String(shape.label || "").toLowerCase().replace(/\s+/g, "");
+  const label = fieldWords(shape);
   const named = autocomplete.split(/\s+/).some((token) => signals.autocomplete.includes(token));
-  const described = signals.words.some((word) => label.includes(word.replace(/[-_]/g, "")));
+  const described = signals.words.some((word) => label.includes(word));
   if (!named && !described) {
     throw new Error(
       `fill-card: ${where} does not identify itself as one (autocomplete="${autocomplete}") — ` +
