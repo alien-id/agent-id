@@ -301,4 +301,23 @@ export function codeDestination(bodyText) {
   return `${(article || "your").toLowerCase()} ${kind.toLowerCase()} ending in ${tail}`;
 }
 
+// The destination for a LOG line. `codeDestination` returns what the page said,
+// and a page is free to say it in full — the owner's whole e-mail address or
+// phone number. That belongs on the card, which is being shown to the owner
+// anyway, and not in a log that outlives the sign-in. Sites that already
+// masked it ("your email ending in 42") pass through: there is nothing left to
+// hide, and cutting them further would destroy the only useful part.
+export function maskDestination(destination) {
+  const value = String(destination || "").trim();
+  if (!value) return null;
+
+  const email = /^([^\s@]+)@([^\s@]+)$/.exec(value);
+  if (email) return `${email[1].slice(0, 1)}***@${email[2]}`;
+
+  const digits = value.replace(/\D/g, "");
+  if (digits.length >= 5) return `***${digits.slice(-4)}`;
+
+  return value;
+}
+
 export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, QR_SIGN_IN_RE, ERROR_RE, BLOCK_RE };

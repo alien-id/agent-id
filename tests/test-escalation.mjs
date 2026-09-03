@@ -125,7 +125,12 @@ test("choosing the browser sends the agent to the browser", () => {
     profile: "main",
   });
 
+  // This exact PAIR is what the caller's `owner_chose_the_browser` detector matches on
+  // to hand the browser over itself, instead of leaving that to a sentence the
+  // model may not act on. Nothing compiles across that boundary — changing either
+  // string here silently turns the hand-off back into a suggestion.
   assert.equal(action, OWNER_MUST_DRIVE, "the viewport is the answer to this");
+  assert.equal(action, "owner_must_drive", "the slug the caller matches on, spelled out");
   assert.equal(reason, "owner_chose_the_browser");
   assert.match(message, /browser view for profile 'main'/);
   // The two ways a card can close must not read the same: one means leave it

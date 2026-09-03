@@ -107,6 +107,33 @@ test("runRecipe maps steps to driver calls, substitutes vars, resolves {otp} onc
   assert.equal(otpCalls, 1);
 });
 
+// `fillCode` spreads what it is given one character per box. A template that
+// merely CONTAINS the code is not a code screen's row — routing it here would put
+// "c", "o", "d", "e" across six boxes and call it a sign-in.
+test("runRecipe sends only a bare {otp} to the row-aware verb", async () => {
+  const calls = [];
+  await runRecipe(
+    pageOn("https://x/login"),
+    [
+      { action: "fill", selector: "#otp", value: "{otp}" },
+      { action: "fill", selector: "#note", value: "code: {otp}" },
+      { action: "type", selector: "#other", text: "{otp} please" },
+    ],
+    {
+      username: "u",
+      password: "p",
+      getOtp: async () => "654321",
+      domains: ["x"],
+      driver: recordingDriver(calls),
+    }
+  );
+  assert.deepEqual(calls, [
+    ["fillCode", "#otp", "654321"],
+    ["fill", "#note", "code: 654321"],
+    ["type", "#other", "654321 please"],
+  ]);
+});
+
 test("runRecipe does not resolve OTP when no step needs it", async () => {
   let otpCalls = 0;
   await runRecipe(pageOn("https://x/login"), [{ action: "fill", selector: "#u", value: "{username}" }], {

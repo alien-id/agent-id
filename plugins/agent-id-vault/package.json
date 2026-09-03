@@ -1,6 +1,6 @@
 {
   "name": "@alien-id/agent-id-vault",
-  "version": "7.7.1",
+  "version": "7.8.0",
   "type": "module",
   "description": "Alien Agent ID vault: portable encrypted credential vault with LUKS-style slots and typed/domain-scoped credential records.",
   "bin": {
@@ -31,6 +31,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@alien-id/agent-id-core": "^7.5.0"
+    "@alien-id/agent-id-core": "^7.6.0"
   }
 }

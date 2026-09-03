@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { generateKeyPairSync } from "node:crypto";
 
 import {
@@ -557,6 +558,150 @@ test("the card names the site, not the credential the agent invented", async () 
 
     child.kill();
     await new Promise((r) => child.on("exit", r));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── a card the OWNER ended, told apart from a card that broke ────────────────────
+
+// Live incident: the owner pressed the card's "sign in from the browser" link on
+// a `vault_add` form. Every way of ending that card collapsed into one opaque
+// `secure form: …` string, which reads to a model like a transient fault — so it
+// called `vault_add` again and the owner got the same form a second time.
+function hostedSocket(reason) {
+  const sock = path.join(os.tmpdir(), `vault-card-${process.pid}-${Date.now()}.sock`);
+  const server = http.createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      const body = JSON.stringify(reason ? { error: "cancelled", reason } : { error: "cancelled" });
+      res.writeHead(409, { "content-type": "application/json" });
+      res.end(body);
+    });
+  });
+
+  return new Promise((resolve) => server.listen(sock, () => resolve({ sock, server })));
+}
+
+async function addAgainstCard({ dir, reason }) {
+  const { sock, server } = await hostedSocket(reason);
+  try {
+    const child = spawn(
+      "node",
+      [
+        CLI, "add", "--name", "booking", "--type", "login",
+        "--passwordless", "--otp", "interactive",
+        "--login-url", "https://account.example.com/sign-in",
+        "--form", "--state-dir", dir,
+      ],
+      {
+        env: {
+          ...process.env,
+          AGENT_ID_SECURE_PROMPT: "hosted",
+          AGENT_ID_SECURE_PROMPT_SOCK: sock,
+        },
+      }
+    );
+    let stdout = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    const code = await new Promise((r) => child.on("exit", r));
+
+    return { code, out: JSON.parse(stdout) };
+  } finally {
+    server.close();
+  }
+}
+
+// Same stubbed card host, driving `set-totp --form` instead. The credential has
+// to exist first, which `add` without `--form` does without raising anything.
+async function setTotpAgainstCard({ dir, reason }) {
+  const { sock, server } = await hostedSocket(reason);
+  try {
+    const child = spawn(
+      "node",
+      [CLI, "set-totp", "--name", "booking", "--form", "--state-dir", dir],
+      {
+        env: {
+          ...process.env,
+          AGENT_ID_SECURE_PROMPT: "hosted",
+          AGENT_ID_SECURE_PROMPT_SOCK: sock,
+        },
+      }
+    );
+    let stdout = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    const code = await new Promise((r) => child.on("exit", r));
+
+    return { code, out: JSON.parse(stdout) };
+  } finally {
+    server.close();
+  }
+}
+
+// Stripping the `action` stops the CALLER handing a browser over. It does not
+// stop the model opening one itself — that tool is model-callable, and it is the
+// whole premise of the pair. So the decline has to say why, or it is the same
+// loop one step longer.
+test("a seed card closed for the browser declines, and says a browser cannot finish it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-card-"));
+  try {
+    await makeVault(dir);
+    // The credential has to exist before a seed can be set on it; plain `add`
+    // raises no card.
+    await new Promise((resolve) => {
+      const child = spawn("node", [
+        CLI, "add", "--name", "booking", "--type", "login",
+        "--domains", "account.example.com", "--state-dir", dir,
+      ]);
+      child.on("exit", resolve);
+    });
+    const { code, out } = await setTotpAgainstCard({ dir, reason: "use_browser" });
+
+    assert.equal(code, 1);
+    assert.equal(out.error, "FORM_USE_BROWSER");
+    assert.equal(out.stored, false);
+    assert.equal(out.action, undefined, "a browser cannot put a seed in the vault");
+    assert.match(out.message, /browser cannot finish this one/);
+    assert.match(out.message, /do not open a browser for it/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a card closed for the browser says so, and stores nothing", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-card-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const { code, out } = await addAgainstCard({ dir, reason: "use_browser" });
+
+    assert.equal(code, 1);
+    assert.equal(out.error, "FORM_USE_BROWSER");
+    // The pair the caller matches on. There is no compiler across that boundary —
+    // this assertion is the contract.
+    assert.equal(out.action, "owner_must_drive");
+    assert.equal(out.reason, "owner_chose_the_browser");
+    assert.equal(out.retryable, false);
+    assert.equal(out.url, "https://account.example.com/sign-in");
+    assert.equal(out.stored, false);
+
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    assert.ok(!vault.get("booking"), "nothing was written");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a card simply dismissed is not the browser, and is not retryable either", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-card-"));
+  try {
+    await makeVault(dir);
+    const { code, out } = await addAgainstCard({ dir, reason: null });
+
+    assert.equal(code, 1);
+    assert.equal(out.error, "FORM_CANCELLED");
+    assert.equal(out.reason, "owner_dismissed_the_card");
+    assert.equal(out.retryable, false);
+    assert.equal(out.action, undefined, "a dismissal asks for nothing to happen instead");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -53,6 +53,7 @@ import {
   classifyLogin,
   codeDestination,
   codeLengthFromText,
+  maskDestination,
   OTP_BODY_RE,
 } from "./login-detect.mjs";
 
@@ -210,7 +211,11 @@ export async function runRecipe(
   // value in an error. Run it under a value-free catch.
   const carriesSecret = (tpl) =>
     typeof tpl === "string" && (tpl.includes("{password}") || tpl.includes("{otp}"));
-  const carriesOtp = (tpl) => typeof tpl === "string" && tpl.includes("{otp}");
+  // The WHOLE value, not a value containing one. `fillCode` spreads what it is
+  // given one character per box, so a template like "code: {otp}" routed here
+  // would put "c", "o", "d"… across the row. A code embedded in a longer string
+  // is not a code screen's row; it goes through the ordinary verbs.
+  const carriesOtp = (tpl) => typeof tpl === "string" && tpl.trim() === "{otp}";
   const guarded = async (tpl, run) => {
     if (!carriesSecret(tpl)) return run();
     try {
@@ -667,6 +672,42 @@ export async function otpBoxes(target) {
   return Array.from({ length: count }, (_, index) => all.nth(index));
 }
 
+// The row a CALLER'S selector is asking about, which is not always the row on the
+// page. `otpBoxes` searches the whole document and takes the first group that
+// looks like a code row — right for a heuristic selector, wrong for an explicit
+// one: a recipe naming `#email-code` beside an SMS row, or a `fill_otp` whose ref
+// points at the second of two code fields, would have its instruction silently
+// replaced by whatever the predicate found first.
+//
+// Three answers, because the selector is not always an instruction:
+//   in the row  → the row (the caller and the predicate agree)
+//   elsewhere   → no row (the caller named something else, and meant it)
+//   no match    → the row (a heuristic net that catches nothing cannot outvote it)
+//
+// The last case is what keeps `typeOtp` working: its selector is a wide net that
+// does not cover a row of bare `<input type=text maxlength=1>`, and reading a
+// no-match as "the caller meant elsewhere" would strand exactly the shape this
+// whole path exists for. Every match is looked at, not the first, for the same
+// reason — a wide net matches many elements, and any one of them landing in the
+// row is agreement.
+export async function otpBoxesFor(target, selector) {
+  const boxes = await otpBoxes(target);
+  if (boxes.length === 0) return [];
+
+  const fit = await target
+    .evaluate(
+      ({ selector, attr }) => {
+        const elements = Array.from(document.querySelectorAll(selector));
+        if (elements.length === 0) return "no-match";
+        return elements.some((el) => el.hasAttribute(attr)) ? "in-row" : "elsewhere";
+      },
+      { selector, attr: OTP_ROW_ATTR }
+    )
+    .catch(() => "no-match");
+
+  return fit === "elsewhere" ? [] : boxes;
+}
+
 export async function otpCardHints(target) {
   // Only an exact count. A row of boxes is one — there are as many as the code
   // has characters. A single field's maxlength is NOT: it says "no more than",
@@ -823,7 +864,12 @@ function describeState(s) {
 // Booking.com's six-box screen holding one character, on both paths that write a
 // code — auto-login's own OTP step and a recipe's `{otp}`.
 export async function typeCodeInto(page, selector, code) {
-  const boxes = await otpBoxes(page);
+  // A second row detection, after the one `otpCardHints` ran to build the card.
+  // Deliberate: minutes pass between them while the owner reads their mail, and
+  // a row carried over from before that wait describes a page that may already
+  // have re-rendered. The saving would be one `evaluate`; the cost would be
+  // typing into locators that no longer point anywhere.
+  const boxes = await otpBoxesFor(page, selector);
   if (boxes.length === 0) {
     // The OTP code is low-sensitivity (single-use, seconds-lived) but still goes
     // through the value-free error guard, for consistency.
@@ -1336,7 +1382,7 @@ export async function autoLogin({
         // written; this path, which raises most of the cards, logged nothing.
         log(
           `auto-login: code hints length=${hints.length ?? "?"} destination=${
-            hints.destination ?? "?"
+            maskDestination(hints.destination) ?? "?"
           } at ${page.url()}`
         );
         const code = await getOtp(retry, hints.destination, hints.length);
