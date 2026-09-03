@@ -326,8 +326,9 @@ function formDescription({
   // `ro` is a grant being made in the moment of typing, so it stays on the card
   // even though the rest of the metadata does not.
   const grant = access === "ro" ? " The agent can read this, never change it." : "";
+  const once = type === "login" ? " Untick Save to vault to use it once." : "";
 
-  return `${lead}${step}${grant}`;
+  return `${lead}${step}${grant}${once}`;
 }
 
 
@@ -402,10 +403,42 @@ function formFieldsForType(type, flags) {
               },
             ]
           : []),
+        // The owner's say over whether the credential outlives this sign-in. On
+        // by default; unticked, the record is kept only until the sign-in that
+        // asked for it completes (see `transient` below). It rides the same
+        // sealed form as the values, so nothing between here and the phone sees
+        // the choice — the value comes back as the string "true" / "false", and
+        // a client that never rendered the row sends nothing, which is "true".
+        SAVE_TO_VAULT_FIELD,
       ];
     default:
       return null;
   }
+}
+
+const SAVE_TO_VAULT_FIELD = Object.freeze({
+  name: "saveToVault",
+  label: "Save to vault",
+  kind: "checkbox",
+  default: "true",
+  secret: false,
+  required: false,
+});
+
+// A credential the owner chose not to keep lives this long at most: longer than
+// the card's own 15-minute budget plus one auto-login, so a sign-in that is
+// under way never loses its credential mid-run, and short enough that "not
+// saved" stays true when nothing consumes it.
+const TRANSIENT_TTL_MS = 30 * 60 * 1000;
+
+// The owner's answer to the "Save to vault" box, taken OUT of the form values
+// so it can never be written into a record as if it were a field. Absent means
+// kept — the card of an older client has no box.
+function takeSaveToVault(formValues) {
+  if (!formValues || !(SAVE_TO_VAULT_FIELD.name in formValues)) return true;
+  const raw = formValues[SAVE_TO_VAULT_FIELD.name];
+  delete formValues[SAVE_TO_VAULT_FIELD.name];
+  return String(raw) !== "false";
 }
 
 // A card the OWNER ended, told apart from a card that broke. All three are
@@ -568,6 +601,8 @@ async function cmdAdd(flags) {
       return outputError(`secure form: ${err.message}`);
     }
   }
+
+  const keep = takeSaveToVault(formValues);
 
   // Read a secret either from the form (--form) or the existing file/env/stdin/tty
   // channels — never from argv.
@@ -742,11 +777,14 @@ async function cmdAdd(flags) {
       }
     }
 
+    if (!keep) record.transient = { until: Date.now() + TRANSIENT_TTL_MS };
+
     const stored = vault.add(record);
     await vault.save();
     stderr(
       `Added credential '${name}' (${type}) for ${domains.join(", ")}` +
-        `${stored.access ? ` — access: ${stored.access}` : ""}.`
+        `${stored.access ? ` — access: ${stored.access}` : ""}` +
+        `${keep ? "" : " — for this sign-in only"}.`
     );
     outputJson({
       ok: true,
@@ -756,6 +794,14 @@ async function cmdAdd(flags) {
       access: effectiveAccess(stored),
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt,
+      ...(keep
+        ? {}
+        : {
+            transient: true,
+            note:
+              "The owner chose not to keep this credential. It exists for this sign-in only " +
+              "and is removed when the sign-in completes (or after 30 minutes).",
+          }),
     });
   } finally {
     vault.lock();

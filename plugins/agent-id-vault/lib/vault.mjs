@@ -47,6 +47,7 @@ import {
   emptyPayload,
   getCredential,
   listMetadata,
+  sweepTransient,
   parsePayload,
   removeCredential,
   serializePayload,
@@ -182,7 +183,7 @@ export async function openVault({
   const payloadJson = decryptPayload(masterKey, file.payload);
   const payload = parsePayload(payloadJson);
 
-  return buildVaultHandle({ stateDir, file, masterKey, payload });
+  return openedHandle({ stateDir, file, masterKey, payload });
 }
 
 // Open the vault when the master key was recovered out-of-band — e.g. the
@@ -215,7 +216,17 @@ export async function openVaultWithMasterKey({ stateDir, masterKey }) {
   }
   verifyModeTag(file, masterKey);
 
-  return buildVaultHandle({ stateDir, file, masterKey, payload });
+  return openedHandle({ stateDir, file, masterKey, payload });
+}
+
+// Every open sweeps the transient records whose window has closed and writes
+// the vault back when it dropped any, so "not saved" is true on disk and not
+// only in the answer to `list`.
+async function openedHandle({ stateDir, file, masterKey, payload }) {
+  const swept = sweepTransient(payload);
+  const handle = buildVaultHandle({ stateDir, file, masterKey, payload });
+  if (swept.length > 0) await handle.save();
+  return handle;
 }
 
 // Read the mobile-slot challenges without unlocking. The proxy hands these to
