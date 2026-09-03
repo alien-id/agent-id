@@ -13,7 +13,7 @@ Give an AI agent its own identity and the tools to act with it safely. It works 
 
 - 🪪 **A portable agent identity** — an Ed25519 keypair the agent owns; everything it signs (commits, operations) is attributable to it and verifiable by anyone.
 - 🔐 **A credential vault** — keep API keys, tokens, OAuth logins, even blockchain wallet keys in an encrypted vault; the agent *uses* them by name through a local proxy and **never sees the secret value**. Unlocked automatically by the agent's own local key. (`agent-id-vault` + `agent-id-proxy`)
-- 🌐 **Browser logins** — sign in once in a real browser when a desktop head is available, **or** let the agent log in *headless* from a stored `login` credential, answering any 2FA over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI). Either way the agent then drives the logged-in session headless for sites that block API/cookie access (e.g. Gmail/Workspace) — still without ever handling your credential. (`agent-id-browser`)
+- 🌐 **Browser logins** — the agent signs a browser in from a stored `login` credential, answering any 2FA over an abstracted secure-entry channel (browser form, mobile app, hosted harness, or CLI), without ever handling your credential. It then drives that signed-in browser itself for sites that block API/cookie access (e.g. Gmail/Workspace). (`agent-id-browser`)
 - 🔏 **Signed git commits** — SSH-signed with trailers tracing back to the agent (and, once you bind, to a human). (`agent-id-git`)
 
 **Human identity is opt-in.** When you want provenance you can prove to a third party, link the agent's key to a verified human via Alien Network's biometric SSO. Git commits then trace the full chain **commit → agent key → SSO `id_token` (`cnf.jkt`) → verified human owner** — but you never *need* it to use the identity, vault, or browser. See [Assurance levels](#assurance-levels--identity-from-the-first-second-binding-added-later).
@@ -89,7 +89,7 @@ Alien Agent ID ships as a Claude Code plugin marketplace with six focused plugin
 | `agent-id-vault` | `/agent-id-vault` | Portable encrypted credential vault for external-service secrets. Single file (`vault.enc`) with LUKS-style slots — passkey (WebAuthn PRF / Touch ID), agent-key (HKDF), passphrase (scrypt), mobile (phone), owner-approval (Alien app). **Two one-way modes:** *user* (default; no passphrase, app/agent-key unlock) and *dev* (`--dev`; passphrase allowed) — a user-mode vault can never gain a passphrase. Typed, domain-scoped credential records, including sealed in-vault-generated wallet keys (`solana-keypair`, `evm-keypair`). `exec` injects credentials into a child process's environment (or a temp `0600` key file via `--file`) for env-var-auth CLIs/SDKs the proxy can't reach. `init`, `add`, `generate`, `show`, `list`, `remove`, `exec`, `rekey`, `export`, `import`, `migrate`. |
 | `agent-id-proxy` | `/agent-id-proxy` | Local credential-injecting HTTP proxy. Agent calls `http://<proxy>/<credname>/<upstream-host>/<path>`; proxy materializes the credential into the request by type and forwards over real HTTPS. Signs Solana/EVM transactions in-process for wallet credentials — the agent submits unsigned transactions. System CA bundle verifies upstream — no TLS interception, no local CA. Enforces per-credential host allowlist (default-deny). `start`, `status`, `stop`. |
 | `agent-id-auth` | `/agent-id-auth` | RFC 9449 DPoP-signed calls to Alien-aware services. `header` emits the two-header pair for one request; `call` is a one-shot signed HTTP request. `discover` fetches and validates `/.well-known/alien-agent-id.json`; `capabilities` renders the manifest as actionable markdown; `support` probes for the meta-tag support signal. |
-| `agent-id-browser` | `/agent-id-browser` | Universal browser the agent drives, with the logged-in profile **sealed in the vault**. Establish a session two ways: a **headed** Chrome login when a desktop browser is available, or an **agent-driven headless** login from a stored `login` credential (`auto-login`, or `snapshot` + `fill-secret`/`fill-otp`) where the password and any 2FA are entered over the abstracted secure-entry channel — never seen by the agent. Afterwards it drives the session **headless** — fine-grained control (accessibility `snapshot` + `click`/`type`/`fill`/`fill-secret`/`fill-otp`/`select`/`press`/`navigate`/`screenshot`/`eval`) plus one-shot `read`/`fetch`. Secret-typing is gated by the credential's domain allowlist (no foreign-origin exfiltration) and refuses sealed in-vault keys. Drives the user's installed Chrome via patchright (stealth driver, installed on first session into the plugin data dir — no browser download). `login`, `auto-login`, `open`, `close`, actions, `read`, `fetch`, `status`. Every open session also serves a token-gated **live viewport stream** (watch + optionally drive it; JPEG by default, ~10× cheaper H.264 after `install-codecs`) — protocol + viewer in [docs/BROWSER-STREAM.md](docs/BROWSER-STREAM.md). |
+| `agent-id-browser` | `/agent-id-browser` | Signs a browser in from a stored `login` credential: `auto-login --cred CRED --rpc HOST:PORT`. The browser is a separate process reached over its RPC port and holds its own profile; this plugin unlocks the vault, drives the sign-in form, and types the password straight into the page — never through the agent. A recipe on the credential drives multi-step and identity-provider forms; 2FA comes from a stored TOTP seed or from a card raised to the owner the moment the site sends the code. Every navigation and every secret-bearing step is confined to the credential's domain allowlist. A failure carries `action`: `owner_must_drive`, `owner_must_confirm`, or `fix_credential`. Driving the browser otherwise — pages, clicks, reads — is done over the same RPC port by whoever runs it. |
 
 Repository layout:
 
@@ -131,7 +131,7 @@ plugins/
 │   └── skills/agent-id-auth/SKILL.md
 └── agent-id-browser/
     ├── .claude-plugin/plugin.json
-    ├── lib/launch.mjs          # hardened patchright launch (sandbox on)
+    ├── lib/rpc-page.mjs        # page adapter over the browser's RPC port
     ├── lib/profile-store.mjs   # tar + AES-256-GCM seal of the profile (DEK in vault)
     ├── lib/session-server.mjs  # persistent session + a11y snapshot/refs + actions
     │                           # (incl. fill-secret/fill-otp: vault → page, seal+domain gated)
@@ -140,8 +140,8 @@ plugins/
     ├── lib/unlock.mjs          # owner-approval (Alien app) unlock
     ├── lib/session.mjs         # logout detection
     ├── bin/cli.mjs             # login, auto-login, open/close, actions, read, fetch, status
-    ├── package.json            # patchright dep (installed at runtime, not bundled)
-    ├── hooks/                  # SessionStart hook: install patchright into the data dir
+    ├── package.json            # core + vault only; the browser is a separate process
+    ├── hooks/                  # SessionStart hook: install the shared libs into the data dir
     └── skills/agent-id-browser/SKILL.md
 .claude-plugin/marketplace.json # lists all six plugins
 examples/                       # demo-service.mjs, dev-sso.mjs
@@ -149,11 +149,10 @@ tests/                          # unit + integration suites
 docs/                           # AGENT-SSO.md, INTEGRATION.md
 ```
 
-Every plugin ships with **zero npm dependencies** (Node.js built-ins only) — even
-`agent-id-browser`, which needs **patchright** (a stealth Playwright) to drive a
-real browser: rather than bundling it, a SessionStart hook installs it into the
-plugin's data dir on first run (~17 MB, no browser binary — it drives the user's
-installed Chrome).
+Every plugin ships with **zero npm dependencies** (Node.js built-ins only),
+`agent-id-browser` included: the browser it signs into is a separate process
+reached over a TCP port, so there is no driver to bundle and no browser to
+download.
 
 ---
 

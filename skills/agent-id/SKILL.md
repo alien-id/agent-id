@@ -113,8 +113,8 @@ node plugins/agent-id-auth/bin/cli.mjs call --url https://service/op --method PO
 | `SKILL.md` `description` | Auto-surfaced the capability | This file + per-plugin SKILL.md bodies, in your system prompt / skills dir |
 | `allowed-tools` | Gated which commands ran | **Your harness must gate this** (see Security) |
 | SessionStart hook | Popped the unlock form per session | Call `proxy start --unlock-form` at session start |
-| Install hook | Auto-installed patchright | Run it once, or `cd plugins/agent-id-browser && npm install`; browser cmds also auto-install into `--plugin-data <dir>` |
-| `${CLAUDE_PLUGIN_DATA}` | Browser's writable dir | Pass `--plugin-data <dir>` to browser commands (only that plugin needs it) |
+| Install hook | Installed the shared libs | Run `cd plugins/agent-id-browser && npm install` once |
+| `${CLAUDE_PLUGIN_DATA}` | The plugin's writable dir | Pass `--plugin-data <dir>` when a command needs one |
 
 ## Security on a foreign harness — read this
 

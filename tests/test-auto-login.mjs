@@ -58,7 +58,7 @@ function pageOn(url) {
   return { url: () => url };
 }
 
-// A recording driver stands in for the human-input driver so the recipe
+// A recording driver stands in for the page driver so the recipe
 // mapping / var-substitution / lazy-OTP logic is tested without a browser.
 function recordingDriver(calls) {
   return {

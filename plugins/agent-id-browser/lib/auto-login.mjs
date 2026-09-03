@@ -30,9 +30,14 @@
 // after the fact with `agent-id-vault set-domains`, since a sign-in only reveals
 // which hosts it needs once it has been driven.
 //
-// The browser-driving functions take a `page` object (a patchright Page), so the
-// pure pieces (applyVars / stepNeedsOtp / runRecipe / resolveOtp-totp) unit-test
-// against a stub page with no real browser.
+// The browser-driving functions take a `page` object — lib/rpc-page.mjs, which
+// speaks to the agent-browser RPC port and offers the same handful of methods
+// this engine uses. So the pure pieces (applyVars / stepNeedsOtp / runRecipe /
+// resolveOtp-totp) still unit-test against a stub page with no real browser.
+//
+// Input is the browser's own: its `Session.dom.click` jitters inside the
+// element's box and its `Session.dom.type` sends a real key per character, so
+// the human cadence lives under this process rather than in it.
 
 import { generateTotp } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
@@ -51,40 +56,17 @@ import {
   maskDestination,
   OTP_BODY_RE,
 } from "./login-detect.mjs";
-import {
-  firstVisible,
-  humanClick,
-  humanDriver,
-  humanType,
-  typeCodeAcrossBoxes,
-} from "./human-input.mjs";
-import { markSecretBoxes, markSecretLocator } from "./secret-taint.mjs";
 
 // Type a secret (password / OTP) with human cadence, guarding against a
 // keyboard/fill error that could echo the value — auto-login errors propagate to
 // the agent, so the raw error must never carry the secret. Mirrors the
-// session-server fill-secret guard.
-//
-// The taint belongs here rather than at the call sites because this function IS
-// the definition of "auto-login typed a secret into this field": the code screen's
-// single field, the Entra/ADFS password, the heuristic password. `fill-secret` and
-// `fill-otp` have tagged their fields since the read-back guard existed; every
-// field auto-login typed stayed readable through `get --what value`, passwords
-// included.
-//
-// Tagged through the same `firstVisible` the typing resolved through, not through
-// the selector again: where a site renders a hidden copy of the form first, those
-// two name different elements, and the one left readable would be the filled one.
+// same guard a secret-typing verb applies wherever one is offered.
 async function typeSecret(page, selector, value, opts = {}) {
-  const { root = page, timeout = 15000 } = opts;
-
   try {
-    await humanType(page, selector, value, opts);
+    await page.fill(selector, value, opts);
   } catch {
     throw new Error(`could not type into "${selector}" — element not visible/editable`);
   }
-
-  await markSecretLocator(await firstVisible(root, selector, timeout));
 }
 
 const PLACEHOLDER_FIELDS = ["url", "value", "text", "selector", "key"];
@@ -181,6 +163,24 @@ function stepCarriesSecret(step) {
   );
 }
 
+// The recipe action vocabulary mapped onto the page adapter. Injectable the way
+// it always was, so runRecipe's substitution and {otp}-laziness unit-test
+// against a recording driver with no browser at all.
+//
+// `fillCode` is the one verb the recipe vocabulary adds on top of the page's own:
+// writing a one-time code. A row of one-character boxes takes the code spread
+// across it, and only the caller knows a value IS a code — the selector does not
+// say so, so teaching `fill` to guess would reshape ordinary fills too.
+export const pageDriver = {
+  navigate: (page, url) => page.goto(url),
+  fill: (page, selector, value) => page.fill(selector, value),
+  type: (page, selector, value) => page.fill(selector, value),
+  fillCode: (page, selector, value) => typeCodeInto(page, selector, value),
+  click: (page, selector) => page.click(selector),
+  press: (page, selector, key) => page.press(selector, key),
+  wait: (page, ms) => page.waitForTimeout(ms),
+};
+
 /**
  * Execute recipe `steps` against a page. `{otp}` is resolved lazily via `getOtp()`
  * the first time a step needs it (so a recipe whose login fails before the OTP
@@ -191,22 +191,12 @@ function stepCarriesSecret(step) {
  * checked against it before the step runs.
  */
 // `driver` maps the action vocabulary to page interactions; it defaults to the
-// human-input driver (curved motion, key-by-key typing) and is injectable so the
-// mapping/{otp}-lazy-resolution logic unit-tests without a browser.
-// The recipe vocabulary, plus the one verb `humanDriver` cannot carry: writing a
-// one-time code. A row of one-character boxes takes the code spread across it,
-// and only the caller knows a value IS a code — the selector does not say so, so
-// teaching `fill` to guess would reshape ordinary fills too. Kept here rather
-// than in `human-input` because recognising the row is this layer's job.
-export const recipeDriver = {
-  ...humanDriver,
-  fillCode: typeCodeInto,
-};
-
+// page driver above and is injectable so the mapping/{otp}-lazy-resolution
+// logic unit-tests without a browser.
 export async function runRecipe(
   page,
   steps,
-  { username, password, getOtp, domains, driver = recipeDriver }
+  { username, password, getOtp, domains, driver = pageDriver },
 ) {
   if (!Array.isArray(domains)) {
     throw new Error("runRecipe requires the credential's `domains` allowlist");
@@ -697,20 +687,21 @@ export async function otpBoxes(target) {
 // The last case is what keeps `typeOtp` working: its selector is a wide net that
 // does not cover a row of bare `<input type=text maxlength=1>`, and reading a
 // no-match as "the caller meant elsewhere" would strand exactly the shape this
-// whole path exists for. `$$eval` and not `$eval` for the same reason — a wide
-// net matches many elements, and any one of them landing in the row is agreement.
+// whole path exists for. Every match is looked at, not the first, for the same
+// reason — a wide net matches many elements, and any one of them landing in the
+// row is agreement.
 export async function otpBoxesFor(target, selector) {
   const boxes = await otpBoxes(target);
   if (boxes.length === 0) return [];
 
   const fit = await target
-    .$$eval(
-      selector,
-      (elements, attr) => {
+    .evaluate(
+      ({ selector, attr }) => {
+        const elements = Array.from(document.querySelectorAll(selector));
         if (elements.length === 0) return "no-match";
         return elements.some((el) => el.hasAttribute(attr)) ? "in-row" : "elsewhere";
       },
-      OTP_ROW_ATTR
+      { selector, attr: OTP_ROW_ATTR }
     )
     .catch(() => "no-match");
 
@@ -866,13 +857,12 @@ function describeState(s) {
   return bits.join(" ");
 }
 
-// Best-effort fill of the OTP field, then submit.
 // Write a one-time code, whatever shape the screen takes it in. A row of
-// one-character boxes gets the code spread across it; anything else gets the
-// ordinary typed fill. Typing the whole code into the first box and trusting the
-// page to move the focus is what left Booking.com's six-box screen holding one
-// character — `fill_otp` has spread since the row predicate existed, and the two
-// paths auto-login drives, its own OTP step and a recipe's `{otp}`, did not.
+// one-character boxes gets the code spread across it, one character per box in
+// document order; anything else gets the ordinary fill. Typing the whole code
+// into the first box and trusting the page to move the focus is what left
+// Booking.com's six-box screen holding one character, on both paths that write a
+// code — auto-login's own OTP step and a recipe's `{otp}`.
 export async function typeCodeInto(page, selector, code) {
   // A second row detection, after the one `otpCardHints` ran to build the card.
   // Deliberate: minutes pass between them while the owner reads their mail, and
@@ -881,20 +871,25 @@ export async function typeCodeInto(page, selector, code) {
   // typing into locators that no longer point anywhere.
   const boxes = await otpBoxesFor(page, selector);
   if (boxes.length === 0) {
-    // The OTP code is low-sensitivity (single-use, seconds-lived) but still typed
-    // with human cadence and the value-free error guard, for consistency.
-    return typeSecret(page, selector, code);
+    // The OTP code is low-sensitivity (single-use, seconds-lived) but still goes
+    // through the value-free error guard, for consistency.
+    await typeSecret(page, selector, code);
+    return;
   }
 
-  // Tainted before the code goes in: every way out of the typing below — a throw,
-  // a partial fill, a row that submits itself — leaves characters in these boxes,
-  // and the tag is the only thing that stops them being read back one at a time
-  // through `get --what value`.
-  await markSecretBoxes(boxes);
-
-  return typeCodeAcrossBoxes(page, boxes, code);
+  // Each box takes the character at its own index. A row that submits itself does
+  // so from the last character, so a box that is gone by the time its turn comes
+  // is left alone rather than reported — the page has already moved on, and the
+  // login loop reads where it went.
+  const characters = Array.from(String(code));
+  for (const [index, box] of boxes.entries()) {
+    const character = characters[index];
+    if (character == null) break;
+    await box.fill(character).catch(() => {});
+  }
 }
 
+// Best-effort fill of the OTP field, then submit.
 async function typeOtp(page, code) {
   const sel =
     'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i], ' +
@@ -931,7 +926,7 @@ async function submitCode(page, fieldSel) {
   for (const known of ["#submitButton", "#idSubmit_SAOTCC_Continue"]) {
     const button = page.locator(known).first();
     if ((await button.count()) && (await button.isVisible().catch(() => false))) {
-      await humanClick(page, known, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
+      await page.click(known, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
       return;
     }
   }
@@ -956,7 +951,7 @@ async function submitCode(page, fieldSel) {
       (await button.textContent({ timeout: SUBMIT_TIMEOUT }).catch(() => "")) || ""
     ).trim();
     if (!CODE_SUBMIT_TEXT_RE.test(label)) continue;
-    await humanClick(page, button, { timeout: SUBMIT_TIMEOUT }).catch(() => {});
+    await button.click({ timeout: SUBMIT_TIMEOUT }).catch(() => {});
     return;
   }
   // Nothing to click: a single-field form, or a screen that submits on its own
@@ -989,7 +984,7 @@ async function detectMicrosoftFlow(page) {
 async function clickIfPresent(page, selector) {
   const loc = page.locator(selector).first();
   if (await loc.count()) {
-    await humanClick(page, selector, { timeout: 8000 }).catch(() => {});
+    await page.click(selector, { timeout: 8000 }).catch(() => {});
     return true;
   }
   return false;
@@ -1000,7 +995,7 @@ async function clickIfPresent(page, selector) {
 async function fillWhenVisible(page, selector, value, { timeout = 15000, secret = false } = {}) {
   await page.waitForSelector(selector, { state: "visible", timeout }).catch(() => {});
   if (secret) await typeSecret(page, selector, value, { timeout });
-  else await humanType(page, selector, value, { timeout });
+  else await page.fill(selector, value, { timeout });
 }
 
 // Drive a Microsoft ADFS or Entra forms login: username → (Next) → password →
@@ -1053,7 +1048,7 @@ async function heuristicLogin(page, { username, password, passwordless }) {
     if ((await loc.count()) === 0) return false;
     if (!(await loc.isVisible().catch(() => false))) return false;
     if (secret) await typeSecret(page, sel, value);
-    else await humanType(page, sel, value);
+    else await page.fill(sel, value);
     return true;
   };
 
@@ -1137,8 +1132,9 @@ async function awaitDeviceConfirmation(page, cred, { log, settleMs, budgetMs }) 
 
 /**
  * Drive a full auto-login against `cred` (a `login` record). Returns
- * { ok, outcome, finalUrl }. Does NOT seal the profile — the caller does that
- * after closing the context. `page` is a patchright Page.
+ * { ok, outcome, finalUrl }. The browser keeps whatever session it ends up
+ * with; `page` is the adapter in lib/rpc-page.mjs, or any object offering the
+ * same handful of methods.
  */
 export async function autoLogin({
   page,

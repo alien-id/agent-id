@@ -2,36 +2,31 @@
 
 // Alien Agent ID — Browser plugin CLI.
 //
-// A universal browser the agent can drive, with an anonymous-or-logged-in
-// profile sealed in the vault. By DEFAULT every command shares ONE session
-// ("main") — public browsing auto-creates it; sign into
-// Google once and every "Sign in with Google" site reuses it. `login` is ADDITIVE:
-// re-run it to add more sites to the same session. Pass --name to opt into a
-// SEPARATE, isolated session (a second account, a sandbox). After a HEADED login
-// the agent drives the browser HEADLESS by default (no window) to read/fetch.
+// ONE command: `auto-login`. It drives a service's sign-in form in a browser it
+// does not own — an agent-browser process reached over its RPC port — using a
+// `login` credential from the vault, and answers a 2FA step from a stored TOTP
+// seed or by asking the owner over the secure-prompt channel.
 //
-//   login  [--name N] [--url START] [--account LABEL] [--fresh]
-//          opens a real window with the session loaded; sign in, close it; the
-//          session is (re)sealed. --fresh discards the existing session, starts clean.
-//   read   [--name N] --url URL [--headed] [--max-chars K]
-//          navigate (headless by default) and return the page's text + final URL.
-//   fetch  [--name N] --url URL [--headed] [--max-chars K]
-//          authenticated HTTP GET via the session (e.g. an API or Atom feed).
-//   status [--name N]   list sealed sessions; reports unlocked / sealed / account.
+//   auto-login --cred LOGIN --rpc HOST:PORT
+//
+// Everything else this CLI used to do — opening sessions, navigating, reading
+// pages, snapshots, screenshots, the viewport stream — belongs to whoever drives
+// the browser directly now — the RPC port is open to any client. What is left
+// here is the one thing that cannot move: the sign-in needs the vault open, and
+// the whole point is that the password goes from the vault into the page without
+// passing through the agent. This process unlocks the vault, types the secret,
+// and never hands it back.
+//
+// The browser is somebody else's process: this command starts no session it did
+// not find and closes none. It leaves the browser signed in, which is the result.
 //
 // Vault precondition: the vault MUST be unlocked. Unlock order: agent-key slot
 // (auto) → passphrase (--passphrase-file / --passphrase-env) → owner-approval
-// (the owner approves in the Alien app; the SAME app-unlock the proxy uses, but
-// driven directly — no control plane needed). If none is available, every command
-// emits a structured VAULT_LOCKED result — the agent must STOP and ask the owner
-// to unlock, never retry blindly.
-//
-// Unlock flags: --passphrase-file F | --passphrase-env V | --no-agent-key |
-//               --no-owner-approval
+// (the owner approves in the Alien app). If none is available the command emits
+// a structured VAULT_LOCKED result — the agent must STOP and ask the owner to
+// unlock, never retry blindly.
 
 import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 
 import {
   outputError,
@@ -40,80 +35,19 @@ import {
   runCli,
   stderr,
 } from "@alien-id/agent-id-core/lib/cli-runtime.mjs";
-import {
-  openVault,
-  loadAgentPrivateKey,
-} from "@alien-id/agent-id-vault/lib/vault.mjs";
+import { openVault, loadAgentPrivateKey } from "@alien-id/agent-id-vault/lib/vault.mjs";
+import { effectiveAccess } from "@alien-id/agent-id-vault/lib/access.mjs";
 
-import {
-  newDek,
-  sealProfile,
-  unsealProfile,
-  sealedProfileExists,
-  ensureAnonymousDefaultProfile,
-} from "../lib/profile-store.mjs";
-import { launchContext } from "../lib/launch.mjs";
-import {
-  DEFAULT_PROFILE,
-  loginHint,
-  noProfileHint,
-  profileName,
-} from "../lib/hints.mjs";
-import { sessionReplyError } from "../lib/session-route.mjs";
-import { installCodecs, loadCodecConfig } from "../lib/stream-encoder.mjs";
 import { escalationFor } from "../lib/escalation.mjs";
 import { autoLogin } from "../lib/auto-login.mjs";
-import { looksLoggedOut } from "../lib/session.mjs";
-import {
-  runSession,
-  callSession,
-  closeLiveSession,
-  pruneDeadSessions,
-} from "../lib/session-server.mjs";
+import { openRpcPage } from "../lib/rpc-page.mjs";
 import { hasOwnerApproval, unlockViaOwnerApproval } from "../lib/unlock.mjs";
-import {
-  ACCESS_LEVELS,
-  effectiveAccess,
-  isAccessRelaxation,
-  strictestAccess,
-} from "@alien-id/agent-id-vault/lib/access.mjs";
-import {
-  applyAccessGuard,
-  contextOptionsForAccess,
-  guardDecision,
-} from "../lib/access-guard.mjs";
 
-// A long-lived `open` daemon outlives its parent's interest in the std pipes:
-// once the host has read the ready line it may close them, and the next
-// diagnostic write (e.g. the access-guard logging a blocked request) would
-// otherwise raise an unhandled EPIPE and kill the live session. Swallow pipe
-// errors instead — losing diagnostics must never cost the session.
-for (const stream of [process.stdout, process.stderr]) {
-  stream.on("error", () => {});
-}
-
-// Bridge the plugin path vars into the environment. Claude Code SUBSTITUTES
-// ${CLAUDE_PLUGIN_DATA}/${CLAUDE_PLUGIN_ROOT} into skill text but only EXPORTS
-// them to hook/MCP processes — not to ordinary skill Bash commands. So the skill
-// passes them as `--plugin-data` / `--plugin-root` flags (with the path already
-// substituted in), and we copy them into process.env here so lib/launch.mjs can
-// locate the runtime-installed patchright uniformly (hook env or flag, same code).
-for (let i = 2; i < process.argv.length - 1; i++) {
-  const v = process.argv[i + 1];
-  if (typeof v !== "string" || v.includes("${")) continue; // skip unsubstituted
-  if (process.argv[i] === "--plugin-data" && !process.env.CLAUDE_PLUGIN_DATA) {
-    process.env.CLAUDE_PLUGIN_DATA = v;
-  } else if (process.argv[i] === "--plugin-root" && !process.env.CLAUDE_PLUGIN_ROOT) {
-    process.env.CLAUDE_PLUGIN_ROOT = v;
-  }
-}
-
-// ─── Vault unlock (non-interactive; surface VAULT_LOCKED rather than hang) ────────
-
-// Unlock order: agent-key (auto) → passphrase (if given) → owner-approval ("approve
-// in the Alien app"). `allowOwnerApproval:false` skips the app prompt (used by
-// `status`, which should just report locked, not page the owner). If nothing
-// works, throws VAULT_LOCKED so the agent stops and asks the owner.
+/**
+ * Open the vault, trying every unlock route in order of how little the owner
+ * has to do: an agent-key slot needs nothing, a passphrase needs a file or an
+ * env var, owner-approval needs them to tap their phone.
+ */
 async function openVaultUnlocked(flags, { allowOwnerApproval = true } = {}) {
   const stateDir = resolveStateDir(flags);
   const useAgentKey = flags["agent-key"] !== false; // --no-agent-key opts out
@@ -151,7 +85,7 @@ async function openVaultUnlocked(flags, { allowOwnerApproval = true } = {}) {
           stderr(
             deepLink
               ? `Approve the vault unlock in your Alien app: ${deepLink}`
-              : "Approve the vault unlock in your Alien app."
+              : "Approve the vault unlock in your Alien app.",
           ),
       });
     } catch (err) {
@@ -181,7 +115,6 @@ function emitLocked(message) {
 
 function handleErr(err) {
   if (err.code === "VAULT_LOCKED") return emitLocked(err.message);
-  if (err.code === "PATCHRIGHT_MISSING") return outputError(err.message);
   if (err.code === "NO_PROFILE") {
     outputJson({ ok: false, error: "NO_PROFILE", message: err.message });
     process.exitCode = 1;
@@ -191,257 +124,27 @@ function handleErr(err) {
   return outputError(err.message || String(err));
 }
 
-// `--headed` → headed; `--headless` → headless; otherwise null (use cred default).
-function resolveHeadless(flags) {
-  if (flags.headed === true) return false;
-  if (flags.headless === true) return true;
-  if (flags.headless === false) return false;
-  return null;
+/** Where the browser is: named per call, or in the environment for a host that
+ *  configures it once. */
+function resolveRpc(flags) {
+  return ((flags.rpc ? String(flags.rpc) : "") || process.env.AGENT_ID_BROWSER_RPC || "").trim();
 }
 
-// Wait for the user to finish the headed login: window/context closed, or timeout.
-function waitForUserClose(ctx, timeoutMs) {
-  return new Promise((resolve) => {
-    let done = false;
-    let iv;
-    let to;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearInterval(iv);
-      clearTimeout(to);
-      resolve();
-    };
-    ctx.once("close", finish);
-    iv = setInterval(() => {
-      try {
-        if (ctx.pages().length === 0) finish();
-      } catch {
-        finish();
-      }
-    }, 1000);
-    to = setTimeout(finish, timeoutMs);
-  });
-}
-
-// The default browser session is ONE shared cookie jar ("main") so logins — and
-// especially shared SSO like "Sign in with Google" — carry across sites. Pass
-// --name to opt into a separate, isolated session (a second account, a sandbox).
-
-// Suggest the right login command: bare `login` for the shared default, `--name` otherwise.
-
-// ─── Profile lifecycle: unseal → run → reseal → wipe ──────────────────────────────
-
-async function withProfile({ flags, name, headless, action }) {
-  const stateDir = resolveStateDir(flags);
-  const vault = await openVaultUnlocked(flags);
-  try {
-    const cred = await ensureAnonymousDefaultProfile({ vault, stateDir, name });
-    if (!cred || cred.type !== "browser-profile") {
-      const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
-      e.code = "NO_PROFILE";
-      throw e;
-    }
-    if (!(await sealedProfileExists(stateDir, cred.profileFile))) {
-      const e = new Error(`sealed profile for '${name}' is missing — re-run ${loginHint(name)}`);
-      e.code = "NO_PROFILE";
-      throw e;
-    }
-
-    const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-bwork-"));
-    try {
-      await unsealProfile({
-        stateDir,
-        file: cred.profileFile,
-        dekHex: cred.dek,
-        destDir: work,
-      });
-      const useHeadless = headless != null ? headless : cred.headless !== false;
-      const ctx = await launchContext({
-        profileDir: work,
-        headless: useHeadless,
-        contextOptions: contextOptionsForAccess(cred),
-      });
-      // Read-only profile → network gate on everything this context does.
-      await applyAccessGuard(ctx, cred, { log: (m) => stderr(m) });
-      let result;
-      try {
-        result = await action(ctx, cred);
-      } finally {
-        await ctx.close();
-      }
-      // Re-seal to capture the refreshed session (rotated cookies), then persist.
-      await sealProfile({
-        stateDir,
-        file: cred.profileFile,
-        dekHex: cred.dek,
-        sourceDir: work,
-      });
-      vault.add({ ...cred, lastSyncedAt: Date.now() });
-      await vault.save();
-      return result;
-    } finally {
-      await fs.rm(work, { recursive: true, force: true });
-    }
-  } finally {
-    vault.lock();
-  }
-}
-
-// ─── Commands ─────────────────────────────────────────────────────────────────────
-
-async function cmdLogin(flags) {
-  const name = profileName(flags.name);
-  const stateDir = resolveStateDir(flags);
-  const startUrl = flags.url ? String(flags.url) : "about:blank";
-  const access = flags.access != null ? String(flags.access) : null;
-  if (access && !ACCESS_LEVELS.includes(access)) {
-    return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
-  }
-
-  let vault;
-  try {
-    vault = await openVaultUnlocked(flags);
-  } catch (err) {
-    return handleErr(err);
-  }
-
-  try {
-    const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-blogin-"));
-    try {
-      // ADDITIVE login: resume the existing sealed session so logins ACCUMULATE in
-      // one cookie jar — sign into Google once and every "Sign in with Google" site
-      // reuses it. `--fresh` discards the existing session and starts clean.
-      const existing = vault.get(name);
-      // Same hazard as auto-login: a live daemon would re-seal its stale copy
-      // over this login on close. Close it first (and wait for its reseal) so
-      // the profile we unseal below is the latest one.
-      await closeLiveSession(stateDir, name, { log: stderr });
-      const resuming =
-        flags.fresh !== true &&
-        existing &&
-        existing.type === "browser-profile" &&
-        (await sealedProfileExists(stateDir, existing.profileFile));
-      if (resuming) {
-        await unsealProfile({
-          stateDir,
-          file: existing.profileFile,
-          dekHex: existing.dek,
-          destDir: work,
-        });
-      }
-      const reuse = resuming ? existing : null;
-      // A login can create a restricted session or tighten one — never widen
-      // one. Widening is the owner's call: `agent-id-vault set-access`.
-      if (reuse && access && isAccessRelaxation(reuse, { ...reuse, access })) {
-        return outputError(
-          `session '${name}' has access level '${effectiveAccess(
-            reuse
-          )}' — a re-login cannot ` +
-            `widen it to '${access}'. The owner can: agent-id-vault set-access --name ${name} --access ${access}`
-        );
-      }
-      const file = reuse ? reuse.profileFile : `${name}.tar.enc`;
-      const dek = reuse ? reuse.dek : newDek();
-      const account = flags.account ? String(flags.account) : reuse?.account || null;
-      const headlessDefault =
-        flags["headed-default"] === true ? false : reuse ? reuse.headless !== false : true;
-
-      // The owner sits at this window — a real platform authenticator (Touch
-      // ID, a security key) may exist and complete, so WebAuthn stays native.
-      const ctx = await launchContext({
-        profileDir: work,
-        headless: false,
-        nativeWebAuthn: true,
-      });
-      stderr(
-        resuming
-          ? `A browser opened with your '${name}' session loaded${flags.url ? " at " + startUrl : ""}. ` +
-              "Sign into the new site (your existing logins are kept), then CLOSE the window."
-          : `A browser window opened${flags.url ? " at " + startUrl : ""}. ` +
-              "Sign in, then CLOSE the window when you're done."
-      );
-      const page = ctx.pages()[0] || (await ctx.newPage());
-      try {
-        await page.goto(startUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: 30000,
-        });
-      } catch {
-        /* about:blank or slow page — fine, the user drives from here */
-      }
-      await waitForUserClose(ctx, Number(flags["timeout-sec"] || 600) * 1000);
-      try {
-        await ctx.close();
-      } catch {
-        /* already closed by the user */
-      }
-
-      const { bytes } = await sealProfile({
-        stateDir,
-        file,
-        dekHex: dek,
-        sourceDir: work,
-      });
-      vault.add({
-        ...(reuse || {}),
-        name,
-        type: "browser-profile",
-        domains: ["*"],
-        description: flags.description
-          ? String(flags.description)
-          : reuse?.description || "Sealed browser profile (agent-id-browser)",
-        dek,
-        profileFile: file,
-        headless: headlessDefault,
-        // The DEK is generated in-vault and must never be shown to the agent —
-        // `vault show` redacts sealed fields (incl. dek) for exportable:false.
-        exportable: false,
-        // Tighten (or set on a fresh profile); the reuse spread already carries
-        // an existing restriction forward, and widening was refused above.
-        ...(access ? { access } : {}),
-        ...(account ? { account } : {}),
-        lastSyncedAt: Date.now(),
-      });
-      await vault.save();
-      outputJson({
-        ok: true,
-        name,
-        profileFile: file,
-        sealedBytes: bytes,
-        resumed: !!resuming,
-        account,
-        access: access || (reuse ? effectiveAccess(reuse) : "rw"),
-        headlessDefault,
-        message: resuming
-          ? `Added to your existing '${name}' session — other logins kept.`
-          : `Session '${name}' sealed. Reuse it for every site (shared SSO like Google carries across); run \`login\` again to add more. Reads run headless by default.`,
-      });
-    } finally {
-      await fs.rm(work, { recursive: true, force: true });
-    }
-  } catch (err) {
-    handleErr(err);
-  } finally {
-    vault.lock();
-  }
-}
-
-// auto-login: drive the sealed browser through a service login using a stored
-// `login` credential, answering 2FA from a stored seed or via the secure prompt,
-// then seal the resulting session into a browser-profile so read/fetch/open reuse
-// it. For places where a full desktop browser isn't on hand (the browser can run
-// headless/remote; the human only touches the abstracted secure-prompt surface).
+// auto-login: drive a service's sign-in in the browser at --rpc, using a stored
+// `login` credential, answering 2FA from a stored seed or via the secure prompt.
+// The browser keeps the session it ends up with — signing in IS the result, and
+// its profile is the browser's own business.
 async function cmdAutoLogin(flags) {
   const credName = flags.cred ? String(flags.cred) : null;
   if (!credName) {
     return outputError("--cred <LOGIN_CRED> is required (the name of a `login` credential)");
   }
-  const requestedAccess = flags.access != null ? String(flags.access) : null;
-  if (requestedAccess && !ACCESS_LEVELS.includes(requestedAccess)) {
-    return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
+  const rpc = resolveRpc(flags);
+  if (!rpc) {
+    return outputError(
+      "--rpc <host:port> is required (the agent-browser RPC address), or set AGENT_ID_BROWSER_RPC",
+    );
   }
-  const stateDir = resolveStateDir(flags);
 
   let vault;
   try {
@@ -455,7 +158,7 @@ async function cmdAutoLogin(flags) {
     if (!cred || cred.type !== "login") {
       const e = new Error(
         `no 'login' credential named '${credName}' — add one with ` +
-          "`agent-id-vault add --type login --login-url … --form`"
+          "`agent-id-vault add --type login --login-url … --form`",
       );
       e.code = "NO_PROFILE";
       throw e;
@@ -463,789 +166,108 @@ async function cmdAutoLogin(flags) {
     if (!cred.loginUrl) {
       return outputError(`login '${credName}' has no loginUrl — set one so auto-login knows where to start`);
     }
-
-    const targetProfile = profileName(flags.name || cred.profile);
-    // A login and its sealed browser-profile are two records in ONE name
-    // namespace — sealing into the login's own name would overwrite it.
-    if (targetProfile === credName) {
+    // A read-only credential used to mint read-only sessions, enforced at the
+    // wire by the session process that owned the browser. This command does not
+    // own it: whoever holds the RPC port drives the session afterwards with no
+    // such guard, so signing in with a `ro` credential would quietly hand out
+    // exactly the access it was restricted from. Refuse instead of pretending.
+    if (effectiveAccess(cred) === "ro") {
       return outputError(
-        `target profile '${targetProfile}' must differ from the login credential '${credName}' ` +
-          "(they share the vault namespace) — pass --name <other> or set the cred's `profile`"
+        `login credential '${credName}' is read-only, and this browser has no read-only mode to ` +
+          "sign in under. The owner can widen it: " +
+          `agent-id-vault set-access --name ${credName} --access rw`,
       );
     }
-    const existing = vault.get(targetProfile);
-    const reuse = existing && existing.type === "browser-profile" ? existing : null;
 
-    // The session's access level is the STRICTEST of: the login credential's
-    // (a read-only credential can only mint read-only sessions), the existing
-    // profile's (a re-login never widens), and the requested flag. An explicit
-    // request the ceiling forbids is an error, not a silent clamp.
-    const ceiling = effectiveAccess(cred);
-    if (requestedAccess === "rw" && ceiling === "ro") {
-      return outputError(
-        `login credential '${credName}' is read-only — sessions minted from it cannot be 'rw'. ` +
-          `The owner can widen it: agent-id-vault set-access --name ${credName} --access rw`
-      );
-    }
-    if (reuse && requestedAccess && isAccessRelaxation(reuse, { ...reuse, access: requestedAccess })) {
-      return outputError(
-        `session '${targetProfile}' has access level '${effectiveAccess(
-          reuse
-        )}' — auto-login cannot ` +
-          `widen it. The owner can: agent-id-vault set-access --name ${targetProfile} --access ${requestedAccess}`
-      );
-    }
-    const sessionAccess = strictestAccess(
-      strictestAccess(requestedAccess || "rw", ceiling),
-      reuse ? effectiveAccess(reuse) : "rw"
-    );
-
-    const file = reuse ? reuse.profileFile : `${targetProfile}.tar.enc`;
-    const dek = reuse ? reuse.dek : newDek();
-    const headless = resolveHeadless(flags) ?? true;
-
-    // A live daemon on the target profile would keep serving its pre-login
-    // copy and re-seal it over ours on close. See closeLiveSession.
-    const closedLiveSession = await closeLiveSession(stateDir, targetProfile, {
-      log: stderr,
-    });
-
-    const work = await fs.mkdtemp(path.join(os.tmpdir(), "agentid-autologin-"));
+    let page;
     try {
-      const ctx = await launchContext({ profileDir: work, headless });
-      let result;
-      // What the engine saw, round by round — the failure report carries it so
-      // a wrong password is distinguishable from a changed form or a redirect
-      // that was never awaited. Never includes a secret.
-      const trace = [];
-      try {
-        const page = ctx.pages()[0] || (await ctx.newPage());
-        result = await autoLogin({
-          page,
-          cred,
-          env: process.env,
-          log: (m) => {
-            stderr(m);
-            trace.push(m);
-          },
-          onOtpModeCorrected: async (otp) => {
-            const stored = vault.get(credName);
-            if (!stored) return;
-            stored.otp = otp;
-            vault.add(stored); // re-validates + upserts, as set-domains does
-            await vault.save();
-          },
-        });
-      } finally {
-        // Close so the context flushes cookies/storage to the work dir before sealing.
-        await ctx.close().catch(() => {});
-      }
-
-      if (!result || !result.ok) {
-        const outcome = result ? result.outcome : "unknown";
-        // `action` is the contract: prose advice used to send the agent to
-        // headed `login`, which refuses on a host with no display and points
-        // straight back here. See lib/escalation.mjs.
-        const { action, reason, message } = escalationFor(outcome, {
-          credName,
-          profile: targetProfile,
-        });
-        outputJson({
-          ok: false,
-          error: "AUTO_LOGIN_FAILED",
-          outcome,
-          action,
-          reason,
-          profile: targetProfile,
-          finalUrl: result ? result.finalUrl : null,
-          ...(result && result.errorText ? { pageError: result.errorText } : {}),
-          trace,
-          message,
-        });
-        process.exitCode = 1;
-        return;
-      }
-
-      // Seal the authenticated session (same upsert/seal path as `login`).
-      const { bytes } = await sealProfile({
-        stateDir,
-        file,
-        dekHex: dek,
-        sourceDir: work,
-      });
-      vault.add({
-        ...(reuse || {}),
-        name: targetProfile,
-        type: "browser-profile",
-        domains: ["*"],
-        description: reuse?.description || `Auto-login session for '${credName}' (agent-id-browser)`,
-        dek,
-        profileFile: file,
-        headless: reuse ? reuse.headless !== false : true,
-        exportable: false,
-        ...(sessionAccess !== "rw" ? { access: sessionAccess } : {}),
-        // A fresh profile inherits the login credential's rules; an existing
-        // profile keeps its own (carried by the reuse spread).
-        ...(!reuse && Array.isArray(cred.accessRules) ? { accessRules: cred.accessRules } : {}),
-        ...(reuse?.account || cred.username ? { account: reuse?.account || cred.username } : {}),
-        lastSyncedAt: Date.now(),
-      });
-      vault.touchLastUsed(credName);
-      await vault.save();
-      outputJson({
-        ok: true,
-        cred: credName,
-        profile: targetProfile,
-        outcome: result.outcome,
-        finalUrl: result.finalUrl,
-        access: sessionAccess,
-        sealedBytes: bytes,
-        closedLiveSession,
-        message:
-          `Logged in and sealed session '${targetProfile}'. Reuse it: \`read --name ${targetProfile} --url …\`.` +
-          (closedLiveSession
-            ? ` The '${targetProfile}' session that was open has been closed; open it again to use the new login.`
-            : ""),
-      });
-    } finally {
-      await fs.rm(work, { recursive: true, force: true });
+      page = await openRpcPage(rpc);
+    } catch (err) {
+      // A browser that answers but holds no session is not an unreachable one,
+      // and saying so sent the caller looking for a network fault instead of
+      // the session they did not open.
+      if (err.code === "NO_SESSION") return outputError(err.message);
+      return outputError(`the browser at ${rpc} is not reachable: ${err.message}`);
     }
-  } catch (err) {
-    handleErr(err);
-  } finally {
-    vault.lock();
-  }
-}
 
-/**
- * Run a read-style action against the LIVE session when one is open, falling
- * back to the one-shot profile copy when there is none.
- *
- * A one-shot unseals a *copy* of the sealed profile, and the live session's
- * cookies only reach the vault on `close`. So while a session is open the copy
- * is stale: reading a site the session is signed into reported `loggedOut` and
- * a redirect to /logout, for a session that was perfectly healthy. That result
- * feeds `sessionExpired`, so the stale copy could raise a "sign in again" card
- * for a live login — the worst kind of false alarm, because it teaches the owner
- * to ignore the real one.
- */
-async function liveOrOneShot(flags, name, action, params, oneShot) {
-  const stateDir = resolveStateDir(flags);
-  let result;
-  try {
-    result = await callSession(stateDir, name, action, params);
-  } catch (err) {
-    // No session is the ordinary case; anything else is a real failure.
-    if (err && err.code === "NO_SESSION") return oneShot();
-    throw err;
-  }
-  const error = sessionReplyError(result, { name, action });
-  if (error) throw error;
-  return result;
-}
-
-async function cmdRead(flags) {
-  const name = profileName(flags.name);
-  if (!flags.url) return outputError("--url is required");
-  const url = String(flags.url);
-  const maxChars = Number(flags["max-chars"] || 4000);
-
-  const oneShot = () =>
-    withProfile({
-      flags,
-      name,
-      headless: resolveHeadless(flags),
-      action: async (ctx) => {
-        const page = ctx.pages()[0] || (await ctx.newPage());
-        const resp = await page.goto(url, {
-          waitUntil: "domcontentloaded",
-          timeout: 30000,
-        });
-        await page.waitForTimeout(1500);
-        const finalUrl = page.url();
-        const title = await page.title().catch(() => "");
-        let text = "";
-        try {
-          text = await page.evaluate(() =>
-            document.body ? document.body.innerText : ""
-          );
-        } catch {
-          /* page navigated/destroyed — leave text empty */
-        }
-        const httpStatus = resp ? resp.status() : null;
-        return {
-          httpStatus,
-          finalUrl,
-          title,
-          loggedOut: looksLoggedOut({ finalUrl, bodyText: text, httpStatus }),
-          text: String(text).slice(0, maxChars),
-        };
+    // What the engine saw, round by round — the failure report carries it so a
+    // wrong password is distinguishable from a changed form or a redirect that
+    // was never awaited. Never includes a secret.
+    const trace = [];
+    const result = await autoLogin({
+      page,
+      cred,
+      env: process.env,
+      log: (m) => {
+        stderr(m);
+        trace.push(m);
       },
     });
 
-  try {
-    const out = await liveOrOneShot(flags, name, "read", { url, maxChars }, oneShot);
-    if (out.loggedOut) {
+    if (!result || !result.ok) {
+      const outcome = result ? result.outcome : "unknown";
+      // `action` is the contract the calling agent branches on: who has to act,
+      // and what they can do about it. See lib/escalation.mjs.
+      const { action, reason, message } = escalationFor(outcome, { credName, profile: credName });
       outputJson({
-        ok: true,
-        sessionExpired: true,
-        action: "re_login",
-        message: `Session looks logged out (landed on ${out.finalUrl}). Re-run ${loginHint(name)}.`,
-        ...out,
+        ok: false,
+        error: "AUTO_LOGIN_FAILED",
+        outcome,
+        action,
+        reason,
+        finalUrl: result ? result.finalUrl : null,
+        ...(result && result.errorText ? { pageError: result.errorText } : {}),
+        trace,
+        message,
       });
-    } else {
-      outputJson({ ok: true, sessionExpired: false, ...out });
+      process.exitCode = 1;
+      return;
     }
-  } catch (err) {
-    handleErr(err);
-  }
-}
 
-async function cmdFetch(flags) {
-  const name = profileName(flags.name);
-  if (!flags.url) return outputError("--url is required");
-  const url = String(flags.url);
-  const maxChars = Number(flags["max-chars"] || 8000);
-
-  const oneShot = () =>
-    withProfile({
-      flags,
-      name,
-      headless: resolveHeadless(flags),
-      action: async (ctx, cred) => {
-        // ctx.request bypasses route interception — check the policy directly.
-        const decision = guardDecision(cred, {
-          method: "GET",
-          url,
-          postData: null,
-        });
-        if (!decision.allowed) {
-          throw new Error(
-            `access level '${effectiveAccess(cred)}' blocks GET ${url} (${
-              decision.reason
-            })`
-          );
-        }
-        const resp = await ctx.request.get(url, { timeout: 30000 });
-        const httpStatus = resp.status();
-        let body = "";
-        try {
-          body = await resp.text();
-        } catch {
-          /* binary or empty body */
-        }
-        return {
-          httpStatus,
-          finalUrl: resp.url(),
-          loggedOut: looksLoggedOut({
-            finalUrl: resp.url(),
-            bodyText: body,
-            httpStatus,
-          }),
-          body: String(body).slice(0, maxChars),
-        };
-      },
-    });
-
-  try {
-    const out = await liveOrOneShot(flags, name, "fetch", { url, maxChars }, oneShot);
-    if (out.loggedOut) {
-      outputJson({
-        ok: true,
-        sessionExpired: true,
-        action: "re_login",
-        message: `Request looks logged out (status ${out.httpStatus}). Re-run ${loginHint(name)}.`,
-        ...out,
-      });
-    } else {
-      outputJson({ ok: true, sessionExpired: false, ...out });
-    }
-  } catch (err) {
-    handleErr(err);
-  }
-}
-
-async function cmdStatus(flags) {
-  const stateDir = resolveStateDir(flags);
-  const only = flags.name ? profileName(flags.name) : null;
-  // Report on sessions that exist: an orphaned file otherwise shows as an open
-  // session nobody can talk to.
-  await pruneDeadSessions(stateDir).catch(() => []);
-  let vault;
-  try {
-    // Don't drive an Alien-app prompt just to report status — agent-key/passphrase only.
-    vault = await openVaultUnlocked(flags, { allowOwnerApproval: false });
-  } catch (err) {
-    if (err.code === "VAULT_LOCKED") {
-      return outputJson({
-        ok: true,
-        unlocked: false,
-        message:
-          "Vault is locked — unlock via agent-key, --passphrase-file, or owner-approval " +
-          "(the Alien app) when you run a browser command.",
-      });
-    }
-    return handleErr(err);
-  }
-  try {
-    const meta = vault.list().filter((c) => c.type === "browser-profile");
-    const profiles = [];
-    for (const m of meta) {
-      if (only && m.name !== only) continue;
-      const cred = vault.get(m.name);
-      profiles.push({
-        name: m.name,
-        account: m.account || null,
-        access: effectiveAccess(cred),
-        headlessDefault: m.headless !== false,
-        sealed: await sealedProfileExists(stateDir, cred.profileFile),
-        lastSyncedAt: cred.lastSyncedAt || null,
-      });
-    }
-    outputJson({ ok: true, unlocked: true, profiles });
-  } catch (err) {
-    handleErr(err);
-  } finally {
-    vault.lock();
-  }
-}
-
-// ─── Interactive session: open / close / actions ─────────────────────────────────
-
-async function cmdOpen(flags) {
-  const name = profileName(flags.name);
-  const stateDir = resolveStateDir(flags);
-  // Orphaned session files (killed container, crashed daemon) still advertise a
-  // streamPort, so a viewer picking "the newest session" can dial a dead port.
-  // Clear them before we add ours.
-  await pruneDeadSessions(stateDir).catch(() => []);
-  let vault;
-  try {
-    vault = await openVaultUnlocked(flags);
-  } catch (err) {
-    return handleErr(err);
-  }
-  let dekHex;
-  let profileFile;
-  let headlessDefault;
-  let policy = null;
-  try {
-    const cred = await ensureAnonymousDefaultProfile({
-      vault,
-      stateDir,
-      name,
-      // Opt-in minting of an empty jar for a named profile: the owner-driven
-      // sign-in path needs somewhere to sign in. Without the flag, a named
-      // profile still refuses to auto-create.
-      allowCreate: flags["bootstrap-profile"] === true,
-    });
-    if (!cred || cred.type !== "browser-profile") {
-      const e = new Error(`no browser-profile named '${name}' — ${noProfileHint(name)}`);
-      e.code = "NO_PROFILE";
-      throw e;
-    }
-    if (!(await sealedProfileExists(stateDir, cred.profileFile))) {
-      const e = new Error(`sealed profile for '${name}' missing — re-run ${loginHint(name)}`);
-      e.code = "NO_PROFILE";
-      throw e;
-    }
-    dekHex = cred.dek;
-    profileFile = cred.profileFile;
-    headlessDefault = cred.headless !== false;
-    if (cred.access != null || cred.accessRules != null) {
-      policy = {
-        ...(cred.access != null ? { access: cred.access } : {}),
-        ...(cred.accessRules != null ? { accessRules: cred.accessRules } : {}),
-      };
-    }
-  } catch (err) {
-    vault.lock();
-    return handleErr(err);
-  }
-  vault.lock(); // we hold dek + profileFile; don't keep the vault open for the session
-
-  const headless = resolveHeadless(flags) ?? headlessDefault;
-  const workDir = path.join(stateDir, "browser-sessions", `${name}.work`);
-  try {
-    await fs.rm(workDir, { recursive: true, force: true });
-    await unsealProfile({
-      stateDir,
-      file: profileFile,
-      dekHex,
-      destDir: workDir,
-    });
-    stderr(
-      `Session '${name}' starting (${headless ? "headless" : "headed"}` +
-        `${
-          policy && effectiveAccess(policy) === "ro" ? ", READ-ONLY" : ""
-        }). Keep this process ` +
-        `running (background it); issue actions, then \`close --name ${name}\`.`
-    );
-    await runSession({
-      stateDir,
-      name,
-      headless,
-      dekHex,
-      profileFile,
-      workDir,
-      policy,
-      startUrl: flags.url,
-    }); // blocks until close
-  } catch (err) {
-    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
-    handleErr(err);
-  }
-}
-
-// Provision H.264 for the viewport stream: probe (env → PATH → prior
-// download), else fetch a static ffmpeg (Linux), and record the result in
-// <stateDir>/browser-codecs.json. Only after this does a `codec=auto` viewer
-// get h264 by default — an unprovisioned host streams jpeg and never spawns
-// ffmpeg implicitly. Re-run any time; it re-verifies the recorded binary.
-async function cmdInstallCodecs(flags) {
-  const stateDir = resolveStateDir(flags);
-  try {
-    const existing = await loadCodecConfig(stateDir);
-    if (existing && flags.force !== true) {
-      return outputJson({
-        ok: true,
-        ...existing,
-        note: "already provisioned (use --force to re-probe)",
-      });
-    }
-    const cfg = await installCodecs({
-      stateDir,
-      allowDownload: flags["no-download"] !== true,
-      log: (m) => stderr(m),
-    });
+    vault.touchLastUsed(credName);
+    await vault.save();
     outputJson({
       ok: true,
-      ...cfg,
-      note: "h264 is now the default stream codec for codec=auto viewers (open sessions pick it up on restart)",
+      cred: credName,
+      outcome: result.outcome,
+      finalUrl: result.finalUrl,
+      message:
+        `Signed in as '${credName}'. The browser holds the session; its own profile keeps the ` +
+        "cookies (close it, or flush it, to be sure they are on disk).",
     });
   } catch (err) {
-    outputError(err.message || String(err));
-  }
-}
-
-async function cmdClose(flags) {
-  const stateDir = resolveStateDir(flags);
-  const name = profileName(flags.name);
-  try {
-    const r = await callSession(stateDir, name, "close", {});
-    outputJson({ ok: true, closed: name, ...r });
-  } catch (err) {
-    if (err.code === "NO_SESSION") {
-      return outputJson({
-        ok: true,
-        closed: name,
-        note: "no open session (already closed)",
-      });
-    }
     handleErr(err);
+  } finally {
+    vault.lock();
   }
 }
-
-async function cmdSessions(flags) {
-  const stateDir = resolveStateDir(flags);
-  const dir = path.join(stateDir, "browser-sessions");
-  const sessions = [];
-  let files = [];
-  try {
-    files = (await fs.readdir(dir)).filter((f) => f.endsWith(".json"));
-  } catch {
-    /* none */
-  }
-  for (const f of files) {
-    try {
-      const info = JSON.parse(await fs.readFile(path.join(dir, f), "utf8"));
-      sessions.push({
-        name: f.replace(/\.json$/, ""),
-        headless: info.headless,
-        pid: info.pid,
-        startedAt: info.startedAt,
-      });
-    } catch {
-      /* skip */
-    }
-  }
-  outputJson({ ok: true, sessions });
-}
-
-// Thin client for an action against a running session. `map` turns flags into
-// the action's params. The server's JSON reply is passed straight through.
-function actionCmd(action, map, timeoutMs) {
-  return async (flags) => {
-    const stateDir = resolveStateDir(flags);
-    const name = profileName(flags.name);
-    try {
-      const params = map ? map(flags) : {};
-      const r = await callSession(stateDir, name, action, params, timeoutMs);
-      outputJson(r);
-      if (r && r.ok === false) process.exitCode = 1;
-    } catch (err) {
-      handleErr(err);
-    }
-  };
-}
-
-const requireUrl = (f) => {
-  if (!f.url) throw new Error("--url is required");
-  return String(f.url);
-};
-const csv = (v) =>
-  v == null
-    ? undefined
-    : String(v)
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-// "x0,y0,x1,y1" → [n,n,n,n] for screenshot --region / zoom.
-const region = (v) =>
-  v == null
-    ? undefined
-    : String(v)
-        .split(",")
-        .map((s) => Number(s.trim()));
 
 runCli({
   commands: {
-    login: cmdLogin,
     "auto-login": cmdAutoLogin,
-    read: cmdRead,
-    fetch: cmdFetch,
-    status: cmdStatus,
-    "install-codecs": cmdInstallCodecs,
-    open: cmdOpen,
-    close: cmdClose,
-    sessions: cmdSessions,
-    snapshot: actionCmd("snapshot"),
-    "form-inspect": actionCmd("form-inspect"),
-    "form-fill": actionCmd("form-fill", (f) => JSON.parse(f.spec || "{}"), 120000),
-    navigate: actionCmd("navigate", (f) => ({ url: requireUrl(f) })),
-    back: actionCmd("back"),
-    "page-text": actionCmd("text", (f) => ({ maxChars: f["max-chars"] })),
-    click: actionCmd("click", (f) => ({ ref: f.ref })),
-    dblclick: actionCmd("dblclick", (f) => ({ ref: f.ref })),
-    check: actionCmd("check", (f) => ({ ref: f.ref })),
-    uncheck: actionCmd("uncheck", (f) => ({ ref: f.ref })),
-    drag: actionCmd("drag", (f) => ({ ref: f.ref, to: f.to })),
-    upload: actionCmd("upload", (f) => ({ ref: f.ref, files: csv(f.files) })),
-    type: actionCmd("type", (f) => ({
-      ref: f.ref,
-      text: f.text ?? "",
-      submit: f.submit === true,
-    })),
-    fill: actionCmd("fill", (f) => ({ fields: JSON.parse(f.fields || "[]") })),
-    // Secret injection by reference: the agent picks the element (ref) from a
-    // snapshot; the vault supplies the value, which never returns to the agent.
-    "fill-secret": actionCmd("fill-secret", (f) => ({
-      ref: f.ref,
-      cred: f.cred,
-      submit: f.submit === true,
-    })),
-    // Must outlast the secure-prompt card this can raise (10 min): a shorter
-    // budget kills the child while the owner is still fetching the code from
-    // their mail, dropping a secret that was on its way back.
-    "fill-otp": actionCmd(
-      "fill-otp",
-      // `--prompt-sock` travels to the daemon because the card is raised THERE,
-      // not in this process: this command forwards one line and exits, so the
-      // hosted-prompt environment the runtime gave it would otherwise be spent
-      // on a process that never asks anyone anything.
-      (f) => ({
-        ref: f.ref,
-        cred: f.cred,
-        submit: f.submit !== false,
-        promptSock: f["prompt-sock"] || undefined,
-      }),
-      11 * 60 * 1000
-    ),
-    select: actionCmd("select", (f) => ({ ref: f.ref, values: csv(f.values) })),
-    press: actionCmd("press", (f) => ({ key: f.key, ref: f.ref })),
-    hover: actionCmd("hover", (f) => ({ ref: f.ref })),
-    scroll: actionCmd("scroll", (f) => ({ dx: f.dx, dy: f.dy })),
-    // Coordinate (vision) actions — pair with `screenshot` for the hybrid path.
-    "click-xy": actionCmd("click-xy", (f) => ({
-      x: f.x,
-      y: f.y,
-      button: f.button,
-      double: f.double === true,
-      css: f.css === true,
-    })),
-    "move-xy": actionCmd("move-xy", (f) => ({
-      x: f.x,
-      y: f.y,
-      css: f.css === true,
-    })),
-    "drag-xy": actionCmd("drag-xy", (f) => ({
-      x: f.x,
-      y: f.y,
-      tox: f.tox,
-      toy: f.toy,
-      css: f.css === true,
-    })),
-    "scroll-xy": actionCmd("scroll-xy", (f) => ({
-      x: f.x,
-      y: f.y,
-      dx: f.dx,
-      dy: f.dy,
-      css: f.css === true,
-    })),
-    // `ref` rides along ONLY so the session server can refuse it by name —
-    // these type into whatever is focused. Dropping it here instead would put
-    // the text somewhere the caller did not ask for and report success.
-    "type-text": actionCmd("type-text", (f) => ({
-      text: f.text ?? "",
-      submit: f.submit === true,
-      ref: f.ref,
-    })),
-    "fill-text": actionCmd("fill-text", (f) => ({
-      text: f.text ?? "",
-      submit: f.submit === true,
-      ref: f.ref,
-    })),
-    "probe-xy": actionCmd("probe-xy", (f) => ({
-      x: f.x,
-      y: f.y,
-      css: f.css === true,
-    })),
-    resize: actionCmd("resize", (f) => ({ width: f.width, height: f.height })),
-    screenshot: actionCmd("screenshot", (f) => ({
-      path: f.path,
-      fullPage: f.full === true || f.fullPage === true,
-      region: region(f.region),
-    })),
-    // zoom = a cropped, closer screenshot of a UI region (image px x0,y0,x1,y1).
-    zoom: actionCmd("screenshot", (f) => ({
-      path: f.path,
-      region: region(f.region),
-      requireRegion: true,
-      css: f.css === true,
-    })),
-    eval: actionCmd("eval", (f) => ({ expression: f.js ?? f.expression })),
-    wait: actionCmd("wait", (f) => ({
-      text: f.text,
-      ms: f.ms,
-      url: f.url,
-      load: f.load,
-    })),
-    get: actionCmd("get", (f) => ({
-      ref: f.ref,
-      what: f.what,
-      attr: f.attr,
-      maxChars: f["max-chars"],
-    })),
-    is: actionCmd("is", (f) => ({ ref: f.ref, what: f.what })),
-    tabs: actionCmd("tabs"),
-    "tab-new": actionCmd("tab-new", (f) => ({ url: f.url }), 45000),
-    "tab-switch": actionCmd("tab-switch", (f) => ({ index: f.index })),
-    "tab-close": actionCmd("tab-close", (f) => ({ index: f.index })),
-    dialog: actionCmd("dialog", (f) => ({ mode: f.mode, text: f.text })),
-    downloads: actionCmd("downloads", (f) => ({ max: f.max })),
-    console: actionCmd("console", (f) => ({ level: f.level, max: f.max })),
-    cookies: actionCmd("cookies", (f) => ({ url: f.url })),
-    batch: actionCmd("batch", (f) => ({ actions: JSON.parse(f.actions || "[]"), delay: f.delay }), 320000),
   },
   printHelp: () =>
     stderr(
-      "agent-id-browser — universal browser; one shared logged-in session in the vault\n\n" +
-        "Sessions: every command shares ONE session ('main') by default — sign into\n" +
-        "Google once, reuse it everywhere. `login` is ADDITIVE (re-run to add sites).\n" +
-        "Use --name to open a SEPARATE isolated session; --fresh discards & restarts one.\n\n" +
-        "Setup / one-shot ([--name N] optional; defaults to the shared 'main' session):\n" +
-        "  login   [--name N] [--url START] [--account LABEL] [--fresh] [--access ro|rw]\n" +
-        "          HEADED login; (re)seals the session into the vault (additive)\n" +
-        "  auto-login --cred LOGIN [--name N] [--headed] [--access ro|rw]\n" +
-        "          drive a service login from a vault `login` credential (username/\n" +
-        "          password + 2FA via stored seed or the secure prompt); seals the\n" +
-        "          session into profile N (default the cred's `profile`, else 'main')\n" +
-        "          --access ro seals a READ-ONLY session: every request the page\n" +
-        "          makes is classified in the session process; writes are blocked\n" +
-        "          at the wire (GET/HEAD/OPTIONS + GraphQL-query/JMAP-get/JSON-RPC\n" +
-        "          reads pass), WebSockets/service-workers are disabled, and\n" +
-        "          eval/fill-secret/fill-otp are refused. A ro login credential\n" +
-        "          only mints ro sessions; re-logins can tighten but never widen\n" +
-        "          (the owner widens via `agent-id-vault set-access`).\n" +
-        "  read    [--name N] --url URL [--headed] [--max-chars K]\n" +
-        "          one-shot: navigate (headless) → page text + final URL + sessionExpired\n" +
-        "  fetch   [--name N] --url URL [--max-chars K]\n" +
-        "          one-shot authenticated HTTP GET via the session (API / feed)\n" +
-        "  status  [--name N]      list sealed sessions\n" +
-        "  install-codecs [--no-download] [--force]\n" +
-        "          provision ffmpeg/H.264 for the viewport stream (probe, else\n" +
-        "          download a static build on Linux). Once provisioned, viewers\n" +
-        "          connecting with codec=auto stream h264 (≈10× less traffic)\n" +
-        "          instead of jpeg; without it the stream stays jpeg-only.\n\n" +
-        "Interactive session (--name optional; defaults to 'main'):\n" +
-        "  open    --name N [--headed] [--url START] [--bootstrap-profile]\n" +
-        "          start a persistent session (run in background); navigates to START\n" +
-        "          before reporting ready; missing default 'main' auto-creates as an\n" +
-        "          anonymous L0 profile. --bootstrap-profile mints an EMPTY jar for a\n" +
-        "          named profile so the owner can sign in themselves (then `close`\n" +
-        "          seals it); without it a named profile never auto-creates\n" +
-        "  snapshot --name N             accessibility tree with element refs; iframe\n" +
-        "          elements get frame-prefixed refs (f1e3); reports open tabs when >1\n" +
-        "  form-inspect --name N           compact form controls + labels/types/requirements;\n" +
-        "          staged[] = present but not what the page asks for now (refs still work);\n" +
-        "          hidden:true = native control outside the layout;\n" +
-        "          on a sign-in page adds signIn:{identifier,passwordAsked}\n" +
-        '  form-fill --name N --spec \'{"fields":[{"ref":"e1","value":"A"}],\n' +
-        '          "checks":[{"ref":"e2","checked":true}],"selects":[...],\n' +
-        '          "uploads":[{"ref":"e3","files":["/a.pdf"]}]}\'\n' +
-        "          atomic fast fill with per-control verification; max 50 controls\n" +
-        "  click   --name N --ref eN                   dblclick --name N --ref eN\n" +
-        "  check   --name N --ref eN                   uncheck  --name N --ref eN\n" +
-        "  type    --name N --ref eN --text T [--submit]\n" +
-        '  fill    --name N --fields \'[{"ref":"e1","value":".."}]\'\n' +
-        "  fill-secret --name N --ref eN --cred NAME.field [--submit]\n" +
-        "          inject a vaulted secret into the ref'd field (agent never sees the value)\n" +
-        "  fill-otp    --name N --ref eN --cred NAME\n" +
-        "          type the current 2FA code (stored seed, or asked via the secure prompt)\n" +
-        "  upload  --name N --ref eN --files /a.pdf[,/b.png]   attach files (file input\n" +
-        "          or picker button); refused on read-only sessions\n" +
-        "  drag    --name N --ref eN --to eM           same-frame drag & drop\n" +
-        "  select  --name N --ref eN --values a,b      press --name N --key Enter [--ref eN]\n" +
-        "  hover   --name N --ref eN                   scroll --name N [--dy 600]\n" +
-        "  Vision (coordinate) actions — pair with `screenshot`; prefer ref-based\n" +
-        "  actions above, use these when the DOM/snapshot is unusable (canvas etc.):\n" +
-        "  click-xy --name N --x N --y N [--double] [--button right|middle] [--css]\n" +
-        "          click a screenshot PIXEL; coords are auto-converted for retina (dpr)\n" +
-        "  move-xy  --name N --x N --y N [--css]        drag-xy --x N --y N --tox N --toy N\n" +
-        "  scroll-xy --name N --x N --y N [--dy N] [--dx N]   wheel at a pixel\n" +
-        "          (zoom-toward-point on maps; scroll an inner pane). dy>0 = down.\n" +
-        "  type-text --name N --text T [--submit]       type into the FOCUSED element\n" +
-        "          (no --ref — use `type` for that; plaintext only, secrets stay\n" +
-        "          ref-based via fill-secret/fill-otp)\n" +
-        "  fill-text --name N --text T [--submit]       paste into the FOCUSED element\n" +
-        "          (no --ref — use `fill`; one-shot insert, no per-key events)\n" +
-        "  probe-xy --name N --x N --y N                what element is at a pixel\n" +
-        "          (tag/role/name/ref — vision→DOM bridge; read-only, ro-safe)\n" +
-        "  zoom    --name N --region x0,y0,x1,y1 [--path P]   cropped closer view of\n" +
-        "          a UI area (read small icons/text without guessing coords)\n" +
-        "  resize  --name N --width W --height H        resize the window (OUTER size;\n" +
-        "          the returned `viewport` is the smaller INNER area — use it for coords)\n" +
-        "  navigate --name N --url URL                 back --name N\n" +
-        "  page-text --name N [--max-chars K]\n" +
-        "  wait    --name N [--text T | --url SUBSTR | --load networkidle | --ms N]\n" +
-        "  get     --name N [--ref eN] --what text|html|value|attr|url|title [--attr A]\n" +
-        "  is      --name N --ref eN --what visible|enabled|checked|editable\n" +
-        "  tabs    list open tabs        tab-new [--url U] | tab-switch --index I | tab-close\n" +
-        "  dialog  [--mode accept|dismiss [--text T]]   JS-dialog policy + last dialog seen\n" +
-        "  downloads               files saved by the page (path + status)\n" +
-        "  console [--level error|warn] [--max K]       page console + JS errors (best-\n" +
-        "          effort: the stealth driver suppresses most console events)\n" +
-        "  cookies [--url U]       cookie metadata (names/domains — values stay sealed)\n" +
-        '  batch   --actions \'[{"action":"click-xy","params":{"x":9,"y":9}},…]\' [--delay MS]\n' +
-        "          one round trip; any action incl. click-xy/drag-xy; stops on error\n" +
-        "  screenshot --name N [--path P] [--full]     JPEG (PNG if --path *.png) +\n" +
-        "          {format,dpr,viewport,image} for click-xy\n" +
-        "  eval    --name N --js 'EXPR'\n" +
-        "  sessions                list open sessions   close --name N\n\n" +
+      "Alien Agent ID — Browser\n\n" +
+        "Usage: agent-id-browser auto-login --cred LOGIN --rpc HOST:PORT\n\n" +
+        "  Drives the sign-in form of the credential's `loginUrl` in the browser at\n" +
+        "  --rpc (an agent-browser RPC port; AGENT_ID_BROWSER_RPC serves as the\n" +
+        "  default). The password is read from the vault and typed straight into the\n" +
+        "  page — it never reaches the calling agent. A 2FA step is answered from the\n" +
+        "  credential's TOTP seed, or by a card raised to the owner at the moment the\n" +
+        "  site sends the code.\n\n" +
+        "  A recipe on the credential (`agent-id-vault set-recipe`) drives multi-step\n" +
+        "  and IdP forms; without one a heuristic fills the identifier and password.\n" +
+        "  Every navigation, and every step that types a secret, is confined to the\n" +
+        "  credential's `domains`.\n\n" +
+        "  On failure the result carries `action`: owner_must_drive (a bot wall or an\n" +
+        "  IdP that refuses automation — hand the browser to the owner),\n" +
+        "  owner_must_confirm, or fix_credential.\n\n" +
+        "  Driving the browser otherwise — opening pages, reading them, clicking — is\n" +
+        "  not this CLI's job any more: talk to the same RPC port directly.\n\n" +
         "Unlock: agent-key (auto) | --passphrase-file F | --passphrase-env V |\n" +
         "        owner-approval (approve in the Alien app; --no-owner-approval to skip).\n" +
-        "If none works, commands return VAULT_LOCKED — ask the owner to unlock, don't retry.\n" +
-        "patchright auto-installs into the plugin data dir on first session (drives your\n" +
-        "installed Chrome via channel=chrome; pass --plugin-data <dir> when not run by a hook)."
+        "If none works, the command returns VAULT_LOCKED — ask the owner to unlock,\n" +
+        "don't retry.",
     ),
 });

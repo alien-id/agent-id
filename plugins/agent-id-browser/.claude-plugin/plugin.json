@@ -1,16 +1,16 @@
 {
   "name": "agent-id-browser",
   "version": "8.4.0",
-  "description": "Alien Browser with anonymous L0 public browsing, vault-sealed login profiles, and compact verified form filling.",
+  "description": "Signs an agent into a website with a vault credential, in a browser reached over its RPC port — the password goes from the vault straight into the page.",
   "author": {
     "name": "Alien",
     "email": "support@alien.org"
   },
   "keywords": [
     "browser-automation",
-    "patchright",
     "credential-vault",
-    "agent-identity"
+    "agent-identity",
+    "auto-login"
   ],
   "dependencies": [
     {
