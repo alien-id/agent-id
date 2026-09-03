@@ -35,9 +35,5 @@
   "dependencies": {
     "@alien-id/agent-id-core": "^7.6.0",
     "@alien-id/agent-id-vault": "^7.8.0"
-  },
-  "optionalDependencies": {
-    "patchright": "^1.61.0",
-    "werift": "0.24.2"
   }
 }

@@ -9,9 +9,9 @@ We have a quick list of common questions to get you started engaging with this p
 
 ## Scope in this repo
 
-Only `@alien-id/agent-id-core` and `@alien-id/agent-id-vault` are published to npm. The
-marketplace-only plugins (`auth`, `git`, `proxy`, `browser`) are `private` and listed under
-`ignore` in `config.json`, so changesets never versions or publishes them. When you change a
-published package, run `bun changeset` and pick the bump; `bun run sync-plugin-versions`
-propagates the resulting version into each plugin's `.claude-plugin/plugin.json` and the
-marketplace manifest.
+`@alien-id/agent-id-core`, `@alien-id/agent-id-vault` and `@alien-id/agent-id-browser` are
+published to npm. The marketplace-only plugins (`auth`, `git`, `proxy`) are `private` and
+listed under `ignore` in `config.json`, so changesets never versions or publishes them. When
+you change a published package, run `bun changeset` and pick the bump; `bun run
+sync-plugin-versions` propagates the resulting version into each plugin's
+`.claude-plugin/plugin.json` and the marketplace manifest.
