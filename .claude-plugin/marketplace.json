@@ -69,7 +69,7 @@
     {
       "name": "agent-id-browser",
       "description": "Signs an agent into a website with a vault credential, in a browser reached over its RPC port. The password goes from the vault straight into the page; 2FA comes from a stored seed or a card to the owner.",
-      "version": "8.4.0",
+      "version": "9.0.0",
       "source": "./plugins/agent-id-browser",
       "category": "identity",
       "keywords": [
