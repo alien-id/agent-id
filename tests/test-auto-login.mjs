@@ -953,3 +953,113 @@ test("the code card names the site and where the code went", () => {
   assert.match(blind.description, /email or messages/i);
   assert.ok(!/sent a code to/.test(blind.description));
 });
+
+// ── A recipe is a hint: a step that fails hands the page to the form heuristics ───
+
+// A page the round loop can read: `evaluate` answers `detectPageState` with a
+// signed-in shape once the fallback has run, and `goto` moves the url.
+function fallbackPage(loginUrl) {
+  const page = {
+    url: () => page.current,
+    current: loginUrl,
+    goto: async (url) => {
+      page.current = url;
+    },
+    waitForTimeout: async () => {},
+    evaluate: async () => ({
+      hasPasswordField: page.current === loginUrl,
+      hasIdentifierField: false,
+      hasOtpField: false,
+      otpFieldNames: [],
+      bodyText: page.current === loginUrl ? "Sign in" : "Welcome back, Daniel",
+      blocked: false,
+      errorText: null,
+    }),
+  };
+  return page;
+}
+
+test("a recipe step that fails falls back to the form heuristics and is reported, not thrown", async () => {
+  const page = fallbackPage("https://x.test/login");
+  const formLogins = [];
+  const result = await autoLogin({
+    page,
+    cred: {
+      name: "steam",
+      username: "daniel",
+      password: "s3cret-pass",
+      loginUrl: "https://x.test/login",
+      domains: ["x.test"],
+      // A selector the model guessed off a snapshot; this page has no `fill`,
+      // so the step fails the way a missing element does.
+      recipe: [
+        { action: "fill", selector: "#does-not-exist", value: "{username}" },
+        { action: "fill", selector: "#nor-this", value: "{password}" },
+      ],
+    },
+    settleMs: 0,
+    formLoginFn: async (p, cred) => {
+      formLogins.push(cred.name);
+      p.current = "https://x.test/account";
+    },
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.outcome, "logged-in");
+  assert.deepEqual(formLogins, ["steam"], "the heuristics ran once, after the recipe gave up");
+  assert.equal(result.recipeFailed?.step, "{username}");
+  assert.match(result.recipeFailed?.cause ?? "", /recipe step/);
+  assert.doesNotMatch(result.recipeFailed?.cause ?? "", /s3cret-pass/);
+});
+
+test("a recipe that runs clean leaves the heuristics alone and reports no recipe failure", async () => {
+  const page = fallbackPage("https://x.test/login");
+  // The default driver reaches the page through `fill`; give this page one.
+  page.fill = async () => {
+    page.current = "https://x.test/account";
+  };
+  let formLogins = 0;
+  const result = await autoLogin({
+    page,
+    cred: {
+      name: "steam",
+      username: "daniel",
+      password: "p",
+      loginUrl: "https://x.test/login",
+      domains: ["x.test"],
+      recipe: [{ action: "fill", selector: "#user", value: "{username}" }],
+    },
+    settleMs: 0,
+    formLoginFn: async () => {
+      formLogins++;
+    },
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(formLogins, 0);
+  assert.equal("recipeFailed" in result, false);
+});
+
+test("a secret step's failure keeps the cause and strikes the value out", async () => {
+  const driver = {
+    ...recordingDriver([]),
+    fill: async (_p, sel, val) => {
+      throw new Error(`no element matches ${sel} to receive ${val}`);
+    },
+  };
+  await assert.rejects(
+    runRecipe(
+      pageOn("https://x/login"),
+      [{ action: "fill", selector: "#pass", value: "{password}" }],
+      { username: "u", password: "s3cret-pass", getOtp: async () => "1", domains: ["x"], driver }
+    ),
+    (err) => {
+      assert.equal(err.code, "RECIPE_STEP_FAILED");
+      assert.equal(err.step, "{password}");
+      assert.match(err.message, /no element matches #pass/);
+      assert.match(err.message, /•••/);
+      assert.doesNotMatch(err.message, /s3cret-pass/);
+      return true;
+    }
+  );
+});

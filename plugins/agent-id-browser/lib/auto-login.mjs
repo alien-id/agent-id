@@ -216,12 +216,35 @@ export async function runRecipe(
   // would put "c", "o", "d"… across the row. A code embedded in a longer string
   // is not a code screen's row; it goes through the ordinary verbs.
   const carriesOtp = (tpl) => typeof tpl === "string" && tpl.trim() === "{otp}";
+  // The cause survives — a selector that never appeared reads as one — but any
+  // occurrence of the values themselves is struck out first.
+  const redactSecrets = (text) => {
+    let out = String(text ?? "");
+    for (const secret of [password, otp]) {
+      if (typeof secret === "string" && secret.length > 0) out = out.split(secret).join("•••");
+    }
+    return out.slice(0, 200);
+  };
+  // Every page-touching step runs under this. A failure against the page — the
+  // element never appeared, the click found nothing — becomes RECIPE_STEP_FAILED
+  // naming the step, which is what lets the caller tell a broken recipe from a
+  // refused sign-in and fall back. Errors that carry a code of their own (a card
+  // outcome, a refusal) pass through untouched; a code resolution failure never
+  // reaches here at all, it happens in `sub` first.
   const guarded = async (tpl, run) => {
-    if (!carriesSecret(tpl)) return run();
     try {
       return await run();
-    } catch {
-      throw new Error(`recipe step '${tpl}' failed while entering a secret value`);
+    } catch (err) {
+      if (err?.code) throw err;
+      const cause = redactSecrets(err?.message ?? err);
+      const e = new Error(
+        carriesSecret(tpl)
+          ? `recipe step '${tpl}' failed while entering a secret value: ${cause}`
+          : `recipe step '${tpl}' failed: ${cause}`
+      );
+      e.code = "RECIPE_STEP_FAILED";
+      e.step = tpl;
+      throw e;
     }
   };
   // Refuse a secret-bearing step on an origin the credential was never scoped to.
@@ -246,7 +269,7 @@ export async function runRecipe(
         }
         const url = await sub(step.url);
         assertHostAllowed(hostOf(url), domains, "recipe navigate: refusing");
-        await driver.navigate(page, url);
+        await guarded(step.url, () => driver.navigate(page, url));
         break;
       }
       // Each of the four below resolves its values FIRST, re-checks the origin, and
@@ -282,14 +305,14 @@ export async function runRecipe(
         gateSecret(step, "recipe click");
         const selector = await sub(step.selector);
         gateSecret(step, "recipe click");
-        await driver.click(page, selector);
+        await guarded(step.selector, () => driver.click(page, selector));
         break;
       }
       case "press": {
         gateSecret(step, "recipe press");
         const selector = await sub(step.selector);
         gateSecret(step, "recipe press");
-        await driver.press(page, selector, step.key || "Enter");
+        await guarded(step.selector, () => driver.press(page, selector, step.key || "Enter"));
         break;
       }
       case "wait":
@@ -1136,11 +1159,47 @@ async function awaitDeviceConfirmation(page, cred, { log, settleMs, budgetMs }) 
  * with; `page` is the adapter in lib/rpc-page.mjs, or any object offering the
  * same handful of methods.
  */
-export async function autoLogin({
+/**
+ * Drive a full auto-login against `cred`. The recipe, when the record has one,
+ * is a hint: a step that fails hands the page back to the form heuristics that
+ * sign a recipe-less credential in, and the result says so in `recipeFailed`
+ * so the caller can retire the recipe. A card outcome inside the recipe is
+ * still the run's outcome.
+ */
+export async function autoLogin(options) {
+  const marks = {};
+  const result = await driveLogin({ ...options, marks });
+  return marks.recipeFailed ? { ...result, recipeFailed: marks.recipeFailed } : result;
+}
+
+// The default sign-in when no recipe drives it: Microsoft's fixed ids where the
+// page is theirs, the heuristic username/password fill everywhere else.
+async function formLogin(page, cred, log) {
+  if (await detectMicrosoftFlow(page)) {
+    // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
+    await microsoftLogin(page, cred, log);
+  } else {
+    await heuristicLogin(page, cred);
+  }
+}
+
+// Which recipe step a RECIPE_STEP_FAILED error names, for the report.
+function recipeStepOf(err) {
+  if (err && typeof err.step === "string") return err.step;
+  const m = /recipe step '([^']+)'/.exec(String(err?.message ?? ""));
+  return m ? m[1] : null;
+}
+
+async function driveLogin({
   page,
   cred,
   env = process.env,
   log = () => {},
+  // Where the recipe fallback and the recipe-less path sign in; injectable so the
+  // fallback tests without a browser.
+  formLoginFn = formLogin,
+  // Written to when the recipe failed and the heuristics took over.
+  marks = {},
   // The identifier step now legitimately spends rounds: a screen asking only for
   // an e-mail or phone classifies as "unknown" until the site advances, where it
   // used to short-circuit to a (wrong) "logged-in" on the first look. Six rounds
@@ -1269,6 +1328,7 @@ export async function autoLogin({
     }
   };
 
+  let recipeDone = false;
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
     try {
       await runRecipe(page, cred.recipe, {
@@ -1277,18 +1337,26 @@ export async function autoLogin({
         getOtp,
         domains: cred.domains,
       });
+      recipeDone = true;
     } catch (err) {
       if (err?.code === "FORM_USE_BROWSER") return ownerWillDrive();
       if (err?.code === "FORM_CANCELLED") return otpDeclined();
-      if (err?.code !== "FORM_TIMEOUT") throw err;
-      return otpTimedOut();
+      if (err?.code === "FORM_TIMEOUT") return otpTimedOut();
+      if (err?.code !== "RECIPE_STEP_FAILED") throw err;
+      // The recipe was written by the model from a snapshot, and a selector it
+      // guessed wrong is not a reason to lose the sign-in — or, as once
+      // happened, the credential: a bare error here left the caller without an
+      // outcome and it deleted the record the owner had just typed. The page
+      // goes back to the start and the heuristics that sign a recipe-less
+      // credential in take over; the report names the step so the recipe can go.
+      const cause = String(err?.message ?? err).slice(0, 200);
+      marks.recipeFailed = { step: recipeStepOf(err), cause };
+      log(`auto-login: the stored recipe failed (${cause}) — falling back to the form heuristics`);
+      await page.goto(cred.loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(settleMs);
     }
-  } else if (await detectMicrosoftFlow(page)) {
-    // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
-    await microsoftLogin(page, cred, log);
-  } else {
-    await heuristicLogin(page, cred);
   }
+  if (!recipeDone) await formLoginFn(page, cred, log);
   await page.waitForTimeout(settleMs);
 
   for (let round = 0; round < maxRounds; round++) {
