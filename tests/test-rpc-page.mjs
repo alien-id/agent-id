@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 
-import { openRpcPage } from "@alien-id/agent-id-browser/lib/rpc-page.mjs";
+import { openRpcPage } from "../plugins/agent-id-browser/lib/rpc-page.mjs";
 
 /**
  * A stand-in for the browser: records every command and answers from `replies`,
