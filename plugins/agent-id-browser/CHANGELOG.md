@@ -1,5 +1,56 @@
 # @alien-id/agent-id-browser
 
+## 9.0.0
+
+### Major Changes
+
+- [#151](https://github.com/alien-id/agent-id/pull/151) [`098fa1a`](https://github.com/alien-id/agent-id/commit/098fa1a1150836fb95e4775508bc190140921053) Thanks [@avpetkun](https://github.com/avpetkun)! - The browser is now a separate process, reached over its RPC port, and this
+  plugin does one thing: sign it in.
+
+  `auto-login --cred CRED --rpc HOST:PORT` drives the sign-in form in a browser it
+  does not own, with the password going from the vault straight into the page as
+  real keystrokes — the reason this step cannot live in whoever drives the pages.
+  Recipes, the domain confinement on every navigation and every secret-bearing
+  step, the TOTP/interactive 2FA policy and the `owner_must_drive` /
+  `owner_must_confirm` / `fix_credential` contract are unchanged.
+
+  Everything else is gone, because the browser it was built on is: the in-process
+  engine and its launcher, the session daemon and its verbs (`open`, `close`,
+  `read`, `fetch`, `snapshot`, `click`, `type`, the form tools, screenshots,
+  tabs, downloads, `eval`), the vault-sealed profile store, the access guard, and
+  the viewport stream server with its codecs. A host that used those drives the
+  browser's own RPC port directly instead. With them go the `patchright` and
+  `werift` optional dependencies: this package now installs nothing but the two
+  shared libraries.
+
+  Two consequences worth naming:
+
+  - **Profiles are the browser's.** Nothing is sealed into the vault any more, so
+    there is no `--name` profile to mint and no re-seal on close. The browser
+    keeps its own profile; `auto-login` leaves it signed in.
+  - **A read-only `login` credential is refused.** `access: ro` used to be
+    enforced at the wire by the process that owned the browser. This command does
+    not own it, so signing in under one would hand out exactly the access the
+    credential was restricted from.
+
+### Minor Changes
+
+- [#151](https://github.com/alien-id/agent-id/pull/151) [`098fa1a`](https://github.com/alien-id/agent-id/commit/098fa1a1150836fb95e4775508bc190140921053) Thanks [@avpetkun](https://github.com/avpetkun)! - `auto-login` requires an open session instead of starting an unnamed one.
+
+  One browser is one user at a time, and which user is a `Session.start` name — a
+  profile directory under the browser's `--data`. This command is handed a port
+  and a credential, never a profile, so it can neither name the profile it wants
+  nor move a browser that is currently being somebody else. It used to start a
+  session anyway, unnamed, from back when a session had no profile to name;
+  against a browser that has them that call is simply an error, and the sign-in
+  failed reporting the browser "not reachable" — which sent callers looking for a
+  network fault instead of the session they had not opened.
+
+  Now `Session.state` deciding there is no session raises `NO_SESSION`, saying
+  that the caller chooses the profile a sign-in lands in and must open the session
+  before handing the port over. An already-active session is used exactly as
+  before.
+
 ## 8.4.0
 
 ### Minor Changes

@@ -1,6 +1,6 @@
 {
   "name": "agent-id-browser",
-  "version": "8.4.0",
+  "version": "9.0.0",
   "description": "Signs an agent into a website with a vault credential, in a browser reached over its RPC port — the password goes from the vault straight into the page.",
   "author": {
     "name": "Alien",
