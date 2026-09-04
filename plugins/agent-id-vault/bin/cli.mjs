@@ -82,6 +82,7 @@ import {
   loginOtpMode,
   LOGIN_OTP_MODES,
   SECRET_FIELDS,
+  isTransient,
   validateRecord,
 } from "../lib/store.mjs";
 import {
@@ -326,7 +327,8 @@ function formDescription({
   // `ro` is a grant being made in the moment of typing, so it stays on the card
   // even though the rest of the metadata does not.
   const grant = access === "ro" ? " The agent can read this, never change it." : "";
-  const once = type === "login" ? " Untick Save to vault to use it once." : "";
+  const once =
+    type === "login" && saveToVaultBoxEnabled() ? " Turn off Save to vault to use it once." : "";
 
   return `${lead}${step}${grant}${once}`;
 }
@@ -409,11 +411,19 @@ function formFieldsForType(type, flags) {
         // sealed form as the values, so nothing between here and the phone sees
         // the choice — the value comes back as the string "true" / "false", and
         // a client that never rendered the row sends nothing, which is "true".
-        SAVE_TO_VAULT_FIELD,
+        ...(saveToVaultBoxEnabled() ? [SAVE_TO_VAULT_FIELD] : []),
       ];
     default:
       return null;
   }
+}
+
+// Off until the phone draws the box: a client that predates it renders a
+// checkbox field as an empty text box under a line telling the owner to turn it
+// off. Set AGENT_ID_SAVE_TO_VAULT_BOX=1 once the iOS build carrying the switch
+// has shipped; the gate itself goes in the release after that.
+function saveToVaultBoxEnabled(env = process.env) {
+  return env.AGENT_ID_SAVE_TO_VAULT_BOX === "1";
 }
 
 const SAVE_TO_VAULT_FIELD = Object.freeze({
@@ -433,7 +443,7 @@ const TRANSIENT_TTL_MS = 30 * 60 * 1000;
 
 // The owner's answer to the "Save to vault" box, taken OUT of the form values
 // so it can never be written into a record as if it were a field. Absent means
-// kept — the card of an older client has no box.
+// kept — the card of an older client, or one raised with the box off, has none.
 function takeSaveToVault(formValues) {
   if (!formValues || !(SAVE_TO_VAULT_FIELD.name in formValues)) return true;
   const raw = formValues[SAVE_TO_VAULT_FIELD.name];
@@ -640,6 +650,11 @@ async function cmdAdd(flags) {
         );
       }
     }
+    // A credential the owner already keeps stays kept: turning the box off on a
+    // re-add would otherwise swap a saved record for one that is deleted after
+    // the next sign-in, which is not what a card about THIS sign-in asked.
+    const keepsExisting = existing != null && !isTransient(existing);
+    const transient = !keep && !keepsExisting;
 
     switch (type) {
       case "bearer":
@@ -777,14 +792,14 @@ async function cmdAdd(flags) {
       }
     }
 
-    if (!keep) record.transient = { until: Date.now() + TRANSIENT_TTL_MS };
+    if (transient) record.transient = { until: Date.now() + TRANSIENT_TTL_MS };
 
     const stored = vault.add(record);
     await vault.save();
     stderr(
       `Added credential '${name}' (${type}) for ${domains.join(", ")}` +
         `${stored.access ? ` — access: ${stored.access}` : ""}` +
-        `${keep ? "" : " — for this sign-in only"}.`
+        `${transient ? " — for this sign-in only" : ""}.`
     );
     outputJson({
       ok: true,
@@ -794,14 +809,22 @@ async function cmdAdd(flags) {
       access: effectiveAccess(stored),
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt,
-      ...(keep
-        ? {}
-        : {
+      ...(transient
+        ? {
             transient: true,
             note:
-              "The owner chose not to keep this credential. It exists for this sign-in only " +
-              "and is removed when the sign-in completes (or after 30 minutes).",
-          }),
+              "The owner chose not to keep this credential. It exists for this sign-in only: " +
+              "auto-login removes it once the sign-in completes, and otherwise it is dropped " +
+              "on the next vault open after 30 minutes.",
+          }
+        : {}),
+      ...(!keep && keepsExisting
+        ? {
+            note:
+              `The owner turned off Save to vault, but '${name}' was already saved; ` +
+              "the stored credential was updated and kept.",
+          }
+        : {}),
     });
   } finally {
     vault.lock();
