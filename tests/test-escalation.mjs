@@ -169,3 +169,55 @@ test("otp-timeout blames nobody's credential — the owner simply was not at the
   assert.match(message, /do not ask for a password/i);
   assert.match(message, /run auto-login again/i);
 });
+
+// ── A run that stopped on its own fault leaves the credential alone ─────────────
+
+test("a crashed run is an outcome with an action, and the credential is intact", () => {
+  const e = escalationFor("error", { ...ctx, pageError: "recipe step '{password}' failed: no element" });
+  assert.equal(e.action, OWNER_MUST_DRIVE);
+  assert.equal(e.reason, "auto_login_crashed");
+  assert.equal(e.credential, "intact");
+  assert.match(e.message, /do NOT remove it/);
+  assert.match(e.message, /recipe step '\{password\}'/);
+  assert.match(e.message, /clear the stored recipe/i);
+  assert.doesNotMatch(e.message, /set-recipe/);
+});
+
+test("every outcome says whether the stored values are in doubt", () => {
+  for (const outcome of [
+    "blocked",
+    "timeout",
+    "confirm-timeout",
+    "otp-declined",
+    "otp-timeout",
+    "owner-will-drive",
+    "error",
+    "domain-not-allowed",
+  ]) {
+    assert.equal(escalationFor(outcome, ctx).credential, "intact", outcome);
+  }
+  assert.equal(escalationFor("failed", ctx).credential, "rejected");
+});
+
+test("a rejected password is re-stored in place, never removed", () => {
+  const e = escalationFor("failed", ctx);
+  assert.match(e.message, /overwrite: true/);
+  assert.match(e.message, /Never remove the credential/);
+  assert.doesNotMatch(e.message, /re-enter them \(/);
+});
+
+test("an unresolved login also says the credential stays", () => {
+  const e = escalationFor("timeout", ctx);
+  assert.match(e.message, /never remove it/i);
+});
+
+test("a host off the allowlist is fixed on the credential, not by a human at the page", () => {
+  const e = escalationFor("domain-not-allowed", { ...ctx, pageError: 'recipe navigate: refusing "evil.test"' });
+  assert.equal(e.action, FIX_CREDENTIAL);
+  assert.equal(e.reason, "host_not_in_domains");
+  assert.equal(e.credential, "intact");
+  assert.match(e.message, /evil\.test/);
+  assert.match(e.message, /domains/);
+  assert.match(e.message, /never remove/i);
+  assert.doesNotMatch(e.message, /browser view/);
+});

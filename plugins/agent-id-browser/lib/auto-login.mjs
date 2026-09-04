@@ -193,6 +193,16 @@ export const pageDriver = {
 // `driver` maps the action vocabulary to page interactions; it defaults to the
 // page driver above and is injectable so the mapping/{otp}-lazy-resolution
 // logic unit-tests without a browser.
+// The errors `runRecipe` lets out of a step as they are: the card's own endings,
+// and a refusal to leave the credential's domains. Everything else a step throws
+// is a page fault and is reported as one.
+const RECIPE_PASSTHROUGH_CODES = new Set([
+  "FORM_USE_BROWSER",
+  "FORM_CANCELLED",
+  "FORM_TIMEOUT",
+  "HOST_NOT_ALLOWED",
+]);
+
 export async function runRecipe(
   page,
   steps,
@@ -216,12 +226,41 @@ export async function runRecipe(
   // would put "c", "o", "d"… across the row. A code embedded in a longer string
   // is not a code screen's row; it goes through the ordinary verbs.
   const carriesOtp = (tpl) => typeof tpl === "string" && tpl.trim() === "{otp}";
+  // The cause survives — a selector that never appeared reads as one — but any
+  // occurrence of the values themselves is struck out first.
+  const redactSecrets = (text) => {
+    let out = String(text ?? "");
+    for (const secret of [password, otp, username]) {
+      if (typeof secret === "string" && secret.length > 0) out = out.split(secret).join("•••");
+    }
+    return out.slice(0, 200);
+  };
+  // Every page-touching step runs under this. A failure against the page — the
+  // element never appeared, the click found nothing, the browser refused the
+  // click — becomes RECIPE_STEP_FAILED naming the step, which is what lets the
+  // caller tell a broken recipe from a refused sign-in and fall back. Only the
+  // codes this engine itself branches on (a card outcome, an allowlist refusal)
+  // pass through: the browser's RPC stamps a code of its own on every error it
+  // returns, and letting those through is how a click the page blocked skipped
+  // the fallback. A code resolution failure never reaches here at all, it
+  // happens in `sub` first. `otpConsumed` says whether the owner has already
+  // answered a card by the time the step failed — the caller must not start the
+  // sign-in over from a page that has moved past it.
   const guarded = async (tpl, run) => {
-    if (!carriesSecret(tpl)) return run();
     try {
       return await run();
-    } catch {
-      throw new Error(`recipe step '${tpl}' failed while entering a secret value`);
+    } catch (err) {
+      if (RECIPE_PASSTHROUGH_CODES.has(err?.code)) throw err;
+      const cause = redactSecrets(err?.message ?? err);
+      const e = new Error(
+        carriesSecret(tpl)
+          ? `recipe step '${tpl}' failed while entering a secret value: ${cause}`
+          : `recipe step '${tpl}' failed: ${cause}`
+      );
+      e.code = "RECIPE_STEP_FAILED";
+      e.step = tpl;
+      e.otpConsumed = otp !== undefined;
+      throw e;
     }
   };
   // Refuse a secret-bearing step on an origin the credential was never scoped to.
@@ -246,7 +285,7 @@ export async function runRecipe(
         }
         const url = await sub(step.url);
         assertHostAllowed(hostOf(url), domains, "recipe navigate: refusing");
-        await driver.navigate(page, url);
+        await guarded(step.url, () => driver.navigate(page, url));
         break;
       }
       // Each of the four below resolves its values FIRST, re-checks the origin, and
@@ -282,14 +321,14 @@ export async function runRecipe(
         gateSecret(step, "recipe click");
         const selector = await sub(step.selector);
         gateSecret(step, "recipe click");
-        await driver.click(page, selector);
+        await guarded(step.selector, () => driver.click(page, selector));
         break;
       }
       case "press": {
         gateSecret(step, "recipe press");
         const selector = await sub(step.selector);
         gateSecret(step, "recipe press");
-        await driver.press(page, selector, step.key || "Enter");
+        await guarded(step.selector, () => driver.press(page, selector, step.key || "Enter"));
         break;
       }
       case "wait":
@@ -1136,11 +1175,52 @@ async function awaitDeviceConfirmation(page, cred, { log, settleMs, budgetMs }) 
  * with; `page` is the adapter in lib/rpc-page.mjs, or any object offering the
  * same handful of methods.
  */
-export async function autoLogin({
+/**
+ * Drive a full auto-login against `cred`. The recipe, when the record has one,
+ * is a hint: a step that fails hands the page back to the form heuristics that
+ * sign a recipe-less credential in, and the result says so in `recipeFailed`
+ * so the caller can retire the recipe. A card outcome inside the recipe is
+ * still the run's outcome.
+ */
+export async function autoLogin(options) {
+  const marks = {};
+  try {
+    const result = await driveLogin({ ...options, marks });
+    return marks.recipeFailed ? { ...result, recipeFailed: marks.recipeFailed } : result;
+  } catch (err) {
+    if (marks.recipeFailed && err && typeof err === "object") err.recipeFailed = marks.recipeFailed;
+    throw err;
+  }
+}
+
+// The default sign-in when no recipe drives it: Microsoft's fixed ids where the
+// page is theirs, the heuristic username/password fill everywhere else.
+async function formLogin(page, cred, log) {
+  if (await detectMicrosoftFlow(page)) {
+    // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
+    await microsoftLogin(page, cred, log);
+  } else {
+    await heuristicLogin(page, cred);
+  }
+}
+
+// Which recipe step a RECIPE_STEP_FAILED error names, for the report.
+function recipeStepOf(err) {
+  if (err && typeof err.step === "string") return err.step;
+  const m = /recipe step '([^']+)'/.exec(String(err?.message ?? ""));
+  return m ? m[1] : null;
+}
+
+async function driveLogin({
   page,
   cred,
   env = process.env,
   log = () => {},
+  // Where the recipe fallback and the recipe-less path sign in; injectable so the
+  // fallback tests without a browser.
+  formLoginFn = formLogin,
+  // Written to when the recipe failed and the heuristics took over.
+  marks = {},
   // The identifier step now legitimately spends rounds: a screen asking only for
   // an e-mail or phone classifies as "unknown" until the site advances, where it
   // used to short-circuit to a (wrong) "logged-in" on the first look. Six rounds
@@ -1164,7 +1244,12 @@ export async function autoLogin({
   // The whole run — warmup, the login page, every recipe step — happens on the
   // credential's own origins. Checked once here so a loginUrl pointing off the
   // allowlist fails before a browser goes anywhere, not after.
-  assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
+  try {
+    assertHostAllowed(hostOf(cred.loginUrl), cred.domains, "loginUrl: refusing");
+  } catch (err) {
+    if (err?.code !== "HOST_NOT_ALLOWED") throw err;
+    return { ok: false, outcome: "domain-not-allowed", finalUrl: null, errorText: err.message };
+  }
   const getOtp = (retry, destination, length) =>
     resolveOtpFn(cred, { env, log, retry, destination, length });
   // One run answers a code challenge twice at most, and the second attempt is
@@ -1269,6 +1354,7 @@ export async function autoLogin({
     }
   };
 
+  let skipFormLogin = false;
   if (Array.isArray(cred.recipe) && cred.recipe.length) {
     try {
       await runRecipe(page, cred.recipe, {
@@ -1277,18 +1363,39 @@ export async function autoLogin({
         getOtp,
         domains: cred.domains,
       });
+      skipFormLogin = true;
     } catch (err) {
       if (err?.code === "FORM_USE_BROWSER") return ownerWillDrive();
       if (err?.code === "FORM_CANCELLED") return otpDeclined();
-      if (err?.code !== "FORM_TIMEOUT") throw err;
-      return otpTimedOut();
+      if (err?.code === "FORM_TIMEOUT") return otpTimedOut();
+      if (err?.code === "HOST_NOT_ALLOWED") {
+        return { ok: false, outcome: "domain-not-allowed", finalUrl: page.url(), errorText: err.message };
+      }
+      if (err?.code !== "RECIPE_STEP_FAILED") throw err;
+      // The recipe was written by the model from a snapshot, and a selector it
+      // guessed wrong is not a reason to lose the sign-in — or, as once
+      // happened, the credential: a bare error here left the caller without an
+      // outcome and it deleted the record the owner had just typed. The report
+      // names the step so the recipe can go. What happens next depends on how
+      // far the recipe got: before any card, the page goes back to the start and
+      // the heuristics that sign a recipe-less credential in take over; once the
+      // owner has answered a code card, the sign-in is past the point a restart
+      // can reach — the code is typed or the page has moved on — and starting
+      // over would raise a second card for the same sign-in. The round loop
+      // reads the page as it stands instead.
+      const cause = String(err?.message ?? err).slice(0, 200);
+      marks.recipeFailed = { step: recipeStepOf(err), cause };
+      if (err.otpConsumed) {
+        log(`auto-login: the stored recipe failed after the code was entered (${cause}) — continuing from the current page`);
+        skipFormLogin = true;
+      } else {
+        log(`auto-login: the stored recipe failed (${cause}) — falling back to the form heuristics`);
+        await page.goto(cred.loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await page.waitForTimeout(settleMs);
+      }
     }
-  } else if (await detectMicrosoftFlow(page)) {
-    // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
-    await microsoftLogin(page, cred, log);
-  } else {
-    await heuristicLogin(page, cred);
   }
+  if (!skipFormLogin) await formLoginFn(page, cred, log);
   await page.waitForTimeout(settleMs);
 
   for (let round = 0; round < maxRounds; round++) {

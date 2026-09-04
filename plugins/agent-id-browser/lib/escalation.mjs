@@ -31,7 +31,17 @@ export const FIX_CREDENTIAL = "fix_credential";
  * Returns { action, reason, message }. `reason` is a stable slug for clients;
  * `message` is what the model reads, and says exactly one next step.
  */
-export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
+export function escalationFor(outcome, ctx = {}) {
+  const escalation = escalationMessage(outcome, ctx);
+  // Whether the stored values are in doubt, as a field a host can gate on
+  // without reading the prose. Only a rejection by the site puts them in doubt;
+  // every other way a sign-in ends leaves the credential exactly as typed, and
+  // an agent that read "fix" as "delete" once cost the owner a card they had
+  // just filled in.
+  return { credential: outcome === "failed" ? "rejected" : "intact", ...escalation };
+}
+
+function escalationMessage(outcome, { credName = "", profile = "", pageError = null } = {}) {
   switch (outcome) {
     // The login handshake is exactly where anti-automation bites. No credential
     // clears it — only a human working the page.
@@ -167,8 +177,38 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
         action: FIX_CREDENTIAL,
         reason: "credentials_rejected",
         message:
-          `The site rejected the stored credentials for '${credName}'. Ask the owner to ` +
-          "re-enter them (`vault_add` with overwrite) rather than retrying the same values.",
+          `The site rejected the stored credentials for '${credName}'. Tell the owner, and ` +
+          "re-store them with `vault_add` and `overwrite: true` only if they confirm the values " +
+          "changed — that call raises the card again and replaces the record in place. Never " +
+          "remove the credential to retry, and do not retry the same values.",
+      };
+    // The run stopped on its own fault — a recipe step that never found its
+    // element, a browser that went away — before the site said anything about the
+    // credential. Nothing about the stored values is in doubt.
+    case "error":
+      return {
+        action: OWNER_MUST_DRIVE,
+        reason: "auto_login_crashed",
+        message:
+          `Auto-login for '${credName}' stopped before it could finish` +
+          `${pageError ? ` (${pageError})` : ""}. The stored credential was not rejected — ` +
+          "leave it in the vault and do NOT remove it. Ask the owner to sign in once in the " +
+          `browser view for profile '${profile}'. If the message names a recipe step, the ` +
+          "recipe is wrong: clear the stored recipe before the next auto-login.",
+      };
+    // The sign-in reached a host the credential was never scoped to — a redirect
+    // through an identity provider, a recipe step pointing off-site. The secret
+    // was withheld, so nothing about it is in doubt, and no human at the page
+    // changes what the allowlist says: the allowlist has to.
+    case "domain-not-allowed":
+      return {
+        action: FIX_CREDENTIAL,
+        reason: "host_not_in_domains",
+        message:
+          `The sign-in for '${credName}' reached a host outside the credential's domains` +
+          `${pageError ? ` (${pageError})` : ""}, so the secret was withheld. Add that host to ` +
+          "the credential's `domains` (wildcards like *.example.com are allowed) and run " +
+          "auto-login again. The stored values are fine — never remove the credential for this.",
       };
     // Timed out or never resolved: could be a changed form, an unusual flow, or
     // an identity provider that refuses automation. A human at the page both
@@ -181,9 +221,11 @@ export function escalationFor(outcome, { credName = "", profile = "" } = {}) {
           `Auto-login for '${credName}' did not complete (${outcome}). This is common for ` +
           "big-IdP sign-in (Google, Microsoft), which refuses automated credential entry. " +
           "Read `trace` and `pageError` first: a rejection message there means the stored " +
-          "credential is wrong (fix it), not that a human is needed. Otherwise ask the owner " +
-          `to sign in once in the browser view for profile '${profile}'; the session then ` +
-          "seals and later visits are headless.",
+          "credential is wrong (tell the owner; re-store with `vault_add` and `overwrite: true` " +
+          "only if they confirm), not that a human is needed. Otherwise ask the owner to sign " +
+          `in once in the browser view for profile '${profile}'; the session then seals and ` +
+          "later visits are headless. Either way the credential stays in the vault — never " +
+          "remove it because a sign-in did not complete.",
       };
   }
 }

@@ -194,29 +194,70 @@ async function cmdAutoLogin(flags) {
     // wrong password is distinguishable from a changed form or a redirect that
     // was never awaited. Never includes a secret.
     const trace = [];
-    const result = await autoLogin({
-      page,
-      cred,
-      env: process.env,
-      log: (m) => {
-        stderr(m);
-        trace.push(m);
-      },
-    });
+    // Any occurrence of the stored values in an error is struck out before it
+    // can reach stdout; the message class (a selector that never appeared, a
+    // browser that went away) is what the caller needs and is kept.
+    const redacted = (text) => {
+      let out = String(text ?? "");
+      for (const secret of [cred.password, cred.username]) {
+        if (typeof secret === "string" && secret.length > 0) out = out.split(secret).join("•••");
+      }
+      return out;
+    };
+    let result;
+    try {
+      result = await autoLogin({
+        page,
+        cred,
+        env: process.env,
+        log: (m) => {
+          stderr(m);
+          trace.push(m);
+        },
+        // The run corrects a stored `otp: none` the moment the site asks for a
+        // code; the vault is ours to write, so the correction lands here.
+        onOtpModeCorrected: async (otp) => {
+          const stored = vault.get(credName);
+          if (!stored) return;
+          stored.otp = otp;
+          vault.add(stored);
+          await vault.save();
+        },
+      });
+    } catch (err) {
+      // A run that threw is a run that ended, and the caller needs the same
+      // `action` it gets for any other ending. Left as a bare error it once
+      // read as a verdict on the credential, and the record the owner had just
+      // typed was deleted for it.
+      result = {
+        ok: false,
+        outcome: "error",
+        finalUrl: null,
+        errorText: redacted(err?.message ?? err),
+        ...(err?.recipeFailed ? { recipeFailed: err.recipeFailed } : {}),
+      };
+    }
 
     if (!result || !result.ok) {
       const outcome = result ? result.outcome : "unknown";
+      const pageError = result && result.errorText ? redacted(result.errorText) : null;
       // `action` is the contract the calling agent branches on: who has to act,
       // and what they can do about it. See lib/escalation.mjs.
-      const { action, reason, message } = escalationFor(outcome, { credName, profile: credName });
+      const { action, reason, message, credential } = escalationFor(outcome, {
+        credName,
+        profile: credName,
+        pageError,
+      });
       outputJson({
         ok: false,
         error: "AUTO_LOGIN_FAILED",
         outcome,
         action,
         reason,
+        credential,
         finalUrl: result ? result.finalUrl : null,
-        ...(result && result.errorText ? { pageError: result.errorText } : {}),
+        ...(pageError ? { pageError } : {}),
+        ...(result && result.recipeFailed ? { recipeFailed: result.recipeFailed } : {}),
         trace,
         message,
       });
@@ -226,14 +267,20 @@ async function cmdAutoLogin(flags) {
 
     vault.touchLastUsed(credName);
     await vault.save();
+    const recipeFailed = result.recipeFailed || null;
     outputJson({
       ok: true,
       cred: credName,
       outcome: result.outcome,
       finalUrl: result.finalUrl,
+      ...(recipeFailed ? { recipeFailed } : {}),
       message:
         `Signed in as '${credName}'. The browser holds the session; its own profile keeps the ` +
-        "cookies (close it, or flush it, to be sure they are on disk).",
+        "cookies (close it, or flush it, to be sure they are on disk)." +
+        (recipeFailed
+          ? ` The stored recipe failed at '${recipeFailed.step ?? "?"}' and was bypassed; clear it ` +
+            `the stored recipe on '${credName}' so the next sign-in does not try it.`
+          : ""),
     });
   } catch (err) {
     handleErr(err);
