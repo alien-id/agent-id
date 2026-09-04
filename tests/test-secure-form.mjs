@@ -67,6 +67,33 @@ test("collects multiple fields (e.g. basic auth) in one submit", async () => {
   assert.deepEqual(values, { username: "admin", password: "s3cr3t" });
 });
 
+test("a checkbox field renders ticked per its default and answers \"true\" / \"false\"", async () => {
+  const fields = [
+    { name: "username", secret: false },
+    { name: "saveToVault", label: "Save to vault", kind: "checkbox", default: "true", required: false },
+  ];
+  const ticked = startForm({ fields });
+  const u = new URL(await ticked.urlReady);
+  const html = await (await fetch(u)).text();
+  assert.match(html, /<input id="saveToVault" name="saveToVault" type="checkbox" value="true" checked>/);
+  assert.doesNotMatch(html, /name="saveToVault"[^>]*type="text"/, "a checkbox is not a text box");
+  const token = u.searchParams.get("t");
+  await fetch(`http://127.0.0.1:${u.port}/submit`, {
+    method: "POST",
+    body: new URLSearchParams({ _token: token, username: "d@example.com", saveToVault: "true" }),
+  });
+  assert.deepEqual((await ticked.done).values, { username: "d@example.com", saveToVault: "true" });
+
+  // An unticked box posts nothing; the answer is still "false", never "".
+  const unticked = startForm({ fields });
+  const u2 = new URL(await unticked.urlReady);
+  await fetch(`http://127.0.0.1:${u2.port}/submit`, {
+    method: "POST",
+    body: new URLSearchParams({ _token: u2.searchParams.get("t"), username: "d@example.com" }),
+  });
+  assert.deepEqual((await unticked.done).values, { username: "d@example.com", saveToVault: "false" });
+});
+
 test("rejects a submit with the wrong token and keeps waiting (then times out)", async () => {
   const { urlReady, done } = startForm({
     fields: [{ name: "value" }],

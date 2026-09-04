@@ -421,6 +421,10 @@ export function listMetadata(payload) {
           hasRecipe: Array.isArray(c.recipe) && c.recipe.length > 0,
         }
       : {}),
+    // The owner unticked "Save to vault": this record is here for one sign-in
+    // and goes when it completes (or when `transient.until` passes). A caller
+    // planning a later sign-in must not count on it.
+    ...(isTransient(c) ? { transient: true } : {}),
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     lastUsedAt: c.lastUsedAt || null,
@@ -430,6 +434,32 @@ export function listMetadata(payload) {
 export function touchLastUsed(payload, name) {
   const rec = getCredential(payload, name);
   if (rec) rec.lastUsedAt = nowMs();
+}
+
+export function isTransient(rec) {
+  return Boolean(rec && rec.transient && typeof rec.transient === "object");
+}
+
+// The sign-in a transient record was kept for has completed: drop it. True when
+// a record went, false when there was none or it is a kept one.
+export function consumeTransient(payload, name) {
+  const rec = getCredential(payload, name);
+  if (!isTransient(rec)) return false;
+  removeCredential(payload, name);
+  return true;
+}
+
+// Drop every transient record whose time is up. Runs on every open, so a
+// credential the owner chose not to keep is never returned past its window
+// even when the sign-in that asked for it never came back to remove it.
+// Returns the names removed; a non-empty list is the caller's cue to save.
+export function sweepTransient(payload, now = nowMs()) {
+  if (!payload || !Array.isArray(payload.credentials)) return [];
+  const expired = payload.credentials.filter(
+    (c) => isTransient(c) && typeof c.transient.until === "number" && c.transient.until <= now,
+  );
+  for (const c of expired) removeCredential(payload, c.name);
+  return expired.map((c) => c.name);
 }
 
 // Every per-type field that holds secret material — the single source of truth.

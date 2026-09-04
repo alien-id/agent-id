@@ -82,6 +82,7 @@ import {
   loginOtpMode,
   LOGIN_OTP_MODES,
   SECRET_FIELDS,
+  isTransient,
   validateRecord,
 } from "../lib/store.mjs";
 import {
@@ -326,8 +327,10 @@ function formDescription({
   // `ro` is a grant being made in the moment of typing, so it stays on the card
   // even though the rest of the metadata does not.
   const grant = access === "ro" ? " The agent can read this, never change it." : "";
+  const once =
+    type === "login" && saveToVaultBoxEnabled() ? " Turn off Save to vault to use it once." : "";
 
-  return `${lead}${step}${grant}`;
+  return `${lead}${step}${grant}${once}`;
 }
 
 
@@ -402,10 +405,50 @@ function formFieldsForType(type, flags) {
               },
             ]
           : []),
+        // The owner's say over whether the credential outlives this sign-in. On
+        // by default; unticked, the record is kept only until the sign-in that
+        // asked for it completes (see `transient` below). It rides the same
+        // sealed form as the values, so nothing between here and the phone sees
+        // the choice — the value comes back as the string "true" / "false", and
+        // a client that never rendered the row sends nothing, which is "true".
+        ...(saveToVaultBoxEnabled() ? [SAVE_TO_VAULT_FIELD] : []),
       ];
     default:
       return null;
   }
+}
+
+// Off until the phone draws the box: a client that predates it renders a
+// checkbox field as an empty text box under a line telling the owner to turn it
+// off. Set AGENT_ID_SAVE_TO_VAULT_BOX=1 once the iOS build carrying the switch
+// has shipped; the gate itself goes in the release after that.
+function saveToVaultBoxEnabled(env = process.env) {
+  return env.AGENT_ID_SAVE_TO_VAULT_BOX === "1";
+}
+
+const SAVE_TO_VAULT_FIELD = Object.freeze({
+  name: "saveToVault",
+  label: "Save to vault",
+  kind: "checkbox",
+  default: "true",
+  secret: false,
+  required: false,
+});
+
+// A credential the owner chose not to keep lives this long at most: longer than
+// the card's own 15-minute budget plus one auto-login, so a sign-in that is
+// under way never loses its credential mid-run, and short enough that "not
+// saved" stays true when nothing consumes it.
+const TRANSIENT_TTL_MS = 30 * 60 * 1000;
+
+// The owner's answer to the "Save to vault" box, taken OUT of the form values
+// so it can never be written into a record as if it were a field. Absent means
+// kept — the card of an older client, or one raised with the box off, has none.
+function takeSaveToVault(formValues) {
+  if (!formValues || !(SAVE_TO_VAULT_FIELD.name in formValues)) return true;
+  const raw = formValues[SAVE_TO_VAULT_FIELD.name];
+  delete formValues[SAVE_TO_VAULT_FIELD.name];
+  return String(raw) !== "false";
 }
 
 // A card the OWNER ended, told apart from a card that broke. All three are
@@ -569,6 +612,8 @@ async function cmdAdd(flags) {
     }
   }
 
+  const keep = takeSaveToVault(formValues);
+
   // Read a secret either from the form (--form) or the existing file/env/stdin/tty
   // channels — never from argv.
   const secret = (field) =>
@@ -605,6 +650,11 @@ async function cmdAdd(flags) {
         );
       }
     }
+    // A credential the owner already keeps stays kept: turning the box off on a
+    // re-add would otherwise swap a saved record for one that is deleted after
+    // the next sign-in, which is not what a card about THIS sign-in asked.
+    const keepsExisting = existing != null && !isTransient(existing);
+    const transient = !keep && !keepsExisting;
 
     switch (type) {
       case "bearer":
@@ -742,11 +792,14 @@ async function cmdAdd(flags) {
       }
     }
 
+    if (transient) record.transient = { until: Date.now() + TRANSIENT_TTL_MS };
+
     const stored = vault.add(record);
     await vault.save();
     stderr(
       `Added credential '${name}' (${type}) for ${domains.join(", ")}` +
-        `${stored.access ? ` — access: ${stored.access}` : ""}.`
+        `${stored.access ? ` — access: ${stored.access}` : ""}` +
+        `${transient ? " — for this sign-in only" : ""}.`
     );
     outputJson({
       ok: true,
@@ -756,6 +809,22 @@ async function cmdAdd(flags) {
       access: effectiveAccess(stored),
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt,
+      ...(transient
+        ? {
+            transient: true,
+            note:
+              "The owner chose not to keep this credential. It exists for this sign-in only: " +
+              "auto-login removes it once the sign-in completes, and otherwise it is dropped " +
+              "on the next vault open after 30 minutes.",
+          }
+        : {}),
+      ...(!keep && keepsExisting
+        ? {
+            note:
+              `The owner turned off Save to vault, but '${name}' was already saved; ` +
+              "the stored credential was updated and kept.",
+          }
+        : {}),
     });
   } finally {
     vault.lock();

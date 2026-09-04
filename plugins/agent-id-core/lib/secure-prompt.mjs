@@ -21,7 +21,11 @@
 //
 // `spec` is exactly the shape collectViaForm already accepts:
 //   { title, description, fields, label, security, submitLabel, timeoutMs }
-//   fields: [{ name, label?, secret?=true, required?=true, multiline?, placeholder? }]
+//   fields: [{ name, label?, secret?=true, required?=true, multiline?, placeholder?,
+//              kind?="text"|"checkbox", default? }]
+//   A checkbox field answers with the string "true" / "false"; `default` is its
+//   initial state in the same domain. A host that never rendered the box sends
+//   nothing, and the caller reads absence as its default.
 //
 // resolveSecurePrompt() picks the first available provider whose capabilities
 // satisfy the spec, in order: hosted → …extraProviders (e.g. mobile) → browser → tty.
@@ -34,8 +38,8 @@ import http from "node:http";
 
 import { collectViaForm } from "./secure-form.mjs";
 import {
-  promptSecret,
-  promptText,
+  promptSecret as promptSecretOnTty,
+  promptText as promptTextOnTty,
   hasTty,
   notifyTty,
 } from "./trusted-input.mjs";
@@ -68,8 +72,10 @@ export class BrowserFormProvider {
 // ─── /dev/tty prompt (the no-GUI fallback) ───────────────────────────────────────
 
 export class TtyProvider {
-  constructor() {
+  constructor({ promptText = promptTextOnTty, promptSecret = promptSecretOnTty } = {}) {
     this.name = "tty";
+    this._promptText = promptText;
+    this._promptSecret = promptSecret;
   }
   isAvailable() {
     return hasTty();
@@ -87,9 +93,15 @@ export class TtyProvider {
     const values = {};
     for (const f of fields) {
       const label = f.label || f.name;
+      if (f.kind === "checkbox") {
+        const on = String(f.default ?? "false") === "true";
+        const answer = this._promptText(`  ${label} [${on ? "Y/n" : "y/N"}]: `).trim().toLowerCase();
+        values[f.name] = answer === "" ? String(on) : String(answer === "y" || answer === "yes");
+        continue;
+      }
       const opt = f.required === false ? " (optional)" : "";
       const prompt = `  ${label}${opt}: `;
-      values[f.name] = f.secret === false ? promptText(prompt) : promptSecret(prompt);
+      values[f.name] = f.secret === false ? this._promptText(prompt) : this._promptSecret(prompt);
     }
     return { values };
   }

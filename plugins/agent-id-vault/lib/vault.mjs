@@ -46,7 +46,9 @@ import {
   addCredential,
   emptyPayload,
   getCredential,
+  consumeTransient,
   listMetadata,
+  sweepTransient,
   parsePayload,
   removeCredential,
   serializePayload,
@@ -182,7 +184,7 @@ export async function openVault({
   const payloadJson = decryptPayload(masterKey, file.payload);
   const payload = parsePayload(payloadJson);
 
-  return buildVaultHandle({ stateDir, file, masterKey, payload });
+  return openedHandle({ stateDir, file, masterKey, payload });
 }
 
 // Open the vault when the master key was recovered out-of-band — e.g. the
@@ -215,6 +217,15 @@ export async function openVaultWithMasterKey({ stateDir, masterKey }) {
   }
   verifyModeTag(file, masterKey);
 
+  return openedHandle({ stateDir, file, masterKey, payload });
+}
+
+// Every open drops the transient records whose window has closed, so no reader
+// sees one past its time. The sweep is in memory only: an open that also wrote
+// would turn `list` and `show` into writers racing whoever is mid-`add`. The
+// disk catches up with the next real save, which carries the swept payload.
+function openedHandle({ stateDir, file, masterKey, payload }) {
+  sweepTransient(payload);
   return buildVaultHandle({ stateDir, file, masterKey, payload });
 }
 
@@ -321,6 +332,10 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     remove(name) {
       assertOpen();
       return removeCredential(state.payload, name);
+    },
+    consumeTransient(name) {
+      assertOpen();
+      return consumeTransient(state.payload, name);
     },
     touchLastUsed(name) {
       assertOpen();

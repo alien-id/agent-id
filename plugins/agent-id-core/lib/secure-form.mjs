@@ -164,9 +164,23 @@ function openForWebauthn(url, size) {
 // Tight initial size; the page's resize script then shrinks the window to the
 // content's true size once rendered (app windows are script-resizable).
 function windowSizeFor(fields) {
-  const rows = Array.isArray(fields) ? fields.length : 1;
-  const multiline = Array.isArray(fields) && fields.some((f) => f.multiline);
-  return { width: 360, height: 250 + 66 * rows + (multiline ? 130 : 0) };
+  const list = Array.isArray(fields) ? fields : [];
+  const checks = list.filter(isCheckbox).length;
+  const rows = Math.max(1, list.length - checks);
+  const multiline = list.some((f) => f.multiline);
+  return { width: 360, height: 250 + 66 * rows + 36 * checks + (multiline ? 130 : 0) };
+}
+
+function isCheckbox(f) {
+  return f && f.kind === "checkbox";
+}
+
+// An unticked HTML checkbox posts nothing, so the answer is read against the
+// field, not the body: present means on, absent means off. That keeps "off"
+// apart from "this form never had the box", which the consumer reads as the
+// default.
+function checkboxValue(params, f) {
+  return params.get(f.name) === "true" ? "true" : "false";
 }
 
 // Inline padlock — the "secure" logo. Stroke follows currentColor.
@@ -195,6 +209,8 @@ const SECURE_CSS = `
  .why code{font-family:ui-monospace,Menlo,Consolas,monospace}
  label{display:block;margin:.5rem 0 .16rem;font-weight:600;font-size:.84rem}
  .opt{font-weight:400;color:#9ca3af}
+ label.check{display:flex;align-items:center;gap:.5rem;margin:.75rem 0 0;font-weight:500;cursor:pointer}
+ label.check input{width:1rem;height:1rem;margin:0;padding:0;accent-color:#16a34a}
  input,textarea{width:100%;padding:.46rem .52rem;font:inherit;border:1px solid #16a34a66;
    background:Field;color:FieldText}
  textarea{resize:vertical;min-height:4.2rem}
@@ -272,6 +288,10 @@ function renderForm({ token, title, description, fields, security, submitLabel, 
         const label = htmlEscape(f.label || f.name);
         const req = f.required === false ? "" : "required";
         const ph = f.placeholder ? `placeholder="${htmlEscape(f.placeholder)}"` : "";
+        if (isCheckbox(f)) {
+          const on = String(f.default ?? "false") === "true" ? " checked" : "";
+          return `<label class="check"><input id="${id}" name="${id}" type="checkbox" value="true"${on}>${label}</label>`;
+        }
         const input = f.multiline
           ? `<textarea id="${id}" name="${id}" rows="5" ${req} ${ph} autocomplete="off"></textarea>`
           : `<input id="${id}" name="${id}" type="${f.secret === false ? "text" : "password"}" ${req} ${ph} autocomplete="off" autocapitalize="off" spellcheck="false">`;
@@ -313,7 +333,10 @@ const DONE_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Done<
  * Serve a one-shot secure form and resolve with the submitted field values.
  *
  *   title, description — shown on the page
- *   fields   — [{ name, label?, secret?=true, required?=true, multiline?, placeholder? }]
+ *   fields   — [{ name, label?, secret?=true, required?=true, multiline?, placeholder?,
+ *                kind?="text"|"checkbox", default? }]
+ *              a checkbox posts "true" / "false" (absent in the submit = "false");
+ *              `default` is its initial state, as the same string
  *   label    — short phrase for the waiting notice ("unlock the vault", …)
  *   timeoutMs — default 5 min; rejects (code FORM_TIMEOUT) if no submit
  *   open      — auto-open the browser (default true)
@@ -394,7 +417,9 @@ export function collectViaForm({
             return;
           }
           const values = {};
-          for (const f of effFields) values[f.name] = params.get(f.name) ?? "";
+          for (const f of effFields) {
+            values[f.name] = isCheckbox(f) ? checkboxValue(params, f) : params.get(f.name) ?? "";
+          }
           res.writeHead(200, PAGE_HEADERS);
           // Resolve only once the done-page has flushed to the browser.
           res.end(DONE_PAGE, () => finish(() => resolve({ values })));

@@ -266,6 +266,10 @@ async function cmdAutoLogin(flags) {
     }
 
     vault.touchLastUsed(credName);
+    // A credential the owner chose not to keep was kept for the sign-in that
+    // just completed and no longer; the session in the browser's profile is
+    // what outlives it.
+    const credentialRemoved = vault.consumeTransient(credName);
     await vault.save();
     const recipeFailed = result.recipeFailed || null;
     outputJson({
@@ -274,12 +278,16 @@ async function cmdAutoLogin(flags) {
       outcome: result.outcome,
       finalUrl: result.finalUrl,
       ...(recipeFailed ? { recipeFailed } : {}),
+      credentialRemoved,
       message:
         `Signed in as '${credName}'. The browser holds the session; its own profile keeps the ` +
         "cookies (close it, or flush it, to be sure they are on disk)." +
         (recipeFailed
-          ? ` The stored recipe failed at '${recipeFailed.step ?? "?"}' and was bypassed; clear it ` +
+          ? ` The stored recipe failed at '${recipeFailed.step ?? "?"}' and was bypassed; clear ` +
             `the stored recipe on '${credName}' so the next sign-in does not try it.`
+          : "") +
+        (credentialRemoved
+          ? ` The credential '${credName}' was kept for this sign-in only and has been removed.`
           : ""),
     });
   } catch (err) {

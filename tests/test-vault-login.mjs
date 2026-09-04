@@ -301,6 +301,7 @@ test("add --type login --passwordless --form shows a single identifier field, an
           ...process.env,
           AGENT_ID_NO_BROWSER: "1",
           AGENT_ID_SECURE_PROMPT: "browser",
+          AGENT_ID_SAVE_TO_VAULT_BOX: "1",
         },
       }
     );
@@ -312,13 +313,19 @@ test("add --type login --passwordless --form shows a single identifier field, an
     const u = new URL(await waitForUrl(child));
     const token = u.searchParams.get("t");
 
-    // The card itself is the contract: one field, and it is the identifier.
+    // The card itself is the contract: one field to type, the identifier — and
+    // the owner's say over keeping it, which is a box, not a field.
     const html = await (await fetch(u)).text();
     const names = [...html.matchAll(/<input[^>]*\bname="([^"]+)"/g)]
       .map((m) => m[1])
       .filter((n) => n !== "_token");
-    assert.deepEqual(names, ["username"], `expected one identifier field, got ${names.join(", ")}`);
+    assert.deepEqual(
+      names,
+      ["username", "saveToVault"],
+      `expected the identifier and the Save to vault box, got ${names.join(", ")}`,
+    );
     assert.ok(!/type="password"/.test(html), "a passwordless card must render no password input");
+    assert.match(html, /name="saveToVault" type="checkbox" value="true" checked/, "the box starts ticked");
 
     const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
       method: "POST",
@@ -702,6 +709,182 @@ test("a card simply dismissed is not the browser, and is not retryable either", 
     assert.equal(out.reason, "owner_dismissed_the_card");
     assert.equal(out.retryable, false);
     assert.equal(out.action, undefined, "a dismissal asks for nothing to happen instead");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── the "Save to vault" box ─────────────────────────────────────────────────────
+
+async function addLoginThroughTheForm(dir, submitFields, { box = "1" } = {}) {
+  const child = spawn(
+    "node",
+    [
+      CLI, "add", "--name", "booking", "--type", "login",
+      "--passwordless", "--otp", "interactive",
+      "--login-url", "https://account.example.com/sign-in",
+      "--form", "--state-dir", dir,
+    ],
+    {
+      env: {
+        ...process.env,
+        AGENT_ID_NO_BROWSER: "1",
+        AGENT_ID_SECURE_PROMPT: "browser",
+        AGENT_ID_SAVE_TO_VAULT_BOX: box,
+      },
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => (stdout += d));
+  child.stderr.on("data", (d) => (stderr += d));
+  const u = new URL(await waitForUrl(child));
+  const html = await (await fetch(u)).text();
+  const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
+    method: "POST",
+    body: new URLSearchParams({ _token: u.searchParams.get("t"), ...submitFields }),
+  });
+  assert.equal(res.status, 200);
+  const code = await new Promise((r) => child.on("exit", r));
+  assert.equal(code, 0, `CLI failed: ${stderr}`);
+  return { ...JSON.parse(stdout), html };
+}
+
+test("with the box off (the default), the card has no Save to vault row and the credential is kept", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-login-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const out = await addLoginThroughTheForm(dir, { username: "d@example.com" }, { box: "" });
+    assert.equal(out.ok, true);
+    assert.equal("transient" in out, false);
+    assert.doesNotMatch(out.html, /name="saveToVault"/, "no box until the phone can draw one");
+    assert.doesNotMatch(out.html, /Save to vault to use it once/, "and no line telling the owner to turn it off");
+
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    assert.equal("transient" in vault.get("booking"), false);
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unticked Save to vault box stores the credential for this sign-in only", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-login-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const before = Date.now();
+    const out = await addLoginThroughTheForm(dir, { username: "d@example.com" });
+    // An unchecked HTML checkbox posts nothing, and that is the "no" the card means.
+    assert.equal(out.ok, true);
+    assert.equal(out.transient, true);
+    assert.match(out.note, /this sign-in only/);
+    assert.match(out.html, /Turn off Save to vault to use it once/);
+
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    const rec = vault.get("booking");
+    assert.equal(rec.username, "d@example.com");
+    assert.ok(!("saveToVault" in rec), "the box is the owner's answer, never a field of the record");
+    assert.ok(rec.transient.until > before + 25 * 60 * 1000, "kept long enough for one sign-in");
+    assert.equal(vault.list().find((c) => c.name === "booking").transient, true);
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a ticked Save to vault box — or a card without one — keeps the credential", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-login-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const out = await addLoginThroughTheForm(dir, { username: "d@example.com", saveToVault: "true" });
+    assert.equal(out.ok, true);
+    assert.equal("transient" in out, false);
+
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    const rec = vault.get("booking");
+    assert.equal("transient" in rec, false);
+    assert.ok(!("saveToVault" in rec));
+    assert.equal("transient" in vault.list().find((c) => c.name === "booking"), false);
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("turning the box off on a re-add keeps a credential the owner already saved", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-login-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const first = await addLoginThroughTheForm(dir, { username: "old@example.com", saveToVault: "true" });
+    assert.equal("transient" in first, false);
+
+    const again = await addLoginThroughTheForm(dir, { username: "new@example.com" });
+    assert.equal(again.ok, true);
+    assert.equal("transient" in again, false);
+    assert.match(again.note, /already saved/);
+
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    const rec = vault.get("booking");
+    assert.equal(rec.username, "new@example.com", "the re-add still updates the record");
+    assert.equal("transient" in rec, false, "and leaves it a kept one");
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a transient credential past its window is gone on the next open, without that open writing the vault", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-login-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    vault.add(loginRec({ name: "expired", transient: { until: Date.now() - 1 } }));
+    vault.add(loginRec({ name: "live", transient: { until: Date.now() + 60_000 } }));
+    vault.add(loginRec({ name: "kept" }));
+    await vault.save();
+    vault.lock();
+    const vaultFile = statePaths(dir).vaultFile;
+    const onDiskBefore = await readFile(vaultFile, "utf8");
+
+    // Every reader sees it gone, and a read-only open is still read-only: `list`
+    // racing an `add` must never write a payload of its own over the new record.
+    const reopened = await openVault({ stateDir: dir, privateKeyPem });
+    assert.deepEqual(reopened.list().map((c) => c.name).sort(), ["kept", "live"]);
+    assert.equal(reopened.get("expired"), null);
+    assert.equal(await readFile(vaultFile, "utf8"), onDiskBefore, "an open alone does not write");
+
+    // The next real save carries the swept payload, so the disk catches up then.
+    await reopened.save();
+    reopened.lock();
+    const again = await openVault({ stateDir: dir, privateKeyPem });
+    assert.equal(again.get("expired"), null);
+    assert.notEqual(await readFile(vaultFile, "utf8"), onDiskBefore);
+    again.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("consumeTransient removes a transient credential once, and never a kept one", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-login-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    vault.add(loginRec({ name: "once", transient: { until: Date.now() + 60_000 } }));
+    vault.add(loginRec({ name: "kept" }));
+
+    assert.equal(vault.consumeTransient("once"), true);
+    assert.equal(vault.get("once"), null);
+    assert.equal(vault.consumeTransient("once"), false, "already gone");
+    assert.equal(vault.consumeTransient("kept"), false);
+    assert.ok(vault.get("kept"), "a kept credential is not the sign-in's to remove");
+    assert.equal(vault.consumeTransient("nobody"), false);
+    await vault.save();
+    vault.lock();
+
+    const reopened = await openVault({ stateDir: dir, privateKeyPem });
+    assert.deepEqual(reopened.list().map((c) => c.name), ["kept"]);
+    reopened.lock();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
