@@ -266,10 +266,10 @@ async function cmdAutoLogin(flags) {
     }
 
     vault.touchLastUsed(credName);
-    // The owner unticked "Save to vault" when this credential was collected: it
-    // was kept for the sign-in that just completed and no longer. The session
-    // in the browser's profile is what outlives it.
-    const credentialRemoved = Boolean(cred.transient) && vault.remove(credName) != null;
+    // A credential the owner chose not to keep was kept for the sign-in that
+    // just completed and no longer; the session in the browser's profile is
+    // what outlives it.
+    const credentialRemoved = vault.consumeTransient(credName);
     await vault.save();
     const recipeFailed = result.recipeFailed || null;
     outputJson({

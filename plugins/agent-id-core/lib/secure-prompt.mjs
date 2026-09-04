@@ -38,8 +38,8 @@ import http from "node:http";
 
 import { collectViaForm } from "./secure-form.mjs";
 import {
-  promptSecret,
-  promptText,
+  promptSecret as promptSecretOnTty,
+  promptText as promptTextOnTty,
   hasTty,
   notifyTty,
 } from "./trusted-input.mjs";
@@ -72,8 +72,10 @@ export class BrowserFormProvider {
 // ─── /dev/tty prompt (the no-GUI fallback) ───────────────────────────────────────
 
 export class TtyProvider {
-  constructor() {
+  constructor({ promptText = promptTextOnTty, promptSecret = promptSecretOnTty } = {}) {
     this.name = "tty";
+    this._promptText = promptText;
+    this._promptSecret = promptSecret;
   }
   isAvailable() {
     return hasTty();
@@ -93,13 +95,13 @@ export class TtyProvider {
       const label = f.label || f.name;
       if (f.kind === "checkbox") {
         const on = String(f.default ?? "false") === "true";
-        const answer = promptText(`  ${label} [${on ? "Y/n" : "y/N"}]: `).trim().toLowerCase();
+        const answer = this._promptText(`  ${label} [${on ? "Y/n" : "y/N"}]: `).trim().toLowerCase();
         values[f.name] = answer === "" ? String(on) : String(answer === "y" || answer === "yes");
         continue;
       }
       const opt = f.required === false ? " (optional)" : "";
       const prompt = `  ${label}${opt}: `;
-      values[f.name] = f.secret === false ? promptText(prompt) : promptSecret(prompt);
+      values[f.name] = f.secret === false ? this._promptText(prompt) : this._promptSecret(prompt);
     }
     return { values };
   }

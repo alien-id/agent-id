@@ -46,6 +46,7 @@ import {
   addCredential,
   emptyPayload,
   getCredential,
+  consumeTransient,
   listMetadata,
   sweepTransient,
   parsePayload,
@@ -219,14 +220,13 @@ export async function openVaultWithMasterKey({ stateDir, masterKey }) {
   return openedHandle({ stateDir, file, masterKey, payload });
 }
 
-// Every open sweeps the transient records whose window has closed and writes
-// the vault back when it dropped any, so "not saved" is true on disk and not
-// only in the answer to `list`.
-async function openedHandle({ stateDir, file, masterKey, payload }) {
-  const swept = sweepTransient(payload);
-  const handle = buildVaultHandle({ stateDir, file, masterKey, payload });
-  if (swept.length > 0) await handle.save();
-  return handle;
+// Every open drops the transient records whose window has closed, so no reader
+// sees one past its time. The sweep is in memory only: an open that also wrote
+// would turn `list` and `show` into writers racing whoever is mid-`add`. The
+// disk catches up with the next real save, which carries the swept payload.
+function openedHandle({ stateDir, file, masterKey, payload }) {
+  sweepTransient(payload);
+  return buildVaultHandle({ stateDir, file, masterKey, payload });
 }
 
 // Read the mobile-slot challenges without unlocking. The proxy hands these to
@@ -332,6 +332,10 @@ function buildVaultHandle({ stateDir, file, masterKey, payload }) {
     remove(name) {
       assertOpen();
       return removeCredential(state.payload, name);
+    },
+    consumeTransient(name) {
+      assertOpen();
+      return consumeTransient(state.payload, name);
     },
     touchLastUsed(name) {
       assertOpen();

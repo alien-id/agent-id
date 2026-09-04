@@ -440,6 +440,15 @@ export function isTransient(rec) {
   return Boolean(rec && rec.transient && typeof rec.transient === "object");
 }
 
+// The sign-in a transient record was kept for has completed: drop it. True when
+// a record went, false when there was none or it is a kept one.
+export function consumeTransient(payload, name) {
+  const rec = getCredential(payload, name);
+  if (!isTransient(rec)) return false;
+  removeCredential(payload, name);
+  return true;
+}
+
 // Drop every transient record whose time is up. Runs on every open, so a
 // credential the owner chose not to keep is never returned past its window
 // even when the sign-in that asked for it never came back to remove it.

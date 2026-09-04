@@ -148,6 +148,37 @@ test("TtyProvider is single-line only (multiline:false)", () => {
   assert.equal(new TtyProvider().capabilities().multiline, false);
 });
 
+test("TtyProvider asks a checkbox as [Y/n] and answers \"true\" / \"false\", empty meaning the default", async () => {
+  const box = { name: "saveToVault", label: "Save to vault", kind: "checkbox", default: "true", required: false };
+  const ask = async (fields, typed) => {
+    const prompts = [];
+    const tty = new TtyProvider({
+      promptText: (p) => {
+        prompts.push(p);
+        return typed;
+      },
+      promptSecret: () => {
+        throw new Error("a checkbox is never read as a secret");
+      },
+    });
+    const { values } = await tty.collect({ fields });
+    return { values, prompts };
+  };
+
+  const on = await ask([box], "");
+  assert.deepEqual(on.values, { saveToVault: "true" });
+  assert.match(on.prompts[0], /Save to vault \[Y\/n\]/);
+
+  assert.deepEqual((await ask([box], "n")).values, { saveToVault: "false" });
+  assert.deepEqual((await ask([box], "No")).values, { saveToVault: "false" });
+  assert.deepEqual((await ask([box], "yes")).values, { saveToVault: "true" });
+
+  const off = await ask([{ ...box, default: "false" }], "");
+  assert.deepEqual(off.values, { saveToVault: "false" });
+  assert.match(off.prompts[0], /\[y\/N\]/);
+  assert.deepEqual((await ask([{ ...box, default: "false" }], "y")).values, { saveToVault: "true" });
+});
+
 test("resolver: AGENT_ID_SECURE_PROMPT forces a backend (overriding availability + order)", () => {
   // Forces tty even though a browser is available…
   assert.equal(resolveSecurePrompt({ env: { AGENT_ID_SECURE_PROMPT: "tty" } }).name, "tty");
