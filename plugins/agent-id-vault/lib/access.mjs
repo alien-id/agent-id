@@ -70,11 +70,14 @@ export function hostMatchesAllowlist(host, allowlist) {
 // never interpolated — only the host — so this is safe to hand to an agent.
 export function assertHostAllowed(host, domains, what) {
   if (hostMatchesAllowlist(host, domains)) return;
-  throw new Error(
+  const e = new Error(
     `${what} "${host || "(no host)"}" — not on the credential's domain allowlist ` +
       `(${(domains || []).join(", ") || "none"}). Add the host to the credential's ` +
       "domains (wildcards like *.example.com are allowed), or fix the credential.",
   );
+  e.code = "HOST_NOT_ALLOWED";
+  e.host = host || null;
+  throw e;
 }
 
 // ─── Naming a credential on screen ────────────────────────────────────────────

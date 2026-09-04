@@ -272,19 +272,19 @@ test("runRecipe fails closed when the page cannot report its origin", async () =
 });
 
 test("autoLogin refuses a loginUrl off the credential's allowlist, before opening anything", async () => {
-  await assert.rejects(
-    autoLogin({
-      page: {},
-      cred: {
-        name: "c",
-        username: "u",
-        password: "p",
-        loginUrl: "https://evil.test/login",
-        domains: ["x"],
-      },
-    }),
-    /not on the credential's domain allowlist/
-  );
+  const result = await autoLogin({
+    page: {},
+    cred: {
+      name: "c",
+      username: "u",
+      password: "p",
+      loginUrl: "https://evil.test/login",
+      domains: ["x"],
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "domain-not-allowed");
+  assert.match(result.errorText, /not on the credential's domain allowlist/);
 });
 
 test("resolveOtp generates a code from a stored TOTP seed (RFC vector)", async () => {
@@ -1059,6 +1059,202 @@ test("a secret step's failure keeps the cause and strikes the value out", async 
       assert.match(err.message, /no element matches #pass/);
       assert.match(err.message, /•••/);
       assert.doesNotMatch(err.message, /s3cret-pass/);
+      return true;
+    }
+  );
+});
+
+// ── Only the engine's own codes leave a recipe step as they are ──────────────────
+
+test("a browser error that carries a code of its own is still a failed recipe step", async () => {
+  const driver = {
+    ...recordingDriver([]),
+    click: async () => {
+      throw Object.assign(new Error("something else owns the point (Session.dom.click)"), { code: -32000 });
+    },
+  };
+  await assert.rejects(
+    runRecipe(pageOn("https://x/login"), [{ action: "click", selector: "#submit" }], {
+      username: "daniel@x.test",
+      password: "s3cret-pass",
+      getOtp: async () => "1",
+      domains: ["x"],
+      driver,
+    }),
+    (err) => {
+      assert.equal(err.code, "RECIPE_STEP_FAILED");
+      assert.equal(err.step, "#submit");
+      assert.equal(err.otpConsumed, false);
+      assert.match(err.message, /owns the point/);
+      return true;
+    }
+  );
+});
+
+test("a card ending inside a recipe step passes through untouched", async () => {
+  const timedOut = Object.assign(new Error("the card expired"), { code: "FORM_TIMEOUT" });
+  const driver = {
+    ...recordingDriver([]),
+    click: async () => {
+      throw timedOut;
+    },
+  };
+  await assert.rejects(
+    runRecipe(pageOn("https://x/login"), [{ action: "click", selector: "#submit" }], {
+      username: "u",
+      password: "p",
+      getOtp: async () => "1",
+      domains: ["x"],
+      driver,
+    }),
+    (err) => err === timedOut
+  );
+});
+
+test("a failed step strikes the username out of the cause too", async () => {
+  const driver = {
+    ...recordingDriver([]),
+    fill: async (_p, sel, val) => {
+      throw new Error(`no element matches ${sel} to receive ${val}`);
+    },
+  };
+  await assert.rejects(
+    runRecipe(
+      pageOn("https://x/login"),
+      [{ action: "fill", selector: "#user", value: "{username}" }],
+      { username: "daniel@x.test", password: "p", getOtp: async () => "1", domains: ["x"], driver }
+    ),
+    (err) => {
+      assert.equal(err.code, "RECIPE_STEP_FAILED");
+      assert.match(err.message, /•••/);
+      assert.doesNotMatch(err.message, /daniel@x\.test/);
+      return true;
+    }
+  );
+});
+
+// ── Once the owner has answered a card, the sign-in is not started over ───────────
+
+test("a recipe that fails after the code was entered continues from the current page", async () => {
+  const loginUrl = "https://x.test/login";
+  const page = fallbackPage(loginUrl);
+  const gotos = [];
+  page.goto = async (url) => {
+    gotos.push(url);
+    page.current = url;
+  };
+  // The code screen: the round loop reads a signed-in page (the code went in
+  // before the step that failed), and the code-row probe finds no row.
+  page.evaluate = async (_fn, arg) =>
+    arg
+      ? null
+      : {
+          hasPasswordField: false,
+          hasIdentifierField: false,
+          hasOtpField: false,
+          otpFieldNames: [],
+          bodyText: "Welcome back, Daniel",
+          blocked: false,
+          errorText: null,
+        };
+  page.fill = async (selector) => {
+    if (selector === "#otp") throw new Error("boom");
+    page.current = "https://x.test/account";
+  };
+  let formLogins = 0;
+  let otpAsks = 0;
+  const result = await autoLogin({
+    page,
+    cred: {
+      name: "steam",
+      username: "daniel@x.test",
+      password: "s3cret-pass",
+      otp: "interactive",
+      loginUrl,
+      domains: ["x.test"],
+      recipe: [
+        { action: "fill", selector: "#user", value: "{username}" },
+        { action: "fill", selector: "#pass", value: "{password}" },
+        { action: "fill", selector: "#otp", value: "{otp}" },
+      ],
+    },
+    settleMs: 0,
+    resolveOtpFn: async () => {
+      otpAsks++;
+      return "123456";
+    },
+    formLoginFn: async () => {
+      formLogins++;
+    },
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.recipeFailed?.step, "{otp}");
+  assert.equal(otpAsks, 1, "the owner was asked once");
+  assert.equal(formLogins, 0, "the heuristics did not retype the values");
+  assert.equal(gotos.filter((url) => url === loginUrl).length, 1, "the page was not sent back to the start");
+});
+
+// ── A host off the allowlist is an outcome, not a crash ───────────────────────────
+
+test("a recipe that leaves the credential's domains ends as domain-not-allowed", async () => {
+  const page = fallbackPage("https://x.test/login");
+  const result = await autoLogin({
+    page,
+    cred: {
+      name: "steam",
+      username: "daniel",
+      password: "p",
+      loginUrl: "https://x.test/login",
+      domains: ["x.test"],
+      recipe: [{ action: "navigate", url: "https://evil.test/steal" }],
+    },
+    settleMs: 0,
+    formLoginFn: async () => assert.fail("the heuristics must not run on a refused recipe"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "domain-not-allowed");
+  assert.match(result.errorText, /evil\.test/);
+  assert.equal("recipeFailed" in result, false);
+});
+
+test("a loginUrl off the allowlist is the same outcome before the browser moves", async () => {
+  const page = fallbackPage("https://x.test/login");
+  page.goto = async () => assert.fail("no navigation on a refused loginUrl");
+  const result = await autoLogin({
+    page,
+    cred: { name: "steam", username: "u", password: "p", loginUrl: "https://evil.test/login", domains: ["x.test"] },
+    settleMs: 0,
+  });
+
+  assert.equal(result.outcome, "domain-not-allowed");
+  assert.match(result.errorText, /loginUrl: refusing/);
+});
+
+// ── The report survives a fallback that then dies ─────────────────────────────────
+
+test("a fallback that throws still names the recipe step that failed", async () => {
+  const page = fallbackPage("https://x.test/login");
+  await assert.rejects(
+    autoLogin({
+      page,
+      cred: {
+        name: "steam",
+        username: "daniel",
+        password: "p",
+        loginUrl: "https://x.test/login",
+        domains: ["x.test"],
+        recipe: [{ action: "fill", selector: "#does-not-exist", value: "{username}" }],
+      },
+      settleMs: 0,
+      formLoginFn: async () => {
+        throw new Error("locator #i0116 was not visible within 15000ms");
+      },
+    }),
+    (err) => {
+      assert.match(err.message, /#i0116/);
+      assert.equal(err.recipeFailed?.step, "{username}");
       return true;
     }
   );

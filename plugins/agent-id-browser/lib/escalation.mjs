@@ -194,7 +194,21 @@ function escalationMessage(outcome, { credName = "", profile = "", pageError = n
           `${pageError ? ` (${pageError})` : ""}. The stored credential was not rejected — ` +
           "leave it in the vault and do NOT remove it. Ask the owner to sign in once in the " +
           `browser view for profile '${profile}'. If the message names a recipe step, the ` +
-          "recipe is wrong: clear it (`set-recipe --clear`) before the next auto-login.",
+          "recipe is wrong: clear the stored recipe before the next auto-login.",
+      };
+    // The sign-in reached a host the credential was never scoped to — a redirect
+    // through an identity provider, a recipe step pointing off-site. The secret
+    // was withheld, so nothing about it is in doubt, and no human at the page
+    // changes what the allowlist says: the allowlist has to.
+    case "domain-not-allowed":
+      return {
+        action: FIX_CREDENTIAL,
+        reason: "host_not_in_domains",
+        message:
+          `The sign-in for '${credName}' reached a host outside the credential's domains` +
+          `${pageError ? ` (${pageError})` : ""}, so the secret was withheld. Add that host to ` +
+          "the credential's `domains` (wildcards like *.example.com are allowed) and run " +
+          "auto-login again. The stored values are fine — never remove the credential for this.",
       };
     // Timed out or never resolved: could be a changed form, an unusual flow, or
     // an identity provider that refuses automation. A human at the page both

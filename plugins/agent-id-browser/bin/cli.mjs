@@ -194,12 +194,15 @@ async function cmdAutoLogin(flags) {
     // wrong password is distinguishable from a changed form or a redirect that
     // was never awaited. Never includes a secret.
     const trace = [];
-    // Any occurrence of the password in an error is struck out before it can
-    // reach stdout; the message class (a selector that never appeared, a
+    // Any occurrence of the stored values in an error is struck out before it
+    // can reach stdout; the message class (a selector that never appeared, a
     // browser that went away) is what the caller needs and is kept.
     const redacted = (text) => {
-      const out = String(text ?? "");
-      return cred.password ? out.split(cred.password).join("•••") : out;
+      let out = String(text ?? "");
+      for (const secret of [cred.password, cred.username]) {
+        if (typeof secret === "string" && secret.length > 0) out = out.split(secret).join("•••");
+      }
+      return out;
     };
     let result;
     try {
@@ -226,7 +229,13 @@ async function cmdAutoLogin(flags) {
       // `action` it gets for any other ending. Left as a bare error it once
       // read as a verdict on the credential, and the record the owner had just
       // typed was deleted for it.
-      result = { ok: false, outcome: "error", finalUrl: null, errorText: redacted(err?.message ?? err) };
+      result = {
+        ok: false,
+        outcome: "error",
+        finalUrl: null,
+        errorText: redacted(err?.message ?? err),
+        ...(err?.recipeFailed ? { recipeFailed: err.recipeFailed } : {}),
+      };
     }
 
     if (!result || !result.ok) {
@@ -270,7 +279,7 @@ async function cmdAutoLogin(flags) {
         "cookies (close it, or flush it, to be sure they are on disk)." +
         (recipeFailed
           ? ` The stored recipe failed at '${recipeFailed.step ?? "?"}' and was bypassed; clear it ` +
-            `(\`set-recipe --name ${credName} --clear\`) so the next sign-in does not try it.`
+            `the stored recipe on '${credName}' so the next sign-in does not try it.`
           : ""),
     });
   } catch (err) {

@@ -14,7 +14,13 @@ deleted the credential the owner had typed a minute earlier.
   the redacted cause) sends the page back to the login URL and hands the run to
   the same form heuristics that sign a recipe-less credential in. The result
   carries `recipeFailed: { step, cause }` and the success message says to clear
-  the recipe. Card outcomes inside the recipe are unchanged.
+  the recipe. Card outcomes inside the recipe are unchanged. Once the owner has
+  answered a code card, a failing step no longer restarts the sign-in — the
+  round loop reads the page as it stands, so one sign-in raises one card.
+- A sign-in that reaches a host outside the credential's `domains` ends as
+  `domain-not-allowed` (`fix_credential`, `host_not_in_domains`) instead of a
+  crash: the fix is the allowlist, not a human at the page.
+- Error causes strike out the username as well as the password and the code.
 - A run that throws is reported as `AUTO_LOGIN_FAILED` with `outcome: "error"`,
   `action: owner_must_drive`, `pageError` and the `trace`, like every other
   ending.
