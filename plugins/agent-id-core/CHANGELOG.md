@@ -1,5 +1,11 @@
 # @alien-id/agent-id-core
 
+## 7.7.0
+
+### Minor Changes
+
+- [#153](https://github.com/alien-id/agent-id/pull/153) [`0f5ea1f`](https://github.com/alien-id/agent-id/commit/0f5ea1f7821eacd765c0d4b6a6f70aea968b9a0c) Thanks [@stelchankad](https://github.com/stelchankad)! - Secure-input fields may declare `kind: "checkbox"` with a `default`; the local browser form and the tty prompt render it and answer with the string `"true"` / `"false"` (an unticked box posts nothing and reads as `"false"`, never as an absent field).
+
 ## 7.6.0
 
 ### Minor Changes
