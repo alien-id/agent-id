@@ -52,7 +52,6 @@ import {
 import {
   classifyLogin,
   codeDestination,
-  codeLengthFromText,
   maskDestination,
   OTP_BODY_RE,
 } from "./login-detect.mjs";
@@ -459,7 +458,6 @@ export async function resolveOtp(
     now,
     retry = false,
     destination = null,
-    length = null,
   } = {}
 ) {
   if (cred.otp === "totp" && cred.totpSecret) {
@@ -471,7 +469,7 @@ export async function resolveOtp(
       ...(now != null ? { now } : {}),
     });
   }
-  const spec = otpCardSpec(cred, { retry, destination, length });
+  const spec = otpCardSpec(cred, { retry, destination });
   log(`Waiting for the ${spec.fields[0].label.toLowerCase()} via the secure prompt…`);
   const { values } = await collectSecret(spec, { env });
 
@@ -482,20 +480,8 @@ export async function resolveOtp(
 // exported for the same reason `otpPromptWording` is: what the owner is shown is
 // worth asserting without standing up a prompt provider, and this is the one card
 // both auto-login and `fill_otp` raise.
-// The count the card is allowed to draw cells for. Outside this the screen falls
-// back to a plain field with a button, which is the only shape that cannot trap
-// someone: cells submit themselves when they fill, so a count that is too high
-// leaves a correct code unsubmittable with no button to press.
-const CODE_CELL_RANGE = [4, 8];
-
-export function otpCardLength(length) {
-  const [low, high] = CODE_CELL_RANGE;
-  return Number.isInteger(length) && length >= low && length <= high ? length : null;
-}
-
-export function otpCardSpec(cred, { retry = false, destination = null, length = null } = {}) {
+export function otpCardSpec(cred, { retry = false, destination = null } = {}) {
   const wording = otpPromptWording(cred, { retry, destination });
-  const cells = otpCardLength(length);
 
   return {
     title: wording.title,
@@ -506,16 +492,7 @@ export function otpCardSpec(cred, { retry = false, destination = null, length = 
     // which is exactly the transcription whose slips the dots would hide. A wrong
     // code costs another round trip to the mailbox; watching it being typed
     // costs nothing.
-    // The screen reads the placeholder as the cell count — the one hint that
-    // already travels the whole way to the phone. Absent, it draws a text field.
-    fields: [
-      {
-        name: "otp",
-        label: wording.label,
-        secret: false,
-        ...(cells ? { placeholder: "•".repeat(cells) } : {}),
-      },
-    ],
+    fields: [{ name: "otp", label: wording.label, secret: false }],
     label: wording.ask,
     security: "Used once to complete sign-in; never stored or shown to the agent.",
     timeoutMs: otpCardBudgetMs(cred, { retry }),
@@ -584,22 +561,21 @@ export function otpModeCorrection(cred) {
 }
 
 // The row of single-character boxes a code screen is built from, in document
-// order — empty when the page uses one ordinary field. Same test as the cell
-// count in `otpCardHints`: a box qualifies by taking a code.
+// order — empty when the page uses one ordinary field. A box qualifies by taking
+// a code.
 export const OTP_BOX_SEL =
   'input[type="text"],input[type="tel"],input[type="number"],input[inputmode="numeric"],input[autocomplete="one-time-code"]';
 
 // The row members, once found, are tagged with this so the boxes the code is
-// typed into are the same elements the cell count was derived from. They used to
-// be two separate predicates — one reading `e.type`, the other
-// `getAttribute("type")` — which already disagreed on `type="TEL"`: the card
-// promised six cells and the fill path found no row at all.
+// typed into are the same elements the row predicate matched. They used to be two
+// separate predicates — one reading `e.type`, the other `getAttribute("type")` —
+// which already disagreed on `type="TEL"`, and the fill path then found no row at
+// all on a screen that plainly had one.
 export const OTP_ROW_ATTR = "data-aib-otp-box";
 
 // A code has at least four characters and at most eight; below four is not a row
-// and above eight is not a code. The cap matters on its own — the screen draws
-// one cell per character and submits on the last, so a count taken from nine
-// stray inputs would strand every answer.
+// and above eight is not a code. The cap matters on its own — nine stray numeric
+// inputs would otherwise be spread a code across.
 const OTP_ROW_MIN = 4;
 const OTP_ROW_MAX = 8;
 
@@ -747,28 +723,13 @@ export async function otpBoxesFor(target, selector) {
   return fit === "elsewhere" ? [] : boxes;
 }
 
+// Where the page says it sent the code, which is the one fact about a code the
+// card can state and the owner cannot look up. The length used to be read here
+// too — off a row of boxes, off a lone `one-time-code` field's `maxlength`, off
+// "6-digit code" in the copy — and travelled as the field's placeholder for the
+// screen to draw cells from. The screen draws one box now, so no reading of the
+// page can be wrong about a length nobody has to know.
 export async function otpCardHints(target) {
-  // Only an exact count. A row of boxes is one — there are as many as the code
-  // has characters. A single field's maxlength is NOT: it says "no more than",
-  // and a site is free to allow eight for a six-character code. Drawing eight
-  // cells for a six-character code is the one failure this screen cannot
-  // recover from, because it submits on the last cell and carries no button.
-  //
-  // With one exception, measured on shadcn's InputOTP — the component a great
-  // many sites take their code screen from. It draws the cells itself and takes
-  // the whole code in ONE field carrying `autocomplete="one-time-code"` and
-  // `maxlength`. A field that declares itself a code field is not budgeting for
-  // an unknown length: it is stating this code's. Without this such a site gets
-  // the plain fallback, which is safe but is the shape we are trying to leave.
-  const count = await target
-    .evaluate(otpRowInPage, {
-      selector: OTP_BOX_SEL,
-      min: OTP_ROW_MIN,
-      max: OTP_ROW_MAX,
-      attr: OTP_ROW_ATTR,
-      codeCopy: OTP_BODY_RE.source,
-    })
-    .catch(() => null);
   const bodyText = await target
     .evaluate(() =>
       document.body && document.body.innerText
@@ -777,33 +738,7 @@ export async function otpCardHints(target) {
     )
     .catch(() => "");
 
-  return {
-    length: count ?? (await declaredCodeFieldLength(target)) ?? codeLengthFromText(bodyText),
-    destination: codeDestination(bodyText),
-  };
-}
-
-// A single field that says it is a code field AND says how long: `one-time-code`
-// with a `maxlength` in range. Both halves are required — the attribute alone
-// leaves the length unknown, and a `maxlength` alone is the upper bound this
-// deliberately refuses.
-async function declaredCodeFieldLength(target) {
-  return target
-    .evaluate(
-      ({ min, max }) => {
-        const visible = (e) => !!(e.offsetParent !== null || e.getClientRects().length);
-        const fields = Array.from(
-          document.querySelectorAll('input[autocomplete="one-time-code"]'),
-        ).filter(visible);
-        if (fields.length !== 1) return null;
-
-        const declared = Number(fields[0].getAttribute("maxlength"));
-
-        return Number.isInteger(declared) && declared >= min && declared <= max ? declared : null;
-      },
-      { min: OTP_ROW_MIN, max: OTP_ROW_MAX },
-    )
-    .catch(() => null);
+  return { destination: codeDestination(bodyText) };
 }
 
 export async function detectPageState(page) {
@@ -903,11 +838,9 @@ function describeState(s) {
 // Booking.com's six-box screen holding one character, on both paths that write a
 // code — auto-login's own OTP step and a recipe's `{otp}`.
 export async function typeCodeInto(page, selector, code) {
-  // A second row detection, after the one `otpCardHints` ran to build the card.
-  // Deliberate: minutes pass between them while the owner reads their mail, and
-  // a row carried over from before that wait describes a page that may already
-  // have re-rendered. The saving would be one `evaluate`; the cost would be
-  // typing into locators that no longer point anywhere.
+  // Detected here rather than back when the card was raised: minutes pass while
+  // the owner reads their mail, and a row found before that wait describes a page
+  // that may already have re-rendered.
   const boxes = await otpBoxesFor(page, selector);
   if (boxes.length === 0) {
     // The OTP code is low-sensitivity (single-use, seconds-lived) but still goes
@@ -1250,8 +1183,7 @@ async function driveLogin({
     if (err?.code !== "HOST_NOT_ALLOWED") throw err;
     return { ok: false, outcome: "domain-not-allowed", finalUrl: null, errorText: err.message };
   }
-  const getOtp = (retry, destination, length) =>
-    resolveOtpFn(cred, { env, log, retry, destination, length });
+  const getOtp = (retry, destination) => resolveOtpFn(cred, { env, log, retry, destination });
   // One run answers a code challenge twice at most, and the second attempt is
   // deliberately cheap.
   //
@@ -1473,26 +1405,18 @@ async function driveLogin({
       }
       otpAsks += 1;
       try {
-        // The code screen has just told us how long the code is and where it sent
-        // it, and the card is the only place either fact reaches the owner. Both
-        // come from the same read: taking the length from here and the destination
-        // from the snapshot a settle earlier paired a fresh fact with a stale one.
-        // What the page enforces beats what it says: an input constrained to six
-        // characters is a fact, "6-digit code" is copy that may describe the last
-        // step rather than this one.
+        // The code screen has just said where it sent the code, and the card is
+        // the only place that fact reaches the owner. Read here rather than off
+        // the snapshot a settle earlier, which would pair the card with a stale
+        // page.
         const hints = await otpCardHints(page);
         // What the card is about to be built from, and the page it was read off.
-        // The screen draws cells only for a length that was stated, so a card that
-        // arrives as a plain field has one of two histories — the row was not
-        // recognised, or this ran before the code screen existed — and the URL is
-        // what tells them apart. `fill_otp` has logged its hints since it was
-        // written; this path, which raises most of the cards, logged nothing.
         log(
-          `auto-login: code hints length=${hints.length ?? "?"} destination=${
+          `auto-login: code hints destination=${
             maskDestination(hints.destination) ?? "?"
           } at ${page.url()}`
         );
-        const code = await getOtp(retry, hints.destination, hints.length);
+        const code = await getOtp(retry, hints.destination);
         await recordOtpModeCorrection();
         await typeOtp(page, code);
       } catch (err) {
