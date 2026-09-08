@@ -578,6 +578,13 @@ async function cmdAdd(flags) {
       // collectSecret routes through the secure-prompt resolver (browser form →
       // /dev/tty → hosted harness), so this works where no GUI browser is present.
       const out = await collectSecret({
+        // What the card is for, beside the prose that says it in English. Only a
+        // `login` is something the owner can also finish in a browser, which is
+        // the one decision a client cannot make from the fields alone: a token, a
+        // cookie jar and a seed all arrive as a single field named `value`, the
+        // same shape a password does.
+        purpose: type === "login" ? "sign_in" : "secret",
+        site: siteName(credentialHost({ loginUrl: flags["login-url"], domains })),
         title: CARD_TITLE,
         description: formDescription({
           name,
