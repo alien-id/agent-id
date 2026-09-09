@@ -41,7 +41,10 @@ export function escalationFor(outcome, ctx = {}) {
   return { credential: outcome === "failed" ? "rejected" : "intact", ...escalation };
 }
 
-function escalationMessage(outcome, { credName = "", profile = "", pageError = null } = {}) {
+function escalationMessage(
+  outcome,
+  { credName = "", profile = "", pageError = null, codeRowSeen = true } = {},
+) {
   switch (outcome) {
     // The login handshake is exactly where anti-automation bites. No credential
     // clears it — only a human working the page.
@@ -100,6 +103,23 @@ function escalationMessage(outcome, { credName = "", profile = "", pageError = n
     // is both useless (the code was wrong or expired) and unaffordable (each ask is
     // ten minutes of a sixteen-minute budget), so the run stops and says why.
     case "otp-rejected":
+      // A code screen built from a row of one-character boxes takes the code
+      // spread across it. When that row is not identified the whole code goes
+      // into the first box, the page never advances, and the site looks like it
+      // refused a correct code. Blaming the owner for that cost a real sign-in:
+      // three codes were typed correctly and reported back as mistyped.
+      if (!codeRowSeen) {
+        return {
+          action: OWNER_MUST_DRIVE,
+          reason: "code_field_not_driveable",
+          message:
+            `The code for '${credName}' was entered but this page's code field could not be ` +
+            "driven, so the code never reached it — the site did not refuse it. Do NOT tell the " +
+            "owner they mistyped it and do NOT ask for another one. Open the browser view for " +
+            `profile '${profile}' so they can type it where they can see it. The password and ` +
+            "the stored code settings are both FINE.",
+        };
+      }
       return {
         action: OWNER_MUST_CONFIRM,
         reason: "otp_not_accepted",
@@ -108,7 +128,7 @@ function escalationMessage(outcome, { credName = "", profile = "", pageError = n
           "window was refused too. For a stored 2FA seed that points at the seed itself " +
           "(re-add it with `vault set-totp`) or at this machine's clock being out of step — " +
           "codes are time-derived, so a skew of more than one period makes every code wrong. " +
-          "For an owner-entered code it was mistyped, or it expired while being fetched. " +
+          "For an owner-entered code it may have expired while being fetched. " +
           "Either way the password is FINE: do not re-check it and do not ask for one. " +
           "Run auto-login again once the cause is addressed.",
       };
