@@ -27,6 +27,10 @@ import {
   isDeepLoginUrl,
   otpCardBudgetMs,
   otpCardSpec,
+  otpBoxes,
+  OTP_ROW_MAX_HOPS,
+  otpBoxesFor,
+  typeCodeInto,
   codeTarget,
   fromAuthenticatorApp,
   maskedIdentifier,
@@ -1316,4 +1320,104 @@ test("a fallback that throws still names the recipe step that failed", async () 
       return true;
     }
   );
+});
+
+
+// The row predicate had exactly one error path — `.catch(() => null)` — so a page
+// exception, an unreachable browser and "this page has no code row" all arrived as
+// the same silence. The whole code then went into the first box of a row nobody had
+// looked for, three correct codes read as refused, and the trace said nothing. These
+// tests pin the diagnosis, which is the part that has to survive any later fix.
+function probeTarget(evaluate) {
+  return {
+    url: () => "https://account.booking.com/otp/email-code",
+    evaluate,
+    locator: () => ({ nth: (index) => ({ index, fill: async () => {} }) }),
+  };
+}
+
+test("a code row probe that throws says so, instead of reading as a page with no row", async () => {
+  const lines = [];
+  const boxes = await otpBoxes(
+    probeTarget(async () => {
+      throw new Error("Runtime.evaluate: HTTP 500");
+    }),
+    (line) => lines.push(line),
+  );
+
+  assert.deepEqual(boxes, []);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /probe failed/);
+  assert.match(lines[0], /HTTP 500/);
+  assert.match(lines[0], /account\.booking\.com/);
+});
+
+test("a page with no code row says what it saw and which check turned it away", async () => {
+  const lines = [];
+  const boxes = await otpBoxes(
+    probeTarget(async () => ({ count: null, candidates: 6, groups: [1, 1, 1, 1, 1, 1, 6], gate: "siblings" })),
+    (line) => lines.push(line),
+  );
+
+  assert.deepEqual(boxes, []);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /candidates=6/);
+  assert.match(lines[0], /groups=1,1,1,1,1,1,6/);
+  assert.match(lines[0], /rejected-by=siblings/);
+});
+
+test("a found row is reported to nobody and simply used", async () => {
+  const lines = [];
+  const boxes = await otpBoxes(
+    probeTarget(async () => ({ count: 6 })),
+    (line) => lines.push(line),
+  );
+
+  assert.equal(boxes.length, 6);
+  assert.deepEqual(lines, []);
+});
+
+test("a selector that names something other than the row says which selector it was", async () => {
+  const lines = [];
+  // The row probe runs first, the selector check second.
+  const answers = [{ count: 6 }, "elsewhere"];
+  const target = {
+    url: () => "https://account.booking.com/otp/email-code",
+    evaluate: async () => answers.shift(),
+    locator: () => ({ nth: (index) => ({ index, fill: async () => {} }) }),
+  };
+  const boxes = await otpBoxesFor(target, "#email-code", (line) => lines.push(line));
+
+  assert.deepEqual(boxes, []);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /#email-code/);
+});
+
+// The hop budget is what the predicate's reach is made of, and two levels was a
+// guess that a real page beat. Measured against agent-browser serving Booking's
+// markup: at two wrappers per box the row was invisible and the whole code landed
+// in box one. The constant is asserted here so a later trim cannot silently take
+// the reach back below what a live site needs.
+test("the row is looked for far enough above a box to survive real wrappers", () => {
+  assert.ok(OTP_ROW_MAX_HOPS >= 4, `a wrapped row needs more than ${OTP_ROW_MAX_HOPS} hops`);
+});
+
+test("typeCodeInto reports whether it drove a row or fell back to one field", async () => {
+  const filled = [];
+  const rowTarget = {
+    url: () => "https://x/otp",
+    evaluate: async () => ({ count: 6 }),
+    locator: () => ({ nth: (index) => ({ fill: async (c) => filled.push([index, c]) }) }),
+  };
+  assert.deepEqual(await typeCodeInto(rowTarget, "input", "428193"), { row: true });
+  assert.deepEqual(filled, [[0, "4"], [1, "2"], [2, "8"], [3, "1"], [4, "9"], [5, "3"]]);
+
+  const oneField = {
+    url: () => "https://x/otp",
+    evaluate: async () => ({ count: null, candidates: 0, groups: [], gate: "no-candidates" }),
+    locator: () => ({ nth: () => ({ fill: async () => {} }) }),
+    fill: async (sel, value) => filled.push(["whole", sel, value]),
+  };
+  assert.deepEqual(await typeCodeInto(oneField, "input", "428193"), { row: false });
+  assert.deepEqual(filled.at(-1), ["whole", "input", "428193"]);
 });

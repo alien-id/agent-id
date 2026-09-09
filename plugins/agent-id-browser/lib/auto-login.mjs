@@ -174,7 +174,7 @@ export const pageDriver = {
   navigate: (page, url) => page.goto(url),
   fill: (page, selector, value) => page.fill(selector, value),
   type: (page, selector, value) => page.fill(selector, value),
-  fillCode: (page, selector, value) => typeCodeInto(page, selector, value),
+  fillCode: (page, selector, value, log) => typeCodeInto(page, selector, value, log),
   click: (page, selector) => page.click(selector),
   press: (page, selector, key) => page.press(selector, key),
   wait: (page, ms) => page.waitForTimeout(ms),
@@ -205,7 +205,7 @@ const RECIPE_PASSTHROUGH_CODES = new Set([
 export async function runRecipe(
   page,
   steps,
-  { username, password, getOtp, domains, driver = pageDriver },
+  { username, password, getOtp, domains, driver = pageDriver, log = () => {} },
 ) {
   if (!Array.isArray(domains)) {
     throw new Error("runRecipe requires the credential's `domains` allowlist");
@@ -300,7 +300,7 @@ export async function runRecipe(
         gateSecret(step, "recipe fill");
         await guarded(step.value, () =>
           carriesOtp(step.value)
-            ? driver.fillCode(page, selector, value)
+            ? driver.fillCode(page, selector, value, log)
             : driver.fill(page, selector, value)
         );
         break;
@@ -313,7 +313,7 @@ export async function runRecipe(
         gateSecret(step, "recipe type");
         await guarded(step.text, () =>
           carriesOtp(step.text)
-            ? driver.fillCode(page, selector, text)
+            ? driver.fillCode(page, selector, text, log)
             : driver.type(page, selector, text)
         );
         break;
@@ -384,7 +384,11 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
   // prompt twice and cannot tell a refused code from a lost one — and for a
   // time-based code the right move is to read the CURRENT one, not retype the
   // one they just sent.
-  const retryNote = retry ? "That code was not accepted — enter the current one. " : "";
+  const retryNote = !retry
+    ? ""
+    : cred.otp === "totp"
+      ? "That code was not accepted — enter the current one. "
+      : "That code was not accepted. Enter it again, or request a fresh one on the page. ";
   // Where the code went. Three tiers, and the wording weakens with each: what the
   // page itself said, then the identifier the sign-in was started with, then
   // nothing. The middle one is a guess — a site can text a code to an account
@@ -607,6 +611,11 @@ export const OTP_ROW_ATTR = "data-aib-otp-box";
 const OTP_ROW_MIN = 4;
 const OTP_ROW_MAX = 8;
 
+// How far above a box its row's container may sit. Booking.com wraps each box
+// twice, so two was not enough; the "nothing else in it" check is what stops the
+// walk from climbing into the form, so this only has to be generous.
+export const OTP_ROW_MAX_HOPS = 6;
+
 // Find the row and tag it, in one place, in the page. Returns how many boxes it
 // holds, or null when the page has no row.
 //
@@ -629,7 +638,7 @@ const OTP_ROW_MAX = 8;
 //     leaves the length to script — Booking.com's, the row this was built for —
 //     is taken on the page's word instead: `one-time-code`, or copy that says a
 //     code was sent.
-function otpRowInPage({ selector, min, max, attr, codeCopy }) {
+function otpRowInPage({ selector, min, max, attr, codeCopy, maxHops }) {
   const codeCopyRe = new RegExp(codeCopy, "i");
   const staged = (e) => !!e.closest('[aria-hidden="true"],[hidden]');
   const visible = (e) =>
@@ -654,65 +663,124 @@ function otpRowInPage({ selector, min, max, attr, codeCopy }) {
   const candidates = Array.from(document.querySelectorAll(selector)).filter(
     visible
   );
-  // Grouped by the direct parent first, then by the grandparent — a wrapped box
-  // has a parent all to itself, and the row only appears one level up. The
-  // checks below are what keep the wider net honest: a grandparent that holds a
-  // form's fields fails "nothing else in it" the same way a parent would.
+  // Grouped by every ancestor up to `maxHops`, nearest first — a wrapped box has
+  // a parent all to itself, and how far up the row appears is the page's choice,
+  // not something to guess at. Two levels was the guess, and a page that wraps
+  // each box twice made the row invisible: twelve groups of one, none of them
+  // reaching `min`, and the whole code typed into the first box.
+  //
+  // The checks below are what keep the wider net honest, and they tighten as it
+  // widens: an ancestor high enough to hold the rest of the form fails "nothing
+  // else in it", so the walk cannot reach past the row it is looking for.
   const byParent = new Map();
   for (const field of candidates) {
-    for (const container of [field.parentElement, field.parentElement?.parentElement]) {
-      if (!container) continue;
-      if (!byParent.has(container)) byParent.set(container, []);
-      byParent.get(container).push(field);
+    let container = field.parentElement;
+    for (let hop = 0; container && hop < maxHops; hop += 1) {
+      if (!byParent.has(container)) byParent.set(container, new Set());
+      byParent.get(container).add(field);
+      container = container.parentElement;
     }
   }
 
-  for (const [parent, group] of byParent) {
-    if (group.length < min || group.length > max) continue;
-    if (!group.every(boxish)) continue;
+  // Which gate turned the most box-like group away. Reported when no row is
+  // found, because "we saw six candidates and `siblings` rejected them" is a
+  // different bug from "this page has no code row", and the two used to arrive
+  // as the same silence.
+  let turnedAway = null;
+  const reject = (group, gate) => {
+    if (!turnedAway || group.length > turnedAway.size) {
+      turnedAway = { size: group.length, gate };
+    }
+  };
+
+  for (const [parent, members] of byParent) {
+    // Insertion order is document order, which is the order the code is spread in.
+    const group = [...members];
+    if (group.length < min || group.length > max) {
+      reject(group, "size");
+      continue;
+    }
+    if (!group.every(boxish)) {
+      reject(group, "boxish");
+      continue;
+    }
     // Every input the container holds, not just the ones that matched the
     // selector: a password or an e-mail beside them makes it a form.
     const siblings = Array.from(parent.querySelectorAll("input")).filter(
       visible
     );
-    if (siblings.length !== group.length) continue;
-    // A wrapper contributes its box to both its own group and its parent's, so
-    // the same element can appear twice in one list. Count it once.
-    if (new Set(group).size !== group.length) continue;
+    if (siblings.length !== group.length) {
+      reject(group, "siblings");
+      continue;
+    }
     const [first] = group;
     const uniform = group.every(
       (e) => e.type === first.type && declared(e) === declared(first)
     );
-    if (!uniform) continue;
+    if (!uniform) {
+      reject(group, "uniform");
+      continue;
+    }
     const aboutACode =
       declared(first) === 1 ||
       group.some((e) => e.getAttribute("autocomplete") === "one-time-code") ||
       codeCopyRe.test(bodyText);
-    if (!aboutACode) continue;
+    if (!aboutACode) {
+      reject(group, "aboutACode");
+      continue;
+    }
 
     group.forEach((box, index) => box.setAttribute(attr, String(index)));
 
-    return group.length;
+    return { count: group.length };
   }
 
-  return null;
+  return {
+    count: null,
+    candidates: candidates.length,
+    groups: [...byParent.values()].map((members) => members.size),
+    gate: turnedAway ? turnedAway.gate : "no-candidates",
+  };
 }
 
-export async function otpBoxes(target) {
-  const count = await target
-    .evaluate(otpRowInPage, {
+export async function otpBoxes(target, log = () => {}) {
+  const where = () => {
+    try {
+      return target.url();
+    } catch {
+      return "?";
+    }
+  };
+
+  let row;
+  try {
+    row = await target.evaluate(otpRowInPage, {
       selector: OTP_BOX_SEL,
       min: OTP_ROW_MIN,
       max: OTP_ROW_MAX,
       attr: OTP_ROW_ATTR,
       codeCopy: OTP_BODY_RE.source,
-    })
-    .catch(() => null);
-  if (!count) return [];
+      maxHops: OTP_ROW_MAX_HOPS,
+    });
+  } catch (err) {
+    // A page exception, a browser that does not answer, an RPC error: all of it
+    // used to arrive as "this page has no code row", and the code then went into
+    // the first box of a row nobody had looked for.
+    log(`auto-login: the code row probe failed at ${where()}: ${err.message}`);
+    return [];
+  }
+
+  if (!row || !row.count) {
+    log(
+      `auto-login: no code row at ${where()} — candidates=${row?.candidates ?? "?"} ` +
+        `groups=${row?.groups?.join(",") || "-"} rejected-by=${row?.gate ?? "?"}`
+    );
+    return [];
+  }
 
   const all = target.locator(`[${OTP_ROW_ATTR}]`);
 
-  return Array.from({ length: count }, (_, index) => all.nth(index));
+  return Array.from({ length: row.count }, (_, index) => all.nth(index));
 }
 
 // The row a CALLER'S selector is asking about, which is not always the row on the
@@ -733,8 +801,8 @@ export async function otpBoxes(target) {
 // whole path exists for. Every match is looked at, not the first, for the same
 // reason — a wide net matches many elements, and any one of them landing in the
 // row is agreement.
-export async function otpBoxesFor(target, selector) {
-  const boxes = await otpBoxes(target);
+export async function otpBoxesFor(target, selector, log = () => {}) {
+  const boxes = await otpBoxes(target, log);
   if (boxes.length === 0) return [];
 
   const fit = await target
@@ -746,7 +814,14 @@ export async function otpBoxesFor(target, selector) {
       },
       { selector, attr: OTP_ROW_ATTR }
     )
-    .catch(() => "no-match");
+    .catch((err) => {
+      log(`auto-login: the code row's selector check failed: ${err.message}`);
+      return "no-match";
+    });
+
+  if (fit === "elsewhere") {
+    log(`auto-login: a code row is on the page, but "${selector}" names something else`);
+  }
 
   return fit === "elsewhere" ? [] : boxes;
 }
@@ -870,16 +945,16 @@ function describeState(s) {
 // into the first box and trusting the page to move the focus is what left
 // Booking.com's six-box screen holding one character, on both paths that write a
 // code — auto-login's own OTP step and a recipe's `{otp}`.
-export async function typeCodeInto(page, selector, code) {
+export async function typeCodeInto(page, selector, code, log = () => {}) {
   // Detected here rather than back when the card was raised: minutes pass while
   // the owner reads their mail, and a row found before that wait describes a page
   // that may already have re-rendered.
-  const boxes = await otpBoxesFor(page, selector);
+  const boxes = await otpBoxesFor(page, selector, log);
   if (boxes.length === 0) {
     // The OTP code is low-sensitivity (single-use, seconds-lived) but still goes
     // through the value-free error guard, for consistency.
     await typeSecret(page, selector, code);
-    return;
+    return { row: false };
   }
 
   // Each box takes the character at its own index. A row that submits itself does
@@ -892,23 +967,27 @@ export async function typeCodeInto(page, selector, code) {
     if (character == null) break;
     await box.fill(character).catch(() => {});
   }
+
+  return { row: true };
 }
 
 // Best-effort fill of the OTP field, then submit.
-async function typeOtp(page, code) {
+async function typeOtp(page, code, log = () => {}) {
   const sel =
     'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i], ' +
     'input[name*="code" i], input[id*="code" i], input[name*="verif" i], input[id*="verif" i], ' +
     'input[inputmode="numeric"]';
   const before = page.url();
 
-  await typeCodeInto(page, sel, code);
+  const written = await typeCodeInto(page, sel, code, log);
 
   // Many code screens submit themselves the moment the last box is filled. Then
   // there is nothing left to click, and hunting for a button on the page we just
   // landed on costs a full element-wait per candidate.
-  if (page.url() !== before) return;
+  if (page.url() !== before) return written;
   await submitCode(page, sel);
+
+  return written;
 }
 
 // Buttons that advance a code screen, by their visible text. Deliberately excludes
@@ -1233,6 +1312,9 @@ async function driveLogin({
   // t+31s — so that one waits the window out first.
   const maxOtpAsks = 2;
   let otpAsks = 0;
+  // Whether a row of one-character boxes was ever driven. A refused code means
+  // something different when it was typed into a row the predicate never found.
+  let codeRowSeen = false;
 
   // Warm up before a deep login link. Some sites (e.g. Reddit) wall a COLD
   // deep-link straight to /login with a "blocked by network security" bot block,
@@ -1327,6 +1409,7 @@ async function driveLogin({
         password: cred.password,
         getOtp,
         domains: cred.domains,
+        log,
       });
       skipFormLogin = true;
     } catch (err) {
@@ -1428,6 +1511,7 @@ async function driveLogin({
           outcome: "otp-rejected",
           finalUrl: page.url(),
           errorText,
+          codeRowSeen,
         };
       }
       const retry = otpAsks > 0;
@@ -1451,7 +1535,7 @@ async function driveLogin({
         );
         const code = await getOtp(retry, hints);
         await recordOtpModeCorrection();
-        await typeOtp(page, code);
+        codeRowSeen = (await typeOtp(page, code, log))?.row || codeRowSeen;
       } catch (err) {
         if (err?.code === "FORM_USE_BROWSER") return ownerWillDrive();
         if (err?.code === "FORM_CANCELLED") return otpDeclined();

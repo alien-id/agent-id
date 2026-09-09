@@ -221,3 +221,45 @@ test("a host off the allowlist is fixed on the credential, not by a human at the
   assert.match(e.message, /never remove/i);
   assert.doesNotMatch(e.message, /browser view/);
 });
+
+
+// A refused code means two different things, and the run knows which. Reporting
+// the wrong one had the model tell an owner who typed three correct codes that
+// they had mistyped them — while the codes had in fact gone into the first box of
+// a row the predicate never identified.
+test("a code the page never received is not a code the site refused", () => {
+  const undriveable = escalationFor("otp-rejected", {
+    credName: "booking.com",
+    profile: "booking.com",
+    codeRowSeen: false,
+  });
+
+  assert.equal(undriveable.action, OWNER_MUST_DRIVE);
+  assert.equal(undriveable.reason, "code_field_not_driveable");
+  assert.equal(undriveable.credential, "intact");
+  assert.match(undriveable.message, /could not be driven/);
+  assert.match(undriveable.message, /the site did not refuse it/);
+  // It must not merely omit the accusation — it has to forbid it, because the
+  // model relayed the old wording to the owner verbatim.
+  assert.match(undriveable.message, /Do NOT tell the owner they mistyped it/);
+
+  const refused = escalationFor("otp-rejected", {
+    credName: "booking.com",
+    profile: "booking.com",
+    codeRowSeen: true,
+  });
+
+  assert.equal(refused.action, OWNER_MUST_CONFIRM);
+  assert.equal(refused.reason, "otp_not_accepted");
+  // Even here the owner is not accused: an owner-entered code that a live site
+  // refuses has expired far more often than it was typed wrong.
+  assert.doesNotMatch(refused.message, /mistyped/);
+});
+
+// Nothing tells an older caller about the row, and a missing flag must not turn
+// every refused code into "we could not drive the page".
+test("a caller that says nothing about the row gets the refused-code reading", () => {
+  const escalation = escalationFor("otp-rejected", { credName: "x", profile: "x" });
+
+  assert.equal(escalation.reason, "otp_not_accepted");
+});
