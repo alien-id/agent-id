@@ -627,8 +627,8 @@ async function addAgainstCard({ dir, reason, seen = [] }) {
 
 // Same stubbed card host, driving `set-totp --form` instead. The credential has
 // to exist first, which `add` without `--form` does without raising anything.
-async function setTotpAgainstCard({ dir, reason }) {
-  const { sock, server } = await hostedSocket(reason);
+async function setTotpAgainstCard({ dir, reason, seen = [] }) {
+  const { sock, server } = await hostedSocket(reason, seen);
   try {
     const child = spawn(
       "node",
@@ -706,6 +706,30 @@ test("a credential card says what it is for and which site it is for", async () 
     // never heard of `purpose`.
     assert.equal(seen[0].title, "Enter it securely");
     assert.match(seen[0].description, /sign-in/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The other two cards this CLI raises. Neither is something a browser can finish
+// — a seed lives behind the site's own two-factor settings, and an approval is
+// the owner typing a name back — but neither says so in a way a client can read
+// off the fields: both are one plain text box, the same shape a password is. So
+// a client offering the browser dismissed the card and, for the approval, threw
+// the answer away silently.
+test("a seed card says it is a stored secret rather than a sign-in", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-card-"));
+  const seen = [];
+  try {
+    await makeVault(dir);
+    await setTotpAgainstCard({ dir, reason: "cancel", seen });
+
+    assert.equal(seen.length, 1, "the card never reached the socket");
+    assert.equal(seen[0].purpose, "secret");
+    // No site, deliberately: nothing generic beats the sentence the card already
+    // carries, so a client falls back to it.
+    assert.equal(seen[0].site, null);
+    assert.match(seen[0].description, /otpauth/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

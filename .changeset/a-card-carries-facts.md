@@ -5,8 +5,17 @@
 ---
 
 A card says what it is about, not only what it says. Every card now travels with
-`purpose` (`sign_in` / `code` / `secret`) and `site`, and a code card adds
-`codeChannel` (`email` / `sms` / `app`), `codeDestination` and `codeIsRetry`.
+`purpose` — `sign_in` for a login, `secret` for a credential or a TOTP seed,
+`code` for a one-time code, `approval` for the one that asks the owner to widen
+what a credential may do — and a card about a site names it in `site`. A code
+card adds `codeChannel` (`email` / `sms` / `app`), `codeDestination` and
+`codeIsRetry`.
+
+`purpose` is also the only thing that says whether a browser could finish the
+card. It cannot be read off the fields: a token, a cookie jar, a seed and an
+approval each arrive as a single text box, exactly as a password does, so a
+client deciding from the fields alone offered the browser for all of them — and
+for the approval that dismissed the card and dropped the answer in silence.
 The prose travels unchanged beside them: a client that has never heard of
 `purpose` renders exactly what it rendered before, which is what lets a client
 draw the same sentence every time without anyone waiting for the other.
