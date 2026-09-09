@@ -156,6 +156,18 @@ test("a card is typed into the secure form under the names the clients key their
     for (const field of CONTRACT_FIELDS) {
       assert.ok(!(field in entry), `list exposed ${field}`);
     }
+
+    // And the one path that does hand the values over: what fills a checkout
+    // form has to read them somewhere, and since the browser session server was
+    // removed that is lethe. Named as its own command so every caller of it can
+    // be found, and so `show` keeps redacting.
+    const read = JSON.parse((await runCli(["read-card", "--name", "visa"], dir)).stdout);
+    assert.equal(read.ok, true);
+    assert.equal(read.card.cardNumber, PAN);
+    assert.equal(read.card.cardExpiry, EXPIRY);
+    assert.equal(read.card.cardSecurityCode, CVC);
+    assert.equal(read.card.cardholderName, HOLDER);
+    assert.equal(read.card.cardLast4, "4242");
   } finally {
     // An assertion above the submit leaves the CLI waiting on a form nobody will
     // fill; without this the runner hangs instead of reporting the failure.
@@ -186,6 +198,30 @@ test("a card refuses an allowlist the caller declared for itself", async () => {
     );
     assert.notEqual(code, 0);
     assert.match(JSON.parse(stdout).error, /no --domains/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("read-card reads nothing but a card", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "readcard-"));
+  try {
+    await makeVault(dir);
+    const { privateKeyPem } = JSON.parse(await readFile(statePaths(dir).mainKey, "utf8"));
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    vault.add({
+      name: "gh",
+      type: "bearer",
+      value: "t0ken",
+      domains: ["api.github.com"],
+    });
+    await vault.save();
+    vault.lock();
+
+    const { code, stdout } = await runCli(["read-card", "--name", "gh"], dir);
+    assert.notEqual(code, 0);
+    assert.match(JSON.parse(stdout).error, /nothing but a card/);
+    assert.ok(!stdout.includes("t0ken"), "read-card returned a value it refused to read");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

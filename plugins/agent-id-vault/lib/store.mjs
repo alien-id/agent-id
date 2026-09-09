@@ -170,8 +170,18 @@ function validateCardExpiry(rec, now = new Date()) {
   }
 }
 
+// The card's own fields, in the order a form asks for them. One list, because
+// the validator, the secure form and the read path below must not drift apart:
+// a name that differs anywhere is a field that silently stops being filled.
+export const CARD_FIELDS = Object.freeze([
+  "cardNumber",
+  "cardExpiry",
+  "cardSecurityCode",
+  "cardholderName",
+]);
+
 function validateCardFields(rec) {
-  requireNonEmpty(rec, ["cardNumber", "cardExpiry", "cardSecurityCode", "cardholderName"]);
+  requireNonEmpty(rec, CARD_FIELDS);
   const number = rec.cardNumber;
   if (!/^\d{12,19}$/.test(number)) {
     throw new Error(`Credential ${rec.name}: cardNumber must be 12-19 digits, no spaces`);

@@ -28,3 +28,11 @@ time, so the allowlist starts empty and default-deny holds literally.
 The form's own sentence says the card asks for approval on every payment. It
 drops the `ro` line that a login card carries — "the agent can read this" is
 the opposite of the promise being made to somebody typing a card number.
+
+`read-card --name N` is the one path that hands the four values over, for the
+process that types them into a checkout — `show` keeps sealing a card, so the
+values are not what an agent gets back when it asks what it has stored. The
+command is not a privilege boundary (the vault opens with the agent key, and
+anything that can run it can import the library); it is a named, greppable path
+in place of a flag on `show`. What guards a card is the owner's per-payment
+approval, enforced in lethe.

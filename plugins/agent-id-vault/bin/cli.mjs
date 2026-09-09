@@ -78,6 +78,8 @@ import {
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
 import {
+  CARD_FIELDS,
+  cardLast4,
   CREDENTIAL_TYPES,
   loginOtpMode,
   LOGIN_OTP_MODES,
@@ -1319,6 +1321,41 @@ async function cmdSetAccess(flags) {
   }
 }
 
+// The card's values, for the one process that types them into a page.
+//
+// `show` seals a card, because `access: "ro"` means its plaintext must not be
+// what the agent reads when it asks what it has stored — and a PAN printed into
+// a tool result is a PAN in the turn's transcript. But something has to hand the
+// four values to whatever fills the checkout form, and since the browser session
+// server was removed (#151) that is the payment tool in lethe.
+//
+// So the read is a command of its own rather than a flag on `show`: it names
+// what it does in the audit log, it reads nothing but a card, and a reader of
+// this file can find every caller by its name. It is not a privilege boundary —
+// the vault opens with the agent key and anything that can run this can import
+// the library instead. What guards a card is the owner's per-payment approval,
+// which is enforced in lethe, not here.
+async function cmdReadCard(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "card") {
+      return outputError(
+        `'${name}' is a ${rec.type}, and read-card reads nothing but a card`,
+      );
+    }
+    const card = {};
+    for (const field of CARD_FIELDS) card[field] = rec[field] ?? "";
+    card.cardLast4 = cardLast4(rec);
+    outputJson({ ok: true, card });
+  } finally {
+    vault.lock();
+  }
+}
+
 async function cmdList(flags) {
   const vault = await openWithFlags(flags);
   try {
@@ -1813,6 +1850,8 @@ function printHelp() {
       "      evm:    [--chain-id-allowlist 1,137] [--to-allowlist 0x..,0x..]",
       "      solana: [--program-allowlist <base58>,..]   (default-allow when omitted)",
       "  show --name N    (sealed/generated secrets are redacted)",
+      "  read-card --name N",
+      "      the card's four values, for the process that types them into a page",
       "  list",
       "  remove --name N",
       "  exec [--env VAR=cred.field | --file VAR=cred.field] … -- <cmd> [args…]",
@@ -1855,6 +1894,7 @@ const commands = {
   "set-access": cmdSetAccess,
   generate: cmdGenerate,
   show: cmdShow,
+  "read-card": cmdReadCard,
   list: cmdList,
   remove: cmdRemove,
   exec: cmdExec,
