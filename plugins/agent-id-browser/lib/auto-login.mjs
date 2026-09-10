@@ -110,6 +110,23 @@ export function isLoginishPath(pathname) {
     .some((seg) => LOGIN_SEGMENT_RE.test(seg));
 }
 
+// The HTTP status a navigation answered with, or null when the page cannot say.
+// Two shapes reach this: the RPC page hands back the browser's own reply, which
+// carries the status as a field, and a Playwright-shaped page hands back a
+// response whose status is a method. Null is not "fine" — it is "unknown", and
+// the caller must not read it as either.
+export function navStatus(navigation) {
+  if (!navigation || typeof navigation !== "object") return null;
+
+  const field = navigation.httpStatus ?? navigation.status;
+  if (typeof field === "number") return field;
+  if (typeof navigation.status !== "function") return null;
+
+  const called = navigation.status();
+
+  return typeof called === "number" ? called : null;
+}
+
 // Are we still sitting on the login/auth host+path after the form cleared? A real
 // login LEAVES the login page (redirect to the app/feed). If the password field
 // merely vanished while we're still on a login-ish path — an SPA re-render, or a
@@ -1324,10 +1341,28 @@ async function driveLogin({
     }
   }
 
-  await page.goto(cred.loginUrl, {
+  // The status is read here and deliberately NOT on the warm-up above: the
+  // origin is allowed to answer badly while the anti-bot clearance is still
+  // being set, which is the whole reason the warm-up is not inspected either.
+  const navigation = await page.goto(cred.loginUrl, {
     waitUntil: "domcontentloaded",
     timeout: 30000,
   });
+  const loginPageStatus = navStatus(navigation);
+  // A navigation resolves on a 404 as happily as on a 200, so without this the
+  // run walks into form detection on an error document, spends every round on
+  // it, and ends by reporting whatever that document's copy sounds like. A dead
+  // address is not something the page can be read to discover — it is the answer
+  // the site already gave.
+  if (loginPageStatus !== null && loginPageStatus >= 400) {
+    return {
+      ok: false,
+      outcome: "login-url-dead",
+      finalUrl: page.url(),
+      errorText: `the sign-in page answered HTTP ${loginPageStatus}`,
+      httpStatus: loginPageStatus,
+    };
+  }
   await page.waitForTimeout(settleMs);
 
   let errorText = null;
