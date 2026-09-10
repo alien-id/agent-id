@@ -16,14 +16,21 @@ Every one of the four is in `SECRET_FIELDS`, so a lock wipes all of it and
 `exportable: false` — the latter means "generated in-vault, never typed into a
 page", which is the one thing a card exists to do.
 
+`ro` is a rule and not a default. The access level is what decides whether
+`show` seals the record, and the caller of `vault_add` is the agent, so
+`--access rw` would have left the number, the expiry and the code readable
+through the agent's own channel. A card now refuses any level but `ro`, the
+way it refuses `--domains`.
+
 The four names are a wire contract, not labels: the secure-input envelope
 carries no field type, so the name a value is sealed under is what picks the
 keyboard and the paired expiry/code row on the phone.
 
 `add --type card` is form-only. A PAN passed as a flag is a PAN in the process
 table, in `ps` output and in the shell history. It also takes no `--domains`:
-where a card may be used is what the owner's approvals write, one payment at a
-time, so the allowlist starts empty and default-deny holds literally.
+a card carries no allowlist at all, and what says where it may be typed is the
+merchant host on the payment intent the owner approved, which lethe enforces.
+The empty list matches no host, so default-deny holds literally here too.
 
 The form's own sentence says the card asks for approval on every payment. It
 drops the `ro` line that a login card carries — "the agent can read this" is

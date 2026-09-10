@@ -56,7 +56,7 @@ export const TOOLS = [
   {
     name: "vault_add",
     description:
-      "Store a credential in the Alien vault. You supply only name/type/domains/access (and login_url for logins); the owner types the secret values into a secure card — they never reach you. If the site has NO password — it asks for an e-mail/phone and sends a code — pass passwordless=true with otp=\"interactive\": the card then has a single identifier field, and the code is asked for separately at sign-in time. Never invent a password for such a site and never ask the owner for one. A `card` takes no domains and no sign-in fields: where it may be used is decided by the owner when they approve a payment, not here. Types: bearer, basic, header, query, cookie, oauth2, login, totp, card.",
+      "Store a credential in the Alien vault. You supply only name/type/domains/access (and login_url for logins); the owner types the secret values into a secure card — they never reach you. If the site has NO password — it asks for an e-mail/phone and sends a code — pass passwordless=true with otp=\"interactive\": the card then has a single identifier field, and the code is asked for separately at sign-in time. Never invent a password for such a site and never ask the owner for one. A `card` takes no domains, no access level and no sign-in fields: it is always stored read-only, and where it may be used is decided by the owner when they approve a payment, not here. Types: bearer, basic, header, query, cookie, oauth2, login, totp, card.",
     kind: "vault",
     inputSchema: {
       type: "object",

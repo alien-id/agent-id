@@ -203,6 +203,25 @@ test("a card refuses an allowlist the caller declared for itself", async () => {
   }
 });
 
+// The access level decides whether `show` seals the record, and the caller of
+// `vault_add` is the agent: `--access rw` would leave the number, the expiry and
+// the code readable through the agent's own channel. The default alone is not the
+// control — this is what makes it one.
+test("a card refuses to be stored at an access level that would unseal it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "addcard-access-"));
+  try {
+    await makeVault(dir);
+    const { code, stdout } = await runCli(
+      ["add", "--name", "visa", "--type", "card", "--access", "rw", "--form"],
+      dir,
+    );
+    assert.notEqual(code, 0);
+    assert.match(JSON.parse(stdout).error, /read-only/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("read-card reads nothing but a card", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "readcard-"));
   try {

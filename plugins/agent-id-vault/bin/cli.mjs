@@ -532,9 +532,19 @@ async function cmdAdd(flags) {
   if (access && !ACCESS_LEVELS.includes(access)) {
     return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
   }
+  // A card is sealed by its access level, so the level is not the caller's to pick:
+  // `rw` leaves `show` returning the number, the expiry and the code in clear, and the
+  // caller here is the agent. Refused rather than quietly corrected, so a caller that
+  // asked for it learns that it was refused.
+  if (type === "card" && access != null && access !== "ro") {
+    return outputError(
+      "A card is stored read-only. Where its values may go is decided by the owner when " +
+        "they approve a payment, not by --access.",
+    );
+  }
   let domains = parseDomains(flags);
   // Declaring where a card may be used would be granting oneself a merchant: the
-  // allowlist is what the owner's approvals write, one payment at a time.
+  // owner's per-payment approval is what says where it may go.
   if (type === "card" && domains.length > 0) {
     return outputError(
       "A card takes no --domains. Where it may be used is decided by the owner when they " +
@@ -545,9 +555,9 @@ async function cmdAdd(flags) {
     // `secret` is not host-scoped (it's used via exec/file, not the HTTP proxy),
     // so it doesn't need a domain allowlist; everything else is default-deny.
     if (type === "secret") domains = ["*"];
-    // A card's allowlist is the owner's to grant: it starts empty — which matches
-    // no host, so default-deny holds literally — and gains one each time they
-    // approve a payment there.
+    // A card carries no allowlist at all: it stays empty, which matches no host, so
+    // default-deny holds literally. Nothing writes to it — what says where a card may
+    // be typed is the merchant host on the owner's approved payment intent.
     else if (type === "card") domains = [];
     else if (type === "login") {
       // `login` IS host-scoped — the browser gates fill-secret / fill-otp and every
@@ -783,10 +793,11 @@ async function cmdAdd(flags) {
         record.cardholderName = formValues.cardholderName || "";
         // A read of this record is a complete card-not-present instrument, so it
         // never comes back out: `ro` makes it access-restricted, which is what
-        // `show` redacts every SECRET_FIELD on. Not `exportable: false` — that
-        // means "generated in-vault, never typed into a page", which is the one
+        // `show` redacts every SECRET_FIELD on. Set, not defaulted — a caller that
+        // passed anything else was already refused above. Not `exportable: false` —
+        // that means "generated in-vault, never typed into a page", which is the one
         // thing a card exists to do, and assertFillAllowed enforces it literally.
-        if (!record.access) record.access = "ro";
+        record.access = "ro";
         break;
       }
       case "login": {

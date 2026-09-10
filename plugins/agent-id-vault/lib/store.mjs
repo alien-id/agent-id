@@ -214,11 +214,11 @@ export function validateRecord(rec) {
   if (!CREDENTIAL_TYPES.includes(rec.type)) {
     throw new Error(`Unknown credential type: ${rec.type}`);
   }
-  // A card is the one type whose allowlist is granted by the owner rather than
-  // declared at creation: it starts empty and gains a host each time the owner
-  // approves a payment there. Empty still denies everything — hostMatchesAllowlist
-  // returns false for an empty list — so default-deny holds literally; what
-  // changes is only that nothing has been granted yet.
+  // A card is the one type that carries no allowlist at all. Nothing writes to it
+  // and nothing reads it; what says where a card may be typed is the merchant host
+  // on the payment intent the owner approved, which lethe enforces. Empty denies
+  // everything — hostMatchesAllowlist returns false for an empty list — so
+  // default-deny holds literally here too.
   const allowsEmptyDomains = rec.type === "card";
   if (!Array.isArray(rec.domains) || (rec.domains.length === 0 && !allowsEmptyDomains)) {
     throw new Error(
