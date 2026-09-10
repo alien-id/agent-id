@@ -248,6 +248,7 @@ async function cmdAutoLogin(flags) {
         profile: credName,
         pageError,
         codeRowSeen: result ? result.codeRowSeen !== false : true,
+        valuesSubmitted: result ? result.valuesSubmitted !== false : true,
       });
       outputJson({
         ok: false,
