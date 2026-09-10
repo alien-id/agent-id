@@ -22,6 +22,7 @@ import {
   CODE_SUBMIT_TEXT_RE,
   resolveOtp,
   isLoginishPath,
+  navStatus,
   stillOnLoginPage,
   originOf,
   isDeepLoginUrl,
@@ -1111,6 +1112,78 @@ test("a refusal after the identifier went in is still the site refusing it", asy
   assert.equal(result.outcome, "failed");
   assert.equal(result.valuesSubmitted, true);
   assert.deepEqual(page.filled, ["owner@example.test"]);
+});
+
+test("navStatus reads a status from either page shape, and admits when it cannot", () => {
+  assert.equal(navStatus({ url: "https://x.test", httpStatus: 404 }), 404);
+  assert.equal(navStatus({ status: () => 500 }), 500);
+  // Not "fine" — unknown. A caller that reads null as 200 condemns nothing,
+  // which is the safe direction; reading it as an error would condemn every
+  // page a shape we do not recognise navigated to.
+  assert.equal(navStatus(null), null);
+  assert.equal(navStatus({}), null);
+  assert.equal(navStatus({ status: "200" }), null);
+});
+
+// A navigation resolves on an error document as happily as on a page, so the
+// status is the only thing that separates them before anything is read.
+function navPage({ loginStatus = 200, warmupStatus = 200 } = {}) {
+  const page = {
+    current: "about:blank",
+    reads: 0,
+    url: () => page.current,
+    goto: async (url) => {
+      page.current = url;
+      return {
+        url,
+        httpStatus: url === refusedCred.loginUrl ? loginStatus : warmupStatus,
+      };
+    },
+    waitForTimeout: async () => {},
+    keyboard: { press: async () => {} },
+    locator: () => ({
+      first: () => ({ count: async () => 0, isVisible: async () => false }),
+      count: async () => 0,
+    }),
+    evaluate: async (fn) => {
+      if (String(fn).includes("userNameInput")) return null;
+      page.reads += 1;
+      return {
+        hasPasswordField: false,
+        hasIdentifierField: false,
+        hasOtpField: false,
+        otpFieldNames: [],
+        bodyText: "Sign in",
+        blocked: false,
+        errorText: null,
+      };
+    },
+  };
+  return page;
+}
+
+test("a login page that answered an error document is a dead address, not a page to read", async () => {
+  const page = navPage({ loginStatus: 404 });
+
+  const result = await autoLogin({ page, cred: refusedCred, settleMs: 0 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "login-url-dead");
+  assert.equal(result.httpStatus, 404);
+  assert.match(result.errorText, /HTTP 404/);
+  assert.equal(page.reads, 0, "nothing on a dead address is worth classifying");
+});
+
+// The warm-up exists for sites that wall a cold deep link and let it through
+// once the origin has set a clearance cookie, so the origin is allowed to answer
+// badly. Condemning the credential for that would break the case it was added for.
+test("a warm-up that answers badly does not condemn the login page", async () => {
+  const page = navPage({ warmupStatus: 403 });
+
+  const result = await autoLogin({ page, cred: refusedCred, settleMs: 0, maxRounds: 2 });
+
+  assert.notEqual(result.outcome, "login-url-dead");
+  assert.ok(page.reads > 0, "the login page answered fine, so it has to be read");
 });
 
 test("a secret step's failure keeps the cause and strikes the value out", async () => {

@@ -203,6 +203,22 @@ function escalationMessage(
           '`otp: "interactive"` so the owner can be asked, or attach a seed with ' +
           "`vault set-totp`. Do not retry as-is; it will ask again.",
       };
+    // The address the credential starts from did not answer with a page. No
+    // human at the browser can fix that and no secret is wrong — the record is,
+    // in the one field that says where to begin.
+    case "login-url-dead":
+      return {
+        action: FIX_CREDENTIAL,
+        reason: "login_url_unreachable",
+        message:
+          `The sign-in page stored for '${credName}' did not load` +
+          `${pageError ? ` (${pageError})` : ""}, so the sign-in never started and the stored ` +
+          "values were never offered to the site. They are FINE: do not ask the owner for " +
+          "them and do not re-store the credential. Find the address the site really signs " +
+          "in on — open the site and look, rather than guessing a path — then correct the " +
+          "one field with `vault set-login-url` and run auto-login again. Correcting it does " +
+          "not ask the owner for the secret a second time.",
+      };
     case "failed":
       // A rejection is a thing the site does to values it was given. This
       // branch is reached whenever the page carries rejection copy, and error
