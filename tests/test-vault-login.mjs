@@ -889,3 +889,127 @@ test("consumeTransient removes a transient credential once, and never a kept one
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ─── set-login-url (move a sign-in address without re-asking for the secret) ────
+
+// Seed a login straight through the library: the point of these tests is the
+// corrector, and going through `add` would raise a card to type a secret that is
+// not what is being corrected.
+async function seedLogin(dir, privateKeyPem, over = {}) {
+  const vault = await openVault({ stateDir: dir, privateKeyPem });
+  vault.add(
+    loginRec({
+      name: "booking",
+      domains: ["*.booking.test"],
+      loginUrl: "https://www.booking.test/sign-in.html",
+      ...over,
+    }),
+  );
+  await vault.save();
+  vault.lock();
+}
+
+function runCli(args) {
+  const child = spawn("node", [CLI, ...args], { env: { ...process.env } });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => (stdout += d));
+  child.stderr.on("data", (d) => (stderr += d));
+
+  return new Promise((resolve) =>
+    child.on("exit", (code) => resolve({ code, stdout, stderr })),
+  );
+}
+
+// The address a login starts from is only proved wrong by driving it, and a
+// wrong one used to cost the owner a card: re-adding the credential is the only
+// way to change it, and that asks for the secret they never got wrong.
+test("set-login-url moves the address and leaves the secret alone", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-setloginurl-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    await seedLogin(dir, privateKeyPem);
+
+    const { code, stdout, stderr } = await runCli([
+      "set-login-url",
+      "--name",
+      "booking",
+      "--login-url",
+      "https://account.booking.test/sign-in",
+      "--state-dir",
+      dir,
+    ]);
+
+    assert.equal(code, 0, `CLI failed: ${stderr}`);
+    assert.match(stdout, /"ok": true/);
+    assert.match(stderr, /sign-in\.html -> https:\/\/account\.booking\.test\/sign-in/);
+
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    const rec = vault.get("booking");
+    assert.equal(rec.loginUrl, "https://account.booking.test/sign-in");
+    assert.equal(rec.password, "p", "the secret is untouched");
+    assert.deepEqual(rec.domains, ["*.booking.test"], "and so is everything else");
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("set-login-url refuses a credential type that has no sign-in address", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-setloginurl-type-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    vault.add({ name: "token", type: "bearer", domains: ["api.booking.test"], value: "t" });
+    await vault.save();
+    vault.lock();
+
+    const { code, stdout } = await runCli([
+      "set-login-url",
+      "--name",
+      "token",
+      "--login-url",
+      "https://account.booking.test/sign-in",
+      "--state-dir",
+      dir,
+    ]);
+
+    assert.notEqual(code, 0, "must not succeed");
+    assert.match(stdout, /not 'bearer'/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("set-login-url refuses a URL the parser rejects, rather than storing it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-setloginurl-bad-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    await seedLogin(dir, privateKeyPem);
+
+    const { code, stdout } = await runCli([
+      "set-login-url",
+      "--name",
+      "booking",
+      "--login-url",
+      "not a url",
+      "--state-dir",
+      dir,
+    ]);
+
+    assert.notEqual(code, 0, "must not succeed");
+    // Refused by the record's own validation, reached through `vault.add` —
+    // the corrector does not get its own weaker idea of a valid address.
+    assert.match(stdout, /loginUrl is not a valid URL/);
+
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    assert.equal(
+      vault.get("booking").loginUrl,
+      "https://www.booking.test/sign-in.html",
+      "a refused write must leave the stored address as it was",
+    );
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
