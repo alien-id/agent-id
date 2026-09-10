@@ -434,8 +434,13 @@ function formFieldsForType(type, flags) {
         // envelope carries no field type, so the name a value is sealed under is
         // what picks the phone's keyboard and the paired expiry/code row. Renaming
         // one downgrades that screen to a plain text box and nothing fails.
-        { name: "cardNumber", label: "Card number" },
-        { name: "cardExpiry", label: "Expiry (MMYY)" },
+        //
+        // `secret` masks the input as it is typed and nothing more — storage
+        // secrecy is `SECRET_FIELDS`, by name, and covers all four regardless. Only
+        // the code keeps the mask: the rest is copied off a card in hand, and a
+        // masked number cannot be read back and checked.
+        { name: "cardNumber", label: "Card number", secret: false },
+        { name: "cardExpiry", label: "Expiry (MM/YY)", secret: false },
         { name: "cardSecurityCode", label: "Security code" },
         { name: "cardholderName", label: "Name on card", secret: false },
       ];
@@ -787,9 +792,15 @@ async function cmdAdd(flags) {
         if (!formValues) {
           return outputError("A card is typed into the secure form — re-run with --form");
         }
-        record.cardNumber = formValues.cardNumber || "";
-        record.cardExpiry = formValues.cardExpiry || "";
-        record.cardSecurityCode = formValues.cardSecurityCode || "";
+        // Copied off a card face, so the separators the labels invite arrive with
+        // the values — a slash in the expiry, groups of four in the number. The
+        // stored form is bare digits, which is what the validators and the fill
+        // both expect, so strip on the way in rather than refuse the owner's
+        // typing.
+        const digitsOf = (value) => (value || "").replace(/\D/g, "");
+        record.cardNumber = digitsOf(formValues.cardNumber);
+        record.cardExpiry = digitsOf(formValues.cardExpiry);
+        record.cardSecurityCode = digitsOf(formValues.cardSecurityCode);
         record.cardholderName = formValues.cardholderName || "";
         // A read of this record is a complete card-not-present instrument, so it
         // never comes back out: `ro` makes it access-restricted, which is what

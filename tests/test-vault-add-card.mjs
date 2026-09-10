@@ -99,19 +99,27 @@ test("a card is typed into the secure form under the names the clients key their
     const token = u.searchParams.get("t");
 
     const form = await (await fetch(url)).text();
-    for (const field of CONTRACT_FIELDS) {
+
+    // Only the security code is masked; storage secrecy is SECRET_FIELDS and
+    // covers all four either way.
+    for (const visible of ["cardNumber", "cardExpiry", "cardholderName"]) {
       assert.ok(
-        form.includes(`name="${field}"`),
-        `the form does not ask for ${field} — the phone would draw a plain box for it`,
+        form.includes(`id="${visible}" name="${visible}" type="text"`),
+        `${visible} must be typed in the clear`,
       );
     }
+    assert.ok(
+      form.includes('id="cardSecurityCode" name="cardSecurityCode" type="password"'),
+      "the security code keeps its mask",
+    );
 
     const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
       method: "POST",
       body: new URLSearchParams({
         _token: token,
-        cardNumber: PAN,
-        cardExpiry: EXPIRY,
+        // Typed the way the labels invite, separators and all.
+        cardNumber: PAN.replace(/(\d{4})(?=\d)/g, "$1 "),
+        cardExpiry: `${EXPIRY.slice(0, 2)}/${EXPIRY.slice(2)}`,
         cardSecurityCode: CVC,
         cardholderName: HOLDER,
       }),

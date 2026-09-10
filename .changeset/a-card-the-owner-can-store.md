@@ -43,3 +43,11 @@ command is not a privilege boundary (the vault opens with the agent key, and
 anything that can run it can import the library); it is a named, greppable path
 in place of a flag on `show`. What guards a card is the owner's per-payment
 approval, enforced in lethe.
+
+Only the security code is masked as it is typed. `secret` on a form field
+decides masking and nothing else — `SECRET_FIELDS` is what makes a value a
+secret in storage, and it covers all four — so masking the number bought
+nothing and cost the owner the ability to check it against the card in their
+hand. The expiry is labelled `MM/YY`, the way a card face writes it, and the
+separators that invites are stripped on the way in: the stored form is bare
+digits, which is what the validators and the fill expect.
