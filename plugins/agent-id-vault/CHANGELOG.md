@@ -1,5 +1,11 @@
 # @alien-id/agent-id-vault
 
+## 7.9.1
+
+### Patch Changes
+
+- [#165](https://github.com/alien-id/agent-id/pull/165) [`5225e57`](https://github.com/alien-id/agent-id/commit/5225e573fbcfc68cc554f43a944cf32f08f48cd5) Thanks [@TemMax](https://github.com/TemMax)! - Write `vault.enc` atomically (temp file + rename) so a concurrent reader never sees a torn file.
+
 ## 7.9.0
 
 ### Minor Changes

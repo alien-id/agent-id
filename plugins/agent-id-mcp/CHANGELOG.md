@@ -1,5 +1,12 @@
 # @alien-id/agent-id-mcp
 
+## 7.3.7
+
+### Patch Changes
+
+- Updated dependencies [[`5225e57`](https://github.com/alien-id/agent-id/commit/5225e573fbcfc68cc554f43a944cf32f08f48cd5)]:
+  - @alien-id/agent-id-vault@7.9.1
+
 ## 7.3.6
 
 ### Patch Changes
