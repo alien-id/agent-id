@@ -238,6 +238,24 @@ clearing the state file and returning — so a supervisor that restarts the prox
 back never sees `start` refuse with "Proxy already running" against a daemon that is
 still mid-shutdown.
 
+### Reload instead of restarting
+
+```bash
+node CLI reload
+```
+
+When only the vault contents or the `--oauth-secrets-file` changed — credentials added or
+removed by another process, a rotated client secret — prefer `reload` over `stop && start`:
+the daemon re-reads both in place, so the pid and the port stay exactly as they were and
+nothing that already points at the port has to be told about a new one. It answers once the
+daemon reports the outcome (`purged` says how many cached tokens and grants the change
+invalidated), and a credential removed on disk stops being usable the moment it returns.
+
+It only works for a proxy that can unseal its vault on its own (the agent-key path).
+`status` reports that as `reloadable`; when it is false, `reload` refuses without signalling
+the daemon and the change needs a restart. Anything else — a different port, a new flag —
+is a restart too: `reload` re-reads inputs, it does not re-apply the command line.
+
 ## Limitations
 
 - **HTTPS only at the upstream leg** in URL-rewrite mode. The agent-to-proxy leg is plain HTTP loopback by design; `--auth-token-file` gates who may use it, but does not encrypt it.

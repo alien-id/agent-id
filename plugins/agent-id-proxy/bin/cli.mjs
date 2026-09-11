@@ -6,6 +6,8 @@
 //   start  — open the vault, listen on localhost, inject stubs into HTTP requests
 //   status — read pidfile, report listening port + uptime
 //   stop   — SIGTERM the running proxy and wait for it to exit (SIGKILL on timeout)
+//   reload — SIGHUP the running proxy so it re-reads the vault and the oauth
+//            secrets file in place, keeping its pid and port
 //
 // Unlock inputs follow the vault CLI: --passphrase-file / --passphrase-env /
 // auto via agent key / /dev/tty prompt.
@@ -152,12 +154,16 @@ async function loadVaultForProxy(stateDir, flags) {
   return { vault: await openVault({ stateDir, privateKeyPem, passphrase }), viaAgentKey: false };
 }
 
+// Written temp-then-rename: `reload` polls this file for the daemon's answer,
+// so a reader must never be able to observe a half-written one.
 async function writeProxyState(paths, info) {
   await ensureDir(path.dirname(paths.proxyState));
-  await fs.writeFile(paths.proxyState, JSON.stringify(info, null, 2) + "\n", {
+  const tmp = `${paths.proxyState}.tmp-${process.pid}`;
+  await fs.writeFile(tmp, JSON.stringify(info, null, 2) + "\n", {
     encoding: "utf8",
     mode: 0o600,
   });
+  await fs.rename(tmp, paths.proxyState);
 }
 
 async function readProxyState(paths) {
@@ -533,6 +539,9 @@ async function cmdStart(flags) {
     requireConsent,
     grantTtlMs,
     oauthClientSecrets,
+    reloadOauthSecrets: oauthSecretsFile
+      ? async () => loadOauthSecretsFile(String(oauthSecretsFile))
+      : null,
     authToken,
     blockPrivateHosts: !!flags["block-private-hosts"],
     onLock: (reason) => {
@@ -551,7 +560,9 @@ async function cmdStart(flags) {
   const controlAddr = proxy.controlAddress;
   // The control token is written to the 0600 proxy state file so same-user
   // tooling (and external approvers) can present it; it never goes to stdout.
-  await writeProxyState(paths, {
+  // The fields a reload never changes, kept in memory so the SIGHUP rewrite
+  // re-states them instead of re-reading a file it is about to replace.
+  const proxyStateBase = {
     pid: process.pid,
     host: addr.host,
     port: addr.port,
@@ -566,6 +577,15 @@ async function cmdStart(flags) {
     requireConsent,
     awaitMobile,
     stateDir,
+    reloadable: !!reopenVault,
+  };
+  let reloadSeq = 0;
+  let reloadedAt = null;
+  await writeProxyState(paths, {
+    ...proxyStateBase,
+    reloadSeq,
+    reloadedAt,
+    lastReload: null,
   });
 
   // For an owner-approval vault, the proxy drives its own unlocks against the
@@ -650,6 +670,39 @@ async function cmdStart(flags) {
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  // Reload in place: re-read the vault and the secrets file, keep the socket.
+  // The bumped `reloadSeq` in proxy.json is what `reload` waits for, so it is
+  // written for a failed reload too — the caller must learn the outcome, not
+  // time out.
+  process.on("SIGHUP", () => {
+    if (shuttingDown) return;
+    stderr("Received SIGHUP, reloading…");
+    (async () => {
+      const result = await proxy.reload({ reason: "sighup" });
+      reloadSeq += 1;
+      if (result.ok) reloadedAt = result.reloadedAt;
+      await writeProxyState(paths, {
+        ...proxyStateBase,
+        reloadSeq,
+        reloadedAt,
+        lastReload: {
+          ok: !!result.ok,
+          error: result.error ?? null,
+          purged: result.purged ?? null,
+          at: Date.now(),
+        },
+      });
+      stderr(
+        result.ok
+          ? `Reload ok: ${result.credentials} credentials, purged ${result.purged.tokens} ` +
+              `cached token(s) and ${result.purged.grants} grant(s).`
+          : `Reload failed: ${result.error}`,
+      );
+    })().catch((err) => {
+      stderr(`Reload failed: ${(err && (err.code || err.name)) || "unknown"}`);
+    });
+  });
 }
 
 async function cmdStatus(flags) {
@@ -669,7 +722,84 @@ async function cmdStatus(flags) {
       ? formatDuration(state.idleTimeoutMs)
       : "never",
     uptimeMs: alive ? Date.now() - state.startedAt : null,
+    reloadable: state.reloadable === true,
+    reloadSeq: state.reloadSeq ?? 0,
+    reloadedAt: state.reloadedAt ?? null,
   });
+}
+
+// `reload` — make the running daemon re-read the vault and the oauth secrets
+// file without restarting it. A restart would move the port; everything already
+// pointed at the old one would have to be told about the new one.
+async function cmdReload(flags) {
+  const stateDir = resolveStateDir(flags);
+  const paths = statePaths(stateDir);
+  const state = await readProxyState(paths);
+  if (!state) {
+    outputJson({ ok: false, error: "no_proxy" });
+    process.exitCode = 1;
+    return;
+  }
+  const { pid, port } = state;
+  // A daemon whose vault needs a human to unseal cannot re-read it, so there is
+  // nothing a signal could achieve — and a SIGHUP it does not handle would kill
+  // it. Answer without signalling.
+  if (state.reloadable !== true) {
+    outputJson({ ok: false, error: "not_reloadable", pid, port });
+    process.exitCode = 1;
+    return;
+  }
+  if (!(await proxyPidLooksAlive(pid))) {
+    await clearProxyState(paths);
+    outputJson({ ok: false, error: "no_proxy" });
+    process.exitCode = 1;
+    return;
+  }
+
+  const seqBefore = state.reloadSeq ?? 0;
+  const timeoutMs = flags.timeout != null ? Number(flags.timeout) : 5000;
+  try {
+    process.kill(pid, "SIGHUP");
+  } catch (err) {
+    if (err.code === "ESRCH") {
+      await clearProxyState(paths);
+      outputJson({ ok: false, error: "no_proxy" });
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let current = null;
+    try {
+      current = await readProxyState(paths);
+    } catch {
+      // The daemon replaces this file by rename, so a read can only fail while
+      // the old one is being unlinked — poll again rather than give up.
+      current = null;
+    }
+    if (current && (current.reloadSeq ?? 0) > seqBefore) {
+      const lastReload = current.lastReload || {};
+      const ok = !!lastReload.ok;
+      outputJson({
+        ok,
+        reloaded: ok,
+        pid,
+        port,
+        reloadedAt: current.reloadedAt ?? null,
+        purged: lastReload.purged ?? null,
+        error: lastReload.error ?? undefined,
+      });
+      if (!ok) process.exitCode = 1;
+      return;
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(50);
+  }
+  outputJson({ ok: false, error: "timeout", pid, port });
+  process.exitCode = 1;
 }
 
 // Still there, by the same two liveness checks the daemon it just signaled
@@ -837,6 +967,9 @@ function printHelp() {
       "  status",
       "  stop [--timeout N]   SIGTERM, wait up to N ms (default 5000) for it to exit,",
       "        then SIGKILL and wait up to 1000ms more",
+      "  reload [--timeout N]   SIGHUP the running proxy and wait for it to re-read",
+      "        the vault and secrets file (same pid, same port; needs a vault the",
+      "        proxy can unseal on its own — see `reloadable` in `status`)",
       "  autounlock [--off] [--idle-timeout T]   opt in/out of the SessionStart hook",
       "        that pops the unlock form once per session (needs a passphrase/dev vault)",
       "",
@@ -902,6 +1035,7 @@ const commands = {
   pair: cmdPair,
   status: cmdStatus,
   stop: cmdStop,
+  reload: cmdReload,
   autounlock: cmdAutounlock,
 };
 
