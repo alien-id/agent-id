@@ -535,7 +535,7 @@ See [docs/VAULT-PROXY.md](docs/VAULT-PROXY.md) for the URL-rewrite request flow 
 | --- | --- |
 | `start [--port N] [--host H] [--passphrase-file F \| --passphrase-env V] [--no-agent-key] [--idle-timeout 12h\|30m\|never]` | Unlock the vault and listen on localhost. Default port 48771, default idle-lock 12h. Foreground (Ctrl-C exits). |
 | `status` | JSON: running, pid, port, uptime, configured idleTimeout. |
-| `stop` | SIGTERM the running proxy. |
+| `stop [--timeout N]` | SIGTERM the running proxy and wait for it to exit (up to 5 s, then SIGKILL); clears the state file. |
 
 Use it by calling `http://<proxy>/<credname>/<upstream-host>/<path>`. Legacy `HTTP_PROXY` + `AgentVault <name>` stub mode also works for plain-HTTP upstream.
 

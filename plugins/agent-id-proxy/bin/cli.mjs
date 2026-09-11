@@ -5,7 +5,7 @@
 // Subcommands:
 //   start  — open the vault, listen on localhost, inject stubs into HTTP requests
 //   status — read pidfile, report listening port + uptime
-//   stop   — send SIGTERM to the running proxy
+//   stop   — SIGTERM the running proxy and wait for it to exit (SIGKILL on timeout)
 //
 // Unlock inputs follow the vault CLI: --passphrase-file / --passphrase-env /
 // auto via agent key / /dev/tty prompt.
@@ -55,6 +55,7 @@ import { createProxy, DEFAULT_IDLE_TIMEOUT_MS } from "../lib/proxy.mjs";
 import { loadOauthSecretsFile } from "../lib/oauth.mjs";
 import { buildPairingPayload, pickReachableHost } from "../lib/pairing.mjs";
 import { normalizeFingerprint } from "../lib/control-tls.mjs";
+import { isZombie, proxyPidLooksAlive } from "../lib/pid.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -394,17 +395,15 @@ async function cmdStart(flags) {
 
   const existing = await readProxyState(paths);
   if (existing && existing.pid) {
-    try {
-      process.kill(existing.pid, 0); // signal 0 = liveness check
+    if (await proxyPidLooksAlive(existing.pid)) {
       outputError(
         `Proxy already running (pid ${existing.pid}, port ${existing.port}). ` +
           "Run `stop` first or pick a different state-dir.",
       );
       return;
-    } catch {
-      // stale pidfile; fall through
-      await clearProxyState(paths);
     }
+    // stale pidfile: gone, a zombie, or a foreign pid that reused the number
+    await clearProxyState(paths);
   }
 
   // Control plane: phone-approved unlock + per-credential consent. On by
@@ -632,12 +631,21 @@ async function cmdStart(flags) {
     if (process.stdin && process.stdin.unref) process.stdin.unref();
   }
 
+  let shuttingDown = false;
   const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const deadline = setTimeout(() => {
+      stderr("shutdown deadline hit; exiting");
+      process.exit(0);
+    }, 5000);
+    deadline.unref?.();
     stderr(`Received ${signal}, shutting down…`);
     approver?.stop();
     await proxy.close();
     vault?.lock();
     await clearProxyState(paths);
+    clearTimeout(deadline);
     process.exit(0);
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
@@ -652,13 +660,7 @@ async function cmdStatus(flags) {
     outputJson({ ok: true, running: false });
     return;
   }
-  let alive = false;
-  try {
-    process.kill(state.pid, 0);
-    alive = true;
-  } catch {
-    alive = false;
-  }
+  const alive = await proxyPidLooksAlive(state.pid);
   outputJson({
     ok: true,
     running: alive,
@@ -670,6 +672,28 @@ async function cmdStatus(flags) {
   });
 }
 
+// Still there, by the same two liveness checks the daemon it just signaled
+// can actually observe: signal-reachable (not exited) and not a zombie (Linux;
+// exited-but-unreaped also counts as gone). No pid.mjs cmdline check here —
+// unlike `start`'s stale-pidfile heuristic, this pid was just signaled by us,
+// so the question is only "has it exited yet", not "is it still our proxy".
+async function stopTargetStillAlive(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  return !(await isZombie(pid));
+}
+
+async function pollUntilGone(pid, deadlineAt) {
+  while (Date.now() < deadlineAt) {
+    if (!(await stopTargetStillAlive(pid))) return true;
+    await sleep(50);
+  }
+  return !(await stopTargetStillAlive(pid));
+}
+
 async function cmdStop(flags) {
   const stateDir = resolveStateDir(flags);
   const paths = statePaths(stateDir);
@@ -678,18 +702,46 @@ async function cmdStop(flags) {
     outputError("No proxy running (no state file)");
     return;
   }
+  const { pid } = state;
+  const timeoutMs = flags.timeout != null ? Number(flags.timeout) : 5000;
+
   try {
-    process.kill(state.pid, "SIGTERM");
-    stderr(`Sent SIGTERM to pid ${state.pid}.`);
-    outputJson({ ok: true, pid: state.pid });
+    process.kill(pid, "SIGTERM");
   } catch (err) {
     if (err.code === "ESRCH") {
       await clearProxyState(paths);
-      outputError(`Process ${state.pid} not found; cleared stale state.`);
-    } else {
-      throw err;
+      outputError(`Process ${pid} not found; cleared stale state.`);
+      return;
     }
+    throw err;
   }
+  stderr(`Sent SIGTERM to pid ${pid}.`);
+
+  const waitStart = Date.now();
+  let exited = await pollUntilGone(pid, waitStart + timeoutMs);
+  let forced = false;
+  if (!exited) {
+    forced = true;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (err) {
+      if (err.code !== "ESRCH") throw err;
+    }
+    exited = await pollUntilGone(pid, Date.now() + 1000);
+  }
+  const waitedMs = Date.now() - waitStart;
+
+  const current = await readProxyState(paths);
+  if (current && current.pid === pid) {
+    await clearProxyState(paths);
+  }
+
+  if (!exited) {
+    outputJson({ ok: false, pid, exited: false, forced, waitedMs });
+    process.exitCode = 1;
+    return;
+  }
+  outputJson({ ok: true, pid, exited: true, forced, waitedMs });
 }
 
 // `pair` — show a QR/deep-link a phone scans to learn the control URL + token,
@@ -783,7 +835,8 @@ function printHelp() {
       "                          (platform-managed connectors; env: AGENT_ID_OAUTH_SECRETS_FILE)",
       "  pair [--control-host H]   show a QR for a phone to scan (control URL + token)",
       "  status",
-      "  stop",
+      "  stop [--timeout N]   SIGTERM, wait up to N ms (default 5000) for it to exit,",
+      "        then SIGKILL and wait up to 1000ms more",
       "  autounlock [--off] [--idle-timeout T]   opt in/out of the SessionStart hook",
       "        that pops the unlock form once per session (needs a passphrase/dev vault)",
       "",

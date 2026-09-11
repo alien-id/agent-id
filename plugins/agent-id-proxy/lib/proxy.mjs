@@ -175,6 +175,10 @@ export function createProxy({
   // a weak boundary wherever the network namespace is shared — a container,
   // or a machine also running a browser that renders untrusted pages.
   authToken = null,
+  // How long close() waits for in-flight clients/upstreams to finish on their
+  // own before forcing sockets and upstream requests closed. Overridable so
+  // tests don't pay the default in wall time.
+  closeGraceMs = 1000,
 }) {
   const controlEnabled = !!control;
   if (controlEnabled && !stateDir) {
@@ -722,6 +726,13 @@ export function createProxy({
   // relies on that.
   const pendingLogWrites = new Set();
 
+  // Every accepted client socket (plain requests and CONNECT tunnels share
+  // the same underlying socket) and every in-flight upstream request, so
+  // close() can force both closed instead of waiting on whatever a client or
+  // a slow upstream is doing.
+  const sockets = new Set();
+  const upstreamReqs = new Set();
+
   async function logAccess(entry) {
     const write = (async () => {
       try {
@@ -835,6 +846,11 @@ export function createProxy({
       headers: finalHeaders,
       lookup: upstreamLookup,
     });
+    upstreamReqs.add(upstreamReq);
+    const untrackUpstreamReq = () => upstreamReqs.delete(upstreamReq);
+    upstreamReq.on("response", untrackUpstreamReq);
+    upstreamReq.on("error", untrackUpstreamReq);
+    upstreamReq.on("close", untrackUpstreamReq);
 
     upstreamReq.on("error", (err) => {
       // SSRF guard rejected the resolved address → 403, not a generic 502.
@@ -1280,6 +1296,15 @@ export function createProxy({
     return { host: m[1].replace(/^\[|\]$/g, ""), port };
   }
 
+  // Every accepted client socket — a CONNECT tunnel's clientSocket is this
+  // same object, so tracking it once here covers both paths. close() forces
+  // these shut once its grace period elapses instead of waiting for every
+  // client to disconnect on its own.
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+
   // CONNECT tunneling for HTTPS. No MITM in v1.
   server.on("connect", (req, clientSocket, head) => {
     // The handler is async, so anything it throws would surface as an
@@ -1460,7 +1485,18 @@ export function createProxy({
       if (owed > 0) await logAccess({ event: "auth_failed_suppressed", suppressed: owed });
       doLock("proxy_shutdown");
       if (controlServer) await controlServer.close();
-      await new Promise((resolve) => server.close(() => resolve()));
+      // `server.close()`'s callback only fires once every accepted socket has
+      // closed and every in-flight upstream request has finished — one slow
+      // upstream or one idle keep-alive client would otherwise hold this open
+      // indefinitely. Give it `closeGraceMs` to finish on its own, then force
+      // both closed; `closed` still resolves once the forced sockets actually
+      // report shut.
+      const closed = new Promise((resolve) => server.close(() => resolve()));
+      await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, closeGraceMs))]);
+      for (const r of upstreamReqs) r.destroy(new Error("proxy_shutdown"));
+      for (const s of sockets) s.destroy();
+      server.closeAllConnections?.();
+      await closed;
       // The log is written fire-and-forget everywhere else; a closed proxy owes
       // the caller a settled log (nothing still writing into a state dir that
       // is about to go).
