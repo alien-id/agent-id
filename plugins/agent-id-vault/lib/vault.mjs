@@ -14,6 +14,7 @@
 // to passphrase if provided. Throws if neither works.
 
 import fs from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 
 import {
   buildAgentKeySlot,
@@ -76,12 +77,25 @@ async function readVaultFile(filePath) {
   }
 }
 
+// Written temp-then-rename, in the same directory so the rename is a same-
+// filesystem (atomic) one: `vault.enc` is the only copy of every credential in
+// it, and a write interrupted in place would leave a truncated file that no
+// unlock method can open. A reader therefore sees either the whole previous
+// vault or the whole new one, never a partial write.
 async function writeVaultFile(filePath, vaultFile) {
   await ensureDir(path.dirname(filePath));
-  await fs.writeFile(filePath, JSON.stringify(vaultFile, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  const tmpPath = `${filePath}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  try {
+    await fs.writeFile(tmpPath, JSON.stringify(vaultFile, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await setPrivateFilePermissions(tmpPath);
+    await fs.rename(tmpPath, filePath);
+  } catch (err) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+    throw err;
+  }
   await setPrivateFilePermissions(filePath);
 }
 
