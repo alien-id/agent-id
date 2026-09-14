@@ -1034,6 +1034,85 @@ test("a recipe that runs clean leaves the heuristics alone and reports no recipe
   assert.equal("recipeFailed" in result, false);
 });
 
+// A page whose copy reads as a refusal, with or without a field to fill. The
+// difference decides whether the stored credential is in doubt, and the run is
+// the only thing that knows it: the classifier sees the same rejection phrases
+// either way, because an error document uses them too.
+//
+// `evaluate` answers two callers here — the Microsoft-flow probe and the page
+// state snapshot — and in a double the only thing telling them apart is the
+// source of the function being evaluated.
+function refusingPage(url, { hasField }) {
+  const page = {
+    current: url,
+    filled: [],
+    url: () => page.current,
+    goto: async (next) => {
+      page.current = next;
+    },
+    waitForTimeout: async () => {},
+    keyboard: { press: async () => {} },
+    evaluate: async (fn) => {
+      if (String(fn).includes("userNameInput")) return null;
+      return {
+        hasPasswordField: false,
+        hasIdentifierField: hasField,
+        hasOtpField: false,
+        otpFieldNames: [],
+        bodyText: "Sorry, something went wrong. Please try again.",
+        blocked: false,
+        errorText: null,
+      };
+    },
+    locator: () => ({
+      first: () => ({
+        count: async () => (hasField ? 1 : 0),
+        isVisible: async () => hasField,
+        press: async () => {},
+      }),
+      count: async () => 0,
+    }),
+    fill: async (_selector, value) => {
+      page.filled.push(value);
+    },
+  };
+  return page;
+}
+
+const refusedCred = {
+  name: "booking.com",
+  username: "owner@example.test",
+  passwordless: true,
+  otp: "interactive",
+  loginUrl: "https://account.booking.com/sign-in",
+  domains: ["*.booking.com"],
+};
+
+// The report this comes from: a sign-in URL that answered an error document, no
+// form on it, nothing typed — and the run said the site had rejected the stored
+// credentials. The owner was told to retype an e-mail address that was correct.
+test("a refusal on a page with nothing to fill reports that nothing was submitted", async () => {
+  const page = refusingPage("https://account.booking.com/sign-in", { hasField: false });
+
+  const result = await autoLogin({ page, cred: refusedCred, settleMs: 0 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.valuesSubmitted, false);
+  assert.deepEqual(page.filled, [], "there was no field, so nothing can have been typed");
+});
+
+test("a refusal after the identifier went in is still the site refusing it", async () => {
+  const page = refusingPage("https://account.booking.com/sign-in", { hasField: true });
+
+  const result = await autoLogin({ page, cred: refusedCred, settleMs: 0 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.valuesSubmitted, true);
+  assert.deepEqual(page.filled, ["owner@example.test"]);
+});
+
 test("a secret step's failure keeps the cause and strikes the value out", async () => {
   const driver = {
     ...recordingDriver([]),
