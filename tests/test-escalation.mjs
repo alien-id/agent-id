@@ -193,6 +193,7 @@ test("every outcome says whether the stored values are in doubt", () => {
     "owner-will-drive",
     "error",
     "domain-not-allowed",
+    "login-url-dead",
   ]) {
     assert.equal(escalationFor(outcome, ctx).credential, "intact", outcome);
   }
@@ -300,6 +301,27 @@ test("a page that was never filled in is not a page that refused the credential"
   assert.equal(refused.action, FIX_CREDENTIAL);
   assert.equal(refused.reason, "credentials_rejected");
   assert.equal(refused.credential, "rejected");
+});
+
+// A stored address that no longer reaches a sign-in page is a wrong record with
+// a right secret — the one combination the three actions had no reading for, so
+// it used to arrive as a rejected credential.
+test("a login page that did not load is fixed on the record, not on the secret", () => {
+  const e = escalationFor("login-url-dead", {
+    ...ctx,
+    pageError: "the sign-in page answered HTTP 400",
+  });
+
+  assert.equal(e.action, FIX_CREDENTIAL);
+  assert.equal(e.reason, "login_url_unreachable");
+  assert.equal(e.credential, "intact");
+  assert.match(e.message, /HTTP 400/);
+  assert.match(e.message, /They are FINE/);
+  assert.match(e.message, /vault set-login-url/);
+  // The two things the old reading got wrong: it asked for the values, and it
+  // sent the owner back through a card.
+  assert.doesNotMatch(e.message, /overwrite: true/);
+  assert.doesNotMatch(e.message, /browser view/);
 });
 
 // Same reasoning as the row flag above: an older caller says nothing, and that
