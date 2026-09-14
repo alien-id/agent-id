@@ -983,6 +983,40 @@ async function cmdSetDomains(flags) {
   }
 }
 
+// Replace the sign-in address on an existing credential. Needed for the same
+// reason `set-domains` is: `loginUrl` is load-bearing for a `login` — auto-login
+// has nowhere to start without it — and whether it is right is only discovered
+// by driving it. A site moves its sign-in page, or the address was a guess at a
+// path that never existed; either way the secret is still correct, and without
+// this the only fix is re-adding the credential, which asks the owner to type
+// that secret again for a field they never got wrong.
+async function cmdSetLoginUrl(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const loginUrl = flags["login-url"] ? String(flags["login-url"]).trim() : "";
+  if (!loginUrl) return outputError("--login-url <URL> is required");
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    // `loginUrl` is a login's field; every sibling that edits one type's field
+    // refuses the others the same way, rather than writing a key that means
+    // nothing on a bearer and reads as policy in `vault show`.
+    if (rec.type !== "login") {
+      return outputError(`set-login-url works on 'login' credentials, not '${rec.type}'`);
+    }
+    const previous = rec.loginUrl || null;
+    rec.loginUrl = loginUrl;
+    vault.add(rec); // re-validates + upserts (createdAt preserved)
+    await vault.save();
+    stderr(`Set login URL on '${name}': ${previous ?? "(none)"} -> ${loginUrl}.`);
+    outputJson({ ok: true, name, loginUrl });
+  } finally {
+    vault.lock();
+  }
+}
+
 async function cmdSetOtp(flags) {
   const name = flags.name;
   if (!name) return outputError("--name <NAME> is required");
@@ -1740,6 +1774,9 @@ function printHelp() {
       "              driven by `agent-id-browser auto-login`, not the HTTP proxy",
       "  set-domains --name N --domains H[,H…]   replace the host allowlist",
       "              a sign-in that redirects between subdomains needs them all",
+      "  set-login-url --name N --login-url URL   move a login's sign-in address",
+      "              for a page that moved or an address that never loaded; asks the",
+      "              owner for nothing",
       "  set-otp --name N --otp none|totp|interactive   fix how a code is answered",
       "              for a login whose stored mode turned out to be wrong; asks the",
       "              owner for nothing. A mailed/texted code is `interactive`.",
@@ -1797,6 +1834,7 @@ const commands = {
   "set-totp": cmdSetTotp,
   "set-recipe": cmdSetRecipe,
   "set-domains": cmdSetDomains,
+  "set-login-url": cmdSetLoginUrl,
   "set-otp": cmdSetOtp,
   "set-access": cmdSetAccess,
   generate: cmdGenerate,
