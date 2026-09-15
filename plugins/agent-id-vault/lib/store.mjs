@@ -41,6 +41,7 @@ export const CREDENTIAL_TYPES = Object.freeze([
   "secret",
   "login",
   "card",
+  "address",
 ]);
 
 // Allowed `otp` policies on a `login` credential.
@@ -180,6 +181,57 @@ export const CARD_FIELDS = Object.freeze([
   "cardholderName",
 ]);
 
+// A billing address, in the order the form asks for it — same reason as
+// CARD_FIELDS: the validator, the secure form and the read path must not drift.
+// `billingAddressLine2` is the one field a person may legitimately leave empty,
+// so it is listed here but exempted from the emptiness check below.
+export const ADDRESS_FIELDS = Object.freeze([
+  "billingFirstName",
+  "billingLastName",
+  "billingCountry",
+  "billingAddressLine1",
+  "billingAddressLine2",
+  "billingCity",
+  "billingState",
+  "billingPostalCode",
+]);
+
+export const ADDRESS_OPTIONAL_FIELDS = Object.freeze(["billingAddressLine2"]);
+
+function validateAddressFields(rec) {
+  const required = ADDRESS_FIELDS.filter((f) => !ADDRESS_OPTIONAL_FIELDS.includes(f));
+  requireNonEmpty(rec, required);
+  if (!/^[A-Z]{2}$/.test(rec.billingCountry)) {
+    throw new Error(
+      `Credential ${rec.name}: billingCountry must be an ISO 3166-1 alpha-2 code, e.g. US`,
+    );
+  }
+  // Deliberately no per-country postal pattern. `SW1A 1AA`, `K1A 0B1` and an
+  // Eircode are all valid, and some sixty countries issue no code at all, so a
+  // country-shaped regex here buys a false refusal and nothing else.
+  if (!/^[0-9A-Za-z][0-9A-Za-z \-]{1,11}$/.test(rec.billingPostalCode)) {
+    throw new Error(
+      `Credential ${rec.name}: billingPostalCode must be 2-12 letters, digits, spaces or hyphens`,
+    );
+  }
+}
+
+// A card's own billing address, when the owner did not keep it for re-use: the
+// same fields, on the card record, invisible to every other card. Kept here
+// rather than in a second type so that one payment reads one record.
+function validateCardBilling(rec) {
+  if (typeof rec.billingAddress === "string" && rec.billingAddress.length > 0) {
+    if (ADDRESS_FIELDS.some((f) => rec[f] != null)) {
+      throw new Error(
+        `Credential ${rec.name}: a card either names a stored address or carries its own, never both`,
+      );
+    }
+    return;
+  }
+  if (!ADDRESS_FIELDS.some((f) => rec[f] != null)) return;
+  validateAddressFields(rec);
+}
+
 function validateCardFields(rec) {
   requireNonEmpty(rec, CARD_FIELDS);
   const number = rec.cardNumber;
@@ -193,6 +245,7 @@ function validateCardFields(rec) {
   if (!/^\d{3,4}$/.test(rec.cardSecurityCode)) {
     throw new Error(`Credential ${rec.name}: cardSecurityCode must be 3 or 4 digits`);
   }
+  validateCardBilling(rec);
 }
 
 // The last four, for a card the owner is asked to recognise. The only part of a
@@ -219,7 +272,7 @@ export function validateRecord(rec) {
   // on the payment intent the owner approved, which the caller enforces. Empty denies
   // everything — hostMatchesAllowlist returns false for an empty list — so
   // default-deny holds literally here too.
-  const allowsEmptyDomains = rec.type === "card";
+  const allowsEmptyDomains = rec.type === "card" || rec.type === "address";
   if (!Array.isArray(rec.domains) || (rec.domains.length === 0 && !allowsEmptyDomains)) {
     throw new Error(
       `Credential ${rec.name}: 'domains' must be a non-empty array (default-deny)`,
@@ -329,6 +382,13 @@ export function validateRecord(rec) {
       // chains and recipients the in-vault key will sign for.
       validateChainIdAllowlist(rec);
       validateToAllowlist(rec);
+      break;
+    }
+    case "address": {
+      // A billing address is not an instrument: on its own it spends nothing.
+      // It is stored sealed all the same, because it is the owner's home
+      // address and a `show` that prints it is a leak of a different kind.
+      validateAddressFields(rec);
       break;
     }
     case "card": {
@@ -575,6 +635,7 @@ export const SECRET_FIELDS = Object.freeze([
   "cardExpiry",
   "cardSecurityCode",
   "cardholderName", // card — every field of one, so none of it survives a lock
+  ...ADDRESS_FIELDS, // address — the owner's own address, and a card may carry a copy
 ]);
 
 // Best-effort scrub of decrypted secret material when the vault locks. JS
