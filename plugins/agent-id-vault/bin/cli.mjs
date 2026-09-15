@@ -445,13 +445,6 @@ function formFieldsForType(type, flags) {
         { name: "cardExpiry", label: "Expiry (MM/YY)", secret: false },
         { name: "cardSecurityCode", label: "Security code" },
         { name: "cardholderName", label: "Name on card", secret: false },
-        // The billing address, on the second page of the same form. Same
-        // contract as above — the page a field lands on is read off its name —
-        // and the same reason for `secret: false`: an address is copied off a
-        // statement, and a masked one cannot be checked. What keeps it out of
-        // `show` is SECRET_FIELDS, by name, as for the card.
-        ...ADDRESS_FIELD_SPECS,
-        ...(saveToVaultBoxEnabled() ? [SAVE_BILLING_ADDRESS_FIELD] : []),
       ];
     default:
       return null;
@@ -466,6 +459,12 @@ function saveToVaultBoxEnabled(env = process.env) {
   return env.AGENT_ID_SAVE_TO_VAULT_BOX === "1";
 }
 
+// The second form: the billing address, asked for after the card and before
+// anything is written. Its own screen because that is the flow — the card is
+// what the owner has in hand, the address is what the issuer checks — and the
+// same contract as the card's four: the name a value is sealed under is what
+// the phone draws it by.
+//
 // The billing page, in the order the design draws it. `billingAddressLine2` is
 // the one optional field; every other one is required, which is what makes the
 // phone's Done wait for it.
@@ -500,6 +499,34 @@ const SAVE_TO_VAULT_FIELD = Object.freeze({
   secret: false,
   required: false,
 });
+
+// The billing-address form, raised after the card's.
+//
+// Answered, it returns the values; closed or timed out, it returns null and the
+// card is stored without one — a card that cannot be billed still pays at the
+// many checkouts that never ask, and throwing away a card the owner has just
+// finished typing to punish them for skipping a second screen would be worse
+// than either.
+async function collectBillingAddress(name) {
+  try {
+    const out = await collectSecret({
+      title: "Billing address",
+      description:
+        "The address this card is billed to. Your bank checks it against the " +
+        "card, so a payment without it is often declined.",
+      fields: [
+        ...ADDRESS_FIELD_SPECS,
+        ...(saveToVaultBoxEnabled() ? [SAVE_BILLING_ADDRESS_FIELD] : []),
+      ],
+      label: `enter the billing address for "${name}"`,
+      security: "I never see it. It goes straight into your encrypted vault.",
+    });
+    return out.values;
+  } catch (err) {
+    stderr(`Billing address not given (${err.message}); storing the card without one.`);
+    return null;
+  }
+}
 
 // Where the billing address the owner just typed ends up.
 //
@@ -741,6 +768,14 @@ async function cmdAdd(flags) {
         security: "I never see it. It goes straight into your encrypted vault.",
       });
       formValues = out.values;
+      // The second step. A card is typed off the card in hand; the address is a
+      // different question and gets a screen of its own. Both are collected
+      // before anything is written, so a card and the address it is billed to
+      // land in one save.
+      if (type === "card") {
+        const billing = await collectBillingAddress(name);
+        if (billing) formValues = { ...formValues, ...billing };
+      }
     } catch (err) {
       const ended = ownerEndedTheCard(err, {
         name,
