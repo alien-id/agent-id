@@ -259,18 +259,56 @@ const NAMED_DESTINATION_RE =
 const ENDING_RE =
   /\b(?:(your|the)\s+)?(phone(?:\s+number)?|number|mobile|e-?mail(?:\s+address)?)\s+ending\s+(?:in\s+|with\s+)?([\d\u2022\u00b7*.\u2026-]{2,8})/i;
 
+// Which sort of place the code went to, as a value rather than a word inside a
+// sentence. The card names it in its own title — "Enter the email code" — so the
+// class has to survive the recognition that already happens here; it used to be
+// collapsed into one boolean and lost.
+//
+// `null` where the page named a place without naming a kind ("your device"): a
+// wrong channel is worse than none, because it sends the owner to the wrong
+// device and then convinces them the code never came.
+function namedChannel(target) {
+  if (/^your\s+e-?mail/i.test(target)) return "email";
+  if (/^your\s+(?:phone|mobile|messages)/i.test(target)) return "sms";
+
+  return null;
+}
+
+// Reduce an address or a number to what identifies it to its owner and to nobody
+// else. Most pages mask it themselves and masking an already-masked value is a
+// no-op; the ones that do not are why this is here, because from this point the
+// value travels to a card through a gateway that has no business holding an
+// e-mail address in full.
+export function maskTarget(value) {
+  const target = String(value || "").trim();
+  if (!target) return null;
+
+  const at = target.lastIndexOf("@");
+  if (at > 0) return `${target.slice(0, 1)}\u2022\u2022\u2022${target.slice(at)}`;
+
+  const digits = target.replace(/\D/g, "");
+
+  return digits.length >= 4 ? `\u2022\u2022\u2022 ${digits.slice(-4)}` : target;
+}
+
 export function codeDestination(bodyText) {
   const text = String(bodyText || "");
   const match = SENT_TO_RE.exec(text);
   const target = match ? match[1].trim().replace(/\s+/g, " ") : null;
 
   if (target && !MARKUP_RE.test(target)) {
-    const recognised =
-      EMAIL_DESTINATION_RE.test(target) ||
-      PHONE_DESTINATION_RE.test(target) ||
-      NAMED_DESTINATION_RE.test(target);
-
-    if (recognised) return target;
+    if (EMAIL_DESTINATION_RE.test(target)) {
+      return { channel: "email", destination: maskTarget(target) };
+    }
+    if (PHONE_DESTINATION_RE.test(target)) {
+      return { channel: "sms", destination: maskTarget(target) };
+    }
+    // Already a description rather than an identifier ("your phone ending in
+    // 4817"), so there is nothing left to mask and cutting it further would
+    // destroy the only useful part.
+    if (NAMED_DESTINATION_RE.test(target)) {
+      return { channel: namedChannel(target), destination: target };
+    }
   }
 
   const ending = ENDING_RE.exec(text);
@@ -278,26 +316,10 @@ export function codeDestination(bodyText) {
 
   const [, article, kind, tail] = ending;
 
-  return `${(article || "your").toLowerCase()} ${kind.toLowerCase()} ending in ${tail}`;
-}
-
-// The destination for a LOG line. `codeDestination` returns what the page said,
-// and a page is free to say it in full — the owner's whole e-mail address or
-// phone number. That belongs on the card, which is being shown to the owner
-// anyway, and not in a log that outlives the sign-in. Sites that already
-// masked it ("your email ending in 42") pass through: there is nothing left to
-// hide, and cutting them further would destroy the only useful part.
-export function maskDestination(destination) {
-  const value = String(destination || "").trim();
-  if (!value) return null;
-
-  const email = /^([^\s@]+)@([^\s@]+)$/.exec(value);
-  if (email) return `${email[1].slice(0, 1)}***@${email[2]}`;
-
-  const digits = value.replace(/\D/g, "");
-  if (digits.length >= 5) return `***${digits.slice(-4)}`;
-
-  return value;
+  return {
+    channel: /e-?mail/i.test(kind) ? "email" : "sms",
+    destination: `${(article || "your").toLowerCase()} ${kind.toLowerCase()} ending in ${tail}`,
+  };
 }
 
 export { OTP_FIELD_RE, OTP_BODY_RE, CONFIRM_BODY_RE, MAGIC_LINK_RE, QR_SIGN_IN_RE, ERROR_RE, BLOCK_RE };

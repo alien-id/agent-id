@@ -576,11 +576,17 @@ test("the card names the site, not the credential the agent invented", async () 
 // a `vault_add` form. Every way of ending that card collapsed into one opaque
 // `secure form: …` string, which reads to a model like a transient fault — so it
 // called `vault_add` again and the owner got the same form a second time.
-function hostedSocket(reason) {
+function hostedSocket(reason, seen = []) {
   const sock = path.join(os.tmpdir(), `vault-card-${process.pid}-${Date.now()}.sock`);
   const server = http.createServer((req, res) => {
-    req.on("data", () => {});
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
+      try {
+        seen.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch {
+        seen.push(null);
+      }
       const body = JSON.stringify(reason ? { error: "cancelled", reason } : { error: "cancelled" });
       res.writeHead(409, { "content-type": "application/json" });
       res.end(body);
@@ -590,8 +596,8 @@ function hostedSocket(reason) {
   return new Promise((resolve) => server.listen(sock, () => resolve({ sock, server })));
 }
 
-async function addAgainstCard({ dir, reason }) {
-  const { sock, server } = await hostedSocket(reason);
+async function addAgainstCard({ dir, reason, seen = [] }) {
+  const { sock, server } = await hostedSocket(reason, seen);
   try {
     const child = spawn(
       "node",
@@ -621,8 +627,8 @@ async function addAgainstCard({ dir, reason }) {
 
 // Same stubbed card host, driving `set-totp --form` instead. The credential has
 // to exist first, which `add` without `--form` does without raising anything.
-async function setTotpAgainstCard({ dir, reason }) {
-  const { sock, server } = await hostedSocket(reason);
+async function setTotpAgainstCard({ dir, reason, seen = [] }) {
+  const { sock, server } = await hostedSocket(reason, seen);
   try {
     const child = spawn(
       "node",
@@ -670,6 +676,60 @@ test("a seed card closed for the browser declines, and says a browser cannot fin
     assert.equal(out.action, undefined, "a browser cannot put a seed in the vault");
     assert.match(out.message, /browser cannot finish this one/);
     assert.match(out.message, /do not open a browser for it/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The facts a client draws its own sentence from, asserted where they actually
+// leave the process: the whole chain from the CLI through the secure-prompt
+// provider to the socket the phone is on the other end of.
+//
+// `purpose` is what says a browser can finish this one. It cannot be read off
+// the fields: a token, a cookie jar and a seed all arrive as a single field
+// named `value`, the same shape a password does, so a client deciding from the
+// fields alone offered the browser for a token and lethe then refused it.
+test("a credential card says what it is for and which site it is for", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-card-"));
+  const seen = [];
+  try {
+    await makeVault(dir);
+    await addAgainstCard({ dir, reason: null, seen });
+
+    assert.equal(seen.length, 1, "the card never reached the socket");
+    assert.equal(seen[0].purpose, "sign_in");
+    // `account.` is a sign-in label and is stripped, so the card names the site
+    // the owner is looking at — and names it the same way the code card will,
+    // because both go through `siteName(credentialHost(...))`.
+    assert.equal(seen[0].site, "Example.com");
+    // The sentences travel too, and stay authoritative for a client that has
+    // never heard of `purpose`.
+    assert.equal(seen[0].title, "Enter it securely");
+    assert.match(seen[0].description, /sign-in/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The other two cards this CLI raises. Neither is something a browser can finish
+// — a seed lives behind the site's own two-factor settings, and an approval is
+// the owner typing a name back — but neither says so in a way a client can read
+// off the fields: both are one plain text box, the same shape a password is. So
+// a client offering the browser dismissed the card and, for the approval, threw
+// the answer away silently.
+test("a seed card says it is a stored secret rather than a sign-in", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-card-"));
+  const seen = [];
+  try {
+    await makeVault(dir);
+    await setTotpAgainstCard({ dir, reason: "cancel", seen });
+
+    assert.equal(seen.length, 1, "the card never reached the socket");
+    assert.equal(seen[0].purpose, "secret");
+    // No site, deliberately: nothing generic beats the sentence the card already
+    // carries, so a client falls back to it.
+    assert.equal(seen[0].site, null);
+    assert.match(seen[0].description, /otpauth/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
