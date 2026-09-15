@@ -78,6 +78,8 @@ import {
   TrustedInputUnavailable,
 } from "../lib/trusted-input.mjs";
 import {
+  CARD_FIELDS,
+  cardLast4,
   CREDENTIAL_TYPES,
   loginOtpMode,
   LOGIN_OTP_MODES,
@@ -317,6 +319,19 @@ function formDescription({
   access,
   passwordless,
 }) {
+  // A card gets its own sentence, and skips the `ro` grant below, because that
+  // grant reads here as the opposite of what it means. On a login it says the agent
+  // may read the account and not change it. On the screen where somebody is typing
+  // a card number, "the agent can read this" is the thing they are most afraid of —
+  // and it would sit directly above a security note promising that it never sees
+  // the value. The stored name is left out for the reason given above CARD_TITLE:
+  // it is a key the agent invented, and this is not where it belongs.
+  if (type === "card") {
+    return (
+      "A payment card for the agent to pay with. It asks you to approve every " +
+      "payment before using it — the amount and the site, every time."
+    );
+  }
   const site = siteName(credentialHost({ loginUrl, domains }));
   const lead = type === "login"
     ? `${site ? `${site} sign-in` : `Sign-in for ${name}`}. You type it on a sealed screen.`
@@ -413,6 +428,22 @@ function formFieldsForType(type, flags) {
         // a client that never rendered the row sends nothing, which is "true".
         ...(saveToVaultBoxEnabled() ? [SAVE_TO_VAULT_FIELD] : []),
       ];
+    case "card":
+      return [
+        // These four names are a wire contract, not labels: the secure-input
+        // envelope carries no field type, so the name a value is sealed under is
+        // what picks the phone's keyboard and the paired expiry/code row. Renaming
+        // one downgrades that screen to a plain text box and nothing fails.
+        //
+        // `secret` masks the input as it is typed and nothing more — storage
+        // secrecy is `SECRET_FIELDS`, by name, and covers all four regardless. Only
+        // the code keeps the mask: the rest is copied off a card in hand, and a
+        // masked number cannot be read back and checked.
+        { name: "cardNumber", label: "Card number", secret: false },
+        { name: "cardExpiry", label: "Expiry (MM/YY)", secret: false },
+        { name: "cardSecurityCode", label: "Security code" },
+        { name: "cardholderName", label: "Name on card", secret: false },
+      ];
     default:
       return null;
   }
@@ -506,11 +537,33 @@ async function cmdAdd(flags) {
   if (access && !ACCESS_LEVELS.includes(access)) {
     return outputError(`--access must be one of ${ACCESS_LEVELS.join(", ")}`);
   }
+  // A card is sealed by its access level, so the level is not the caller's to pick:
+  // `rw` leaves `show` returning the number, the expiry and the code in clear, and the
+  // caller here is the agent. Refused rather than quietly corrected, so a caller that
+  // asked for it learns that it was refused.
+  if (type === "card" && access != null && access !== "ro") {
+    return outputError(
+      "A card is stored read-only. Where its values may go is decided by the owner when " +
+        "they approve a payment, not by --access.",
+    );
+  }
   let domains = parseDomains(flags);
+  // Declaring where a card may be used would be granting oneself a merchant: the
+  // owner's per-payment approval is what says where it may go.
+  if (type === "card" && domains.length > 0) {
+    return outputError(
+      "A card takes no --domains. Where it may be used is decided by the owner when they " +
+        "approve a payment, not here.",
+    );
+  }
   if (domains.length === 0) {
     // `secret` is not host-scoped (it's used via exec/file, not the HTTP proxy),
     // so it doesn't need a domain allowlist; everything else is default-deny.
     if (type === "secret") domains = ["*"];
+    // A card carries no allowlist at all: it stays empty, which matches no host, so
+    // default-deny holds literally. Nothing writes to it — what says where a card may
+    // be typed is the merchant host on the owner's approved payment intent.
+    else if (type === "card") domains = [];
     else if (type === "login") {
       // `login` IS host-scoped — the browser gates fill-secret / fill-otp and every
       // auto-login recipe step on this list. Default to the loginUrl host; falling
@@ -731,6 +784,31 @@ async function cmdAdd(flags) {
               "(--refresh-token-file / --refresh-token-env / stdin / --form)"
           );
         }
+        break;
+      }
+      case "card": {
+        // Form-only, and not for tidiness: a PAN passed as a flag is a PAN in the
+        // process table, in `ps` output, and in whatever shell history saw it.
+        if (!formValues) {
+          return outputError("A card is typed into the secure form — re-run with --form");
+        }
+        // Copied off a card face, so the separators the labels invite arrive with
+        // the values — a slash in the expiry, groups of four in the number. The
+        // stored form is bare digits, which is what the validators and the fill
+        // both expect, so strip on the way in rather than refuse the owner's
+        // typing.
+        const digitsOf = (value) => (value || "").replace(/\D/g, "");
+        record.cardNumber = digitsOf(formValues.cardNumber);
+        record.cardExpiry = digitsOf(formValues.cardExpiry);
+        record.cardSecurityCode = digitsOf(formValues.cardSecurityCode);
+        record.cardholderName = formValues.cardholderName || "";
+        // A read of this record is a complete card-not-present instrument, so it
+        // never comes back out: `ro` makes it access-restricted, which is what
+        // `show` redacts every SECRET_FIELD on. Set, not defaulted — a caller that
+        // passed anything else was already refused above. Not `exportable: false` —
+        // that means "generated in-vault, never typed into a page", which is the one
+        // thing a card exists to do, and assertFillAllowed enforces it literally.
+        record.access = "ro";
         break;
       }
       case "login": {
@@ -1265,6 +1343,41 @@ async function cmdSetAccess(flags) {
   }
 }
 
+// The card's values, for the one process that types them into a page.
+//
+// `show` seals a card, because `access: "ro"` means its plaintext must not be
+// what the agent reads when it asks what it has stored — and a PAN printed into
+// a tool result is a PAN in the turn's transcript. But something has to hand the
+// four values to whatever fills the checkout form, and since the browser session
+// server was removed (#151) that is the payment tool in lethe.
+//
+// So the read is a command of its own rather than a flag on `show`: it names
+// what it does in the audit log, it reads nothing but a card, and a reader of
+// this file can find every caller by its name. It is not a privilege boundary —
+// the vault opens with the agent key and anything that can run this can import
+// the library instead. What guards a card is the owner's per-payment approval,
+// which is enforced in lethe, not here.
+async function cmdReadCard(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "card") {
+      return outputError(
+        `'${name}' is a ${rec.type}, and read-card reads nothing but a card`,
+      );
+    }
+    const card = {};
+    for (const field of CARD_FIELDS) card[field] = rec[field] ?? "";
+    card.cardLast4 = cardLast4(rec);
+    outputJson({ ok: true, card });
+  } finally {
+    vault.lock();
+  }
+}
+
 async function cmdList(flags) {
   const vault = await openWithFlags(flags);
   try {
@@ -1759,6 +1872,8 @@ function printHelp() {
       "      evm:    [--chain-id-allowlist 1,137] [--to-allowlist 0x..,0x..]",
       "      solana: [--program-allowlist <base58>,..]   (default-allow when omitted)",
       "  show --name N    (sealed/generated secrets are redacted)",
+      "  read-card --name N",
+      "      the card's four values, for the process that types them into a page",
       "  list",
       "  remove --name N",
       "  exec [--env VAR=cred.field | --file VAR=cred.field] … -- <cmd> [args…]",
@@ -1801,6 +1916,7 @@ const commands = {
   "set-access": cmdSetAccess,
   generate: cmdGenerate,
   show: cmdShow,
+  "read-card": cmdReadCard,
   list: cmdList,
   remove: cmdRemove,
   exec: cmdExec,
