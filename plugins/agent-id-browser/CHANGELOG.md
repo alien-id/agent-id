@@ -1,5 +1,64 @@
 # @alien-id/agent-id-browser
 
+## 9.1.2
+
+### Patch Changes
+
+- [#162](https://github.com/alien-id/agent-id/pull/162) [`60b4ed8`](https://github.com/alien-id/agent-id/commit/60b4ed8224ba7b98d3dc82144ae4c9aeaddcdd58) Thanks [@stelchankad](https://github.com/stelchankad)! - Read the status the login page answered with, instead of reading the error
+  document it returned.
+
+  A navigation resolves on a 404 as happily as on a 200, and auto-login discarded
+  what `goto` handed back — so a stored address that no longer reaches a sign-in
+  page was treated as a sign-in that would not go through. The run walked into
+  form detection on an error document, spent every round on it, re-navigated to
+  the same dead address, and ended by reporting whatever that document's copy
+  sounded like. On a page carrying "try again" that was a rejected credential.
+
+  The login page's status is now read from the navigation itself — `navStatus`
+  handles both page shapes — and a 4xx or 5xx ends the run immediately as
+  `login-url-dead`, before anything on the page is classified. An unknown status
+  condemns nothing.
+
+  The warm-up navigation is deliberately still not judged. It exists for sites
+  that wall a cold deep link and let it through once the origin has set a
+  clearance cookie, so the origin is allowed to answer badly; acting on its status
+  would break the case the warm-up was added for.
+
+  `login-url-dead` escalates as `fix_credential` / `login_url_unreachable` with
+  the credential `intact` — a wrong record with a right secret, which the three
+  actions previously had no reading for. The message says the values were never
+  offered to the site, tells the caller to find the real sign-in address by
+  looking rather than guessing a path, and points at `vault set-login-url`, which
+  corrects the one field without asking the owner for the secret again.
+
+- [#161](https://github.com/alien-id/agent-id/pull/161) [`52f7c42`](https://github.com/alien-id/agent-id/commit/52f7c42ef5b5b83d1c10951d9bcc9b1ff8a61c9d) Thanks [@stelchankad](https://github.com/stelchankad)! - Say the site rejected a credential only when the site was given one to reject.
+
+  `AUTO_LOGIN_FAILED` reported `credential: "rejected"` from the outcome alone, and
+  the outcome reached `"failed"` whenever the page carried rejection copy. Error
+  documents carry it too — "invalid", "try again" — and a page that is not a
+  sign-in offers no form to weigh those phrases against. A sign-in URL that
+  answered an error document therefore came back as "the site rejected the stored
+  credentials", and the owner was told to retype an e-mail address that had been
+  correct all along, on a page nothing had ever been typed into.
+
+  The run now reports whether a stored value actually went into a visible field.
+  `heuristicLogin` already computed that and dropped it; it is returned, recorded
+  on every path including the one that filled nothing, and carried out with the
+  outcome as `valuesSubmitted`. A completed recipe counts as submitted — driving
+  the credential into the page is what its steps are for — and so does a recipe
+  that failed after a code card was answered, since the steps before it had run.
+
+  A `"failed"` outcome with nothing submitted is now `owner_must_drive` /
+  `no_values_submitted`, the credential stays `intact`, and the message forbids
+  the accusation rather than merely omitting it: the model relayed the old wording
+  to the owner verbatim. It also points at `finalUrl`, because a login URL that no
+  longer reaches a sign-in page is the likeliest way to arrive here. A caller that
+  reports nothing about the fill still gets the old reading, so a refused
+  credential is unaffected.
+
+- Updated dependencies [[`2bd9cc4`](https://github.com/alien-id/agent-id/commit/2bd9cc44ca52dc5025344b04905adf0ba2d70d98), [`5225e57`](https://github.com/alien-id/agent-id/commit/5225e573fbcfc68cc554f43a944cf32f08f48cd5)]:
+  - @alien-id/agent-id-vault@7.10.0
+
 ## 9.1.1
 
 ### Patch Changes
