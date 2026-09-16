@@ -1,5 +1,27 @@
 # @alien-id/agent-id-vault
 
+## 7.10.0
+
+### Minor Changes
+
+- [#163](https://github.com/alien-id/agent-id/pull/163) [`2bd9cc4`](https://github.com/alien-id/agent-id/commit/2bd9cc44ca52dc5025344b04905adf0ba2d70d98) Thanks [@stelchankad](https://github.com/stelchankad)! - Add `set-login-url`, so moving a login's sign-in address does not ask the owner
+  for the secret again.
+
+  `loginUrl` is load-bearing for a `login` — auto-login has nowhere to start
+  without it — and whether it is right is only discovered by driving it. A site
+  moves its sign-in page, or the stored address was a guess at a path that never
+  existed. Either way the secret is still correct, and until now the only way to
+  change that one field was re-adding the credential, which raises the card and
+  asks the owner to retype a value they never got wrong.
+
+  It follows the other five correctors: `--name` and the one field, refusing a
+  type that has no sign-in address, and re-validating through the record's own
+  rules so a corrector cannot store an address `add` would have refused.
+
+### Patch Changes
+
+- [#165](https://github.com/alien-id/agent-id/pull/165) [`5225e57`](https://github.com/alien-id/agent-id/commit/5225e573fbcfc68cc554f43a944cf32f08f48cd5) Thanks [@TemMax](https://github.com/TemMax)! - Write `vault.enc` atomically (temp file + rename) so a concurrent reader never sees a torn file.
+
 ## 7.9.0
 
 ### Minor Changes
