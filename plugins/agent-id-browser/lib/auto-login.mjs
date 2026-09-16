@@ -1083,6 +1083,11 @@ export { detectMicrosoftFlow };
 // Heuristic fallback: fill a username/email field and the password field, submit.
 // Handles a simple two-step flow (username page → password page), and the
 // passwordless flow where submitting the identifier is the entire step.
+//
+// Returns whether a stored value actually went into a visible field. The fills
+// already answer that and used to drop the answer on the floor, which left the
+// run unable to tell a site that refused the credential from a page that was
+// never a sign-in — and only the first of those is the credential's fault.
 async function heuristicLogin(page, { username, password, passwordless }) {
   // Ordered widest-signal-first, and it must cover everything IDENTIFIER_FIELD_SEL
   // recognises — a screen the classifier calls an identifier step and this cannot
@@ -1103,14 +1108,14 @@ async function heuristicLogin(page, { username, password, passwordless }) {
     return true;
   };
 
-  await fillFirst(userSel, username);
+  const filledUser = await fillFirst(userSel, username);
   // Passwordless: submitting the identifier IS the whole step — it is what makes
   // the site send the code. Stop here deliberately rather than falling into the
   // password hunt below, which would press Enter a second time and re-submit a
   // form that has already advanced.
   if (passwordless) {
     await page.keyboard.press("Enter").catch(() => {});
-    return;
+    return filledUser;
   }
   // If the password field isn't on this page yet, advance (two-step IdP) and retry.
   if ((await page.locator(pwSel).count()) === 0) {
@@ -1119,6 +1124,11 @@ async function heuristicLogin(page, { username, password, passwordless }) {
   }
   const filledPw = await fillFirst(pwSel, password, true);
   if (filledPw) await page.locator(pwSel).first().press("Enter").catch(() => {});
+
+  // The identifier alone counts: a site that answers "no account with that
+  // e-mail" has rejected a stored value, and it is reached without a password
+  // ever being asked for.
+  return filledUser || filledPw;
 }
 
 /**
@@ -1207,13 +1217,21 @@ export async function autoLogin(options) {
 
 // The default sign-in when no recipe drives it: Microsoft's fixed ids where the
 // page is theirs, the heuristic username/password fill everywhere else.
-async function formLogin(page, cred, log) {
+//
+// `marks` is written to rather than returned, the way runRecipe's failure is —
+// and it is written on every path, including the one that typed nothing. An
+// absent mark means nobody reported, which is what an injected `formLoginFn`
+// double leaves behind, and that has to keep reading as the old answer rather
+// than as "nothing was submitted".
+async function formLogin(page, cred, log, marks = {}) {
   if (await detectMicrosoftFlow(page)) {
     // Microsoft ADFS / Entra: stable element IDs the heuristic can't drive.
+    // Its fills throw rather than report, so returning at all means they landed.
     await microsoftLogin(page, cred, log);
-  } else {
-    await heuristicLogin(page, cred);
+    marks.valuesSubmitted = true;
+    return;
   }
+  marks.valuesSubmitted = await heuristicLogin(page, cred);
 }
 
 // Which recipe step a RECIPE_STEP_FAILED error names, for the report.
@@ -1379,6 +1397,10 @@ async function driveLogin({
         log,
       });
       skipFormLogin = true;
+      // A recipe that ran to the end is the credential going into the page: that
+      // is what its `type` steps are for. The heuristics never run, so this is
+      // the only place a recipe-driven sign-in can report it.
+      marks.valuesSubmitted = true;
     } catch (err) {
       if (err?.code === "FORM_USE_BROWSER") return ownerWillDrive();
       if (err?.code === "FORM_CANCELLED") return otpDeclined();
@@ -1403,6 +1425,9 @@ async function driveLogin({
       if (err.otpConsumed) {
         log(`auto-login: the stored recipe failed after the code was entered (${cause}) — continuing from the current page`);
         skipFormLogin = true;
+        // A code was answered, so the steps before it — the ones carrying the
+        // identifier and the password — had already run.
+        marks.valuesSubmitted = true;
       } else {
         log(`auto-login: the stored recipe failed (${cause}) — falling back to the form heuristics`);
         await page.goto(cred.loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -1410,7 +1435,7 @@ async function driveLogin({
       }
     }
   }
-  if (!skipFormLogin) await formLoginFn(page, cred, log);
+  if (!skipFormLogin) await formLoginFn(page, cred, log, marks);
   await page.waitForTimeout(settleMs);
 
   for (let round = 0; round < maxRounds; round++) {
@@ -1451,7 +1476,16 @@ async function driveLogin({
       }
       log("auto-login: form cleared but still on the login page — awaiting redirect");
     } else if (outcome === "failed") {
-      return { ok: false, outcome, finalUrl: page.url(), errorText };
+      // Carried out with the outcome, the way `codeRowSeen` is: whether the site
+      // was ever given anything to refuse is what separates a wrong credential
+      // from a page that only reads like one.
+      return {
+        ok: false,
+        outcome,
+        finalUrl: page.url(),
+        errorText,
+        valuesSubmitted: marks.valuesSubmitted,
+      };
     } else if (outcome === "confirm-on-device") {
       // Nothing to type: the owner approves on their own device and the page
       // advances by itself. Tell them once, then poll until it does. This is

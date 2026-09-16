@@ -197,6 +197,11 @@ test("every outcome says whether the stored values are in doubt", () => {
     assert.equal(escalationFor(outcome, ctx).credential, "intact", outcome);
   }
   assert.equal(escalationFor("failed", ctx).credential, "rejected");
+  // ...but only once the site was given something to reject.
+  assert.equal(
+    escalationFor("failed", { ...ctx, valuesSubmitted: false }).credential,
+    "intact",
+  );
 });
 
 test("a rejected password is re-stored in place, never removed", () => {
@@ -262,4 +267,46 @@ test("a caller that says nothing about the row gets the refused-code reading", (
   const escalation = escalationFor("otp-rejected", { credName: "x", profile: "x" });
 
   assert.equal(escalation.reason, "otp_not_accepted");
+});
+
+// The same shape one step earlier: a page can read as a refusal without ever
+// having been filled in. A sign-in URL that answered an error document did
+// exactly that, and the owner was sent to retype an e-mail that was correct.
+test("a page that was never filled in is not a page that refused the credential", () => {
+  const untouched = escalationFor("failed", {
+    credName: "booking.com",
+    profile: "booking.com",
+    valuesSubmitted: false,
+  });
+
+  assert.equal(untouched.action, OWNER_MUST_DRIVE);
+  assert.equal(untouched.reason, "no_values_submitted");
+  assert.equal(untouched.credential, "intact");
+  assert.match(untouched.message, /nothing was typed/);
+  assert.match(untouched.message, /cannot have rejected them/);
+  // Forbidding the accusation, not just omitting it — the old wording reached
+  // the owner verbatim.
+  assert.match(untouched.message, /Do NOT tell the owner their credentials\s+are wrong/);
+  // A dead login URL is the likeliest cause, so the report has to point there.
+  assert.match(untouched.message, /finalUrl/);
+  assert.doesNotMatch(untouched.message, /overwrite: true/);
+
+  const refused = escalationFor("failed", {
+    credName: "booking.com",
+    profile: "booking.com",
+    valuesSubmitted: true,
+  });
+
+  assert.equal(refused.action, FIX_CREDENTIAL);
+  assert.equal(refused.reason, "credentials_rejected");
+  assert.equal(refused.credential, "rejected");
+});
+
+// Same reasoning as the row flag above: an older caller says nothing, and that
+// must keep meaning "the site refused it", not "we never asked".
+test("a caller that says nothing about the fill gets the rejected reading", () => {
+  const escalation = escalationFor("failed", { credName: "x", profile: "x" });
+
+  assert.equal(escalation.reason, "credentials_rejected");
+  assert.equal(escalation.credential, "rejected");
 });

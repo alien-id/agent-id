@@ -38,12 +38,23 @@ export function escalationFor(outcome, ctx = {}) {
   // every other way a sign-in ends leaves the credential exactly as typed, and
   // an agent that read "fix" as "delete" once cost the owner a card they had
   // just filled in.
-  return { credential: outcome === "failed" ? "rejected" : "intact", ...escalation };
+  //
+  // A rejection also requires that the site was given something to reject. The
+  // run reports that as `valuesSubmitted`, and an outcome of "failed" without it
+  // is a page that reads like a refusal without ever having been filled in.
+  const rejected = outcome === "failed" && ctx.valuesSubmitted !== false;
+  return { credential: rejected ? "rejected" : "intact", ...escalation };
 }
 
 function escalationMessage(
   outcome,
-  { credName = "", profile = "", pageError = null, codeRowSeen = true } = {},
+  {
+    credName = "",
+    profile = "",
+    pageError = null,
+    codeRowSeen = true,
+    valuesSubmitted = true,
+  } = {},
 ) {
   switch (outcome) {
     // The login handshake is exactly where anti-automation bites. No credential
@@ -193,6 +204,27 @@ function escalationMessage(
           "`vault set-totp`. Do not retry as-is; it will ask again.",
       };
     case "failed":
+      // A rejection is a thing the site does to values it was given. This
+      // branch is reached whenever the page carries rejection copy, and error
+      // documents carry it too — "try again", "invalid" — while a page that is
+      // not a sign-in offers no form to weigh that against. Read as a rejection
+      // it sent an owner to retype an e-mail address that had been correct all
+      // along, on a sign-in URL that had answered HTTP 400 before anything was
+      // typed.
+      if (!valuesSubmitted) {
+        return {
+          action: OWNER_MUST_DRIVE,
+          reason: "no_values_submitted",
+          message:
+            `The page reached for '${credName}' reads like a refusal, but nothing was typed ` +
+            "into it: there was no sign-in form to fill, so the site never saw the stored " +
+            "values and cannot have rejected them. Do NOT tell the owner their credentials " +
+            "are wrong, and do NOT re-store them. Read `finalUrl` — if that is not the " +
+            "site's sign-in page, the credential's login URL is what needs correcting. If it " +
+            `is, open the browser view for profile '${profile}' so the owner can see what the ` +
+            "page is showing.",
+        };
+      }
       return {
         action: FIX_CREDENTIAL,
         reason: "credentials_rejected",
