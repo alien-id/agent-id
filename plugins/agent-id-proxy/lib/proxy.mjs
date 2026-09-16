@@ -163,6 +163,10 @@ export function createProxy({
   // an oauth2 credential carries no clientSecret of its own, so
   // personal/standalone creds behave exactly as before.
   oauthClientSecrets = null,
+  // Re-read those per-connector secrets in place: an optional async () => map,
+  // supplied when the host can hand the same file back. `reload()` calls it so
+  // a rotated secrets file lands without the port churn of a respawn.
+  reloadOauthSecrets = null,
   // Self-reopen: an optional async () => Vault, supplied only when the vault
   // can be unsealed without a human (the agent-key auto-unlock path). Lets an
   // unattended proxy (e.g. a supervisor spawning one proxy per principal)
@@ -175,6 +179,10 @@ export function createProxy({
   // a weak boundary wherever the network namespace is shared — a container,
   // or a machine also running a browser that renders untrusted pages.
   authToken = null,
+  // How long close() waits for in-flight clients/upstreams to finish on their
+  // own before forcing sockets and upstream requests closed. Overridable so
+  // tests don't pay the default in wall time.
+  closeGraceMs = 1000,
 }) {
   const controlEnabled = !!control;
   if (controlEnabled && !stateDir) {
@@ -243,6 +251,20 @@ export function createProxy({
     oauthInFlight: new Map(),
   };
 
+  // The per-connector secrets currently in force. Starts as the map the caller
+  // loaded at spawn and is replaced wholesale by `reload()`; a failed re-read
+  // leaves the previous map serving.
+  let clientSecrets = oauthClientSecrets;
+
+  // A credential record's identity over time: the vault stamps `updatedAt` on
+  // every write of the record and never on a read, so a value that changed on
+  // disk always carries a different epoch. Cached material is keyed by it, and
+  // an in-place refresh-token rotation deliberately does NOT bump it (it writes
+  // the field without going through addCredential), so rotation keeps the cache.
+  function credEpoch(cred) {
+    return cred?.updatedAt ?? cred?.createdAt ?? null;
+  }
+
   // Refresh an oauth2 access token this far before its stated expiry, so a token
   // that is valid when injected is still valid when it reaches the upstream.
   const OAUTH_SKEW_MS = 60 * 1000;
@@ -289,6 +311,39 @@ export function createProxy({
     if (onLock) onLock(reason);
   }
 
+  // Bring the in-memory caches back in line with the vault that is serving now:
+  // a credential another process deleted must stop being usable, and one whose
+  // record changed must not keep answering with material minted from the old
+  // one. The credential names are collected once and every cache is filtered
+  // against that set, so the cost is linear in the caches, not quadratic.
+  function reconcileCachesWithVault() {
+    const names = new Set(state.vault ? state.vault.list().map((m) => m.name) : []);
+    let tokens = 0;
+    let grants = 0;
+    for (const [name, entry] of state.oauthTokens) {
+      // A token cached for a credential that is gone is unusable by definition —
+      // including the rotated refresh token the vault refused to store, which
+      // has nothing left to belong to.
+      if (!names.has(name) || entry.epoch !== credEpoch(state.vault.get(name))) {
+        state.oauthTokens.delete(name);
+        tokens += 1;
+      }
+    }
+    for (const name of state.oauthInFlight.keys()) {
+      if (!names.has(name)) state.oauthInFlight.delete(name);
+    }
+    for (const key of state.grants.keys()) {
+      if (!names.has(key.split("\x00")[0])) {
+        state.grants.delete(key);
+        grants += 1;
+      }
+    }
+    for (const key of state.grantInFlight.keys()) {
+      if (!names.has(key.split("\x00")[0])) state.grantInFlight.delete(key);
+    }
+    return { tokens, grants, credentials: names.size };
+  }
+
   // Shared by every path that hands the proxy a freshly opened vault (control-
   // plane unlock, self-reopen): swap it in and clear the locked state. Idle
   // tracking is timestamp-based (see the ticker below), so touching activity
@@ -317,6 +372,11 @@ export function createProxy({
     // copy of the vault in the heap for the life of the process.
     if (displaced && displaced !== openedVault) displaced.lock();
     touchActivity();
+    // Every reopen path (credential miss, idle relock, rotation, pairing,
+    // reload) gets the same reconciliation, so a deletion on disk can never be
+    // outlived by a cache entry. The counts are returned for the caller that
+    // reports them (`reload`); the others ignore them.
+    return reconcileCachesWithVault();
   }
 
   // Self-reopen (agent-key auto-unlock only): a single in-flight reopen shared
@@ -336,7 +396,14 @@ export function createProxy({
           adoptVault(opened);
           logAccess({ event: "vault_reopened", reason }).catch(() => {});
           return true;
-        } catch {
+        } catch (err) {
+          // A reopen that fails silently is indistinguishable from a proxy that
+          // never tried: the caller just sees its original miss or stays locked.
+          logAccess({
+            event: "vault_reopen_failed",
+            reason,
+            error: (err && (err.code || err.name)) || "vault_reopen_failed",
+          }).catch(() => {});
           return false;
         } finally {
           reopenInFlight = null;
@@ -344,6 +411,75 @@ export function createProxy({
       })();
     }
     return reopenInFlight;
+  }
+
+  // ── Reload in place ───────────────────────────────────────────────────────
+  // Re-read the vault and the per-connector secrets file without dropping the
+  // listening socket, so whatever manages this proxy can apply a credential or
+  // secret change without a restart (a restart churns the port, and everything
+  // already pointed at the old one has to be told about the new one).
+  //
+  // Deliberately NOT a superset of `start`: it re-reads inputs, it does not
+  // re-evaluate flags. A vault that cannot be unsealed without a human has no
+  // `reopenVault`, and such a proxy answers `not_reloadable` rather than
+  // pretending.
+  let reloadInFlight = null;
+  async function reload({ reason = "manual" } = {}) {
+    if (!reopenVault) return { ok: false, error: "not_reloadable" };
+    if (reloadInFlight) return reloadInFlight;
+    reloadInFlight = (async () => {
+      let opened = null;
+      let openError = null;
+      try {
+        opened = await reopenVault();
+      } catch (err) {
+        openError = (err && (err.code || err.name)) || "vault_reopen_failed";
+      }
+      if (!opened) {
+        // The vault that is already serving stays serving: a reload that cannot
+        // read the new state must not degrade into a locked proxy.
+        await logAccess({
+          event: "proxy_reload_failed",
+          reason,
+          error: openError || "vault_reopen_failed",
+        });
+        return { ok: false, error: "vault_reopen_failed" };
+      }
+      const purgedCounts = adoptVault(opened);
+      const purged = { tokens: purgedCounts.tokens, grants: purgedCounts.grants };
+
+      let secretsReloaded = false;
+      if (reloadOauthSecrets) {
+        try {
+          clientSecrets = await reloadOauthSecrets();
+          secretsReloaded = true;
+        } catch {
+          // The reason is never the error text: that text names the secrets
+          // file's path and, for a parse failure, can quote its contents.
+          await logAccess({ event: "proxy_reload_failed", reason, error: "secrets_reload_failed" });
+          return { ok: false, error: "secrets_reload_failed", vaultReloaded: true, purged };
+        }
+      }
+
+      await logAccess({
+        event: "proxy_reloaded",
+        reason,
+        credentials: purgedCounts.credentials,
+        purgedTokens: purged.tokens,
+        purgedGrants: purged.grants,
+        secretsReloaded,
+      });
+      touchActivity();
+      return {
+        ok: true,
+        reloadedAt: Date.now(),
+        purged,
+        credentials: purgedCounts.credentials,
+      };
+    })().finally(() => {
+      reloadInFlight = null;
+    });
+    return reloadInFlight;
   }
 
   // Shared retry for the data-plane lookup helpers: a `credential_not_found`
@@ -513,7 +649,13 @@ export function createProxy({
   // from the stored refresh token when the cached one is missing or near expiry.
   // Concurrent requests for the same credential share one in-flight refresh.
   async function resolveOauth2Bearer(cred) {
-    const cached = state.oauthTokens.get(cred.name);
+    let cached = state.oauthTokens.get(cred.name);
+    // The record this cache entry was minted from is not the record in force
+    // any more — its tokens belong to a credential that no longer exists.
+    if (cached && cached.epoch !== credEpoch(cred)) {
+      state.oauthTokens.delete(cred.name);
+      cached = undefined;
+    }
     if (accessTokenUsable(cached)) return cached.accessToken;
 
     // Honor a seeded access token on the record (skips the first refresh).
@@ -527,6 +669,7 @@ export function createProxy({
         accessToken: cred.accessToken,
         expiresAt: cred.accessTokenExpiresAt,
         refreshToken: cred.refreshToken,
+        epoch: credEpoch(cred),
       });
       return cred.accessToken;
     }
@@ -534,6 +677,7 @@ export function createProxy({
     let inFlight = state.oauthInFlight.get(cred.name);
     if (!inFlight) {
       inFlight = (async () => {
+        const startEpoch = credEpoch(cred);
         const refreshToken = cached?.refreshToken || cred.refreshToken;
         // The cred's own secret wins (personal/standalone use); a
         // platform-managed cred carries none and resolves via the host's
@@ -541,7 +685,7 @@ export function createProxy({
         // platform secrets in host config — never both in one place.
         const clientSecret =
           cred.clientSecret ||
-          (oauthClientSecrets && cred.clientId ? oauthClientSecrets[cred.clientId] : null) ||
+          (clientSecrets && cred.clientId ? clientSecrets[cred.clientId] : null) ||
           null;
         let res;
         try {
@@ -574,6 +718,7 @@ export function createProxy({
           expiresAt: now() + res.expiresInSec * 1000,
           refreshToken: res.refreshToken || refreshToken,
           refreshTokenUnpersisted: false,
+          epoch: startEpoch,
         };
 
         // Persist a rotated refresh token so it survives proxy restart /
@@ -587,8 +732,22 @@ export function createProxy({
             res.refreshToken,
           ));
         }
-        state.oauthTokens.set(cred.name, entry);
-        logAccess({ event: "oauth_refreshed", credential: cred.name }).catch(() => {});
+        // The credential may have been deleted or rewritten while this exchange
+        // was on the wire (a reload, or another process's write). Caching the
+        // result then would resurrect material for a record nobody can see any
+        // more; the request that paid for the exchange still gets its token.
+        const live = state.vault?.get(cred.name);
+        if (live && credEpoch(live) === startEpoch) {
+          state.oauthTokens.set(cred.name, entry);
+          logAccess({ event: "oauth_refreshed", credential: cred.name }).catch(() => {});
+        } else {
+          state.oauthTokens.delete(cred.name);
+          logAccess({
+            event: "oauth_refresh_discarded",
+            credential: cred.name,
+            reason: "credential_changed",
+          }).catch(() => {});
+        }
         return entry.accessToken;
       })().finally(() => state.oauthInFlight.delete(cred.name));
       state.oauthInFlight.set(cred.name, inFlight);
@@ -722,6 +881,13 @@ export function createProxy({
   // relies on that.
   const pendingLogWrites = new Set();
 
+  // Every accepted client socket (plain requests and CONNECT tunnels share
+  // the same underlying socket) and every in-flight upstream request, so
+  // close() can force both closed instead of waiting on whatever a client or
+  // a slow upstream is doing.
+  const sockets = new Set();
+  const upstreamReqs = new Set();
+
   async function logAccess(entry) {
     const write = (async () => {
       try {
@@ -835,6 +1001,11 @@ export function createProxy({
       headers: finalHeaders,
       lookup: upstreamLookup,
     });
+    upstreamReqs.add(upstreamReq);
+    const untrackUpstreamReq = () => upstreamReqs.delete(upstreamReq);
+    upstreamReq.on("response", untrackUpstreamReq);
+    upstreamReq.on("error", untrackUpstreamReq);
+    upstreamReq.on("close", untrackUpstreamReq);
 
     upstreamReq.on("error", (err) => {
       // SSRF guard rejected the resolved address → 403, not a generic 502.
@@ -1113,7 +1284,29 @@ export function createProxy({
     // POST-tunneled reads).
     for (const u of credentialsUsed) {
       const rec = lookup(u.name);
-      if (!rec) continue; // already resolved by the rewrite step
+      // The record was there when the rewrite step read it and is gone now (a
+      // vault swap between the two). Its access level is unknowable, so the
+      // request cannot be gated — refuse it rather than forward material that
+      // belongs to a credential that no longer exists.
+      if (!rec) {
+        logAccess({
+          event: "access_denied",
+          credential: u.name,
+          host: parsed.hostname,
+          method: req.method,
+          path: parsed.pathname,
+          reason: "credential_gone",
+        });
+        return structuredError(res, 403, {
+          error: "credential_not_found",
+          message:
+            `credential '${u.name}' disappeared from the vault while the request was ` +
+            "being prepared — nothing was forwarded. Retry it.",
+          credential: u.name,
+          host: parsed.hostname,
+          reason: "credential_gone",
+        });
+      }
       const decision = evaluateAccess(rec, {
         method: req.method,
         host: parsed.hostname,
@@ -1279,6 +1472,15 @@ export function createProxy({
     // want it bare.
     return { host: m[1].replace(/^\[|\]$/g, ""), port };
   }
+
+  // Every accepted client socket — a CONNECT tunnel's clientSocket is this
+  // same object, so tracking it once here covers both paths. close() forces
+  // these shut once its grace period elapses instead of waiting for every
+  // client to disconnect on its own.
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
 
   // CONNECT tunneling for HTTPS. No MITM in v1.
   server.on("connect", (req, clientSocket, head) => {
@@ -1460,7 +1662,18 @@ export function createProxy({
       if (owed > 0) await logAccess({ event: "auth_failed_suppressed", suppressed: owed });
       doLock("proxy_shutdown");
       if (controlServer) await controlServer.close();
-      await new Promise((resolve) => server.close(() => resolve()));
+      // `server.close()`'s callback only fires once every accepted socket has
+      // closed and every in-flight upstream request has finished — one slow
+      // upstream or one idle keep-alive client would otherwise hold this open
+      // indefinitely. Give it `closeGraceMs` to finish on its own, then force
+      // both closed; `closed` still resolves once the forced sockets actually
+      // report shut.
+      const closed = new Promise((resolve) => server.close(() => resolve()));
+      await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, closeGraceMs))]);
+      for (const r of upstreamReqs) r.destroy(new Error("proxy_shutdown"));
+      for (const s of sockets) s.destroy();
+      server.closeAllConnections?.();
+      await closed;
       // The log is written fire-and-forget everywhere else; a closed proxy owes
       // the caller a settled log (nothing still writing into a state dir that
       // is about to go).
@@ -1495,6 +1708,9 @@ export function createProxy({
     },
     forceLock(reason = "manual") {
       doLock(reason);
+    },
+    reload(opts = {}) {
+      return reload(opts);
     },
   };
 }

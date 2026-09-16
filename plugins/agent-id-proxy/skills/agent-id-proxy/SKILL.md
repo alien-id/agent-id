@@ -193,7 +193,7 @@ After `--idle-timeout` of no traffic (default **12h**, 1Password parity), the pr
 - **Agent-key auto-unlock** (the default — not `--unlock-form`, not `--no-agent-key`) **with `--no-control`:** the proxy re-opens the vault itself and the request proceeds. No human, no restart. A `CONNECT` tunnel is re-opened the same way.
 - **Control plane on** (the default) with a phone or owner-approval slot: the request parks until the unlock is approved — unchanged, unlock stays an owner action there. A `CONNECT` tunnel has nowhere to park, so it is refused with `401 vault_locked` rather than re-unlocking itself.
 - **Control plane on with nothing to ask** (no paired device, no owner-approval slot): `401 {error: "no_unlock_method"}` on every request, agent key or not — self-reopen is reached only with `--no-control`. Pair a device before the lock, or restart the proxy.
-- **Anything else** (passphrase, passkey, `--unlock-form`): `401 {error: "vault_locked"}`; restart to re-unlock:
+- **Anything else** (passphrase, passkey, `--unlock-form`): `401 {error: "vault_locked"}`; restart to re-unlock. `stop` waits for the old process to actually exit before returning, so a `stop && start` back to back is safe — `start` never races a still-shutting-down daemon for the port or the state file:
 
 ```bash
 node CLI stop && node CLI start --passphrase-file ~/.agent-id-pass
@@ -231,6 +231,30 @@ The `X-AgentVault-Proxy-Error` response header carries the same code. A `CONNECT
 node CLI status
 node CLI stop
 ```
+
+`stop` sends SIGTERM and then waits (polling, up to `--timeout`, default 5000ms) for the
+process to actually exit, force-killing with SIGKILL if it hasn't by the deadline, before
+clearing the state file and returning — so a supervisor that restarts the proxy back to
+back never sees `start` refuse with "Proxy already running" against a daemon that is
+still mid-shutdown.
+
+### Reload instead of restarting
+
+```bash
+node CLI reload
+```
+
+When only the vault contents or the `--oauth-secrets-file` changed — credentials added or
+removed by another process, a rotated client secret — prefer `reload` over `stop && start`:
+the daemon re-reads both in place, so the pid and the port stay exactly as they were and
+nothing that already points at the port has to be told about a new one. It answers once the
+daemon reports the outcome (`purged` says how many cached tokens and grants the change
+invalidated), and a credential removed on disk stops being usable the moment it returns.
+
+It only works for a proxy that can unseal its vault on its own (the agent-key path).
+`status` reports that as `reloadable`; when it is false, `reload` refuses without signalling
+the daemon and the change needs a restart. Anything else — a different port, a new flag —
+is a restart too: `reload` re-reads inputs, it does not re-apply the command line.
 
 ## Limitations
 

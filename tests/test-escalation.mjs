@@ -193,10 +193,16 @@ test("every outcome says whether the stored values are in doubt", () => {
     "owner-will-drive",
     "error",
     "domain-not-allowed",
+    "login-url-dead",
   ]) {
     assert.equal(escalationFor(outcome, ctx).credential, "intact", outcome);
   }
   assert.equal(escalationFor("failed", ctx).credential, "rejected");
+  // ...but only once the site was given something to reject.
+  assert.equal(
+    escalationFor("failed", { ...ctx, valuesSubmitted: false }).credential,
+    "intact",
+  );
 });
 
 test("a rejected password is re-stored in place, never removed", () => {
@@ -262,4 +268,67 @@ test("a caller that says nothing about the row gets the refused-code reading", (
   const escalation = escalationFor("otp-rejected", { credName: "x", profile: "x" });
 
   assert.equal(escalation.reason, "otp_not_accepted");
+});
+
+// The same shape one step earlier: a page can read as a refusal without ever
+// having been filled in. A sign-in URL that answered an error document did
+// exactly that, and the owner was sent to retype an e-mail that was correct.
+test("a page that was never filled in is not a page that refused the credential", () => {
+  const untouched = escalationFor("failed", {
+    credName: "booking.com",
+    profile: "booking.com",
+    valuesSubmitted: false,
+  });
+
+  assert.equal(untouched.action, OWNER_MUST_DRIVE);
+  assert.equal(untouched.reason, "no_values_submitted");
+  assert.equal(untouched.credential, "intact");
+  assert.match(untouched.message, /nothing was typed/);
+  assert.match(untouched.message, /cannot have rejected them/);
+  // Forbidding the accusation, not just omitting it — the old wording reached
+  // the owner verbatim.
+  assert.match(untouched.message, /Do NOT tell the owner their credentials\s+are wrong/);
+  // A dead login URL is the likeliest cause, so the report has to point there.
+  assert.match(untouched.message, /finalUrl/);
+  assert.doesNotMatch(untouched.message, /overwrite: true/);
+
+  const refused = escalationFor("failed", {
+    credName: "booking.com",
+    profile: "booking.com",
+    valuesSubmitted: true,
+  });
+
+  assert.equal(refused.action, FIX_CREDENTIAL);
+  assert.equal(refused.reason, "credentials_rejected");
+  assert.equal(refused.credential, "rejected");
+});
+
+// A stored address that no longer reaches a sign-in page is a wrong record with
+// a right secret — the one combination the three actions had no reading for, so
+// it used to arrive as a rejected credential.
+test("a login page that did not load is fixed on the record, not on the secret", () => {
+  const e = escalationFor("login-url-dead", {
+    ...ctx,
+    pageError: "the sign-in page answered HTTP 400",
+  });
+
+  assert.equal(e.action, FIX_CREDENTIAL);
+  assert.equal(e.reason, "login_url_unreachable");
+  assert.equal(e.credential, "intact");
+  assert.match(e.message, /HTTP 400/);
+  assert.match(e.message, /They are FINE/);
+  assert.match(e.message, /vault set-login-url/);
+  // The two things the old reading got wrong: it asked for the values, and it
+  // sent the owner back through a card.
+  assert.doesNotMatch(e.message, /overwrite: true/);
+  assert.doesNotMatch(e.message, /browser view/);
+});
+
+// Same reasoning as the row flag above: an older caller says nothing, and that
+// must keep meaning "the site refused it", not "we never asked".
+test("a caller that says nothing about the fill gets the rejected reading", () => {
+  const escalation = escalationFor("failed", { credName: "x", profile: "x" });
+
+  assert.equal(escalation.reason, "credentials_rejected");
+  assert.equal(escalation.credential, "rejected");
 });

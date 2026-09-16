@@ -22,6 +22,7 @@ import {
   CODE_SUBMIT_TEXT_RE,
   resolveOtp,
   isLoginishPath,
+  navStatus,
   stillOnLoginPage,
   originOf,
   isDeepLoginUrl,
@@ -1032,6 +1033,157 @@ test("a recipe that runs clean leaves the heuristics alone and reports no recipe
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(formLogins, 0);
   assert.equal("recipeFailed" in result, false);
+});
+
+// A page whose copy reads as a refusal, with or without a field to fill. The
+// difference decides whether the stored credential is in doubt, and the run is
+// the only thing that knows it: the classifier sees the same rejection phrases
+// either way, because an error document uses them too.
+//
+// `evaluate` answers two callers here — the Microsoft-flow probe and the page
+// state snapshot — and in a double the only thing telling them apart is the
+// source of the function being evaluated.
+function refusingPage(url, { hasField }) {
+  const page = {
+    current: url,
+    filled: [],
+    url: () => page.current,
+    goto: async (next) => {
+      page.current = next;
+    },
+    waitForTimeout: async () => {},
+    keyboard: { press: async () => {} },
+    evaluate: async (fn) => {
+      if (String(fn).includes("userNameInput")) return null;
+      return {
+        hasPasswordField: false,
+        hasIdentifierField: hasField,
+        hasOtpField: false,
+        otpFieldNames: [],
+        bodyText: "Sorry, something went wrong. Please try again.",
+        blocked: false,
+        errorText: null,
+      };
+    },
+    locator: () => ({
+      first: () => ({
+        count: async () => (hasField ? 1 : 0),
+        isVisible: async () => hasField,
+        press: async () => {},
+      }),
+      count: async () => 0,
+    }),
+    fill: async (_selector, value) => {
+      page.filled.push(value);
+    },
+  };
+  return page;
+}
+
+const refusedCred = {
+  name: "booking.com",
+  username: "owner@example.test",
+  passwordless: true,
+  otp: "interactive",
+  loginUrl: "https://account.booking.com/sign-in",
+  domains: ["*.booking.com"],
+};
+
+// The report this comes from: a sign-in URL that answered an error document, no
+// form on it, nothing typed — and the run said the site had rejected the stored
+// credentials. The owner was told to retype an e-mail address that was correct.
+test("a refusal on a page with nothing to fill reports that nothing was submitted", async () => {
+  const page = refusingPage("https://account.booking.com/sign-in", { hasField: false });
+
+  const result = await autoLogin({ page, cred: refusedCred, settleMs: 0 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.valuesSubmitted, false);
+  assert.deepEqual(page.filled, [], "there was no field, so nothing can have been typed");
+});
+
+test("a refusal after the identifier went in is still the site refusing it", async () => {
+  const page = refusingPage("https://account.booking.com/sign-in", { hasField: true });
+
+  const result = await autoLogin({ page, cred: refusedCred, settleMs: 0 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.valuesSubmitted, true);
+  assert.deepEqual(page.filled, ["owner@example.test"]);
+});
+
+test("navStatus reads a status from either page shape, and admits when it cannot", () => {
+  assert.equal(navStatus({ url: "https://x.test", httpStatus: 404 }), 404);
+  assert.equal(navStatus({ status: () => 500 }), 500);
+  // Not "fine" — unknown. A caller that reads null as 200 condemns nothing,
+  // which is the safe direction; reading it as an error would condemn every
+  // page a shape we do not recognise navigated to.
+  assert.equal(navStatus(null), null);
+  assert.equal(navStatus({}), null);
+  assert.equal(navStatus({ status: "200" }), null);
+});
+
+// A navigation resolves on an error document as happily as on a page, so the
+// status is the only thing that separates them before anything is read.
+function navPage({ loginStatus = 200, warmupStatus = 200 } = {}) {
+  const page = {
+    current: "about:blank",
+    reads: 0,
+    url: () => page.current,
+    goto: async (url) => {
+      page.current = url;
+      return {
+        url,
+        httpStatus: url === refusedCred.loginUrl ? loginStatus : warmupStatus,
+      };
+    },
+    waitForTimeout: async () => {},
+    keyboard: { press: async () => {} },
+    locator: () => ({
+      first: () => ({ count: async () => 0, isVisible: async () => false }),
+      count: async () => 0,
+    }),
+    evaluate: async (fn) => {
+      if (String(fn).includes("userNameInput")) return null;
+      page.reads += 1;
+      return {
+        hasPasswordField: false,
+        hasIdentifierField: false,
+        hasOtpField: false,
+        otpFieldNames: [],
+        bodyText: "Sign in",
+        blocked: false,
+        errorText: null,
+      };
+    },
+  };
+  return page;
+}
+
+test("a login page that answered an error document is a dead address, not a page to read", async () => {
+  const page = navPage({ loginStatus: 404 });
+
+  const result = await autoLogin({ page, cred: refusedCred, settleMs: 0 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "login-url-dead");
+  assert.equal(result.httpStatus, 404);
+  assert.match(result.errorText, /HTTP 404/);
+  assert.equal(page.reads, 0, "nothing on a dead address is worth classifying");
+});
+
+// The warm-up exists for sites that wall a cold deep link and let it through
+// once the origin has set a clearance cookie, so the origin is allowed to answer
+// badly. Condemning the credential for that would break the case it was added for.
+test("a warm-up that answers badly does not condemn the login page", async () => {
+  const page = navPage({ warmupStatus: 403 });
+
+  const result = await autoLogin({ page, cred: refusedCred, settleMs: 0, maxRounds: 2 });
+
+  assert.notEqual(result.outcome, "login-url-dead");
+  assert.ok(page.reads > 0, "the login page answered fine, so it has to be read");
 });
 
 test("a secret step's failure keeps the cause and strikes the value out", async () => {

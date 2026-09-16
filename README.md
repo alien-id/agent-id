@@ -535,7 +535,10 @@ See [docs/VAULT-PROXY.md](docs/VAULT-PROXY.md) for the URL-rewrite request flow 
 | --- | --- |
 | `start [--port N] [--host H] [--passphrase-file F \| --passphrase-env V] [--no-agent-key] [--idle-timeout 12h\|30m\|never]` | Unlock the vault and listen on localhost. Default port 48771, default idle-lock 12h. Foreground (Ctrl-C exits). |
 | `status` | JSON: running, pid, port, uptime, configured idleTimeout. |
-| `stop` | SIGTERM the running proxy. |
+| `stop [--timeout N]` | SIGTERM the running proxy and wait for it to exit (up to 5 s, then SIGKILL); clears the state file. |
+| `reload [--timeout N]` | SIGHUP the running proxy and wait (up to 5 s) for it to re-read the vault and the `--oauth-secrets-file`, keeping its pid and port. |
+
+`start` records whether the running proxy can do that at all (`reloadable` in `status` and in the state file): only a vault the proxy can unseal on its own — the agent-key path — can be re-read without a human, and `reload` refuses a daemon that cannot instead of signalling it.
 
 Use it by calling `http://<proxy>/<credname>/<upstream-host>/<path>`. Legacy `HTTP_PROXY` + `AgentVault <name>` stub mode also works for plain-HTTP upstream.
 
