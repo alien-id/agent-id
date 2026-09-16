@@ -1,5 +1,80 @@
 # @alien-id/agent-id-vault
 
+## 7.11.0
+
+### Minor Changes
+
+- [#169](https://github.com/alien-id/agent-id/pull/169) [`058bcf5`](https://github.com/alien-id/agent-id/commit/058bcf52120c8f93cc5d34aad657a793816b38d6) Thanks [@stelchankad](https://github.com/stelchankad)! - The billing address a card is billed to.
+
+  A card-not-present payment is checked against the address the card is billed
+  to, so a stored card that has none cannot complete most checkouts. `address`
+  joins the credential types — eight fields, of which only the second street
+  line is optional — and it is asked for on a screen of its own, after the card,
+  so neither form is a wall of twelve boxes. Closing that second screen stores
+  the card without an address rather than losing it.
+
+  The address is a record in its own right, and the card holds a reference to
+  it, so a second card reuses the address the owner already typed. Its name
+  discloses nothing about where they live: `billing-1`, `billing-2`, matched by
+  value so the same address is never stored twice. Every field is in
+  `SECRET_FIELDS` — an address is personal data, and `show` seals it the way it
+  seals a card.
+
+  `read-card` resolves the reference, so whatever types a checkout form reads
+  one shape whether the address lives in its own record or inside the card. A
+  card stored before this reads back with no billing block, and a checkout that
+  asks for no address is filled exactly as before.
+
+- [#160](https://github.com/alien-id/agent-id/pull/160) [`093ad66`](https://github.com/alien-id/agent-id/commit/093ad66622dea34a5eb98ac2f9dbedca83d7c109) Thanks [@stelchankad](https://github.com/stelchankad)! - A payment card the owner can store, typed only into the secure form.
+
+  `card` joins the credential types: four fields (`cardNumber`, `cardExpiry`,
+  `cardSecurityCode`, `cardholderName`), validated where they are stored — 12-19
+  digits and Luhn on the number, `MMYY` still ahead on the expiry, three or four
+  digits on the security code. A number mistyped by one digit is otherwise only
+  reported by the merchant, after the owner has approved a payment.
+
+  Every one of the four is in `SECRET_FIELDS`, so a lock wipes all of it and
+  `show` redacts all of it. The record is `access: "ro"` rather than
+  `exportable: false` — the latter means "generated in-vault, never typed into a
+  page", which is the one thing a card exists to do.
+
+  `ro` is a rule and not a default. The access level is what decides whether
+  `show` seals the record, and the caller of `vault_add` is the agent, so
+  `--access rw` would have left the number, the expiry and the code readable
+  through the agent's own channel. A card now refuses any level but `ro`, the
+  way it refuses `--domains`.
+
+  The four names are a wire contract, not labels: the secure-input envelope
+  carries no field type, so the name a value is sealed under is what picks the
+  keyboard and the paired expiry/code row on the phone.
+
+  `add --type card` is form-only. A PAN passed as a flag is a PAN in the process
+  table, in `ps` output and in the shell history. It also takes no `--domains`:
+  a card carries no allowlist at all, and what says where it may be typed is the
+  merchant host on the payment intent the owner approved, which the agent runtime
+  enforces.
+  The empty list matches no host, so default-deny holds literally here too.
+
+  The form's own sentence says the card asks for approval on every payment. It
+  drops the `ro` line that a login card carries — "the agent can read this" is
+  the opposite of the promise being made to somebody typing a card number.
+
+  `read-card --name N` is the one path that hands the four values over, for the
+  process that types them into a checkout — `show` keeps sealing a card, so the
+  values are not what an agent gets back when it asks what it has stored. The
+  command is not a privilege boundary (the vault opens with the agent key, and
+  anything that can run it can import the library); it is a named, greppable path
+  in place of a flag on `show`. What guards a card is the owner's per-payment
+  approval, enforced by the caller that spends it.
+
+  Only the security code is masked as it is typed. `secret` on a form field
+  decides masking and nothing else — `SECRET_FIELDS` is what makes a value a
+  secret in storage, and it covers all four — so masking the number bought
+  nothing and cost the owner the ability to check it against the card in their
+  hand. The expiry is labelled `MM/YY`, the way a card face writes it, and the
+  separators that invites are stripped on the way in: the stored form is bare
+  digits, which is what the validators and the fill expect.
+
 ## 7.10.0
 
 ### Minor Changes
