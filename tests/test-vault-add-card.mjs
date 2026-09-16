@@ -167,7 +167,7 @@ test("a card is typed into the secure form under the names the clients key their
 
     // And the one path that does hand the values over: what fills a checkout
     // form has to read them somewhere, and since the browser session server was
-    // removed that is lethe. Named as its own command so every caller of it can
+    // removed that is the caller's payment tool. Named as its own command so it can
     // be found, and so `show` keeps redacting.
     const read = JSON.parse((await runCli(["read-card", "--name", "visa"], dir)).stdout);
     assert.equal(read.ok, true);

@@ -1383,14 +1383,14 @@ async function cmdSetAccess(flags) {
 // what the agent reads when it asks what it has stored — and a PAN printed into
 // a tool result is a PAN in the turn's transcript. But something has to hand the
 // four values to whatever fills the checkout form, and since the browser session
-// server was removed (#151) that is the payment tool in lethe.
+// server was removed (#151) that is the caller's payment tool.
 //
 // So the read is a command of its own rather than a flag on `show`: it names
 // what it does in the audit log, it reads nothing but a card, and a reader of
 // this file can find every caller by its name. It is not a privilege boundary —
 // the vault opens with the agent key and anything that can run this can import
 // the library instead. What guards a card is the owner's per-payment approval,
-// which is enforced in lethe, not here.
+// which the caller enforces on every payment, not here.
 async function cmdReadCard(flags) {
   const name = flags.name;
   if (!name) return outputError("--name <NAME> is required");

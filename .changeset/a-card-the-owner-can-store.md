@@ -29,7 +29,8 @@ keyboard and the paired expiry/code row on the phone.
 `add --type card` is form-only. A PAN passed as a flag is a PAN in the process
 table, in `ps` output and in the shell history. It also takes no `--domains`:
 a card carries no allowlist at all, and what says where it may be typed is the
-merchant host on the payment intent the owner approved, which lethe enforces.
+merchant host on the payment intent the owner approved, which the agent runtime
+enforces.
 The empty list matches no host, so default-deny holds literally here too.
 
 The form's own sentence says the card asks for approval on every payment. It
@@ -42,7 +43,7 @@ values are not what an agent gets back when it asks what it has stored. The
 command is not a privilege boundary (the vault opens with the agent key, and
 anything that can run it can import the library); it is a named, greppable path
 in place of a flag on `show`. What guards a card is the owner's per-payment
-approval, enforced in lethe.
+approval, enforced by the caller that spends it.
 
 Only the security code is masked as it is typed. `secret` on a form field
 decides masking and nothing else — `SECRET_FIELDS` is what makes a value a

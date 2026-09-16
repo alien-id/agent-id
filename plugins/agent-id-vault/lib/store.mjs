@@ -216,7 +216,7 @@ export function validateRecord(rec) {
   }
   // A card is the one type that carries no allowlist at all. Nothing writes to it
   // and nothing reads it; what says where a card may be typed is the merchant host
-  // on the payment intent the owner approved, which lethe enforces. Empty denies
+  // on the payment intent the owner approved, which the caller enforces. Empty denies
   // everything — hostMatchesAllowlist returns false for an empty list — so
   // default-deny holds literally here too.
   const allowsEmptyDomains = rec.type === "card";
