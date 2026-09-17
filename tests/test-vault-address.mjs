@@ -306,6 +306,10 @@ test("the card screen asks whether to keep the card", async () => {
     const { cardForm, billingForm } = await addCard(dir, "visa", CARD, ADDRESS);
 
     assert.ok(cardForm.includes('name="saveToVault"'), "the card screen offers no choice");
+    // The clients find a box by its name, so the name is the login form's; the
+    // wording is not, because "Save to vault" on a card screen says nothing
+    // about where the number is going.
+    assert.ok(cardForm.includes("Save card to Secure Vault"), "the card box is worded for a login");
     assert.ok(
       billingForm.includes('name="saveBillingAddress"'),
       "the address screen's own box was lost",

@@ -453,7 +453,7 @@ function formFieldsForType(type, flags) {
         // A card is the one credential where the answer is worth asking twice,
         // and until it was here the owner typed a card and was told nothing
         // about where it went.
-        ...(saveToVaultBoxEnabled() ? [SAVE_TO_VAULT_FIELD] : []),
+        ...(saveToVaultBoxEnabled() ? [SAVE_CARD_FIELD] : []),
       ];
     default:
       return null;
@@ -507,6 +507,15 @@ const SAVE_TO_VAULT_FIELD = Object.freeze({
   default: "true",
   secret: false,
   required: false,
+});
+
+// The same box under the same name — the clients find it by name — with the
+// wording the card screen needs. A sign-in's "Save to vault" says nothing about
+// where it goes, and on the one screen where the owner is typing a card number
+// that is the thing they are looking for.
+const SAVE_CARD_FIELD = Object.freeze({
+  ...SAVE_TO_VAULT_FIELD,
+  label: "Save card to Secure Vault for future use",
 });
 
 // The billing-address form, raised after the card's.
