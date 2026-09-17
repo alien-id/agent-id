@@ -34,7 +34,7 @@
     {
       "name": "agent-id-vault",
       "description": "Portable encrypted credential vault with LUKS-style slots (passphrase + agent-key + phone/owner-approval) and typed/domain-scoped credential records.",
-      "version": "7.11.0",
+      "version": "7.12.0",
       "source": "./plugins/agent-id-vault",
       "category": "identity",
       "keywords": [
@@ -69,7 +69,7 @@
     {
       "name": "agent-id-browser",
       "description": "Signs an agent into a website with a vault credential, in a browser reached over its RPC port. The password goes from the vault straight into the page; 2FA comes from a stored seed or a card to the owner.",
-      "version": "9.1.3",
+      "version": "9.1.4",
       "source": "./plugins/agent-id-browser",
       "category": "identity",
       "keywords": [
@@ -82,7 +82,7 @@
     {
       "name": "agent-id-mcp",
       "description": "MCP server exposing agent-id identity, vault, and the vault-sealed browser as MCP tools — the connector shape Claude Cowork (and other MCP hosts) consume, where the CLI/hook/local-Chrome plugin model can't run. Thin adapter over the agent-id-* CLIs; runs stdio locally or Streamable-HTTP when hosted.",
-      "version": "7.3.8",
+      "version": "7.3.9",
       "source": "./plugins/agent-id-mcp",
       "category": "identity",
       "keywords": [
