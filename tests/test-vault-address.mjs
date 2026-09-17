@@ -62,22 +62,6 @@ async function makeVault(dir) {
   await initVault({ stateDir: dir, privateKeyPem, agentId: "main" });
 }
 
-function waitForUrl(child) {
-  return new Promise((resolve, reject) => {
-    let buf = "";
-    const onData = (d) => {
-      buf += d.toString();
-      const m = buf.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[a-f0-9]+/);
-      if (m) {
-        child.stderr.off("data", onData);
-        resolve(m[0]);
-      }
-    };
-    child.stderr.on("data", onData);
-    child.on("exit", () => reject(new Error(`CLI exited before printing a URL:\n${buf}`)));
-  });
-}
-
 function runCli(args, dir) {
   return new Promise((resolve) => {
     const child = spawn("node", [CLI, ...args, "--state-dir", dir]);
@@ -108,10 +92,34 @@ async function addCard(dir, name, values, billing) {
   );
   let stdout = "";
   let stderr = "";
+  let exited = false;
   child.stdout.on("data", (d) => (stdout += d));
   child.stderr.on("data", (d) => (stderr += d));
+  child.on("exit", () => (exited = true));
+
+  // The URL is printed to stderr, and the second form's is printed the instant
+  // the first is answered — before anything here could have started listening
+  // for it. So the scan reads everything the child has said so far and skips
+  // the URLs already answered, rather than racing a listener against a write.
+  const answered = [];
+  const nextUrl = async () => {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const url = (stderr.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[a-f0-9]+/g) || []).find(
+        (candidate) => !answered.includes(candidate),
+      );
+      if (url) {
+        answered.push(url);
+        return url;
+      }
+      if (exited) throw new Error(`CLI exited before printing a URL:\n${stderr}`);
+      if (Date.now() > deadline) throw new Error(`no secure form in 30s:\n${stderr}`);
+      await new Promise((tick) => setTimeout(tick, 20));
+    }
+  };
+
   const answer = async (fields) => {
-    const url = await waitForUrl(child);
+    const url = await nextUrl();
     const u = new URL(url);
     const markup = await (await fetch(url)).text();
     const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
