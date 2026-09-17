@@ -1,5 +1,23 @@
 # @alien-id/agent-id-vault
 
+## 7.12.0
+
+### Minor Changes
+
+- [#170](https://github.com/alien-id/agent-id/pull/170) [`c0381e2`](https://github.com/alien-id/agent-id/commit/c0381e21056e9b0efefd340ccece3d6d078a42c0) Thanks [@stelchankad](https://github.com/stelchankad)! - A card asks whether to keep it, and its address is readable on its own.
+
+  The secure form for a card never carried the "Save to vault" box every other
+  credential offers, so a card was stored for good and the owner was told
+  nothing. It carries it now, with a window of its own: a sign-in is consumed at
+  a known moment and a purchase is not, so an unkept card lives a day rather than
+  the half hour an unkept sign-in gets.
+
+  Two readers join `read-card`, and neither hands a card over. `card-fields`
+  answers with the names of the fields this card can fill, so a caller can refuse
+  a box the card has no value for before it spends anything; `read-address`
+  answers with the address the card is billed to and nothing else, because a
+  delivery step asks for an address long before anything is paid.
+
 ## 7.11.0
 
 ### Minor Changes
