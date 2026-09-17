@@ -329,9 +329,12 @@ function formDescription({
   // the value. The stored name is left out for the reason given above CARD_TITLE:
   // it is a key the agent invented, and this is not where it belongs.
   if (type === "card") {
+    const kept = saveToVaultBoxEnabled()
+      ? " Turn off Save to vault to use it for this purchase only."
+      : "";
     return (
       "A payment card for the agent to pay with. It asks you to approve every " +
-      "payment before using it — the amount and the site, every time."
+      `payment before using it — the amount and the site, every time.${kept}`
     );
   }
   const site = siteName(credentialHost({ loginUrl, domains }));
@@ -445,6 +448,12 @@ function formFieldsForType(type, flags) {
         { name: "cardExpiry", label: "Expiry (MM/YY)", secret: false },
         { name: "cardSecurityCode", label: "Security code" },
         { name: "cardholderName", label: "Name on card", secret: false },
+        // The same box the login form offers, and for the same reason: whether
+        // the record outlives the thing it was typed for is the owner's to say.
+        // A card is the one credential where the answer is worth asking twice,
+        // and until it was here the owner typed a card and was told nothing
+        // about where it went.
+        ...(saveToVaultBoxEnabled() ? [SAVE_CARD_FIELD] : []),
       ];
     default:
       return null;
@@ -498,6 +507,15 @@ const SAVE_TO_VAULT_FIELD = Object.freeze({
   default: "true",
   secret: false,
   required: false,
+});
+
+// The same box under the same name — the clients find it by name — with the
+// wording the card screen needs. A sign-in's "Save to vault" says nothing about
+// where it goes, and on the one screen where the owner is typing a card number
+// that is the thing they are looking for.
+const SAVE_CARD_FIELD = Object.freeze({
+  ...SAVE_TO_VAULT_FIELD,
+  label: "Save card to Secure Vault for future use",
 });
 
 // The billing-address form, raised after the card's.
@@ -589,6 +607,18 @@ function billingAddressName(typed, vault) {
 // under way never loses its credential mid-run, and short enough that "not
 // saved" stays true when nothing consumes it.
 const TRANSIENT_TTL_MS = 30 * 60 * 1000;
+
+// A card is not a sign-in. Nothing consumes it at a known moment: the purchase
+// it was typed for runs as the agent's own turns, through an approval the owner
+// answers from their phone, and half an hour is well inside that. A card that
+// disappeared mid-checkout would be a worse defect than the one the box fixes,
+// so an unkept card is measured in a day — long enough that no purchase loses
+// it, short enough that "not saved" still means something.
+const CARD_TRANSIENT_TTL_MS = 24 * 60 * 60 * 1000;
+
+function transientTtlMs(type) {
+  return type === "card" ? CARD_TRANSIENT_TTL_MS : TRANSIENT_TTL_MS;
+}
 
 // The owner's answer to the "Save to vault" box, taken OUT of the form values
 // so it can never be written into a record as if it were a field. Absent means
@@ -997,14 +1027,15 @@ async function cmdAdd(flags) {
       }
     }
 
-    if (transient) record.transient = { until: Date.now() + TRANSIENT_TTL_MS };
+    if (transient) record.transient = { until: Date.now() + transientTtlMs(type) };
 
+    const transientFor = type === "card" ? "this purchase" : "this sign-in";
     const stored = vault.add(record);
     await vault.save();
     stderr(
       `Added credential '${name}' (${type}) for ${domains.join(", ")}` +
         `${stored.access ? ` — access: ${stored.access}` : ""}` +
-        `${transient ? " — for this sign-in only" : ""}.`
+        `${transient ? ` — for ${transientFor} only` : ""}.`
     );
     outputJson({
       ok: true,
@@ -1018,9 +1049,13 @@ async function cmdAdd(flags) {
         ? {
             transient: true,
             note:
-              "The owner chose not to keep this credential. It exists for this sign-in only: " +
-              "auto-login removes it once the sign-in completes, and otherwise it is dropped " +
-              "on the next vault open after 30 minutes.",
+              type === "card"
+                ? "The owner chose not to keep this card. It exists for the purchase it was " +
+                  "typed for, and is dropped on the next vault open after 24 hours. Pay with " +
+                  "it now; do not offer it as a stored card later."
+                : "The owner chose not to keep this credential. It exists for this sign-in " +
+                  "only: auto-login removes it once the sign-in completes, and otherwise it " +
+                  "is dropped on the next vault open after 30 minutes.",
           }
         : {}),
       ...(!keep && keepsExisting
@@ -1543,6 +1578,66 @@ async function cmdReadCard(flags) {
   }
 }
 
+// Which of a card's fields have a value — the names, and nothing else.
+//
+// The caller that types a card has to know, before it spends the owner's
+// approval, whether the boxes it was handed are ones this card can answer.
+// Until now the only reader that knew was `read-card`, which answers with the
+// plaintext, so the question could not be asked without opening the card. This
+// one answers with the names: it is safe to call at any time, it appears in the
+// audit log as what it is, and a ref the card cannot fill can be refused before
+// anything is spent.
+async function cmdCardFields(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "card") {
+      return outputError(
+        `'${name}' is a ${rec.type}, and card-fields reads nothing but a card`,
+      );
+    }
+    const billing = billingOf(rec, vault) ?? {};
+    const answered = (source) => (field) => (source[field] ?? "").length > 0;
+    outputJson({
+      ok: true,
+      fields: [
+        ...CARD_FIELDS.filter(answered(rec)),
+        ...ADDRESS_FIELDS.filter(answered(billing)),
+      ],
+    });
+  } finally {
+    vault.lock();
+  }
+}
+
+// The address a card is billed to, without the card.
+//
+// A checkout asks for an address on its delivery step, on its billing block and
+// sometimes once more on the page after the payment, and only the first of those
+// has anything to do with spending. So the address is readable on its own, and
+// this reader never touches the number, the expiry or the security code — the
+// caller that fills an address form has no business holding them.
+async function cmdReadAddress(flags) {
+  const name = flags.card;
+  if (!name) return outputError("--card <NAME> is required");
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "card") {
+      return outputError(
+        `'${name}' is a ${rec.type}, and read-address reads the address a card is billed to`,
+      );
+    }
+    outputJson({ ok: true, billing: billingOf(rec, vault) });
+  } finally {
+    vault.lock();
+  }
+}
+
 // The billing address of a card: resolved from the credential it names, else
 // read off the card, else null for a card stored before there was one.
 function billingOf(rec, vault) {
@@ -2060,6 +2155,10 @@ function printHelp() {
       "  show --name N    (sealed/generated secrets are redacted)",
       "  read-card --name N",
       "      the card's four values, for the process that types them into a page",
+      "  card-fields --name N",
+      "      which of the card's fields have a value — the names, not the values",
+      "  read-address --card N",
+      "      the address that card is billed to, without the card",
       "  list",
       "  remove --name N",
       "  exec [--env VAR=cred.field | --file VAR=cred.field] … -- <cmd> [args…]",
@@ -2104,6 +2203,8 @@ const commands = {
   generate: cmdGenerate,
   show: cmdShow,
   "read-card": cmdReadCard,
+  "card-fields": cmdCardFields,
+  "read-address": cmdReadAddress,
   list: cmdList,
   remove: cmdRemove,
   exec: cmdExec,

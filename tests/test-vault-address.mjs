@@ -62,22 +62,6 @@ async function makeVault(dir) {
   await initVault({ stateDir: dir, privateKeyPem, agentId: "main" });
 }
 
-function waitForUrl(child) {
-  return new Promise((resolve, reject) => {
-    let buf = "";
-    const onData = (d) => {
-      buf += d.toString();
-      const m = buf.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[a-f0-9]+/);
-      if (m) {
-        child.stderr.off("data", onData);
-        resolve(m[0]);
-      }
-    };
-    child.stderr.on("data", onData);
-    child.on("exit", () => reject(new Error(`CLI exited before printing a URL:\n${buf}`)));
-  });
-}
-
 function runCli(args, dir) {
   return new Promise((resolve) => {
     const child = spawn("node", [CLI, ...args, "--state-dir", dir]);
@@ -108,10 +92,34 @@ async function addCard(dir, name, values, billing) {
   );
   let stdout = "";
   let stderr = "";
+  let exited = false;
   child.stdout.on("data", (d) => (stdout += d));
   child.stderr.on("data", (d) => (stderr += d));
+  child.on("exit", () => (exited = true));
+
+  // The URL is printed to stderr, and the second form's is printed the instant
+  // the first is answered — before anything here could have started listening
+  // for it. So the scan reads everything the child has said so far and skips
+  // the URLs already answered, rather than racing a listener against a write.
+  const answered = [];
+  const nextUrl = async () => {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const url = (stderr.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[a-f0-9]+/g) || []).find(
+        (candidate) => !answered.includes(candidate),
+      );
+      if (url) {
+        answered.push(url);
+        return url;
+      }
+      if (exited) throw new Error(`CLI exited before printing a URL:\n${stderr}`);
+      if (Date.now() > deadline) throw new Error(`no secure form in 30s:\n${stderr}`);
+      await new Promise((tick) => setTimeout(tick, 20));
+    }
+  };
+
   const answer = async (fields) => {
-    const url = await waitForUrl(child);
+    const url = await nextUrl();
     const u = new URL(url);
     const markup = await (await fetch(url)).text();
     const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
@@ -281,6 +289,169 @@ test("a card with no address reads as a card without one", async () => {
     assert.equal(read.ok, true);
     assert.equal(read.card.cardNumber, PAN);
     assert.equal(read.card.billing, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The box the card screen never had. Every other credential asks whether it
+// should outlive the thing it was typed for; the card — the one worth asking
+// about twice — was stored for good without a word, and the owner reported it
+// as a missing box rather than as a surprise, which is the good outcome only
+// because they happened to look.
+test("the card screen asks whether to keep the card", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-keepbox-"));
+  try {
+    await makeVault(dir);
+    const { cardForm, billingForm } = await addCard(dir, "visa", CARD, ADDRESS);
+
+    assert.ok(cardForm.includes('name="saveToVault"'), "the card screen offers no choice");
+    // The clients find a box by its name, so the name is the login form's; the
+    // wording is not, because "Save to vault" on a card screen says nothing
+    // about where the number is going.
+    assert.ok(cardForm.includes("Save card to Secure Vault"), "the card box is worded for a login");
+    assert.ok(
+      billingForm.includes('name="saveBillingAddress"'),
+      "the address screen's own box was lost",
+    );
+    // Two names, not one: the clients find a box by its name, and a screen that
+    // reused the other's would tick the wrong record.
+    assert.ok(!cardForm.includes('name="saveBillingAddress"'));
+    assert.ok(!billingForm.includes('name="saveToVault"'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A sign-in is consumed at a known moment and a purchase is not, so the two
+// windows cannot be the same one. Half an hour would take the card out from
+// under a checkout the owner is still approving from their phone.
+test("a card the owner does not keep outlives the purchase it was typed for", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-once-card-"));
+  try {
+    await makeVault(dir);
+    const before = Date.now();
+    await addCard(dir, "visa", { ...CARD, saveToVault: "false" }, ADDRESS);
+
+    const { privateKeyPem } = JSON.parse(await readFile(statePaths(dir).mainKey, "utf8"));
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    const card = vault.get("visa");
+    const hours = (card.transient.until - before) / (60 * 60 * 1000);
+    assert.ok(hours >= 24 && hours < 25, `an unkept card lives ${hours} hours`);
+    // And the box itself is never written down as if it were a card field.
+    assert.ok(!("saveToVault" in card));
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a card the owner keeps is kept", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-kept-card-"));
+  try {
+    await makeVault(dir);
+    await addCard(dir, "visa", { ...CARD, saveToVault: "true" }, ADDRESS);
+
+    const { privateKeyPem } = JSON.parse(await readFile(statePaths(dir).mainKey, "utf8"));
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    assert.equal(vault.get("visa").transient, undefined);
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// What the caller has to know before it spends the owner's approval: which
+// boxes on the checkout this card can answer. Asking `read-card` would answer
+// it with the card itself, which is why the question has a reader of its own.
+test("card-fields names what a card can answer and hands over nothing", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-fields-"));
+  try {
+    await makeVault(dir);
+    await addCard(dir, "visa", CARD, ADDRESS);
+
+    const out = (await runCli(["card-fields", "--name", "visa"], dir)).stdout;
+    const read = JSON.parse(out);
+    assert.equal(read.ok, true);
+    assert.deepEqual(read.fields, [...Object.keys(CARD), ...Object.keys(ADDRESS)]);
+    for (const value of [PAN, CARD.cardSecurityCode, ADDRESS.billingPostalCode]) {
+      assert.ok(!out.includes(value), `card-fields returned ${value}`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The apartment line is the one field the owner may leave empty, and a ref
+// aimed at a box this card cannot answer is refused — so the caller has to be
+// able to tell an empty one from a stored one.
+test("card-fields leaves out the box the owner did not fill", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-fields-gap-"));
+  try {
+    await makeVault(dir);
+    await addCard(dir, "visa", CARD, { ...ADDRESS, billingAddressLine2: "" });
+
+    const read = JSON.parse((await runCli(["card-fields", "--name", "visa"], dir)).stdout);
+    assert.ok(!read.fields.includes("billingAddressLine2"));
+    assert.ok(read.fields.includes("billingAddressLine1"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A delivery step asks for an address and has nothing to do with paying, so
+// whatever fills one has no business holding the card.
+test("read-address hands over the address and never the card", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-readaddr-"));
+  try {
+    await makeVault(dir);
+    await addCard(dir, "visa", CARD, { ...ADDRESS, saveBillingAddress: "true" });
+
+    const out = (await runCli(["read-address", "--card", "visa"], dir)).stdout;
+    const read = JSON.parse(out);
+    assert.equal(read.ok, true);
+    assert.deepEqual(read.billing, ADDRESS);
+    for (const value of [PAN, CARD.cardSecurityCode, CARD.cardExpiry]) {
+      assert.ok(!out.includes(value), `read-address returned ${value}`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a card with no address reads back no address to fill", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-readaddr-none-"));
+  try {
+    await makeVault(dir);
+    await addCard(dir, "visa", CARD, {});
+
+    const read = JSON.parse((await runCli(["read-address", "--card", "visa"], dir)).stdout);
+    assert.equal(read.ok, true);
+    assert.equal(read.billing, null);
+
+    const fields = JSON.parse((await runCli(["card-fields", "--name", "visa"], dir)).stdout);
+    assert.deepEqual(fields.fields, Object.keys(CARD));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("neither new reader reads anything but a card", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-notacard-"));
+  try {
+    await makeVault(dir);
+    await addCard(dir, "visa", CARD, { ...ADDRESS, saveBillingAddress: "true" });
+
+    const listed = JSON.parse((await runCli(["list"], dir)).stdout);
+    const address = listed.credentials.find((c) => c.type === "address").name;
+    for (const args of [
+      ["card-fields", "--name", address],
+      ["read-address", "--card", address],
+    ]) {
+      const refused = JSON.parse((await runCli(args, dir)).stdout);
+      assert.equal(refused.ok, false);
+      assert.match(refused.error, /is a address/);
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
