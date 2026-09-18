@@ -779,6 +779,13 @@ async function cmdAdd(flags) {
       // collectSecret routes through the secure-prompt resolver (browser form →
       // /dev/tty → hosted harness), so this works where no GUI browser is present.
       const out = await collectSecret({
+        // What the card is for, beside the prose that says it in English. Only a
+        // `login` is something the owner can also finish in a browser, which is
+        // the one decision a client cannot make from the fields alone: a token, a
+        // cookie jar and a seed all arrive as a single field named `value`, the
+        // same shape a password does.
+        purpose: type === "login" ? "sign_in" : "secret",
+        site: siteName(credentialHost({ loginUrl: flags["login-url"], domains })),
         title: CARD_TITLE,
         description: formDescription({
           name,
@@ -1084,6 +1091,12 @@ async function cmdSetTotp(flags) {
   if (flags.form) {
     try {
       const out = await collectSecret({
+        // A seed is a stored secret, and saying so is what keeps the browser off this
+        // card: a client reading the fields alone sees one plain text box and offers a
+        // view that cannot put anything in the vault — which is what the message below
+        // has to talk the model out of afterwards. No `site`: there is nothing generic
+        // to say about a seed that beats the sentence already here.
+        purpose: "secret",
         title: `Set TOTP seed: ${name}`,
         description:
           "Paste the base32 secret, or the full otpauth:// URI from the QR code",
@@ -1486,6 +1499,12 @@ async function cmdSetAccess(flags) {
       let values;
       try {
         ({ values } = await collectSecret({
+          // Not a value the owner is handing over: they are being asked whether to widen
+          // what a credential may do, and typing its name back is the answer. Nothing a
+          // browser can carry, and a client that offered one would dismiss this card and
+          // silently drop the approval — the catch below leaves the access alone whichever
+          // way it ends.
+          purpose: "approval",
           title: `Allow MORE access: ${name}`,
           description:
             `The agent asks to widen what '${name}' may do: ` +
