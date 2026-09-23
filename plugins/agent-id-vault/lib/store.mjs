@@ -183,8 +183,10 @@ export const CARD_FIELDS = Object.freeze([
 
 // A billing address, in the order the form asks for it — same reason as
 // CARD_FIELDS: the validator, the secure form and the read path must not drift.
-// `billingAddressLine2` is the one field a person may legitimately leave empty,
-// so it is listed here but exempted from the emptiness check below.
+// The second street line, the state and the postal code are the fields a person
+// may legitimately leave empty — most countries have no states and some sixty
+// issue no postal code — so they are listed here but exempted from the
+// emptiness check below.
 export const ADDRESS_FIELDS = Object.freeze([
   "billingFirstName",
   "billingLastName",
@@ -196,7 +198,11 @@ export const ADDRESS_FIELDS = Object.freeze([
   "billingPostalCode",
 ]);
 
-export const ADDRESS_OPTIONAL_FIELDS = Object.freeze(["billingAddressLine2"]);
+export const ADDRESS_OPTIONAL_FIELDS = Object.freeze([
+  "billingAddressLine2",
+  "billingState",
+  "billingPostalCode",
+]);
 
 function validateAddressFields(rec) {
   const required = ADDRESS_FIELDS.filter((f) => !ADDRESS_OPTIONAL_FIELDS.includes(f));
@@ -208,8 +214,11 @@ function validateAddressFields(rec) {
   }
   // Deliberately no per-country postal pattern. `SW1A 1AA`, `K1A 0B1` and an
   // Eircode are all valid, and some sixty countries issue no code at all, so a
-  // country-shaped regex here buys a false refusal and nothing else.
-  if (!/^[0-9A-Za-z][0-9A-Za-z \-]{1,11}$/.test(rec.billingPostalCode)) {
+  // country-shaped regex here buys a false refusal and nothing else. Checked
+  // only when one was typed: `test(undefined)` matches the string "undefined".
+  const postalCode = rec.billingPostalCode;
+  const hasPostalCode = typeof postalCode === "string" && postalCode.length > 0;
+  if (hasPostalCode && !/^[0-9A-Za-z][0-9A-Za-z \-]{1,11}$/.test(postalCode)) {
     throw new Error(
       `Credential ${rec.name}: billingPostalCode must be 2-12 letters, digits, spaces or hyphens`,
     );

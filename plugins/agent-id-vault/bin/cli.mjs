@@ -468,15 +468,17 @@ function saveToVaultBoxEnabled(env = process.env) {
   return env.AGENT_ID_SAVE_TO_VAULT_BOX === "1";
 }
 
-// The second form: the billing address, asked for after the card and before
-// anything is written. Its own screen because that is the flow — the card is
-// what the owner has in hand, the address is what the issuer checks — and the
-// same contract as the card's four: the name a value is sealed under is what
-// the phone draws it by.
+// The billing-address form. Not raised when the card is stored: whether the
+// shop will ask for an address, and for which boxes, is known only once its
+// form is in front of the agent, so `set-address` raises this then — and only
+// when the vault has no address to answer with. The same contract as the card's
+// four: the name a value is sealed under is what the phone draws it by.
 //
-// The billing page, in the order the design draws it. `billingAddressLine2` is
-// the one optional field; every other one is required, which is what makes the
-// phone's Done wait for it.
+// The billing page, in the order the design draws it. The second street line,
+// the state and the postal code are optional — most countries have no states
+// and some sixty issue no postal code, and a checkout that insists on one
+// refuses the fill before anything is spent. The rest is required, which is
+// what makes the phone's Done wait for it.
 const ADDRESS_FIELD_SPECS = Object.freeze([
   { name: "billingFirstName", label: "First name", secret: false },
   { name: "billingLastName", label: "Last name", secret: false },
@@ -484,8 +486,8 @@ const ADDRESS_FIELD_SPECS = Object.freeze([
   { name: "billingAddressLine1", label: "Address", secret: false },
   { name: "billingAddressLine2", label: "Apt, suite (optional)", secret: false, required: false },
   { name: "billingCity", label: "City", secret: false },
-  { name: "billingState", label: "State", secret: false },
-  { name: "billingPostalCode", label: "ZIP", secret: false },
+  { name: "billingState", label: "State", secret: false, required: false },
+  { name: "billingPostalCode", label: "ZIP", secret: false, required: false },
 ]);
 
 // Ticked, the address becomes a credential of its own that the next card can
@@ -518,32 +520,26 @@ const SAVE_CARD_FIELD = Object.freeze({
   label: "Save card to Secure Vault for future use",
 });
 
-// The billing-address form, raised after the card's.
+// The billing-address form, raised by `set-address` once a checkout has asked
+// for an address the vault cannot answer.
 //
-// Answered, it returns the values; closed or timed out, it returns null and the
-// card is stored without one — a card that cannot be billed still pays at the
-// many checkouts that never ask, and throwing away a card the owner has just
-// finished typing to punish them for skipping a second screen would be worse
-// than either.
+// An owner's decision — closing it, choosing the browser, letting it expire —
+// is thrown as it is: this form is the whole command, so its outcome is the
+// command's, and `cmdSetAddress` is where it is told apart from a fault.
 async function collectBillingAddress(name) {
-  try {
-    const out = await collectSecret({
-      title: "Billing address",
-      description:
-        "The address this card is billed to. Your bank checks it against the " +
-        "card, so a payment without it is often declined.",
-      fields: [
-        ...ADDRESS_FIELD_SPECS,
-        ...(saveToVaultBoxEnabled() ? [SAVE_BILLING_ADDRESS_FIELD] : []),
-      ],
-      label: `enter the billing address for "${name}"`,
-      security: "I never see it. It goes straight into your encrypted vault.",
-    });
-    return out.values;
-  } catch (err) {
-    stderr(`Billing address not given (${err.message}); storing the card without one.`);
-    return null;
-  }
+  const out = await collectSecret({
+    title: "Billing address",
+    description:
+      "The address this card is billed to. Your bank checks it against the " +
+      "card, so a payment without it is often declined.",
+    fields: [
+      ...ADDRESS_FIELD_SPECS,
+      ...(saveToVaultBoxEnabled() ? [SAVE_BILLING_ADDRESS_FIELD] : []),
+    ],
+    label: `enter the billing address for "${name}"`,
+    security: "I never see it. It goes straight into your encrypted vault.",
+  });
+  return out.values;
 }
 
 // Where the billing address the owner just typed ends up.
@@ -552,8 +548,7 @@ async function collectBillingAddress(name) {
 // and the card keeps only its name, so the next card can be billed to the same
 // address without asking again. Unticked, the same values ride on the card and
 // no other card can see them. Either way it is stored: an address is not
-// optional decoration, it is what the issuer checks, and a card that cannot be
-// billed cannot be paid with.
+// optional decoration, it is what the issuer checks.
 function attachBillingAddress(record, formValues, vault) {
   if (!formValues) return;
   const typed = {};
@@ -561,11 +556,16 @@ function attachBillingAddress(record, formValues, vault) {
     const value = (formValues[field] || "").trim();
     if (value.length > 0) typed[field] = value;
   }
-  // A client that does not draw the billing page sends none of it, and a card
+  // A form that came back with none of it leaves the card as it was: a card
   // without an address is still a card — the fill simply has nothing to type
   // into a checkout's address boxes.
   if (Object.keys(typed).length === 0) return;
   if (typed.billingCountry) typed.billingCountry = typed.billingCountry.toUpperCase();
+  // A card either names a stored address or carries its own, never both — so
+  // whichever way this one goes, what it held before is cleared first, or the
+  // record fails validation on the way in.
+  delete record.billingAddress;
+  for (const field of ADDRESS_FIELDS) delete record[field];
 
   if (formValues.saveBillingAddress === "false") {
     Object.assign(record, typed);
@@ -798,14 +798,6 @@ async function cmdAdd(flags) {
         security: "I never see it. It goes straight into your encrypted vault.",
       });
       formValues = out.values;
-      // The second step. A card is typed off the card in hand; the address is a
-      // different question and gets a screen of its own. Both are collected
-      // before anything is written, so a card and the address it is billed to
-      // land in one save.
-      if (type === "card") {
-        const billing = await collectBillingAddress(name);
-        if (billing) formValues = { ...formValues, ...billing };
-      }
     } catch (err) {
       const ended = ownerEndedTheCard(err, {
         name,
@@ -1599,18 +1591,18 @@ async function cmdCardFields(flags) {
         `'${name}' is a ${rec.type}, and card-fields reads nothing but a card`,
       );
     }
-    const billing = billingOf(rec, vault) ?? {};
-    const answered = (source) => (field) => (source[field] ?? "").length > 0;
-    outputJson({
-      ok: true,
-      fields: [
-        ...CARD_FIELDS.filter(answered(rec)),
-        ...ADDRESS_FIELDS.filter(answered(billing)),
-      ],
-    });
+    outputJson({ ok: true, fields: answeredFields(rec, vault) });
   } finally {
     vault.lock();
   }
+}
+
+// Which of a card's fields have a value — the names, and nothing else. One
+// list for `card-fields` and `set-address`, so what the two report never drifts.
+function answeredFields(rec, vault) {
+  const billing = billingOf(rec, vault) ?? {};
+  const answered = (source) => (field) => (source[field] ?? "").length > 0;
+  return [...CARD_FIELDS.filter(answered(rec)), ...ADDRESS_FIELDS.filter(answered(billing))];
 }
 
 // The address a card is billed to, without the card.
@@ -1654,6 +1646,83 @@ function billingOf(rec, vault) {
     billing[field] = value;
   }
   return present ? billing : null;
+}
+
+// The address a card is billed to, asked for when a checkout needs it.
+//
+// Not at `add`: the card is what the owner has in hand, and whether the shop
+// will ask for an address — and for which boxes — is known only once its form
+// is in front of the agent. Asked then, the screen is raised once per address
+// rather than once per card: an address the vault already holds is linked to
+// the card without a word, and only a vault with none (or `--replace`, for an
+// address that lacks a box this shop insists on) puts the form in front of the
+// owner. Names only come back; the values stay sealed.
+async function cmdSetAddress(flags) {
+  const name = flags.card;
+  if (!name) return outputError("--card <NAME> is required");
+  if (!flags.form) {
+    return outputError("set-address takes --form: the owner types the address, never the agent");
+  }
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "card") {
+      return outputError(
+        `'${name}' is a ${rec.type}, and set-address sets the address a card is billed to`,
+      );
+    }
+    const answer = (source) =>
+      outputJson({
+        ok: true,
+        card: name,
+        address: typeof rec.billingAddress === "string" ? rec.billingAddress : null,
+        source,
+        fields: answeredFields(rec, vault),
+      });
+    if (!flags.replace) {
+      if (billingOf(rec, vault)) return answer("already");
+      const stored = vault.list().filter((entry) => entry.type === "address");
+      if (stored.length === 1) {
+        rec.billingAddress = stored[0].name;
+        vault.add(rec);
+        await vault.save();
+        stderr(`Linked '${name}' to the stored address '${stored[0].name}'; nothing was asked.`);
+        return answer("existing");
+      }
+    }
+    let values;
+    try {
+      values = await collectBillingAddress(name);
+    } catch (err) {
+      const ended = ownerEndedTheCard(err, { card: name });
+      if (ended) {
+        // The stock wording is about a sign-in. An address the owner would
+        // rather type into the page themselves is exactly what a browser view
+        // is for, so the `action` stays and only the words change.
+        if (ended.error === "FORM_USE_BROWSER") {
+          ended.message =
+            "The owner closed the card and asked to type the address into the page " +
+            "themselves. That is not a refusal. Do not raise this card again and do not " +
+            "ask for the address here.";
+        }
+        outputJson({ ok: false, stored: false, ...ended });
+        process.exitCode = 1;
+        return;
+      }
+      return outputError(`secure form: ${err.message}`);
+    }
+    attachBillingAddress(rec, values, vault);
+    if (!billingOf(rec, vault)) {
+      return outputError("the address form came back empty; nothing was stored");
+    }
+    vault.add(rec); // re-validates + upserts (createdAt preserved)
+    await vault.save();
+    stderr(`Set the billing address on '${name}'.`);
+    return answer("typed");
+  } finally {
+    vault.lock();
+  }
 }
 
 async function cmdList(flags) {
@@ -2159,6 +2228,9 @@ function printHelp() {
       "      which of the card's fields have a value — the names, not the values",
       "  read-address --card N",
       "      the address that card is billed to, without the card",
+      "  set-address --card N --form [--replace]",
+      "      ask the owner for the address that card is billed to, once a checkout",
+      "      needs it; an address the vault already holds is linked without asking",
       "  list",
       "  remove --name N",
       "  exec [--env VAR=cred.field | --file VAR=cred.field] … -- <cmd> [args…]",
@@ -2205,6 +2277,7 @@ const commands = {
   "read-card": cmdReadCard,
   "card-fields": cmdCardFields,
   "read-address": cmdReadAddress,
+  "set-address": cmdSetAddress,
   list: cmdList,
   remove: cmdRemove,
   exec: cmdExec,
