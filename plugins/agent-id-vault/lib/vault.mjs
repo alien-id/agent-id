@@ -82,21 +82,46 @@ async function readVaultFile(filePath) {
 // it, and a write interrupted in place would leave a truncated file that no
 // unlock method can open. A reader therefore sees either the whole previous
 // vault or the whole new one, never a partial write.
+//
+// The rename orders the two versions against a reader; it does not put either of
+// them on the disk. With delayed allocation the file can be renamed into place
+// with its length and none of its bytes, and a machine that loses power there
+// comes back to a vault of that many NUL bytes — found on a guest whose VM was
+// killed minutes after the vault was created, where every later unlock failed
+// with a parse error on byte zero. So the bytes are flushed before the rename,
+// and the rename itself after it; the directory flush is best effort, because a
+// filesystem that will not open a directory for reading still has the file.
 async function writeVaultFile(filePath, vaultFile) {
   await ensureDir(path.dirname(filePath));
   const tmpPath = `${filePath}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   try {
-    await fs.writeFile(tmpPath, JSON.stringify(vaultFile, null, 2) + "\n", {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    const handle = await fs.open(tmpPath, "w", 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(vaultFile, null, 2) + "\n", { encoding: "utf8" });
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await setPrivateFilePermissions(tmpPath);
     await fs.rename(tmpPath, filePath);
+    await syncDirectory(path.dirname(filePath));
   } catch (err) {
     await fs.rm(tmpPath, { force: true }).catch(() => {});
     throw err;
   }
   await setPrivateFilePermissions(filePath);
+}
+
+async function syncDirectory(dirPath) {
+  let handle;
+  try {
+    handle = await fs.open(dirPath, "r");
+    await handle.sync();
+  } catch {
+    // The file is already on the disk; only the rename is at risk here.
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 export async function vaultFileExists(stateDir) {
