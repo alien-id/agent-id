@@ -168,6 +168,15 @@ export class HostedHarnessProvider {
       security: spec.security || "",
       submitLabel: spec.submitLabel || "",
       timeoutMs: spec.timeoutMs || null,
+      // What the card is about, beside what it says. A client that knows these
+      // draws its own sentence and can draw the same one every time; one that
+      // does not renders `title`/`description` exactly as before, which is why
+      // both travel and neither replaces the other.
+      purpose: spec.purpose || null,
+      site: spec.site || null,
+      codeChannel: spec.codeChannel || null,
+      codeDestination: spec.codeDestination || null,
+      codeIsRetry: spec.codeIsRetry ?? null,
     });
     return new Promise((resolve, reject) => {
       const req = http.request(
