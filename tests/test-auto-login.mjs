@@ -32,6 +32,7 @@ import {
   OTP_ROW_MAX_HOPS,
   otpBoxesFor,
   typeCodeInto,
+  codeTarget,
   fromAuthenticatorApp,
   maskedIdentifier,
   otpModeCorrection,
@@ -58,8 +59,11 @@ test("stepNeedsOtp detects {otp} in a placeholder field", () => {
 
 // A page stub that reports the origin it is "on" — the allowlist gate reads it
 // live via page.url(), so a bare {} is no longer a usable stand-in.
-function pageOn(url) {
-  return { url: () => url };
+function pageOn(url, bodyText = "") {
+  // A recipe reads the page before it raises the code card, the same way the
+  // ordinary path does, so a page a recipe runs against has to be readable —
+  // even when the test has nothing for it to say.
+  return { url: () => url, evaluate: async () => bodyText };
 }
 
 // A recording driver stands in for the page driver so the recipe
@@ -545,8 +549,16 @@ test("only a credential that denies codes is corrected, and it is corrected once
 });
 
 test("an identifier is masked down to what the owner recognises", () => {
-  assert.equal(maskedIdentifier("daniel@eti.co"), "d•••@eti.co");
-  assert.equal(maskedIdentifier("+1 (415) 555-4817"), "••• 4817");
+  // The channel rides along, because the card names it in its own title and the
+  // identifier is the only thing that can say which one when the page did not.
+  assert.deepEqual(maskedIdentifier("daniel@eti.co"), {
+    channel: "email",
+    destination: "d•••@eti.co",
+  });
+  assert.deepEqual(maskedIdentifier("+1 (415) 555-4817"), {
+    channel: "sms",
+    destination: "••• 4817",
+  });
   // Neither an address nor a number: it names no place to look.
   assert.equal(maskedIdentifier("danielsmith"), null);
   assert.equal(maskedIdentifier(""), null);
@@ -643,7 +655,9 @@ test("a page that navigates WHILE the owner types the code cannot receive it", a
   // call, the code lands on whatever the page navigated to in the meantime.
   const calls = [];
   let url = "https://account.example.com/verify";
-  const page = { url: () => url };
+  // Read before the wait, on the origin the pre-`sub` check just allowed — the
+  // navigation this test is about happens after, while the owner is typing.
+  const page = { url: () => url, evaluate: async () => "" };
   await assert.rejects(
     runRecipe(page, [{ action: "fill", selector: "#code", value: "{otp}" }], {
       username: "u",
@@ -704,6 +718,57 @@ test("millisToNextTotpWindow respects the credential's own period", () => {
 
 // ─── a mistyped code gets one more chance, and the card says why ──────────────────
 
+// ─── the facts a client draws its own sentence from ───────────────────────────
+
+// Prose and facts travel together and neither replaces the other: a client that
+// knows `purpose` draws one sentence every time, and one that does not renders
+// exactly what it rendered before. Sending only the facts would blank the card
+// on every installed client; sending only the prose is what made the wording
+// differ from one card to the next.
+test("a code card carries the facts beside the sentence, not instead of it", () => {
+  const spec = otpCardSpec(
+    { name: "booking", passwordless: true, loginUrl: "https://account.booking.com/signin" },
+    { channel: "email", destination: "d•••@eti.co" },
+  );
+
+  assert.equal(spec.purpose, "code");
+  assert.equal(spec.site, "Booking.com");
+  assert.equal(spec.codeChannel, "email");
+  assert.equal(spec.codeDestination, "d•••@eti.co");
+  assert.equal(spec.codeIsRetry, false);
+  assert.match(spec.description, /sent a code to d•••@eti\.co/);
+  assert.match(spec.title, /Sign-in code for Booking\.com/);
+});
+
+test("a retry says so as a fact, not only inside the sentence", () => {
+  const spec = otpCardSpec({ name: "booking", passwordless: true }, { retry: true });
+
+  assert.equal(spec.codeIsRetry, true);
+  assert.match(spec.description, /not accepted/);
+});
+
+// Two tiers fill one slot. The page's own words win; the identifier the sign-in
+// was started with is the fallback, and it names a channel too — which is the
+// whole reason the card can say "email" when the page said nothing.
+test("codeTarget prefers what the page said and falls back to the identifier", () => {
+  const cred = { name: "booking", username: "daniel@eti.co" };
+
+  assert.deepEqual(codeTarget(cred, { channel: "sms", destination: "••• 4817" }), {
+    channel: "sms",
+    destination: "••• 4817",
+  });
+  assert.deepEqual(codeTarget(cred), { channel: "email", destination: "d•••@eti.co" });
+  assert.equal(codeTarget({ name: "booking", username: "danielsmith" }), null);
+});
+
+// Nothing was sent anywhere, so the card must not send them to a mailbox. This
+// is the one channel no page can name and no identifier can imply.
+test("a code from an authenticator names the app and no destination", () => {
+  const target = codeTarget({ name: "booking", otp: "totp", username: "daniel@eti.co" });
+
+  assert.deepEqual(target, { channel: "app", destination: null });
+});
+
 test("the retry card says the code was refused, so the owner reads a fresh one", () => {
   // Without it the owner sees the same prompt twice and cannot tell a refused
   // code from a lost one — and for a time-based code the right move is to read
@@ -729,11 +794,14 @@ function formTimeout() {
   return err;
 }
 
-function recipePage(url) {
+function recipePage(url, bodyText = "") {
   return {
     url: () => url,
     goto: async () => {},
     waitForTimeout: async () => {},
+    // Readable, for the same reason `pageOn` is: the recipe reads the page for
+    // where the code went before it asks for one.
+    evaluate: async () => bodyText,
   };
 }
 

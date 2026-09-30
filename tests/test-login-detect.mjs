@@ -482,18 +482,42 @@ test("Russian body copy without a rejection does not trip the error match", () =
 
 test("codeDestination reads back the destination the page itself printed", () => {
   const cases = [
-    ["We sent a code to +1 ••• ••• 4817. Enter it below.", "+1 ••• ••• 4817"],
-    ["Enter the code we texted to +1 (415) 555-0134", "+1 (415) 555-0134"],
+    ["We sent a code to +1 ••• ••• 4817. Enter it below.", "sms", "••• 4817"],
+    ["Enter the code we texted to +1 (415) 555-0134", "sms", "••• 0134"],
     // The masking dot and the domain dot are the same character; only a dot that
     // ends a sentence may end the capture.
-    ["We just emailed a code to d••@gmail.com", "d••@gmail.com"],
-    ["A verification code was sent to daniel@eti.co.", "daniel@eti.co"],
-    ["We sent a code to your phone", "your phone"],
-    ["Check your inbox — we sent a code to your email address.", "your email address"],
+    ["We just emailed a code to d••@gmail.com", "email", "d•••@gmail.com"],
+    ["A verification code was sent to daniel@eti.co.", "email", "d•••@eti.co"],
+    ["We sent a code to your phone", "sms", "your phone"],
+    ["Check your inbox — we sent a code to your email address.", "email", "your email address"],
   ];
-  for (const [body, expected] of cases) {
-    assert.equal(codeDestination(body), expected, body);
+  for (const [body, channel, destination] of cases) {
+    assert.deepEqual(codeDestination(body), { channel, destination }, body);
   }
+});
+
+// The channel is what the card puts in its own title — "Enter the email code" —
+// and it used to be decided here and thrown away: three recognisers collapsed
+// into one boolean. Naming the wrong one is worse than naming none, so a place
+// the page named without naming a kind yields no channel at all.
+test("codeDestination says which sort of place the code went to", () => {
+  assert.equal(codeDestination("We sent a code to your device")?.channel, null);
+  assert.equal(codeDestination("We sent a code to your messages")?.channel, "sms");
+  assert.equal(codeDestination("We emailed a code to your e-mail")?.channel, "email");
+  assert.equal(codeDestination("We sent it to the email address ending in 42")?.channel, "email");
+});
+
+// An address the page prints in full would otherwise cross the gateway and sit on
+// a card in full. Most sites mask it themselves and masking twice is a no-op; the
+// ones that do not are the reason this happens at the source. A place the page
+// described rather than named has nothing left to mask.
+test("codeDestination masks an identifier the page spelled out", () => {
+  assert.equal(codeDestination("We sent a code to daniel@eti.co")?.destination, "d•••@eti.co");
+  assert.equal(codeDestination("We texted a code to +1 415 555 0134")?.destination, "••• 0134");
+  assert.equal(
+    codeDestination("We sent a code to your phone ending in 4817")?.destination,
+    "your phone ending in 4817",
+  );
 });
 
 test("codeDestination also reads the shape that names no `to`", () => {
@@ -510,13 +534,13 @@ test("codeDestination also reads the shape that names no `to`", () => {
     ["We messaged your mobile ending with ••4817", "your mobile ending in ••4817"],
   ];
   for (const [body, expected] of cases) {
-    assert.equal(codeDestination(body), expected, body);
+    assert.deepEqual(codeDestination(body), { channel: "sms", destination: expected }, body);
   }
 
   // An address the page states outright still wins over the ending it repeats.
-  assert.equal(
+  assert.deepEqual(
     codeDestination("We sent a code to d••@gmail.com — the address ending in 4817 is your old one"),
-    "d••@gmail.com",
+    { channel: "email", destination: "d•••@gmail.com" },
   );
 });
 

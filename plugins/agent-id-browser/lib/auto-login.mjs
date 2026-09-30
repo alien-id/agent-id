@@ -52,7 +52,7 @@ import {
 import {
   classifyLogin,
   codeDestination,
-  maskDestination,
+  maskTarget,
   OTP_BODY_RE,
 } from "./login-detect.mjs";
 
@@ -230,7 +230,9 @@ export async function runRecipe(
   let otp;
   const sub = async (s) => {
     if (typeof s !== "string") return s;
-    if (s.includes("{otp}") && otp === undefined) otp = await getOtp();
+    if (s.includes("{otp}") && otp === undefined) {
+      otp = await getOtp(false, await otpCardHints(page));
+    }
     return applyVars(s, { username, password, otp });
   };
   // A step whose template injects the password/otp must never surface the raw
@@ -411,7 +413,7 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
   // say "sent". And a guess is still worth making: "check your email or messages"
   // sent an owner hunting through the wrong device while a number he had
   // forgotten was attached to the account held the code.
-  const guess = maskedIdentifier(cred.username);
+  const guess = maskedIdentifier(cred.username)?.destination;
   const sentence = destination
     ? `${site} sent a code to ${destination} — enter it to finish signing in`
     : guess
@@ -423,6 +425,7 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
       description: `${retryNote}Open your 2FA app and enter the current code for ${site}`,
       label: "Current 2FA code",
       ask: `enter the current 2FA code for ${site}`,
+      site,
     };
   }
   if (cred.passwordless) {
@@ -431,6 +434,7 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
       description: `${retryNote}${sentence}`,
       label: "Sign-in code",
       ask: `enter the sign-in code for ${site}`,
+      site,
     };
   }
   return {
@@ -440,6 +444,7 @@ export function otpPromptWording(cred, { retry = false, destination = null } = {
       : `${retryNote}Sign-in to ${site} needs your current code`,
     label: "Current 2FA code",
     ask: `enter the 2FA code for ${site}`,
+    site,
   };
 }
 
@@ -450,16 +455,29 @@ export function maskedIdentifier(identifier) {
   const value = String(identifier || "").trim();
   if (!value) return null;
 
-  const at = value.lastIndexOf("@");
-  if (at > 0) {
-    const domain = value.slice(at);
-    return `${value.slice(0, 1)}•••${domain}`;
+  if (value.lastIndexOf("@") > 0) {
+    return { channel: "email", destination: maskTarget(value) };
   }
 
   const digits = value.replace(/\D/g, "");
   const isPhone = /^\+?[\d\s().-]+$/.test(value) && digits.length >= 7;
 
-  return isPhone ? `••• ${digits.slice(-4)}` : null;
+  return isPhone ? { channel: "sms", destination: maskTarget(value) } : null;
+}
+
+// Where the code went, as a fact rather than as a sentence: what the page said,
+// else the identifier the sign-in was started with. The prose above weakens on
+// the second tier ("should reach") because it is a guess; the fact does not,
+// because a client draws one sentence either way and there is nothing different
+// the owner could do with a hedge.
+//
+// An authenticator is not a tier at all: nothing was sent anywhere, and saying
+// so is the difference between the owner opening an app and hunting a mailbox.
+export function codeTarget(cred, { channel = null, destination = null } = {}) {
+  if (fromAuthenticatorApp(cred)) return { channel: "app", destination: null };
+  if (destination) return { channel, destination };
+
+  return maskedIdentifier(cred.username);
 }
 
 // How long until the credential's TOTP period rolls over, plus a beat so the new
@@ -478,6 +496,7 @@ export async function resolveOtp(
     log = () => {},
     now,
     retry = false,
+    channel = null,
     destination = null,
   } = {}
 ) {
@@ -490,7 +509,7 @@ export async function resolveOtp(
       ...(now != null ? { now } : {}),
     });
   }
-  const spec = otpCardSpec(cred, { retry, destination });
+  const spec = otpCardSpec(cred, { retry, channel, destination });
   log(`Waiting for the ${spec.fields[0].label.toLowerCase()} via the secure prompt…`);
   const { values } = await collectSecret(spec, { env });
 
@@ -501,10 +520,19 @@ export async function resolveOtp(
 // exported for the same reason `otpPromptWording` is: what the owner is shown is
 // worth asserting without standing up a prompt provider, and this is the one card
 // both auto-login and `fill_otp` raise.
-export function otpCardSpec(cred, { retry = false, destination = null } = {}) {
+export function otpCardSpec(cred, { retry = false, channel = null, destination = null } = {}) {
   const wording = otpPromptWording(cred, { retry, destination });
+  const target = codeTarget(cred, { channel, destination });
 
   return {
+    // The facts a client draws its own sentence from. The prose below stays and
+    // stays authoritative for anyone who does not know these — a client that has
+    // never heard of `purpose` renders exactly what it rendered before.
+    purpose: "code",
+    site: wording.site,
+    codeChannel: target?.channel ?? null,
+    codeDestination: target?.destination ?? null,
+    codeIsRetry: retry,
     title: wording.title,
     description: wording.description,
     // Not masked, unlike every other value this vault collects. A code is
@@ -830,7 +858,12 @@ export async function otpCardHints(target) {
     )
     .catch(() => "");
 
-  return { destination: codeDestination(bodyText) };
+  const sentTo = codeDestination(bodyText);
+
+  return {
+    channel: sentTo?.channel ?? null,
+    destination: sentTo?.destination ?? null,
+  };
 }
 
 export async function detectPageState(page) {
@@ -1297,7 +1330,7 @@ async function driveLogin({
     if (err?.code !== "HOST_NOT_ALLOWED") throw err;
     return { ok: false, outcome: "domain-not-allowed", finalUrl: null, errorText: err.message };
   }
-  const getOtp = (retry, destination) => resolveOtpFn(cred, { env, log, retry, destination });
+  const getOtp = (retry, hints = {}) => resolveOtpFn(cred, { env, log, retry, ...hints });
   // One run answers a code challenge twice at most, and the second attempt is
   // deliberately cheap.
   //
@@ -1565,11 +1598,11 @@ async function driveLogin({
         const hints = await otpCardHints(page);
         // What the card is about to be built from, and the page it was read off.
         log(
-          `auto-login: code hints destination=${
-            maskDestination(hints.destination) ?? "?"
+          `auto-login: code hints channel=${hints.channel ?? "?"} destination=${
+            hints.destination ?? "?"
           } at ${page.url()}`
         );
-        const code = await getOtp(retry, hints.destination);
+        const code = await getOtp(retry, hints);
         await recordOtpModeCorrection();
         codeRowSeen = (await typeOtp(page, code, log))?.row || codeRowSeen;
       } catch (err) {
