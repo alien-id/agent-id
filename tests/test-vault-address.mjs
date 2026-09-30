@@ -156,12 +156,14 @@ async function driveForm(dir, args, values) {
   }
 }
 
-// `add --type card --form`: one screen, the card in hand.
+// `add --type card --form`: one screen, the card in hand. The box is posted
+// ticked, as the screen starts: an unticked box posts nothing, which the form
+// reads as "not kept".
 async function addCard(dir, name, values) {
   const { form, stdout, stderr } = await driveForm(
     dir,
     ["add", "--name", name, "--type", "card"],
-    values,
+    { saveToVault: "true", ...values },
   );
   return { cardForm: form, stdout, stderr };
 }
@@ -543,6 +545,45 @@ test("a card the owner keeps is kept", async () => {
     const vault = await openStored(dir);
     assert.equal(vault.get("visa").transient, undefined);
     vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The card leaves the vault once it has been typed into the checkout, and the
+// address it was billed to has to leave with it: kept as a credential of its
+// own, it would outlive the card the owner chose not to keep.
+test("the address of a card the owner does not keep leaves with the card", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-unkept-card-"));
+  try {
+    await makeVault(dir);
+    await addCard(dir, "visa", { ...CARD, saveToVault: "false" });
+    const { billingForm, out } = await setAddress(dir, "visa", {
+      ...ADDRESS,
+      saveBillingAddress: "true",
+    });
+
+    assert.ok(
+      !billingForm.includes('name="saveBillingAddress"'),
+      "the address screen offers to keep an address whose card is not kept",
+    );
+    assert.equal(out.address, null);
+    const vault = await openStored(dir);
+    const card = vault.get("visa");
+    assert.ok(card.transient, "setting the address kept the card");
+    assert.equal(card.billingAddress, undefined);
+    assert.equal(card.billingPostalCode, "94025");
+    assert.equal(vault.list().filter((c) => c.type === "address").length, 0);
+    vault.lock();
+
+    const read = JSON.parse((await runCli(["read-card", "--name", "visa"], dir)).stdout);
+    assert.deepEqual(read.card.billing, ADDRESS);
+
+    const removed = await runCli(["remove", "--name", "visa"], dir);
+    assert.equal(removed.code, 0, removed.stderr);
+    const after = await openStored(dir);
+    assert.deepEqual(after.list(), [], "something of the card outlived it");
+    after.lock();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

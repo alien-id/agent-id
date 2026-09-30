@@ -526,7 +526,7 @@ const SAVE_CARD_FIELD = Object.freeze({
 // An owner's decision — closing it, choosing the browser, letting it expire —
 // is thrown as it is: this form is the whole command, so its outcome is the
 // command's, and `cmdSetAddress` is where it is told apart from a fault.
-async function collectBillingAddress(name) {
+async function collectBillingAddress(name, { cardIsKept }) {
   const out = await collectSecret({
     title: "Billing address",
     description:
@@ -534,7 +534,7 @@ async function collectBillingAddress(name) {
       "card, so a payment without it is often declined.",
     fields: [
       ...ADDRESS_FIELD_SPECS,
-      ...(saveToVaultBoxEnabled() ? [SAVE_BILLING_ADDRESS_FIELD] : []),
+      ...(saveToVaultBoxEnabled() && cardIsKept ? [SAVE_BILLING_ADDRESS_FIELD] : []),
     ],
     label: `enter the billing address for "${name}"`,
     security: "I never see it. It goes straight into your encrypted vault.",
@@ -548,7 +548,9 @@ async function collectBillingAddress(name) {
 // and the card keeps only its name, so the next card can be billed to the same
 // address without asking again. Unticked, the same values ride on the card and
 // no other card can see them. Either way it is stored: an address is not
-// optional decoration, it is what the issuer checks.
+// optional decoration, it is what the issuer checks. A card the owner did not
+// keep always carries its address itself, so the address leaves with the card
+// instead of outliving it as a credential of its own.
 function attachBillingAddress(record, formValues, vault) {
   if (!formValues) return;
   const typed = {};
@@ -567,7 +569,7 @@ function attachBillingAddress(record, formValues, vault) {
   delete record.billingAddress;
   for (const field of ADDRESS_FIELDS) delete record[field];
 
-  if (formValues.saveBillingAddress === "false") {
+  if (formValues.saveBillingAddress === "false" || isTransient(record)) {
     Object.assign(record, typed);
     return;
   }
@@ -856,6 +858,9 @@ async function cmdAdd(flags) {
     // the next sign-in, which is not what a card about THIS sign-in asked.
     const keepsExisting = existing != null && !isTransient(existing);
     const transient = !keep && !keepsExisting;
+    // Set before the type branches, so a card's address sees that the card is
+    // not kept (attachBillingAddress).
+    if (transient) record.transient = { until: Date.now() + transientTtlMs(type) };
 
     switch (type) {
       case "bearer":
@@ -1019,8 +1024,6 @@ async function cmdAdd(flags) {
       }
     }
 
-    if (transient) record.transient = { until: Date.now() + transientTtlMs(type) };
-
     const transientFor = type === "card" ? "this purchase" : "this sign-in";
     const stored = vault.add(record);
     await vault.save();
@@ -1043,8 +1046,9 @@ async function cmdAdd(flags) {
             note:
               type === "card"
                 ? "The owner chose not to keep this card. It exists for the purchase it was " +
-                  "typed for, and is dropped on the next vault open after 24 hours. Pay with " +
-                  "it now; do not offer it as a stored card later."
+                  "typed for: it is removed as soon as it has been typed into the checkout, " +
+                  "and otherwise dropped on the next vault open after 24 hours. Pay with it " +
+                  "now; do not offer it as a stored card later."
                 : "The owner chose not to keep this credential. It exists for this sign-in " +
                   "only: auto-login removes it once the sign-in completes, and otherwise it " +
                   "is dropped on the next vault open after 30 minutes.",
@@ -1693,7 +1697,7 @@ async function cmdSetAddress(flags) {
     }
     let values;
     try {
-      values = await collectBillingAddress(name);
+      values = await collectBillingAddress(name, { cardIsKept: !isTransient(rec) });
     } catch (err) {
       const ended = ownerEndedTheCard(err, { card: name });
       if (ended) {
