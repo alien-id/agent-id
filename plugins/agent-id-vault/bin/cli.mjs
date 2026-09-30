@@ -79,6 +79,7 @@ import {
 } from "../lib/trusted-input.mjs";
 import {
   ADDRESS_FIELDS,
+  ANSWER_KEY_PATTERN,
   ADDRESS_OPTIONAL_FIELDS,
   CARD_FIELDS,
   cardLast4,
@@ -1154,6 +1155,67 @@ async function cmdSetTotp(flags) {
   }
 }
 
+// set-answer: store the owner's reply to one of a website's secret questions
+// ("your first pet") on an existing `login`, under a short key the browser then
+// addresses as `<name>.answers.<key>`. The reply is typed into the secure prompt,
+// so it never enters the agent's transcript; the question is shown on the card so
+// the owner knows which one is being asked. Re-running it for the same key
+// replaces the reply.
+async function cmdSetAnswer(flags) {
+  const name = flags.name;
+  const key = flags.key;
+  if (!name) return outputError("--name <NAME> is required");
+  if (!key || !ANSWER_KEY_PATTERN.test(key)) {
+    return outputError("--key <KEY> is required: 1-40 of a-z, 0-9 and _ (e.g. first_pet)");
+  }
+  const question = typeof flags.question === "string" ? flags.question.trim() : "";
+
+  let answer;
+  if (flags.form) {
+    try {
+      const out = await collectSecret({
+        title: `Secret question: ${name}`,
+        description: question
+          ? `The website asks: “${question}” Your answer is kept in the vault for the next sign-in.`
+          : "Your answer is kept in the vault for the next sign-in.",
+        fields: [{ name: "answer", label: question || "Your answer" }],
+        label: `answer the secret question for "${name}"`,
+        security: "Sealed with <code>AES-256-GCM</code>. Never shown to the agent.",
+      });
+      answer = out.values.answer;
+    } catch (err) {
+      const ended = ownerEndedTheCard(err, { name });
+      if (ended) {
+        outputJson({ ok: false, stored: false, ...ended });
+        process.exitCode = 1;
+        return;
+      }
+      return outputError(`secure form: ${err.message}`);
+    }
+  } else {
+    answer = await resolveValue(flags, "answer"); // --answer-file / --answer-env / stdin / tty
+  }
+  if (!answer || !answer.trim()) {
+    return outputError("an answer is required (--form, --answer-file, --answer-env, or stdin)");
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "login") {
+      return outputError(`set-answer works on 'login' credentials, not '${rec.type}'`);
+    }
+    rec.answers = { ...(rec.answers || {}), [key]: answer.trim() };
+    vault.add(rec); // re-validates + upserts (createdAt preserved)
+    await vault.save();
+    stderr(`Stored the answer '${key}' on '${name}'.`);
+    outputJson({ ok: true, name, key, answerKeys: Object.keys(rec.answers) });
+  } finally {
+    vault.lock();
+  }
+}
+
 // Attach or replace the auto-login recipe on a `login` credential. Separate from
 // `add` because a recipe is usually derived from looking at the sign-in page, which
 // happens after the credential exists — and re-adding would re-prompt the owner for
@@ -2213,6 +2275,9 @@ function printHelp() {
       "  set-recipe --name N (--recipe '<JSON steps>' | --clear)",
       "              attach/replace the auto-login recipe on a login cred; steps are",
       "              navigate|fill|type|click|press|wait with {username}/{password}/{otp}",
+      "  set-answer --name N --key K [--question Q] [--form]",
+      "              store the reply to a website's secret question on a login cred;",
+      "              the browser types it as N.answers.K; else --answer-file/-env/stdin",
       "  set-totp --name N [--form]   attach/update a 2FA seed on a login|totp cred",
       "              accepts a base32 secret or an otpauth:// URI (use when 2FA is",
       "              enabled after the login was stored); else --seed-file/-env/stdin",
@@ -2271,6 +2336,7 @@ const commands = {
   init: cmdInit,
   add: cmdAdd,
   "set-totp": cmdSetTotp,
+  "set-answer": cmdSetAnswer,
   "set-recipe": cmdSetRecipe,
   "set-domains": cmdSetDomains,
   "set-login-url": cmdSetLoginUrl,

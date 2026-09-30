@@ -426,6 +426,100 @@ test("set-totp attaches a TOTP seed (otpauth URI) to an existing interactive log
   }
 });
 
+// ─── set-answer (a reply to the website's secret question) ─────────────────────────
+
+function runVaultCli(dir, args, env = {}) {
+  return new Promise((resolve) => {
+    const child = spawn("node", [CLI, ...args, "--state-dir", dir], {
+      env: { ...process.env, ...env },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("set-answer stores a reply under its key; list shows the key and never the reply", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-setanswer-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    let vault = await openVault({ stateDir: dir, privateKeyPem });
+    vault.add(loginRec({ otp: "interactive" }));
+    await vault.save();
+    vault.lock();
+
+    const ANSWER = "Biscuit the second";
+    const stored = await runVaultCli(
+      dir,
+      ["set-answer", "--name", "demo", "--key", "first_pet", "--answer-env", "ANSWER"],
+      { ANSWER },
+    );
+    assert.equal(stored.code, 0, stored.stderr);
+    assert.deepEqual(JSON.parse(stored.stdout).answerKeys, ["first_pet"]);
+    assert.ok(!stored.stdout.includes(ANSWER), "the reply never reaches stdout");
+
+    vault = await openVault({ stateDir: dir, privateKeyPem });
+    assert.deepEqual(vault.get("demo").answers, { first_pet: ANSWER });
+    vault.lock();
+
+    const listed = await runVaultCli(dir, ["list"]);
+    assert.equal(listed.code, 0, listed.stderr);
+    assert.ok(listed.stdout.includes("first_pet"), listed.stdout);
+    assert.ok(!listed.stdout.includes(ANSWER), "list carries the key, not the reply");
+
+    const replaced = await runVaultCli(
+      dir,
+      ["set-answer", "--name", "demo", "--key", "first_pet", "--answer-env", "ANSWER"],
+      { ANSWER: "Rex" },
+    );
+    assert.equal(replaced.code, 0, replaced.stderr);
+    vault = await openVault({ stateDir: dir, privateKeyPem });
+    assert.deepEqual(vault.get("demo").answers, { first_pet: "Rex" });
+    vault.lock();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("set-answer refuses a malformed key and a credential that is not a login", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-setanswer-bad-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    vault.add(loginRec({ otp: "interactive" }));
+    vault.add({ name: "token", type: "bearer", domains: ["api.example.com"], value: "t" });
+    await vault.save();
+    vault.lock();
+
+    for (const key of ["First Pet", "pet.name", "", "x".repeat(41)]) {
+      const refused = await runVaultCli(
+        dir,
+        ["set-answer", "--name", "demo", "--key", key, "--answer-env", "ANSWER"],
+        { ANSWER: "Rex" },
+      );
+      assert.notEqual(refused.code, 0, `key ${JSON.stringify(key)} was accepted`);
+    }
+    const notLogin = await runVaultCli(
+      dir,
+      ["set-answer", "--name", "token", "--key", "first_pet", "--answer-env", "ANSWER"],
+      { ANSWER: "Rex" },
+    );
+    assert.notEqual(notLogin.code, 0);
+    assert.ok(`${notLogin.stdout}${notLogin.stderr}`.includes("login"), notLogin.stdout);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a login's answers must be key → non-empty string", () => {
+  assert.throws(() => validateRecord(loginRec({ answers: ["Rex"] })), /answers must be an object/);
+  assert.throws(() => validateRecord(loginRec({ answers: { "Bad Key": "Rex" } })), /answer key/);
+  assert.throws(() => validateRecord(loginRec({ answers: { first_pet: "" } })), /non-empty string/);
+  assert.doesNotThrow(() => validateRecord(loginRec({ answers: { first_pet: "Rex" } })));
+});
+
 // ─── set-recipe ───────────────────────────────────────────────────────────────────
 
 test("set-recipe attaches a recipe to an existing login and re-validates its steps", async () => {
