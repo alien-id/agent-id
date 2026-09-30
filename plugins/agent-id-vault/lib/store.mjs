@@ -264,6 +264,30 @@ export function cardLast4(rec) {
   return typeof rec?.cardNumber === "string" ? rec.cardNumber.slice(-4) : "";
 }
 
+// The key a login's answer to a website's secret question is filed under, and
+// the name the browser addresses it by (`<cred>.answers.<key>`): short, and
+// safe to show in `list`, since it names the question and not the answer.
+export const ANSWER_KEY_PATTERN = /^[a-z0-9_]{1,40}$/;
+
+// `answers` holds a login's replies to the website's secret questions ("your
+// first pet"), one string per key. The replies are secrets; the keys are not.
+function validateAnswers(rec) {
+  if (rec.answers == null) return;
+  if (typeof rec.answers !== "object" || Array.isArray(rec.answers)) {
+    throw new Error(`Credential ${rec.name}: answers must be an object of key → answer`);
+  }
+  for (const [key, answer] of Object.entries(rec.answers)) {
+    if (!ANSWER_KEY_PATTERN.test(key)) {
+      throw new Error(
+        `Credential ${rec.name}: answer key "${key}" must be 1-40 of a-z, 0-9 and _`,
+      );
+    }
+    if (typeof answer !== "string" || answer.length === 0) {
+      throw new Error(`Credential ${rec.name}: the answer under "${key}" must be a non-empty string`);
+    }
+  }
+}
+
 export function validateRecord(rec) {
   if (!rec || typeof rec !== "object") {
     throw new Error("Record must be an object");
@@ -491,6 +515,7 @@ export function validateRecord(rec) {
       ) {
         throw new Error(`Credential ${rec.name}: selectors must be an object`);
       }
+      validateAnswers(rec);
       break;
     }
   }
@@ -577,6 +602,7 @@ export function listMetadata(payload) {
           passwordless: c.passwordless === true,
           loginUrl: c.loginUrl || null,
           hasRecipe: Array.isArray(c.recipe) && c.recipe.length > 0,
+          answerKeys: Object.keys(c.answers || {}),
         }
       : {}),
     // The owner unticked "Save to vault": this record is here for one sign-in
@@ -640,6 +666,7 @@ export const SECRET_FIELDS = Object.freeze([
   "privateKey", // evm-keypair
   "dek", // browser-profile (data-encryption key for the sealed profile)
   "totpSecret", // login (the stored 2FA seed; username + password already listed above)
+  "answers", // login (replies to the website's secret questions, key → answer)
   "cardNumber",
   "cardExpiry",
   "cardSecurityCode",
