@@ -441,6 +441,86 @@ function runVaultCli(dir, args, env = {}) {
   });
 }
 
+function runVaultCliWithStdin(dir, args, stdin, env = {}) {
+  return new Promise((resolve) => {
+    const child = spawn("node", [CLI, ...args, "--state-dir", dir], {
+      env: { ...process.env, ...env },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(stdin);
+  });
+}
+
+test("form-spec prints the card add --form would raise, and touches no vault", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-formspec-"));
+  try {
+    const { code, stdout, stderr } = await runVaultCli(
+      dir,
+      ["form-spec", "--name", "booking", "--type", "login", "--login-url", "https://account.booking.com/sign-in"],
+      { AGENT_ID_SAVE_TO_VAULT_BOX: "1" },
+    );
+    assert.equal(code, 0, stderr);
+    const { ok, spec } = JSON.parse(stdout);
+    assert.equal(ok, true);
+    assert.equal(spec.title, "Enter it securely");
+    assert.match(spec.description, /sign-in/);
+    assert.deepEqual(spec.fields.map((f) => f.name), ["username", "password", "saveToVault"]);
+    assert.equal(spec.label, 'enter the "booking" secret');
+    assert.ok(spec.security.length > 0);
+
+    const passwordless = JSON.parse(
+      (
+        await runVaultCli(dir, [
+          "form-spec", "--name", "airbnb", "--type", "login", "--login-url", "https://www.airbnb.com/login",
+          "--passwordless", "--otp", "interactive",
+        ])
+      ).stdout,
+    );
+    assert.deepEqual(passwordless.spec.fields.map((f) => f.name), ["username"]);
+
+    const refused = await runVaultCli(dir, ["form-spec", "--name", "x", "--type", "login"]);
+    assert.notEqual(refused.code, 0, "the same shape errors as add");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("add --form --values-stdin stores the values the runtime collected; none of them in argv", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vault-valuesstdin-"));
+  try {
+    const privateKeyPem = await makeVault(dir);
+    const { code, stdout, stderr } = await runVaultCliWithStdin(
+      dir,
+      ["add", "--name", "booking", "--type", "login", "--login-url", "https://account.booking.com/sign-in", "--form", "--values-stdin"],
+      JSON.stringify({ username: "owner@acme.test", password: "hunter2", saveToVault: "true" }),
+      { AGENT_ID_SAVE_TO_VAULT_BOX: "1" },
+    );
+    assert.equal(code, 0, stderr);
+    assert.equal(JSON.parse(stdout).ok, true, stdout);
+    assert.ok(!stdout.includes("hunter2"), "the password never comes back out");
+
+    const vault = await openVault({ stateDir: dir, privateKeyPem });
+    const rec = vault.get("booking");
+    assert.equal(rec.username, "owner@acme.test");
+    assert.equal(rec.password, "hunter2");
+    vault.lock();
+
+    const garbled = await runVaultCliWithStdin(
+      dir,
+      ["add", "--name", "other", "--type", "login", "--login-url", "https://example.com/", "--form", "--values-stdin"],
+      "not json",
+    );
+    assert.notEqual(garbled.code, 0);
+    assert.match(garbled.stdout, /--values-stdin is not valid JSON/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("set-answer stores a reply under its key; list shows the key and never the reply", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "vault-setanswer-"));
   try {

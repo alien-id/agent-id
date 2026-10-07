@@ -778,28 +778,46 @@ async function cmdAdd(flags) {
     if (!specs) {
       return outputError(`--form is not supported for type ${type}`);
     }
-    try {
+    const card = {
+      title: CARD_TITLE,
+      description: formDescription({
+        name,
+        type,
+        loginUrl: flags["login-url"],
+        domains,
+        access,
+        passwordless: flags.passwordless,
+      }),
+      fields: specs,
+      label: `enter the "${name}" secret`,
+      // The promise, not the primitive: the algorithm names told the owner nothing
+      // they could act on and read as a warning label on a screen meant to
+      // reassure. It has to stay true, though — this card's whole purpose is to
+      // store the value, so "isn't saved anywhere" would be a lie told on the one
+      // screen where trust is the point.
+      security: "I never see it. It goes straight into your encrypted vault.",
+    };
+    // `form-spec`: the card this add would raise, for a runtime that raises it
+    // itself and hands the answer back through --values-stdin.
+    if (flags["spec-only"]) {
+      outputJson({ ok: true, spec: { ...card, submitLabel: "", timeoutMs: null } });
+      return;
+    }
+    if (flags["values-stdin"]) {
+      let parsed = null;
+      try {
+        parsed = JSON.parse((await readStdin()) ?? "");
+      } catch (err) {
+        return outputError(`--values-stdin is not valid JSON: ${err.message}`);
+      }
+      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return outputError("--values-stdin must be a JSON object of the card's values");
+      }
+      formValues = parsed;
+    } else try {
       // collectSecret routes through the secure-prompt resolver (browser form →
       // /dev/tty → hosted harness), so this works where no GUI browser is present.
-      const out = await collectSecret({
-        title: CARD_TITLE,
-        description: formDescription({
-          name,
-          type,
-          loginUrl: flags["login-url"],
-          domains,
-          access,
-          passwordless: flags.passwordless,
-        }),
-        fields: specs,
-        label: `enter the "${name}" secret`,
-        // The promise, not the primitive: the algorithm names told the owner nothing
-        // they could act on and read as a warning label on a screen meant to
-        // reassure. It has to stay true, though — this card's whole purpose is to
-        // store the value, so "isn't saved anywhere" would be a lie told on the one
-        // screen where trust is the point.
-        security: "I never see it. It goes straight into your encrypted vault.",
-      });
+      const out = await collectSecret(card);
       formValues = out.values;
     } catch (err) {
       const ended = ownerEndedTheCard(err, {
@@ -2252,6 +2270,10 @@ function printHelp() {
       "  add --name N --type T --domains H[,H…] [--access ro|rw] [type-specific value flags]",
       "      --form   enter the secret out-of-band via the secure prompt (browser",
       "               form → /dev/tty → hosted harness); else --<field>-file/-env/stdin",
+      "      --form --values-stdin   take the card's values as a JSON object on stdin,",
+      "               for a runtime that raised the card itself (see form-spec)",
+      "  form-spec <add's flags>   print the card `add --form` would raise, without",
+      "               raising it or opening the vault",
       "      --access ro   read-only: the proxy/browser allow only read-shaped",
       "               requests (GET/HEAD/OPTIONS + POST-tunneled reads: GraphQL",
       "               query, JMAP get/query, JSON-RPC non-submitting); show/exec",
@@ -2335,6 +2357,7 @@ function makeRekeyHandler() {
 const commands = {
   init: cmdInit,
   add: cmdAdd,
+  "form-spec": (flags) => cmdAdd({ ...flags, form: true, "spec-only": true }),
   "set-totp": cmdSetTotp,
   "set-answer": cmdSetAnswer,
   "set-recipe": cmdSetRecipe,
