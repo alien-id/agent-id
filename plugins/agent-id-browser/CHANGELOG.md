@@ -1,5 +1,12 @@
 # @alien-id/agent-id-browser
 
+## 9.1.6
+
+### Patch Changes
+
+- Updated dependencies [[`a1e66d7`](https://github.com/alien-id/agent-id/commit/a1e66d7b2891ffef8a2d343c3026b8940e44ce52), [`d2c327d`](https://github.com/alien-id/agent-id/commit/d2c327d05a7cdf91946311443d202327f5570f1e), [`0a5bf07`](https://github.com/alien-id/agent-id/commit/0a5bf07a71a3a6a7e102a9d35492471b13cae284), [`085420b`](https://github.com/alien-id/agent-id/commit/085420ba15e2a94d8cc31d728122ad7c66adc426)]:
+  - @alien-id/agent-id-vault@7.14.0
+
 ## 9.1.5
 
 ### Patch Changes
