@@ -4,13 +4,13 @@
 //
 // The address is what the issuer checks: a card-not-present payment without one
 // is declined by AVS long before anything we wrote gets a say. It is asked for
-// when a checkout needs it — `set-address`, raised by the agent once a form has
-// asked for boxes the vault cannot answer — and never when the card is stored.
-// Three things can silently stop working and none fails loudly, which is why
-// they are tested from outside the module: that `add` asks for the card alone,
-// the eight field names (a wire contract with the phone, exactly as the card's
-// four are), and where the values end up — the owner's choice between an
-// address kept for re-use and one that belongs to this card alone.
+// when the card is stored, on the card form's second page, and again through
+// `set-address` when a checkout wants one the vault cannot answer. Three things
+// can silently stop working and none fails loudly, which is why they are tested
+// from outside the module: that `add` asks for the address beside the card, the
+// eight field names (a wire contract with the phone, exactly as the card's four
+// are), and where the values end up — the owner's choice between an address kept
+// for re-use and one that belongs to this card alone.
 //
 // Run: node --test tests/test-vault-address.mjs
 
@@ -156,9 +156,9 @@ async function driveForm(dir, args, values) {
   }
 }
 
-// `add --type card --form`: one screen, the card in hand. The box is posted
-// ticked, as the screen starts: an unticked box posts nothing, which the form
-// reads as "not kept".
+// `add --type card --form`: the card form, answered with the card alone. The box
+// is posted ticked, as the screen starts: an unticked box posts nothing, which
+// the form reads as "not kept".
 async function addCard(dir, name, values) {
   const { form, stdout, stderr } = await driveForm(
     dir,
@@ -206,25 +206,59 @@ async function setAddressAgainstCard(dir, name, reason) {
   }
 }
 
-// Storing a card used to raise the address screen right behind the card's,
-// with seven boxes the owner could not get past — and no way to tell, from a
-// checkout in Dubai, that none of it would ever be asked for.
-test("storing a card asks for the card and nothing else", async () => {
+// The card and the address it is billed to are asked in one form, so the first
+// checkout that wants an address already has one, and there is no second screen
+// behind the card's for the owner to meet.
+test("storing a card asks for its billing address on the same form", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "billing-add-"));
   try {
     await makeVault(dir);
-    const { cardForm } = await addCard(dir, "visa", CARD);
+    const { form, out } = await driveForm(
+      dir,
+      ["add", "--name", "visa", "--type", "card"],
+      { saveToVault: "true", ...CARD, ...ADDRESS },
+    );
 
-    for (const field of Object.keys(ADDRESS)) {
-      assert.ok(!cardForm.includes(`name="${field}"`), `${field} was asked for on the card screen`);
+    for (const field of [...Object.keys(CARD), ...Object.keys(ADDRESS), "saveBillingAddress"]) {
+      assert.ok(form.includes(`name="${field}"`), `${field} is missing from the card form`);
     }
-    assert.ok(!cardForm.includes('name="saveBillingAddress"'));
+    assert.ok(form.includes('placeholder="US"'), "the Country box says what shape it wants");
+    assert.equal(out.ok, true);
+    assert.deepEqual(out.billingAddress, { stored: true });
     const read = JSON.parse((await runCli(["read-card", "--name", "visa"], dir)).stdout);
-    assert.equal(read.ok, true);
+    assert.equal(read.card.cardNumber, PAN);
+    assert.equal(read.card.billing.billingPostalCode, "94025");
+    const fields = JSON.parse((await runCli(["card-fields", "--name", "visa"], dir)).stdout);
+    for (const field of Object.keys(ADDRESS)) {
+      assert.ok(fields.fields.includes(field), `${field} is not fillable after the card form`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// "United States" is what a box labelled Country invites. Refused, it must not
+// take with it the card the owner just typed off the card in hand.
+test("an address the vault refuses leaves the card stored without one", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "billing-refused-"));
+  try {
+    await makeVault(dir);
+    const { out, stderr } = await driveForm(
+      dir,
+      ["add", "--name", "visa", "--type", "card"],
+      { saveToVault: "true", ...CARD, ...ADDRESS, billingCountry: "United States" },
+    );
+
+    assert.equal(out.ok, true);
+    assert.equal(out.billingAddress.stored, false);
+    assert.match(out.billingAddress.reason, /billingCountry/);
+    assert.match(stderr, /Billing address not stored/);
+    const read = JSON.parse((await runCli(["read-card", "--name", "visa"], dir)).stdout);
     assert.equal(read.card.cardNumber, PAN);
     assert.equal(read.card.billing, null);
-    const fields = JSON.parse((await runCli(["card-fields", "--name", "visa"], dir)).stdout);
-    assert.deepEqual(fields.fields, Object.keys(CARD));
+    const vault = await openStored(dir);
+    assert.equal(vault.list().filter((entry) => entry.type === "address").length, 0);
+    vault.lock();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
