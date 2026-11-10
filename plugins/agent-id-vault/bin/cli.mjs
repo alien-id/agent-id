@@ -639,8 +639,10 @@ function isBillingAddress(entry) {
 }
 
 function billingAddressName(typed, vault) {
+  // A billing address only: an address the owner saved on its own keeps its own name,
+  // description and `confirm`, even when the card is billed to the same street.
   const same = (record) =>
-    record.type === "address" &&
+    isBillingAddress(record) &&
     ADDRESS_FIELDS.every((field) => (record[field] ?? "") === (typed[field] ?? ""));
   const existing = vault.list().find((record) => same(vault.get(record.name)));
   if (existing) return existing.name;

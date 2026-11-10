@@ -234,3 +234,34 @@ test("a card is billed to a stored billing address, never to a home address save
     assert.equal(linked.json?.source, "existing", linked.stdout + linked.stderr);
     assert.equal(linked.json?.address, "billing-1");
   }));
+
+test("a card billed to the same street does not take over a home address", () =>
+  withVault(async (dir) => {
+    const street = {
+      billingFirstName: "Anna",
+      billingLastName: "Weber",
+      billingCountry: "DE",
+      billingAddressLine1: "Hauptstr. 1",
+      billingCity: "Berlin",
+    };
+    const home = await cli(dir, ["add", "--name", "home", "--type", "address", "--form", "--values-stdin"], {
+      stdin: JSON.stringify(street),
+    });
+    assert.equal(home.json?.ok, true, home.stdout + home.stderr);
+    const card = await cli(dir, ["add", "--name", "visa", "--type", "card", "--form", "--values-stdin"], {
+      stdin: JSON.stringify({
+        cardNumber: "4242424242424242",
+        cardExpiry: "1234",
+        cardSecurityCode: "123",
+        cardholderName: "Anna Weber",
+        ...street,
+        saveBillingAddress: "true",
+      }),
+    });
+    assert.equal(card.json?.ok, true, card.stdout + card.stderr);
+    const listed = (await cli(dir, ["list"])).json.credentials;
+    const kept = listed.find((c) => c.name === "home");
+    assert.equal(kept.confirm, true, "the home address keeps the owner's answer");
+    assert.equal(kept.description, null);
+    assert.ok(listed.some((c) => c.name === "billing-1" && c.type === "address"));
+  }));
