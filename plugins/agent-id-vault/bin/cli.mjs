@@ -317,8 +317,13 @@ async function cmdInit(flags) {
 const CARD_TITLE = "Enter it securely";
 
 // A record the agent types and never reads. Said on the card, because the owner is
-// typing a passport number into a box an agent put in front of them.
-const PERSONAL_NOTE = "It asks you before typing it into a website, and never sees it.";
+// typing a passport number into a box an agent put in front of them. With the confirm
+// box on the card, asking is the owner's to turn off, and the line says so.
+function personalNote() {
+  return saveToVaultBoxEnabled()
+    ? "The agent never sees it, and unless you turn it off below it asks you before typing it into a website."
+    : "The agent never sees it, and it asks you before typing it into a website.";
+}
 
 function formDescription({
   name,
@@ -349,7 +354,7 @@ function formDescription({
   if (type === "address" || type === "personal") {
     const holder = name.split(".").slice(1).join(".");
     const whose = holder ? `For ${holder}. ` : "";
-    return `${whose}Saved in your encrypted vault. ${PERSONAL_NOTE}`;
+    return `${whose}Saved in your encrypted vault. ${personalNote()}`;
   }
   const site = siteName(credentialHost({ loginUrl, domains }));
   const lead = type === "login"
@@ -626,6 +631,13 @@ function attachBillingAddress(record, formValues, vault) {
 // thing `show` refuses. So the name carries nothing — and re-use is decided by
 // comparing the values instead, which is the real question anyway. Typing the
 // same address twice updates one record; typing a different one adds another.
+// A billing address the billing form stored, by the name `billingAddressName` gives it. An
+// address the owner saved on its own (`add --type address`) is a home or a delivery
+// address, and is never taken for a card's billing address without asking.
+function isBillingAddress(entry) {
+  return entry.type === "address" && /^billing-\d+$/.test(entry.name);
+}
+
 function billingAddressName(typed, vault) {
   const same = (record) =>
     record.type === "address" &&
@@ -844,7 +856,7 @@ async function cmdAdd(flags) {
         type === "personal"
           ? personalKind(flags.kind).title
           : type === "address"
-            ? "Your address"
+            ? "Address"
             : CARD_TITLE,
       description: formDescription({
         name,
@@ -1888,7 +1900,7 @@ async function cmdSetAddress(flags) {
       });
     if (!flags.replace) {
       if (billingOf(rec, vault)) return answer("already");
-      const stored = vault.list().filter((entry) => entry.type === "address");
+      const stored = vault.list().filter(isBillingAddress);
       if (stored.length === 1) {
         rec.billingAddress = stored[0].name;
         vault.add(rec);
@@ -2443,8 +2455,9 @@ function printHelp() {
       "  card-fields --name N",
       "      which of the card's fields have a value — the names, not the values",
       "  read-address --card N | --name N",
+      "      the address that card is billed to, without the card, or an address record",
       "  read-personal --name N",
-      "      the address that card is billed to, without the card",
+      "      a personal record's values, for the process that types them into a page",
       "  set-address --card N --form [--replace]",
       "      ask the owner for the address that card is billed to, once a checkout",
       "      needs it; an address the vault already holds is linked without asking",

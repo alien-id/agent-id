@@ -200,3 +200,37 @@ test("the card's words are the vault's, and the box waits for clients that draw 
     assert.equal(box.kind, "checkbox");
     assert.equal(box.default, "true");
   }));
+
+test("a card is billed to a stored billing address, never to a home address saved on its own", () =>
+  withVault(async (dir) => {
+    const card = await cli(dir, ["add", "--name", "visa", "--type", "card", "--form", "--values-stdin"], {
+      stdin: JSON.stringify({
+        cardNumber: "4242424242424242",
+        cardExpiry: "1234",
+        cardSecurityCode: "123",
+        cardholderName: "Anna Weber",
+      }),
+    });
+    assert.equal(card.json?.ok, true, card.stdout + card.stderr);
+    const address = (name) =>
+      cli(dir, ["add", "--name", name, "--type", "address", "--form", "--values-stdin"], {
+        stdin: JSON.stringify({
+          billingFirstName: "Anna",
+          billingLastName: "Weber",
+          billingCountry: "DE",
+          billingAddressLine1: name === "home" ? "Hauptstr. 1" : "Ringstr. 9",
+          billingCity: "Berlin",
+        }),
+      });
+    assert.equal((await address("home")).json?.ok, true);
+    // No form can be raised here: with only a home address, the command must try to.
+    const alone = await cli(dir, ["set-address", "--card", "visa", "--form"], {
+      env: { AGENT_ID_SECURE_PROMPT: "tty" },
+    });
+    assert.notEqual(alone.json?.source, "existing", alone.stdout);
+
+    assert.equal((await address("billing-1")).json?.ok, true);
+    const linked = await cli(dir, ["set-address", "--card", "visa", "--form"]);
+    assert.equal(linked.json?.source, "existing", linked.stdout + linked.stderr);
+    assert.equal(linked.json?.address, "billing-1");
+  }));
