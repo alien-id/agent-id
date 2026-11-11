@@ -86,6 +86,8 @@ import {
   CREDENTIAL_TYPES,
   loginOtpMode,
   LOGIN_OTP_MODES,
+  PERSONAL_KINDS,
+  personalKind,
   SECRET_FIELDS,
   isTransient,
   validateRecord,
@@ -314,6 +316,15 @@ async function cmdInit(flags) {
 // reads to a person as a typo.
 const CARD_TITLE = "Enter it securely";
 
+// A record the agent types and never reads. Said on the card, because the owner is
+// typing a passport number into a box an agent put in front of them. With the confirm
+// box on the card, asking is the owner's to turn off, and the line says so.
+function personalNote() {
+  return saveToVaultBoxEnabled()
+    ? "The agent never sees it, and unless you turn it off below it asks you before typing it into a website."
+    : "The agent never sees it, and it asks you before typing it into a website.";
+}
+
 function formDescription({
   name,
   type,
@@ -337,6 +348,13 @@ function formDescription({
       "A payment card for the agent to pay with. It asks you to approve every " +
       `payment before using it — the amount and the site, every time.${kept}`
     );
+  }
+  // The part of the name after the first dot says whose it is (`passport.anna`),
+  // and with two travellers that is the one thing the owner cannot otherwise tell.
+  if (type === "address" || type === "personal") {
+    const holder = name.split(".").slice(1).join(".");
+    const whose = holder ? `For ${holder}. ` : "";
+    return `${whose}Saved in your encrypted vault. ${personalNote()}`;
   }
   const site = siteName(credentialHost({ loginUrl, domains }));
   const lead = type === "login"
@@ -456,6 +474,10 @@ function formFieldsForType(type, flags) {
         // about where it went.
         ...(saveToVaultBoxEnabled() ? [SAVE_CARD_FIELD] : []),
       ];
+    case "address":
+      return [...ADDRESS_FIELD_SPECS, ...confirmBox()];
+    case "personal":
+      return [...personalKind(flags.kind).fields, ...confirmBox()];
     default:
       return null;
   }
@@ -511,6 +533,22 @@ const SAVE_TO_VAULT_FIELD = Object.freeze({
   secret: false,
   required: false,
 });
+
+// Whether the owner is asked before this record is typed into a website. Ticked by
+// default, and a client that never drew the row sends nothing, which is ticked too.
+const CONFIRM_FIELD = Object.freeze({
+  name: "confirmBeforeUse",
+  label: "Ask me before typing this into a website",
+  kind: "checkbox",
+  default: "true",
+  secret: false,
+  required: false,
+});
+
+// Behind the same gate as the save box: an older client draws a checkbox as a text box.
+function confirmBox() {
+  return saveToVaultBoxEnabled() ? [CONFIRM_FIELD] : [];
+}
 
 // The same box under the same name — the clients find it by name — with the
 // wording the card screen needs. A sign-in's "Save to vault" says nothing about
@@ -593,9 +631,18 @@ function attachBillingAddress(record, formValues, vault) {
 // thing `show` refuses. So the name carries nothing — and re-use is decided by
 // comparing the values instead, which is the real question anyway. Typing the
 // same address twice updates one record; typing a different one adds another.
+// A billing address the billing form stored, by the name `billingAddressName` gives it. An
+// address the owner saved on its own (`add --type address`) is a home or a delivery
+// address, and is never taken for a card's billing address without asking.
+function isBillingAddress(entry) {
+  return entry.type === "address" && /^billing-\d+$/.test(entry.name);
+}
+
 function billingAddressName(typed, vault) {
+  // A billing address only: an address the owner saved on its own keeps its own name,
+  // description and `confirm`, even when the card is billed to the same street.
   const same = (record) =>
-    record.type === "address" &&
+    isBillingAddress(record) &&
     ADDRESS_FIELDS.every((field) => (record[field] ?? "") === (typed[field] ?? ""));
   const existing = vault.list().find((record) => same(vault.get(record.name)));
   if (existing) return existing.name;
@@ -630,6 +677,15 @@ function takeSaveToVault(formValues) {
   if (!formValues || !(SAVE_TO_VAULT_FIELD.name in formValues)) return true;
   const raw = formValues[SAVE_TO_VAULT_FIELD.name];
   delete formValues[SAVE_TO_VAULT_FIELD.name];
+  return String(raw) !== "false";
+}
+
+// The owner's answer to the confirm box, taken out of the form values for the
+// reason `takeSaveToVault` is. Only the form can turn it off: there is no flag.
+function takeConfirm(formValues) {
+  if (!formValues || !(CONFIRM_FIELD.name in formValues)) return true;
+  const raw = formValues[CONFIRM_FIELD.name];
+  delete formValues[CONFIRM_FIELD.name];
   return String(raw) !== "false";
 }
 
@@ -698,7 +754,26 @@ async function cmdAdd(flags) {
         "they approve a payment, not by --access.",
     );
   }
+  // The owner's details are typed by the owner, go only where the owner says at
+  // the moment of use, and stay sealed. All three are refused rather than corrected,
+  // so a caller that asked for something else learns it was refused.
+  const ownersDetails = type === "address" || type === "personal";
+  if (type === "personal" && !personalKind(flags.kind)) {
+    return outputError(`--kind must be one of: ${Object.keys(PERSONAL_KINDS).join(", ")}`);
+  }
+  if (ownersDetails && !flags.form) {
+    return outputError(`A ${type} record is typed into the secure form — re-run with --form`);
+  }
+  if (ownersDetails && access != null && access !== "ro") {
+    return outputError(`A ${type} record is stored read-only; --access cannot change that.`);
+  }
   let domains = parseDomains(flags);
+  if (ownersDetails && domains.length > 0) {
+    return outputError(
+      `A ${type} record takes no --domains. Where it may be typed is decided by the owner ` +
+        "when it is used, not here.",
+    );
+  }
   // Declaring where a card may be used would be granting oneself a merchant: the
   // owner's per-payment approval is what says where it may go.
   if (type === "card" && domains.length > 0) {
@@ -714,7 +789,7 @@ async function cmdAdd(flags) {
     // A card carries no allowlist at all: it stays empty, which matches no host, so
     // default-deny holds literally. Nothing writes to it — what says where a card may
     // be typed is the merchant host on the owner's approved payment intent.
-    else if (type === "card") domains = [];
+    else if (type === "card" || ownersDetails) domains = [];
     else if (type === "login") {
       // `login` IS host-scoped — the browser gates fill-secret / fill-otp and every
       // auto-login recipe step on this list. Default to the loginUrl host; falling
@@ -779,7 +854,12 @@ async function cmdAdd(flags) {
       return outputError(`--form is not supported for type ${type}`);
     }
     const card = {
-      title: CARD_TITLE,
+      title:
+        type === "personal"
+          ? personalKind(flags.kind).title
+          : type === "address"
+            ? "Address"
+            : CARD_TITLE,
       description: formDescription({
         name,
         type,
@@ -835,6 +915,7 @@ async function cmdAdd(flags) {
   }
 
   const keep = takeSaveToVault(formValues);
+  const confirm = takeConfirm(formValues);
 
   // Read a secret either from the form (--form) or the existing file/env/stdin/tty
   // channels — never from argv.
@@ -984,6 +1065,28 @@ async function cmdAdd(flags) {
         attachBillingAddress(record, formValues, vault);
         break;
       }
+      case "address": {
+        for (const field of ADDRESS_FIELDS) {
+          const value = (formValues[field] || "").trim();
+          if (value.length > 0) record[field] = value;
+        }
+        if (record.billingCountry) record.billingCountry = record.billingCountry.toUpperCase();
+        record.access = "ro";
+        record.confirm = confirm;
+        break;
+      }
+      case "personal": {
+        const fields = {};
+        for (const { name: field } of personalKind(flags.kind).fields) {
+          const value = String(formValues[field] ?? "").trim();
+          if (value.length > 0) fields[field] = value;
+        }
+        record.kind = flags.kind;
+        record.fields = fields;
+        record.access = "ro";
+        record.confirm = confirm;
+        break;
+      }
       case "login": {
         record.username = formValues ? formValues.username : flags.username;
         if (!record.username) {
@@ -1059,6 +1162,10 @@ async function cmdAdd(flags) {
       access: effectiveAccess(stored),
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt,
+      ...(stored.type === "personal"
+        ? { kind: stored.kind, fields: Object.keys(stored.fields) }
+        : {}),
+      ...(typeof stored.confirm === "boolean" ? { confirm: stored.confirm } : {}),
       ...(transient
         ? {
             transient: true,
@@ -1697,18 +1804,47 @@ function answeredFields(rec, vault) {
 // this reader never touches the number, the expiry or the security code — the
 // caller that fills an address form has no business holding them.
 async function cmdReadAddress(flags) {
-  const name = flags.card;
-  if (!name) return outputError("--card <NAME> is required");
+  const name = flags.card ?? flags.name;
+  if (!name) return outputError("--card <NAME> or --name <NAME> is required");
   const vault = await openWithFlags(flags);
   try {
     const rec = vault.get(name);
     if (!rec) return outputError(`No credential named '${name}'`);
-    if (rec.type !== "card") {
+    // By the flag and not by what is found: `--card` on an address record would
+    // otherwise answer as if that address were a card's.
+    const wanted = flags.card != null ? "card" : "address";
+    if (rec.type !== wanted) {
       return outputError(
-        `'${name}' is a ${rec.type}, and read-address reads the address a card is billed to`,
+        `'${name}' is a ${rec.type}, and read-address ${flags.card != null ? "--card" : "--name"} ` +
+          `reads ${wanted === "card" ? "the address a card is billed to" : "an address record"}`,
       );
     }
     outputJson({ ok: true, billing: billingOf(rec, vault) });
+  } finally {
+    vault.lock();
+  }
+}
+
+// The values of a `personal` record, for the caller that types them into a page.
+// A command of its own for the reason `read-card` is: it names what it does in the
+// audit log and reads nothing else. Not a privilege boundary either — what guards
+// the values is the owner's answer, which the caller asks for before each use.
+async function cmdReadPersonal(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "personal") {
+      return outputError(`'${name}' is a ${rec.type}, and read-personal reads a personal record`);
+    }
+    outputJson({
+      ok: true,
+      kind: rec.kind,
+      confirm: rec.confirm !== false,
+      fields: { ...rec.fields },
+    });
   } finally {
     vault.lock();
   }
@@ -1766,7 +1902,7 @@ async function cmdSetAddress(flags) {
       });
     if (!flags.replace) {
       if (billingOf(rec, vault)) return answer("already");
-      const stored = vault.list().filter((entry) => entry.type === "address");
+      const stored = vault.list().filter(isBillingAddress);
       if (stored.length === 1) {
         rec.billingAddress = stored[0].name;
         vault.add(rec);
@@ -2272,6 +2408,9 @@ function printHelp() {
       "               form → /dev/tty → hosted harness); else --<field>-file/-env/stdin",
       "      --form --values-stdin   take the card's values as a JSON object on stdin,",
       "               for a runtime that raised the card itself (see form-spec)",
+      "      --type personal --kind K --form   the owner's own details, typed by the owner:",
+      `               K is one of ${Object.keys(PERSONAL_KINDS).join(", ")}`,
+      "      --type address --form   an address of its own, not tied to a card",
       "  form-spec <add's flags>   print the card `add --form` would raise, without",
       "               raising it or opening the vault",
       "      --access ro   read-only: the proxy/browser allow only read-shaped",
@@ -2317,8 +2456,10 @@ function printHelp() {
       "      the card's four values, for the process that types them into a page",
       "  card-fields --name N",
       "      which of the card's fields have a value — the names, not the values",
-      "  read-address --card N",
-      "      the address that card is billed to, without the card",
+      "  read-address --card N | --name N",
+      "      the address that card is billed to, without the card, or an address record",
+      "  read-personal --name N",
+      "      a personal record's values, for the process that types them into a page",
       "  set-address --card N --form [--replace]",
       "      ask the owner for the address that card is billed to, once a checkout",
       "      needs it; an address the vault already holds is linked without asking",
@@ -2370,6 +2511,7 @@ const commands = {
   "read-card": cmdReadCard,
   "card-fields": cmdCardFields,
   "read-address": cmdReadAddress,
+  "read-personal": cmdReadPersonal,
   "set-address": cmdSetAddress,
   list: cmdList,
   remove: cmdRemove,

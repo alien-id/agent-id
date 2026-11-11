@@ -99,6 +99,18 @@ node CLI add --name deploy-key --type secret --value-file ~/.ssh/id_ed25519
 Login/password pairs use `--type basic` (`--username` + a password input). For
 SSH/RSA keys and other key material use `--type secret`.
 
+The owner's own details are form-only, read-only and take no `--domains`:
+
+```bash
+node CLI add --name phone --type personal --kind phone --form
+node CLI add --name passport.anna --type personal --kind passport --form
+node CLI add --name home --type address --form
+```
+
+`list` shows a personal record's `kind`, its field names and `confirm`, never its
+values. `confirm` says whether the owner is asked before the record is typed into
+a website. It is on by default and only the owner can turn it off, on the form.
+
 Value-input channels — pick the one with the smallest attack surface:
 - `--form` — **out-of-band browser form (recommended when a human is present).** You
   supply `--name`/`--type`/`--domains` (and any metadata like `--header-name`); a

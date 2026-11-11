@@ -11,7 +11,7 @@
 //     name: "github-pat",
 //     type: one of CREDENTIAL_TYPES below (bearer | basic | header | query |
 //           cookie | totp | cookie-jar | oauth2 | solana-keypair | evm-keypair |
-//           browser-profile | secret | login | card),
+//           browser-profile | secret | login | card | address | personal),
 //     domains: ["*.github.com"],
 //     description: "...",
 //     createdAt, updatedAt, lastUsedAt,
@@ -42,6 +42,7 @@ export const CREDENTIAL_TYPES = Object.freeze([
   "login",
   "card",
   "address",
+  "personal",
 ]);
 
 // Allowed `otp` policies on a `login` credential.
@@ -61,6 +62,91 @@ export const LOGIN_OTP_MODES = Object.freeze(["none", "totp", "interactive"]);
 // typed and the code already sent. The mode is only ever consulted at a code step,
 // so a site that asks for nothing is unaffected either way.
 export const DEFAULT_LOGIN_OTP_MODE = "interactive";
+
+// One document's three boxes. `expiryRequired` because a passport and a visa always
+// carry the date and a form asks for it, while plenty of national IDs and licences
+// have none, and a required box nobody can answer leaves the owner stuck on the card.
+function documentKind(title, { expiryRequired = false } = {}) {
+  return Object.freeze({
+    title,
+    fields: Object.freeze([
+      Object.freeze({ name: "number", label: "Number", secret: false }),
+      Object.freeze({
+        name: "expiry",
+        label: "Expiry date (YYYY-MM-DD)",
+        secret: false,
+        required: expiryRequired,
+      }),
+      Object.freeze({
+        name: "issuingCountry",
+        label: "Issuing country",
+        secret: false,
+        required: expiryRequired,
+      }),
+    ]),
+  });
+}
+
+// What a `personal` record can be, and the boxes the owner fills for each. A closed
+// list and not a set of labels the caller passes, because this is the text on a
+// sealed screen: what it asks for is said here and never in the agent's words.
+//
+// `anyOf`: at least one of these has a value. A bank account is an IBAN in one
+// country and a number with a routing code in another.
+export const PERSONAL_KINDS = Object.freeze({
+  phone: Object.freeze({
+    title: "Phone number",
+    fields: Object.freeze([
+      Object.freeze({ name: "number", label: "Phone number, with country code", secret: false }),
+    ]),
+  }),
+  date_of_birth: Object.freeze({
+    title: "Date of birth",
+    fields: Object.freeze([
+      Object.freeze({ name: "date", label: "Date of birth (YYYY-MM-DD)", secret: false }),
+    ]),
+  }),
+  passport: documentKind("Passport", { expiryRequired: true }),
+  visa: documentKind("Visa", { expiryRequired: true }),
+  national_id: documentKind("National ID card"),
+  driving_licence: documentKind("Driving licence"),
+  residence_permit: documentKind("Residence permit"),
+  tax_id: Object.freeze({
+    title: "Tax or social security number",
+    fields: Object.freeze([
+      Object.freeze({ name: "number", label: "Tax or social security number", secret: false }),
+    ]),
+  }),
+  bank_account: Object.freeze({
+    title: "Bank account",
+    anyOf: Object.freeze(["iban", "accountNumber"]),
+    fields: Object.freeze([
+      Object.freeze({ name: "iban", label: "IBAN", secret: false, required: false }),
+      Object.freeze({ name: "accountNumber", label: "Account number", secret: false, required: false }),
+      Object.freeze({
+        name: "routingCode",
+        label: "BIC, SWIFT, routing or sort code",
+        secret: false,
+        required: false,
+      }),
+    ]),
+  }),
+  health_insurance: Object.freeze({
+    title: "Health insurance",
+    fields: Object.freeze([
+      Object.freeze({ name: "number", label: "Policy number", secret: false }),
+      Object.freeze({ name: "provider", label: "Insurer", secret: false, required: false }),
+    ]),
+  }),
+});
+
+// A kind by name, or null. `kind` arrives from the command line, and a plain
+// lookup answers `constructor` with a function.
+export function personalKind(kind) {
+  return typeof kind === "string" && Object.hasOwn(PERSONAL_KINDS, kind)
+    ? PERSONAL_KINDS[kind]
+    : null;
+}
 
 export function loginOtpMode(rec) {
   return rec?.otp == null || rec.otp === "" ? DEFAULT_LOGIN_OTP_MODE : rec.otp;
@@ -241,6 +327,38 @@ function validateCardBilling(rec) {
   validateAddressFields(rec);
 }
 
+// `fields` is the owner's values under the names their kind declares. No value
+// appears in an error: these messages reach the agent.
+function validatePersonalFields(rec) {
+  const kind = personalKind(rec.kind);
+  if (!kind) {
+    throw new Error(
+      `Credential ${rec.name}: kind must be one of ${Object.keys(PERSONAL_KINDS).join(", ")}`,
+    );
+  }
+  const fields = rec.fields;
+  if (fields == null || typeof fields !== "object" || Array.isArray(fields)) {
+    throw new Error(`Credential ${rec.name}: fields must be an object of name → value`);
+  }
+  const known = kind.fields.map((field) => field.name);
+  for (const [key, value] of Object.entries(fields)) {
+    if (!known.includes(key)) {
+      throw new Error(`Credential ${rec.name}: ${rec.kind} has no field "${key}"`);
+    }
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`Credential ${rec.name}: "${key}" must be a non-empty string`);
+    }
+  }
+  for (const field of kind.fields) {
+    if (field.required !== false && !fields[field.name]) {
+      throw new Error(`Credential ${rec.name}: "${field.name}" is required for ${rec.kind}`);
+    }
+  }
+  if (kind.anyOf && !kind.anyOf.some((name) => fields[name])) {
+    throw new Error(`Credential ${rec.name}: ${rec.kind} needs one of ${kind.anyOf.join(", ")}`);
+  }
+}
+
 function validateCardFields(rec) {
   requireNonEmpty(rec, CARD_FIELDS);
   const number = rec.cardNumber;
@@ -305,7 +423,8 @@ export function validateRecord(rec) {
   // on the payment intent the owner approved, which the caller enforces. Empty denies
   // everything — hostMatchesAllowlist returns false for an empty list — so
   // default-deny holds literally here too.
-  const allowsEmptyDomains = rec.type === "card" || rec.type === "address";
+  const allowsEmptyDomains =
+    rec.type === "card" || rec.type === "address" || rec.type === "personal";
   if (!Array.isArray(rec.domains) || (rec.domains.length === 0 && !allowsEmptyDomains)) {
     throw new Error(
       `Credential ${rec.name}: 'domains' must be a non-empty array (default-deny)`,
@@ -324,6 +443,11 @@ export function validateRecord(rec) {
   // Optional per-credential access level + rules (enforced by the proxy and
   // the browser session server; see access.mjs).
   validateAccessFields(rec);
+  // Whether the owner is asked before this record is typed into a website. The
+  // vault only stores the answer; the runtime that types the value asks.
+  if (rec.confirm != null && typeof rec.confirm !== "boolean") {
+    throw new Error(`Credential ${rec.name}: confirm must be true or false`);
+  }
   switch (rec.type) {
     case "bearer":
       requireNonEmpty(rec, ["value"]);
@@ -422,6 +546,13 @@ export function validateRecord(rec) {
       // It is stored sealed all the same, because it is the owner's home
       // address and a `show` that prints it is a leak of a different kind.
       validateAddressFields(rec);
+      break;
+    }
+    case "personal": {
+      // The owner's own details: a phone number, a passport, a bank account. Like
+      // an address it spends nothing, and it is sealed all the same, because the
+      // whole point of keeping it here is that the agent never holds the value.
+      validatePersonalFields(rec);
       break;
     }
     case "card": {
@@ -591,6 +722,11 @@ export function listMetadata(payload) {
     // card: the last four, so an approval card can name which instrument is
     // about to be charged. The only part of a number that leaves the vault.
     ...(c.type === "card" ? { cardLast4: cardLast4(c) } : {}),
+    // personal: what it is and which fields it holds, names only, so a caller can
+    // tell a stored phone number is there without opening the record.
+    ...(c.type === "personal" ? { kind: c.kind, fields: Object.keys(c.fields || {}) } : {}),
+    // Metadata, not a secret: the caller needs it to know the owner will be asked.
+    ...(typeof c.confirm === "boolean" ? { confirm: c.confirm } : {}),
     // login: the non-secret shape of the sign-in, so a caller can tell what a
     // stored credential will ask for before driving it — whether a password
     // exists at all, how a code is answered, where to start, and whether an
@@ -672,6 +808,7 @@ export const SECRET_FIELDS = Object.freeze([
   "cardSecurityCode",
   "cardholderName", // card — every field of one, so none of it survives a lock
   ...ADDRESS_FIELDS, // address — the owner's own address, and a card may carry a copy
+  "fields", // personal (the owner's values, name → value)
 ]);
 
 // Best-effort scrub of decrypted secret material when the vault locks. JS
