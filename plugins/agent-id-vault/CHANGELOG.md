@@ -1,5 +1,21 @@
 # @alien-id/agent-id-vault
 
+## 7.14.0
+
+### Minor Changes
+
+- [#176](https://github.com/alien-id/agent-id/pull/176) [`a1e66d7`](https://github.com/alien-id/agent-id/commit/a1e66d7b2891ffef8a2d343c3026b8940e44ce52) Thanks [@stelchankad](https://github.com/stelchankad)! - A login keeps the owner's replies to a website's secret questions. `vault set-answer --name N --key K [--question Q] --form` raises a secure card showing the question, stores the reply under `answers.K`, and the browser types it as `N.answers.K`. `vault list` shows a login's `answerKeys`, never the replies, and `answers` is a secret field: it is scrubbed on lock and sealed on an access-restricted record.
+
+- [#177](https://github.com/alien-id/agent-id/pull/177) [`d2c327d`](https://github.com/alien-id/agent-id/commit/d2c327d05a7cdf91946311443d202327f5570f1e) Thanks [@stelchankad](https://github.com/stelchankad)! - A caller can raise the credential card itself and hand the answer back. `vault form-spec` takes the flags `add` takes and prints the card `add --form` would raise (`title`, `description`, `fields`, `label`, `security`) without raising it or opening the vault, after the same shape checks `add` makes. `add --form --values-stdin` reads that card's values as a JSON object on stdin instead of raising the card, and stores them exactly as an answered card would, Save to vault included. A host that keeps its own secure-prompt channel can then show the card the moment the owner asks for it, rather than starting `add --form` first.
+
+- [#175](https://github.com/alien-id/agent-id/pull/175) [`085420b`](https://github.com/alien-id/agent-id/commit/085420ba15e2a94d8cc31d728122ad7c66adc426) Thanks [@stelchankad](https://github.com/stelchankad)! - A card the owner did not keep carries its billing address itself, so the address leaves the vault with the card instead of outliving it as a credential of its own, and the address screen for such a card no longer offers to keep the address. The note for an unkept card now says it is removed once typed into the checkout.
+
+- [#180](https://github.com/alien-id/agent-id/pull/180) [`f6466ce`](https://github.com/alien-id/agent-id/commit/f6466cea7f60b4a8bd51a786470f30f404477860) Thanks [@alekseiEti](https://github.com/alekseiEti)! - The vault keeps the owner's own details. `vault add --type personal --kind <phone|date_of_birth|passport|visa|national_id|driving_licence|residence_permit|tax_id|bank_account|health_insurance> --form` raises a secure card with fixed labels and stores the values sealed under `fields`, read back with `vault read-personal --name N`. `--type address --form` stores an address that belongs to no card, read with `vault read-address --name N`. Both are form-only, read-only and take no `--domains`. A new `confirm` field on a record says whether the owner is asked before it is typed into a website: on by default, turned off only by the owner on the card, and shown by `vault list` with a personal record's `kind` and field names, never its values.
+
+### Patch Changes
+
+- [#174](https://github.com/alien-id/agent-id/pull/174) [`0a5bf07`](https://github.com/alien-id/agent-id/commit/0a5bf07a71a3a6a7e102a9d35492471b13cae284) Thanks [@stelchankad](https://github.com/stelchankad)! - Put the vault on the disk before renaming it into place, so a machine that loses power does not come back to a file of NUL bytes that no unlock can open.
+
 ## 7.13.0
 
 ### Minor Changes
