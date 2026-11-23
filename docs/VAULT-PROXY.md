@@ -187,7 +187,7 @@ Each record carries:
 | `totp` | `<otpHeader \|\| X-OTP-Code>: <6-digit RFC 6238 code>` |
 | `oauth2` | `Authorization: Bearer <access token>` — refreshed on demand from the stored refresh token |
 | `solana-keypair` | ed25519 signature filled into the `sendTransaction` JSON-RPC body |
-| `evm-keypair` | `eth_sendTransaction` → signed EIP-1559 `eth_sendRawTransaction` |
+| `evm-keypair` | `eth_sendTransaction` → signed EIP-1559 `eth_sendRawTransaction`; `eth_signTypedData_v4` → an EIP-712 signature, answered locally |
 
 #### oauth2: refresh-on-demand
 
@@ -242,10 +242,46 @@ in a header:
   deterministic ECDSA, low-s) and forwards it as `eth_sendRawTransaction`. A
   `from` field, if present, must equal the credential address.
 
+- **EVM typed data** — `eth_signTypedData_v4` is answered by the proxy itself:
+  it signs the EIP-712 payload and returns the signature, and nothing reaches
+  the upstream. This is **default-deny**. A record signs typed data only for
+  the rules in its `typedDataAllowlist`, each naming a primary type and the
+  whole domain (`name`, `version`, `chainId`, `verifyingContract`, `salt` —
+  every field the payload's domain carries, and no other). A transaction is
+  bounded by its chain, its gas and the RPC allowlist; a typed-data signature
+  is bounded only by the contract that reads it, and a token permit hands a
+  balance to whoever holds the signature, so a key signs none it was not
+  told to. `eth_accounts` answers the credential's address. `personal_sign`,
+  `eth_sign`, `eth_signTransaction` and typed data v1/v3 are refused rather
+  than forwarded. Rules are set at `generate` (`--typed-data-allowlist`) or
+  with `agent-id-vault set-typed-data`, where adding a rule needs the owner's
+  confirmation on the secure prompt and removing one does not.
+
 The agent-visible artifacts — request URLs, unsigned transactions, signatures,
 tx hashes — are all public-by-design data (they land on chain anyway). The
 access log records `solana_signed` / `evm_signed` events with signatures / tx
-hashes, never key material.
+hashes and `evm_typed_data_signed` with the digest, never key material.
+
+A process that holds the vault itself and broadcasts on its own — a supervisor
+carrying out an action its owner just approved — asks for one signature at a
+time instead: `agent-id-vault wallet-sign --name N --transaction | --typed-data`
+reads the payload as JSON on stdin and answers `{raw, hash, from}` or
+`{signature, digest, address}`. It applies the same record rules as the proxy,
+signs nothing for a read-only (`access: ro`) wallet, and never prints the key.
+
+An EVM wallet record also carries three settings that only its owner writes:
+`withdrawalAllowlist`, the accounts its funds may leave to (`[{address, label}]`),
+`dailySpendLimitUsd`, the most it may trade in 24 hours, and `refundAddresses`,
+where funds sent in from another chain go back to when the swap that carries
+them fails (`[{chain, address}]`, one per chain). Each is typed by the owner on
+the secure prompt (`agent-id-vault set-withdrawal --name N`,
+`agent-id-vault set-daily-limit --name N`,
+`agent-id-vault set-refund --name N --chain CODE`); no flag carries an address
+or a figure in, so an agent can raise the card and can remove an entry
+(`--remove`, `--clear`) and cannot add one. These are not signing constraints:
+the vault signs a transaction without knowing where the money inside a contract
+call ends up or what a trade is worth, so it keeps the settings, lists them, and
+leaves holding to them to the process that carries out the trades.
 
 See `examples/solana-transfer-via-proxy.mjs` for the full agent-side flow
 (blockhash → build unsigned → submit via proxy → confirm), verified end-to-end
@@ -454,6 +490,7 @@ Two practical notes:
 | Reach the control plane (local process or LAN host) | Loopback-bound by default; mutating routes require the bearer token. The master key on `/approve` is always sealed to the proxy's pinned key. A network-exposed plane runs over TLS (self-signed, fingerprint pinned via the QR), so the token isn't sniffable either. Residual: the pin trusts the QR's out-of-band channel, and a stolen token is replayable until the proxy restarts (new token). |
 | Drive the agent to hit an internal/metadata host | SSRF guard refuses link-local (incl. `169.254.169.254`), unspecified, and multicast upstreams; `--block-private-hosts` adds loopback/RFC1918. Applies to forwarded requests and CONNECT tunnels alike. Independent of the per-credential allowlist. |
 | Get the wallet key to sign an arbitrary tx | Bounded by the credential's RPC-host allowlist, plus optional `chainIdAllowlist` / `toAllowlist` (EVM) and `programAllowlist` (Solana) enforced before signing. |
+| Get the wallet key to sign a token permit or another off-chain authorization | Refused: typed data is default-deny, signed only for the primary types and exact domains in the record's `typedDataAllowlist`; `personal_sign` / `eth_sign` are never served. Adding a rule needs the owner's confirmation. |
 | Steal proxy CA private key | Not applicable. **There is no CA**, because we use URL-rewrite instead of TLS interception. |
 
 ---

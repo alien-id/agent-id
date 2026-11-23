@@ -19,6 +19,7 @@
 //   }
 
 import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
+import { toChecksumAddress } from "@alien-id/agent-id-core/lib/evm.mjs";
 import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
 import { assertHostAllowed, credentialHost, hostMatchesAllowlist, siteName, validateAccessFields } from "./access.mjs";
 
@@ -202,6 +203,214 @@ function validateToAllowlist(rec) {
     if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) {
       throw new Error(`Credential ${rec.name}: toAllowlist entries must be 0x EVM addresses`);
     }
+  }
+}
+
+// Which EIP-712 payloads an EVM key may sign. Default-DENY, unlike the lists
+// above: a record without it signs no typed data. Each rule names a primary
+// type and the whole domain it is signed under (see `typedDataRuleMatches`).
+const TYPED_DATA_DOMAIN_KEYS = ["name", "version", "chainId", "verifyingContract", "salt"];
+
+function validateTypedDataAllowlist(rec) {
+  if (rec.typedDataAllowlist == null) return;
+  if (!Array.isArray(rec.typedDataAllowlist) || rec.typedDataAllowlist.length === 0) {
+    throw new Error(`Credential ${rec.name}: typedDataAllowlist must be a non-empty array`);
+  }
+  for (const rule of rec.typedDataAllowlist) {
+    if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+      throw new Error(`Credential ${rec.name}: each typedDataAllowlist rule must be an object`);
+    }
+    if (Object.keys(rule).some((key) => key !== "primaryType" && key !== "domain")) {
+      throw new Error(
+        `Credential ${rec.name}: a typedDataAllowlist rule holds primaryType and domain only`,
+      );
+    }
+    if (
+      typeof rule.primaryType !== "string" ||
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(rule.primaryType) ||
+      rule.primaryType === "EIP712Domain"
+    ) {
+      throw new Error(`Credential ${rec.name}: typedDataAllowlist primaryType must name a message type`);
+    }
+    const domain = rule.domain;
+    if (!domain || typeof domain !== "object" || Array.isArray(domain)) {
+      throw new Error(`Credential ${rec.name}: a typedDataAllowlist rule needs a domain object`);
+    }
+    const keys = Object.keys(domain);
+    if (keys.length === 0 || keys.some((key) => !TYPED_DATA_DOMAIN_KEYS.includes(key))) {
+      throw new Error(
+        `Credential ${rec.name}: a typedDataAllowlist domain holds ${TYPED_DATA_DOMAIN_KEYS.join(", ")} only, and at least one`,
+      );
+    }
+    for (const key of ["name", "version"]) {
+      if (domain[key] !== undefined && (typeof domain[key] !== "string" || domain[key] === "")) {
+        throw new Error(`Credential ${rec.name}: typedDataAllowlist domain ${key} must be a non-empty string`);
+      }
+    }
+    if (domain.chainId !== undefined && (!Number.isSafeInteger(domain.chainId) || domain.chainId <= 0)) {
+      throw new Error(`Credential ${rec.name}: typedDataAllowlist domain chainId must be a positive integer`);
+    }
+    if (
+      domain.verifyingContract !== undefined &&
+      (typeof domain.verifyingContract !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(domain.verifyingContract))
+    ) {
+      throw new Error(`Credential ${rec.name}: typedDataAllowlist domain verifyingContract must be a 0x EVM address`);
+    }
+    if (
+      domain.salt !== undefined &&
+      (typeof domain.salt !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(domain.salt))
+    ) {
+      throw new Error(`Credential ${rec.name}: typedDataAllowlist domain salt must be 32 bytes of 0x hex`);
+    }
+  }
+}
+
+function typedDataRuleKey(rule) {
+  const domain = rule.domain || {};
+  return JSON.stringify([
+    rule.primaryType,
+    ...TYPED_DATA_DOMAIN_KEYS.map((key) =>
+      domain[key] === undefined ? null : String(domain[key]).toLowerCase(),
+    ),
+  ]);
+}
+
+/**
+ * Does `after` let the key sign typed data `before` did not? True when a rule
+ * appears that was not there. Dropping rules, or the whole list, only
+ * tightens, and applies without the owner.
+ */
+export function isTypedDataRelaxation(before, after) {
+  const had = new Set((before.typedDataAllowlist || []).map(typedDataRuleKey));
+  return (after.typedDataAllowlist || []).some((rule) => !had.has(typedDataRuleKey(rule)));
+}
+
+// ─── What the owner set for a wallet: where its funds may leave to, and how
+// much it may trade in a day ──────────────────────────────────────────────────
+//
+// Neither is a signing constraint. The vault signs a transaction without
+// knowing where its money ends up (a swap is a call to a contract, and the
+// destination is inside the call) and without knowing what it is worth, so it
+// cannot hold a signature to either one. It KEEPS them, and guards who writes
+// them: both are entered by the owner on the secure prompt and are never taken
+// from a caller's arguments (`set-withdrawal`, `set-daily-limit`,
+// `set-refund`). The process that carries out trades reads them from `list`
+// and holds itself to them.
+
+export const WITHDRAWAL_ACCOUNTS_MAX = 16;
+export const REFUND_ADDRESSES_MAX = 32;
+// A chain as the caller's venue codes it (BTC, SOL, TRON), and an address on
+// it as its own chain writes one. The vault knows neither format: what it
+// guards is whose hand wrote the address, not whether a chain would take it.
+export const REFUND_CHAIN_PATTERN = /^[A-Z][A-Z0-9]{1,11}$/;
+export const REFUND_ADDRESS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+export const WITHDRAWAL_LABEL_MAX = 40;
+export const DAILY_SPEND_LIMIT_USD_MAX = 10_000_000;
+
+function validateWithdrawalAllowlist(rec) {
+  if (rec.withdrawalAllowlist == null) return;
+  const accounts = rec.withdrawalAllowlist;
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    throw new Error(`Credential ${rec.name}: withdrawalAllowlist must be a non-empty array`);
+  }
+  if (accounts.length > WITHDRAWAL_ACCOUNTS_MAX) {
+    throw new Error(
+      `Credential ${rec.name}: withdrawalAllowlist holds at most ${WITHDRAWAL_ACCOUNTS_MAX} accounts`,
+    );
+  }
+  const addresses = new Set();
+  const labels = new Set();
+  for (const account of accounts) {
+    if (!account || typeof account !== "object" || Array.isArray(account)) {
+      throw new Error(`Credential ${rec.name}: each withdrawalAllowlist account must be an object`);
+    }
+    if (Object.keys(account).some((key) => key !== "address" && key !== "label")) {
+      throw new Error(`Credential ${rec.name}: a withdrawalAllowlist account holds address and label only`);
+    }
+    const { address, label } = account;
+    if (typeof address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+      throw new Error(`Credential ${rec.name}: a withdrawalAllowlist address must be a 0x EVM address`);
+    }
+    // One spelling per address, so that what is listed is what is compared.
+    if (address !== toChecksumAddress(address)) {
+      throw new Error(`Credential ${rec.name}: a withdrawalAllowlist address is kept in its EIP-55 form`);
+    }
+    if (/^0x0{40}$/.test(address)) {
+      throw new Error(`Credential ${rec.name}: the zero address is nobody's account`);
+    }
+    if (typeof rec.address === "string" && address.toLowerCase() === rec.address.toLowerCase()) {
+      throw new Error(`Credential ${rec.name}: the wallet's own address is not a withdrawal account`);
+    }
+    if (
+      typeof label !== "string" ||
+      label.length === 0 ||
+      label.length > WITHDRAWAL_LABEL_MAX ||
+      label !== label.trim() ||
+      /[\u0000-\u001f\u007f]/.test(label)
+    ) {
+      throw new Error(
+        `Credential ${rec.name}: a withdrawalAllowlist label is 1 to ${WITHDRAWAL_LABEL_MAX} printable characters`,
+      );
+    }
+    if (addresses.has(address.toLowerCase())) {
+      throw new Error(`Credential ${rec.name}: ${address} is listed twice in withdrawalAllowlist`);
+    }
+    if (labels.has(label.toLowerCase())) {
+      throw new Error(`Credential ${rec.name}: two withdrawalAllowlist accounts are both named "${label}"`);
+    }
+    addresses.add(address.toLowerCase());
+    labels.add(label.toLowerCase());
+  }
+}
+
+// Where money the owner sends IN from another chain goes back to when the
+// swap that carries it cannot be completed: one address per chain, the
+// owner's own, typed by them like a withdrawal account. A refund address is a
+// destination for the owner's money that no approval ever shows, which is
+// why it is theirs alone to write.
+function validateRefundAddresses(rec) {
+  if (rec.refundAddresses == null) return;
+  const refunds = rec.refundAddresses;
+  if (!Array.isArray(refunds) || refunds.length === 0) {
+    throw new Error(`Credential ${rec.name}: refundAddresses must be a non-empty array`);
+  }
+  if (refunds.length > REFUND_ADDRESSES_MAX) {
+    throw new Error(`Credential ${rec.name}: refundAddresses holds at most ${REFUND_ADDRESSES_MAX} chains`);
+  }
+  const chains = new Set();
+  for (const refund of refunds) {
+    if (!refund || typeof refund !== "object" || Array.isArray(refund)) {
+      throw new Error(`Credential ${rec.name}: each refundAddresses entry must be an object`);
+    }
+    if (Object.keys(refund).some((key) => key !== "chain" && key !== "address")) {
+      throw new Error(`Credential ${rec.name}: a refundAddresses entry holds chain and address only`);
+    }
+    const { chain, address } = refund;
+    if (typeof chain !== "string" || !REFUND_CHAIN_PATTERN.test(chain)) {
+      throw new Error(`Credential ${rec.name}: a refundAddresses chain is a code like BTC or SOL`);
+    }
+    if (typeof address !== "string" || !REFUND_ADDRESS_PATTERN.test(address)) {
+      throw new Error(`Credential ${rec.name}: a refundAddresses address is 8 to 128 letters, digits and . _ : -`);
+    }
+    // An EVM address is kept in its EIP-55 form, as a withdrawal account is:
+    // its capitals are its checksum, and one that fails it holds a typo.
+    if (/^0x[0-9a-fA-F]{40}$/.test(address) && address !== toChecksumAddress(address)) {
+      throw new Error(`Credential ${rec.name}: an EVM refundAddresses address is kept in its EIP-55 form`);
+    }
+    if (chains.has(chain)) {
+      throw new Error(`Credential ${rec.name}: ${chain} has two refund addresses`);
+    }
+    chains.add(chain);
+  }
+}
+
+function validateDailySpendLimit(rec) {
+  if (rec.dailySpendLimitUsd == null) return;
+  const limit = rec.dailySpendLimitUsd;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > DAILY_SPEND_LIMIT_USD_MAX) {
+    throw new Error(
+      `Credential ${rec.name}: dailySpendLimitUsd must be a whole number of dollars from 1 to ${DAILY_SPEND_LIMIT_USD_MAX}`,
+    );
   }
 }
 
@@ -539,6 +748,12 @@ export function validateRecord(rec) {
       // chains and recipients the in-vault key will sign for.
       validateChainIdAllowlist(rec);
       validateToAllowlist(rec);
+      // And which EIP-712 payloads it will sign: none, unless listed.
+      validateTypedDataAllowlist(rec);
+      // What the owner set for it, kept here and enforced by the caller.
+      validateWithdrawalAllowlist(rec);
+      validateDailySpendLimit(rec);
+      validateRefundAddresses(rec);
       break;
     }
     case "address": {
@@ -715,6 +930,17 @@ export function listMetadata(payload) {
     // transactions and check balances without opening the record.
     ...(c.publicKey ? { publicKey: c.publicKey } : {}),
     ...(c.address ? { address: c.address } : {}),
+    // What the key will sign is policy, not a secret: a caller reads it to know
+    // which chains, recipients, programs and typed-data domains are open to it.
+    ...(Array.isArray(c.chainIdAllowlist) ? { chainIdAllowlist: c.chainIdAllowlist } : {}),
+    ...(Array.isArray(c.toAllowlist) ? { toAllowlist: c.toAllowlist } : {}),
+    ...(Array.isArray(c.programAllowlist) ? { programAllowlist: c.programAllowlist } : {}),
+    ...(Array.isArray(c.typedDataAllowlist) ? { typedDataAllowlist: c.typedDataAllowlist } : {}),
+    // What the owner set for a wallet, for the caller that holds itself to it:
+    // the accounts its funds may leave to, and how much it may trade in a day.
+    ...(Array.isArray(c.withdrawalAllowlist) ? { withdrawalAllowlist: c.withdrawalAllowlist } : {}),
+    ...(Number.isSafeInteger(c.dailySpendLimitUsd) ? { dailySpendLimitUsd: c.dailySpendLimitUsd } : {}),
+    ...(Array.isArray(c.refundAddresses) ? { refundAddresses: c.refundAddresses } : {}),
     // browser-profile: surface the (non-secret) account label + headless default
     // so an agent can see which profile is which without opening the record.
     ...(c.account ? { account: c.account } : {}),

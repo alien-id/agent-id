@@ -6,6 +6,8 @@
 //   - proxy rewrites eth_sendTransaction → eth_sendRawTransaction with a
 //     correctly signed EIP-1559 raw tx (sender recovered upstream == address)
 //   - passthrough + allowlist + never-leak invariants
+//   - eth_signTypedData_v4 is answered by the proxy itself, under the record's
+//     typed-data rules, and never reaches the upstream
 //
 // Run: node --test tests/test-proxy-evm.mjs
 
@@ -20,12 +22,38 @@ import { promisify } from "node:util";
 
 import { initVault, openVault } from "../plugins/agent-id-vault/lib/vault.mjs";
 import { createProxy } from "../plugins/agent-id-proxy/lib/proxy.mjs";
+import { signTypedData } from "../plugins/agent-id-core/lib/evm.mjs";
 
 const execFileAsync = promisify(execFile);
 const VAULT_CLI = new URL("../plugins/agent-id-vault/bin/cli.mjs", import.meta.url).pathname;
 const PASSPHRASE = "test-pass-evm-1234";
 
 const upstreamSeen = { value: null };
+
+// An order as an exchange has a wallet sign it, and the rule that lets it.
+const ORDER_DOMAIN = {
+  name: "Test Exchange",
+  version: "1",
+  chainId: 137,
+  verifyingContract: "0x1111111111111111111111111111111111111111",
+};
+const ORDER_RULE = JSON.stringify([{ primaryType: "Order", domain: ORDER_DOMAIN }]);
+
+function orderFor(maker, domain = ORDER_DOMAIN) {
+  return {
+    types: {
+      Order: [
+        { name: "maker", type: "address" },
+        { name: "tokenId", type: "uint256" },
+        { name: "makerAmount", type: "uint256" },
+        { name: "side", type: "uint8" },
+      ],
+    },
+    primaryType: "Order",
+    domain,
+    message: { maker, tokenId: "1234567890", makerAmount: "5000000", side: 0 },
+  };
+}
 
 function startMockRpc() {
   return new Promise((resolve) => {
@@ -114,6 +142,8 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
       "evm-keypair",
       "--domains",
       upstream.hostname,
+      "--typed-data-allowlist",
+      ORDER_RULE,
       "--state-dir",
       stateDir,
       "--passphrase-file",
@@ -121,6 +151,7 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
     ]);
     const out = JSON.parse(stdout);
     assert.equal(out.ok, true);
+    assert.deepEqual(out.typedDataAllowlist, JSON.parse(ORDER_RULE));
     assert.equal(out.type, "evm-keypair");
     assert.equal(out.exportable, false);
     assert.match(out.address, /^0x[0-9a-fA-F]{40}$/);
@@ -223,16 +254,110 @@ describe("evm wallet via vault + proxy (mock RPC)", () => {
     assert.equal(JSON.parse(r.body).error, "evm_sign_failed");
   });
 
-  it("log records evm_signed but never the private key", async () => {
+  it("proxy: eth_signTypedData_v4 is answered here and never reaches the upstream", async () => {
+    upstreamSeen.value = null;
+    const typed = orderFor(walletAddress);
+    const r = await rpcViaProxy({
+      proxyPort,
+      credname: "evm-hot",
+      host: upstream.host,
+      body: { jsonrpc: "2.0", id: 5, method: "eth_signTypedData_v4", params: [walletAddress, typed] },
+    });
+    assert.equal(r.status, 200, r.body);
+    const rec = vault.get("evm-hot");
+    const expected = signTypedData(typed, Buffer.from(rec.privateKey, "hex"));
+    assert.deepEqual(JSON.parse(r.body), { jsonrpc: "2.0", id: 5, result: expected.signature });
+    assert.equal(upstreamSeen.value, null, "a signature request must not be forwarded");
+    assert.ok(!r.body.includes(rec.privateKey), "the answer never carries the key");
+  });
+
+  it("proxy: typed data outside the record's rules → 400 evm_sign_failed, nothing forwarded", async () => {
+    upstreamSeen.value = null;
+    // The same order under another contract: the shape of a permit for a token the key holds.
+    const elsewhere = orderFor(walletAddress, {
+      ...ORDER_DOMAIN,
+      verifyingContract: "0x2222222222222222222222222222222222222222",
+    });
+    const r = await rpcViaProxy({
+      proxyPort,
+      credname: "evm-hot",
+      host: upstream.host,
+      body: { jsonrpc: "2.0", id: 6, method: "eth_signTypedData_v4", params: [walletAddress, elsewhere] },
+    });
+    assert.equal(r.status, 400);
+    const body = JSON.parse(r.body);
+    assert.equal(body.error, "evm_sign_failed");
+    assert.match(body.message, /not in this credential's typedDataAllowlist/);
+    assert.equal(upstreamSeen.value, null);
+
+    const blind = await rpcViaProxy({
+      proxyPort,
+      credname: "evm-hot",
+      host: upstream.host,
+      body: { jsonrpc: "2.0", id: 7, method: "personal_sign", params: ["0xdeadbeef", walletAddress] },
+    });
+    assert.equal(blind.status, 400);
+    assert.equal(JSON.parse(blind.body).error, "evm_sign_failed");
+    assert.equal(upstreamSeen.value, null);
+  });
+
+  it("proxy: eth_accounts answers with the wallet's address", async () => {
+    upstreamSeen.value = null;
+    const r = await rpcViaProxy({
+      proxyPort,
+      credname: "evm-hot",
+      host: upstream.host,
+      body: { jsonrpc: "2.0", id: 8, method: "eth_accounts", params: [] },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(r.body).result, [walletAddress]);
+    assert.equal(upstreamSeen.value, null);
+  });
+
+  it("CLI list: shows what the wallet will sign", async () => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      VAULT_CLI,
+      "list",
+      "--state-dir",
+      stateDir,
+      "--passphrase-file",
+      passFile,
+    ]);
+    const listed = JSON.parse(stdout);
+    const wallet = (listed.credentials || listed).find((c) => c.name === "evm-hot");
+    assert.deepEqual(wallet.typedDataAllowlist, JSON.parse(ORDER_RULE));
+    assert.equal(wallet.address, walletAddress);
+  });
+
+  it("CLI set-typed-data --clear: the wallet signs no typed data again", async () => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      VAULT_CLI,
+      "set-typed-data",
+      "--name",
+      "evm-hot",
+      "--clear",
+      "--state-dir",
+      stateDir,
+      "--passphrase-file",
+      passFile,
+    ]);
+    assert.equal(JSON.parse(stdout).typedDataAllowlist, null);
+    const reopened = await openVault({ stateDir, passphrase: PASSPHRASE });
+    assert.equal(reopened.get("evm-hot").typedDataAllowlist, undefined);
+    reopened.lock();
+  });
+
+  it("log records evm_signed and the typed-data digest but never the private key", async () => {
     // The access-log append is async; poll briefly so the read doesn't race the write.
     const logPath = path.join(stateDir, "proxy.log");
     let raw = "";
     for (let i = 0; i < 50; i++) {
       raw = await fs.readFile(logPath, "utf8").catch(() => "");
-      if (raw.includes("evm_signed")) break;
+      if (raw.includes("evm_signed") && raw.includes("evm_typed_data_signed")) break;
       await new Promise((r) => setTimeout(r, 20));
     }
     assert.ok(raw.includes("evm_signed"), "log records signing event");
+    assert.ok(raw.includes("evm_typed_data_signed"), "log records the typed-data signature");
     const rec = vault.get("evm-hot");
     assert.ok(!raw.includes(rec.privateKey), "log must NOT contain the key");
   });
