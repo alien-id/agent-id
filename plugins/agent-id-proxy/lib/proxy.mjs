@@ -41,7 +41,7 @@ import {
 import { OAuthError, refreshAccessToken } from "./oauth.mjs";
 import { blockedAddressReason, makeUpstreamLookup } from "./ssrf.mjs";
 import { signSolanaRpcBody } from "@alien-id/agent-id-core/lib/solana.mjs";
-import { signEvmRpcBody } from "@alien-id/agent-id-core/lib/evm.mjs";
+import { answerEvmWalletRpc, signEvmRpcBody } from "@alien-id/agent-id-core/lib/evm.mjs";
 import {
   openVaultWithMasterKey,
   readMobileSlotChallenges,
@@ -1182,6 +1182,40 @@ export function createProxy({
             });
             event = { event: "solana_signed", signatures: result.signatures };
           } else {
+            // What a wallet answers by itself never reaches the upstream: its
+            // own address, and an EIP-712 signature the record allows.
+            const local = answerEvmWalletRpc(raw.toString("utf8"), cred.privateKey, cred.address, {
+              typedDataAllowlist: cred.typedDataAllowlist,
+            });
+            if (local) {
+              if (local.signed) {
+                logAccess({
+                  event: "evm_typed_data_signed",
+                  digests: local.digests,
+                  credential: cred.name,
+                  host: parsed.host,
+                });
+                if (state.vault) state.vault.touchLastUsed(cred.name);
+              }
+              const payload = Buffer.from(local.body, "utf8");
+              res.writeHead(200, {
+                "Content-Type": "application/json; charset=utf-8",
+                "Content-Length": payload.length,
+              });
+              res.end(payload);
+              logAccess({
+                method: req.method,
+                host: parsed.host,
+                path: reqPathname,
+                status: 200,
+                credentials: [cred.name],
+                bytesIn: raw.length,
+                bytesOut: payload.length,
+                durationMs: Date.now() - start,
+                answeredLocally: true,
+              });
+              return;
+            }
             result = signEvmRpcBody(raw.toString("utf8"), cred.privateKey, cred.address, {
               chainIdAllowlist: cred.chainIdAllowlist,
               toAllowlist: cred.toAllowlist,

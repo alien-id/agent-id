@@ -171,9 +171,25 @@ curl http://localhost:48771/polygon-hot/polygon-bor-rpc.publicnode.com/ \
         "gas":21000,"maxFeePerGas":120000000000,"maxPriorityFeePerGas":30000000000}]}'
 ```
 
+**EVM typed data** — `eth_signTypedData_v4` (EIP-712) is answered by the
+proxy itself and never forwarded: the result is the 65-byte signature. It is
+default-deny: the record must list the payload's primary type and whole domain
+in its `typedDataAllowlist` (see the vault skill, "What a wallet key will
+sign"), and `params[0]` must be the credential's address. `eth_accounts`
+answers the credential's address the same way. `personal_sign`, `eth_sign`,
+`eth_signTransaction` and the older typed-data versions are refused: this
+wallet signs transactions and allowlisted typed data, nothing it cannot read.
+
+```bash
+curl http://localhost:48771/trader/polygon-bor-rpc.publicnode.com/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_signTypedData_v4","params":["0x<address>", {"types":{…},"primaryType":"Order","domain":{…},"message":{…}}]}'
+```
+
 Signing failures return `400 {error: "solana_sign_failed" | "evm_sign_failed"}`.
 The access log records `solana_signed` / `evm_signed` events with signatures/
-tx hashes (public on-chain data) — never key material.
+tx hashes, and `evm_typed_data_signed` with the digest (public data) — never
+key material.
 
 ## Mode 2 — HTTP_PROXY stub injection (legacy, HTTP only)
 

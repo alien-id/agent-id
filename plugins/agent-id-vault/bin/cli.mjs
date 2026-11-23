@@ -90,7 +90,13 @@ import {
   personalKind,
   SECRET_FIELDS,
   isTransient,
+  isTypedDataRelaxation,
   validateRecord,
+  DAILY_SPEND_LIMIT_USD_MAX,
+  REFUND_ADDRESS_PATTERN,
+  REFUND_CHAIN_PATTERN,
+  WITHDRAWAL_ACCOUNTS_MAX,
+  WITHDRAWAL_LABEL_MAX,
 } from "../lib/store.mjs";
 import {
   ACCESS_LEVELS,
@@ -103,7 +109,12 @@ import {
 import { collectSecret } from "@alien-id/agent-id-core/lib/secure-prompt.mjs";
 import { normalizeTotpInput } from "@alien-id/agent-id-core/lib/totp.mjs";
 import { generateSolanaKeypair } from "@alien-id/agent-id-core/lib/solana.mjs";
-import { generateEvmKeypair } from "@alien-id/agent-id-core/lib/evm.mjs";
+import {
+  generateEvmKeypair,
+  signEvmTransactionFor,
+  signEvmTypedDataFor,
+  toChecksumAddress,
+} from "@alien-id/agent-id-core/lib/evm.mjs";
 
 // ─── Input helpers ──────────────────────────────────────────────────────────────
 
@@ -1585,6 +1596,15 @@ async function cmdGenerate(flags) {
       if (chainIds) record.chainIdAllowlist = chainIds.map((n) => Number(n));
       const toAllowlist = parseCsvFlag(flags["to-allowlist"]);
       if (toAllowlist) record.toAllowlist = toAllowlist;
+      // Typed data is default-deny: the key signs none unless a rule is given
+      // here, at birth, or added later through `set-typed-data`.
+      if (flags["typed-data-allowlist"] != null) {
+        try {
+          record.typedDataAllowlist = parseTypedDataRules(flags["typed-data-allowlist"]);
+        } catch (err) {
+          return outputError(err.message);
+        }
+      }
     }
     const stored = vault.add(record);
     await vault.save();
@@ -1598,6 +1618,7 @@ async function cmdGenerate(flags) {
       ...(record.publicKey ? { publicKey: record.publicKey } : {}),
       ...(record.address ? { address: record.address } : {}),
       domains: stored.domains,
+      ...(record.typedDataAllowlist ? { typedDataAllowlist: record.typedDataAllowlist } : {}),
       exportable: false,
       createdAt: stored.createdAt,
     });
@@ -1717,6 +1738,561 @@ async function cmdSetAccess(flags) {
       access: effectiveAccess(after),
       accessRules: after.accessRules ?? null,
     });
+  } finally {
+    vault.lock();
+  }
+}
+
+// ─── set-typed-data: which EIP-712 payloads an EVM key may sign ───────────────
+
+function parseTypedDataRules(raw) {
+  let rules;
+  try {
+    rules = JSON.parse(String(raw));
+  } catch (err) {
+    throw new Error(`typed-data rules must be a JSON array: ${err.message}`);
+  }
+  if (!Array.isArray(rules)) throw new Error("typed-data rules must be a JSON array");
+  return rules;
+}
+
+function describeTypedData(rec) {
+  const rules = rec.typedDataAllowlist || [];
+  if (rules.length === 0) return "no typed data";
+  return rules
+    .map((rule) => {
+      const domain = rule.domain || {};
+      const where = [
+        domain.name,
+        domain.chainId !== undefined ? `chain ${domain.chainId}` : null,
+        domain.verifyingContract,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      return `${rule.primaryType} (${where})`;
+    })
+    .join("; ");
+}
+
+// Replace the typed-data rules on an EVM wallet. A transaction is bounded by
+// its chain and the RPC allowlist; a typed-data signature is bounded only by
+// the contract that reads it, so the list is default-deny and adding to it is
+// the owner's decision, taken the way `set-access` takes a widening: on the
+// secure prompt, out of the agent's sight. Removing rules applies at once.
+async function cmdSetTypedData(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  let wantRules; // null = clear; array = replace
+  if (flags.clear === true) {
+    wantRules = null;
+  } else if (flags.rules != null) {
+    try {
+      wantRules = parseTypedDataRules(flags.rules);
+    } catch (err) {
+      return outputError(err.message);
+    }
+  } else {
+    return outputError("Nothing to change — pass --rules '<JSON array>' or --clear");
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "evm-keypair") {
+      return outputError(`Credential '${name}' is ${rec.type} — typed-data rules apply to evm-keypair only`);
+    }
+
+    const after = { ...rec };
+    if (wantRules == null) delete after.typedDataAllowlist;
+    else after.typedDataAllowlist = wantRules;
+    try {
+      validateRecord(after); // fail fast, before any owner ceremony
+    } catch (err) {
+      return outputError(err.message);
+    }
+
+    if (isTypedDataRelaxation(rec, after)) {
+      stderr(
+        `Letting '${name}' sign more typed data (${describeTypedData(rec)} → ` +
+          `${describeTypedData(after)}) needs the owner's out-of-band confirmation…`
+      );
+      let values;
+      try {
+        ({ values } = await collectSecret({
+          title: `Allow MORE signing: ${name}`,
+          description:
+            `The agent asks to let the wallet '${name}' sign: ${describeTypedData(after)}. ` +
+            `Today it signs: ${describeTypedData(rec)}. Approve only if YOU intend this.`,
+          fields: [
+            {
+              name: "confirm",
+              label: `Type the credential name (${name}) to approve`,
+              secret: false,
+            },
+          ],
+          label: `approve more signing for "${name}"`,
+          security: "Typed by you, out of the agent's sight. Mismatch = no change.",
+        }));
+      } catch (err) {
+        // An approval, not a secret: however the owner ends it, nothing changes,
+        // and asking again in the same turn is the loop, not the recovery.
+        if (ownerEndedTheCard(err)) {
+          outputJson({
+            ok: false,
+            error: "OWNER_DID_NOT_APPROVE",
+            reason: "owner_ended_the_card",
+            retryable: false,
+            typedData: describeTypedData(rec),
+            message:
+              "Signing rules unchanged — the owner did not approve them. Do not ask again in this turn.",
+          });
+          process.exitCode = 1;
+          return;
+        }
+        return outputError(`owner confirmation: ${err.message}`);
+      }
+      if (String(values.confirm || "").trim() !== name) {
+        return outputError("owner confirmation did not match the credential name — signing rules unchanged");
+      }
+    }
+
+    vault.add(after);
+    await vault.save();
+    stderr(`'${name}' now signs: ${describeTypedData(after)}.`);
+    outputJson({
+      ok: true,
+      name,
+      typedDataAllowlist: after.typedDataAllowlist ?? null,
+    });
+  } finally {
+    vault.lock();
+  }
+}
+
+// ─── set-withdrawal, set-daily-limit: what the owner sets for a wallet ────────
+//
+// Where a wallet's funds may leave to, and how much it may trade in a day. Both
+// are the owner's own words: the address and the figure are typed on the secure
+// prompt, out of the agent's sight, and there is no flag, file or variable that
+// carries either in. An agent can ask for the card and can take an entry away;
+// it cannot put one there. The vault keeps the two and does not enforce them
+// (see store.mjs): the caller that carries out trades reads them from `list`.
+
+function describeWithdrawals(rec) {
+  const accounts = rec.withdrawalAllowlist || [];
+  if (accounts.length === 0) return "no account";
+  return accounts.map((account) => `${account.label} (${account.address})`).join("; ");
+}
+
+function describeDailyLimit(rec) {
+  return Number.isSafeInteger(rec.dailySpendLimitUsd)
+    ? `$${rec.dailySpendLimitUsd} a day`
+    : "no limit set";
+}
+
+// The wallet a setting is for, or the refusal already written.
+function walletForSetting(vault, name, what) {
+  const rec = vault.get(name);
+  if (!rec) {
+    outputError(`No credential named '${name}'`);
+    return null;
+  }
+  if (rec.type !== "evm-keypair") {
+    outputError(`Credential '${name}' is ${rec.type} — ${what} apply to evm-keypair only`);
+    return null;
+  }
+  return rec;
+}
+
+// What the owner typed for an account's address, as the one spelling the vault
+// keeps. An address in mixed case carries its own checksum, and one that fails
+// it is a slip of the hand caught here, before money follows it.
+function readWithdrawalAddress(typed) {
+  const address = String(typed || "").trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    throw new Error("that is not an EVM address (0x and 40 hex digits)");
+  }
+  const body = address.slice(2);
+  const oneCase = body === body.toLowerCase() || body === body.toUpperCase();
+  const checksummed = toChecksumAddress(address);
+  if (!oneCase && address !== checksummed) {
+    throw new Error("the address does not pass its own checksum — one character is off");
+  }
+  return checksummed;
+}
+
+// What the owner typed for a daily limit, as whole dollars.
+function readDailyLimit(typed) {
+  const text = String(typed || "").trim().replace(/^\$\s*/, "");
+  // Plain digits, or digits in thousands: "2,50" is not read as 250.
+  if (!/^(\d{1,9}|\d{1,3}(,\d{3}){1,2})$/.test(text)) {
+    throw new Error("a daily limit is a whole number of US dollars, like 250");
+  }
+  const limit = Number(text.replace(/,/g, ""));
+  if (limit < 1 || limit > DAILY_SPEND_LIMIT_USD_MAX) {
+    throw new Error(`a daily limit is from 1 to ${DAILY_SPEND_LIMIT_USD_MAX} US dollars`);
+  }
+  return limit;
+}
+
+// Answer for a card the owner ended, or rethrow as an ordinary failure.
+function settingNotChanged(err, extra) {
+  const ended = ownerEndedTheCard(err, extra);
+  if (!ended) return false;
+  outputJson({ ok: false, ...ended });
+  process.exitCode = 1;
+  return true;
+}
+
+async function cmdSetWithdrawal(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  // An address is never read from the command line: the flag that would carry
+  // one is the way an agent adds its own.
+  for (const flag of ["address", "add", "label", "accounts"]) {
+    if (flags[flag] != null) {
+      return outputError(
+        `--${flag} is not taken: a withdrawal account is typed by the owner on the secure prompt. ` +
+          "Run `set-withdrawal --name N` and let them enter it.",
+      );
+    }
+  }
+  const removing = flags.remove != null && flags.remove !== true ? String(flags.remove).trim() : null;
+  if (flags.remove === true) return outputError("--remove takes an address or a label");
+  if (removing != null && flags.clear === true) {
+    return outputError("Pass --remove or --clear, not both");
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = walletForSetting(vault, name, "withdrawal accounts");
+    if (!rec) return;
+    const listed = rec.withdrawalAllowlist || [];
+    const after = { ...rec };
+
+    if (flags.clear === true || removing != null) {
+      // Taking an account away only narrows where funds can go: no ceremony.
+      const kept =
+        flags.clear === true
+          ? []
+          : listed.filter(
+              (account) =>
+                account.address.toLowerCase() !== removing.toLowerCase() &&
+                account.label.toLowerCase() !== removing.toLowerCase(),
+            );
+      if (removing != null && kept.length === listed.length) {
+        return outputError(`'${name}' lists no withdrawal account "${removing}" — nothing was removed`);
+      }
+      if (kept.length === 0) delete after.withdrawalAllowlist;
+      else after.withdrawalAllowlist = kept;
+    } else {
+      if (listed.length >= WITHDRAWAL_ACCOUNTS_MAX) {
+        return outputError(
+          `'${name}' already lists ${WITHDRAWAL_ACCOUNTS_MAX} withdrawal accounts — remove one first`,
+        );
+      }
+      stderr(`Adding a withdrawal account to '${name}' is the owner's to do, on the secure prompt…`);
+      let values;
+      try {
+        ({ values } = await collectSecret({
+          title: `Add a withdrawal account: ${name}`,
+          description:
+            `Funds leave the wallet '${name}' (${rec.address}) only to the accounts listed here. ` +
+            `Listed today: ${describeWithdrawals(rec)}. Enter the address of an account that is ` +
+            "YOURS, from your own records — not one the agent, a message or a webpage gave you.",
+          fields: [
+            { name: "address", label: "Account address (0x…)", secret: false },
+            {
+              name: "label",
+              label: "A name for it, e.g. Ledger",
+              secret: false,
+              required: false,
+            },
+          ],
+          label: `add a withdrawal account for "${name}"`,
+          security: "Typed by you, out of the agent's sight. The agent cannot add or change an account.",
+          submitLabel: "Add account",
+        }));
+      } catch (err) {
+        if (
+          settingNotChanged(err, {
+            withdrawalAllowlist: rec.withdrawalAllowlist ?? null,
+            message: "No account was added — the owner ended the card. Do not raise it again in this turn.",
+          })
+        ) {
+          return;
+        }
+        return outputError(`secure prompt: ${err.message}`);
+      }
+      let address;
+      try {
+        address = readWithdrawalAddress(values.address);
+      } catch (err) {
+        return outputError(`${err.message} — no account was added`);
+      }
+      const typedLabel = String(values.label || "").trim().slice(0, WITHDRAWAL_LABEL_MAX).trim();
+      const label = typedLabel || `${address.slice(0, 6)}…${address.slice(-4)}`;
+      after.withdrawalAllowlist = [...listed, { address, label }];
+    }
+
+    try {
+      validateRecord(after);
+    } catch (err) {
+      return outputError(`${err.message} — nothing was changed`);
+    }
+    vault.add(after);
+    await vault.save();
+    stderr(`Funds leave '${name}' only to: ${describeWithdrawals(after)}.`);
+    outputJson({
+      ok: true,
+      name,
+      withdrawalAllowlist: after.withdrawalAllowlist ?? null,
+    });
+  } finally {
+    vault.lock();
+  }
+}
+
+async function cmdSetDailyLimit(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  for (const flag of ["limit", "usd", "amount", "value"]) {
+    if (flags[flag] != null) {
+      return outputError(
+        `--${flag} is not taken: the daily limit is typed by the owner on the secure prompt. ` +
+          "Run `set-daily-limit --name N` and let them enter it.",
+      );
+    }
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "evm-keypair") {
+      return outputError(
+        `Credential '${name}' is ${rec.type} — daily limits apply to evm-keypair only`,
+      );
+    }
+    const whose = `the wallet '${name}' (${rec.address})`;
+    const after = { ...rec };
+
+    if (flags.clear === true) {
+      // No limit set is the tightest state there is: a caller that holds
+      // itself to the limit trades nothing without one.
+      delete after.dailySpendLimitUsd;
+    } else {
+      stderr(`Setting the daily limit of '${name}' is the owner's to do, on the secure prompt…`);
+      let values;
+      try {
+        ({ values } = await collectSecret({
+          title: `Set the daily trading limit: ${name}`,
+          description:
+            `The most ${whose} may trade in any 24 hours, in US dollars. ` +
+            `Today: ${describeDailyLimit(rec)}. Every trade still needs your approval; this is the ` +
+            "ceiling on all of them together.",
+          fields: [{ name: "limit", label: "Daily limit in US dollars, e.g. 250", secret: false }],
+          label: `set the daily trading limit for "${name}"`,
+          security: "Typed by you, out of the agent's sight. The agent cannot set or raise the limit.",
+          submitLabel: "Set limit",
+        }));
+      } catch (err) {
+        if (
+          settingNotChanged(err, {
+            dailySpendLimitUsd: rec.dailySpendLimitUsd ?? null,
+            message: "The limit is unchanged — the owner ended the card. Do not raise it again in this turn.",
+          })
+        ) {
+          return;
+        }
+        return outputError(`secure prompt: ${err.message}`);
+      }
+      try {
+        after.dailySpendLimitUsd = readDailyLimit(values.limit);
+      } catch (err) {
+        return outputError(`${err.message} — the limit is unchanged`);
+      }
+    }
+
+    try {
+      validateRecord(after);
+    } catch (err) {
+      return outputError(`${err.message} — nothing was changed`);
+    }
+    vault.add(after);
+    await vault.save();
+    stderr(`'${name}' trades within: ${describeDailyLimit(after)}.`);
+    outputJson({ ok: true, name, dailySpendLimitUsd: after.dailySpendLimitUsd ?? null });
+  } finally {
+    vault.lock();
+  }
+}
+
+function describeRefunds(rec) {
+  const refunds = rec.refundAddresses || [];
+  if (refunds.length === 0) return "none";
+  return refunds.map((refund) => `${refund.chain}: ${refund.address}`).join("; ");
+}
+
+// Where funds the owner sends in from another chain go back to if the swap
+// that carries them cannot be completed. The chain is named by the caller (it
+// only says which card to raise); the address is the owner's own and is typed
+// by them. One per chain: a second one replaces the first, on the same card.
+async function cmdSetRefund(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  for (const flag of ["address", "refund", "to", "addresses"]) {
+    if (flags[flag] != null) {
+      return outputError(
+        `--${flag} is not taken: a refund address is typed by the owner on the secure prompt. ` +
+          "Run `set-refund --name N --chain CODE` and let them enter it.",
+      );
+    }
+  }
+  const removing = flags.remove != null && flags.remove !== true ? String(flags.remove).trim().toUpperCase() : null;
+  if (flags.remove === true) return outputError("--remove takes a chain code");
+  const chain = flags.chain != null && flags.chain !== true ? String(flags.chain).trim().toUpperCase() : null;
+  const clearing = flags.clear === true;
+  if ([removing != null, clearing, chain != null].filter(Boolean).length !== 1) {
+    return outputError("Pass exactly one of --chain CODE (the owner types its address), --remove CODE, --clear");
+  }
+  if (chain != null && !REFUND_CHAIN_PATTERN.test(chain)) {
+    return outputError("--chain is a chain code like BTC, SOL or TRON");
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = walletForSetting(vault, name, "refund addresses");
+    if (!rec) return;
+    const listed = rec.refundAddresses || [];
+    const after = { ...rec };
+
+    if (clearing || removing != null) {
+      // Taking one away only means the next funding from that chain asks again.
+      const kept = clearing ? [] : listed.filter((refund) => refund.chain !== removing);
+      if (removing != null && kept.length === listed.length) {
+        return outputError(`'${name}' has no refund address for ${removing} — nothing was removed`);
+      }
+      if (kept.length === 0) delete after.refundAddresses;
+      else after.refundAddresses = kept;
+    } else {
+      const current = listed.find((refund) => refund.chain === chain);
+      stderr(`The ${chain} refund address of '${name}' is the owner's to enter, on the secure prompt…`);
+      let values;
+      try {
+        ({ values } = await collectSecret({
+          title: `Refund address for ${chain}: ${name}`,
+          description:
+            `When you send ${chain} funds to the wallet '${name}' through a swap and the swap cannot ` +
+            "be completed, the funds are sent back to this address. Enter an address of YOUR OWN " +
+            `wallet on ${chain} — not an exchange deposit address, and not one the agent, a message ` +
+            `or a webpage gave you. Today: ${current ? current.address : "none"}.`,
+          fields: [{ name: "address", label: `Your ${chain} address`, secret: false }],
+          label: `set the ${chain} refund address for "${name}"`,
+          security: "Typed by you, out of the agent's sight. The agent cannot set or change it.",
+          submitLabel: "Save address",
+        }));
+      } catch (err) {
+        if (
+          settingNotChanged(err, {
+            refundAddresses: rec.refundAddresses ?? null,
+            message: "No refund address was saved — the owner ended the card. Do not raise it again in this turn.",
+          })
+        ) {
+          return;
+        }
+        return outputError(`secure prompt: ${err.message}`);
+      }
+      let address = String(values.address || "").trim();
+      if (!REFUND_ADDRESS_PATTERN.test(address)) {
+        return outputError("that does not read as an address (8 to 128 letters, digits and . _ : -) — nothing was saved");
+      }
+      // An EVM address is held to its own checksum, like a withdrawal account:
+      // a refund is sent where this says, and no approval ever shows it again.
+      if (/^0x[0-9a-fA-F]{40}$/.test(address)) {
+        try {
+          address = readWithdrawalAddress(address);
+        } catch (err) {
+          return outputError(`${err.message} — nothing was saved`);
+        }
+      }
+      after.refundAddresses = [...listed.filter((refund) => refund.chain !== chain), { chain, address }];
+    }
+
+    try {
+      validateRecord(after);
+    } catch (err) {
+      return outputError(`${err.message} — nothing was changed`);
+    }
+    vault.add(after);
+    await vault.save();
+    stderr(`Refunds for '${name}' go to: ${describeRefunds(after)}.`);
+    outputJson({ ok: true, name, refundAddresses: after.refundAddresses ?? null });
+  } finally {
+    vault.lock();
+  }
+}
+
+// ─── wallet-sign: one signature from an in-vault EVM key ──────────────────────
+//
+// For the process that holds the vault and carries a signature out itself — a
+// supervisor that has just had a trade approved, and broadcasts the transaction
+// or posts the order on its own. The proxy signs for an agent that must not
+// hold the vault; this signs for the caller that already does, under the same
+// record and the same rules: the chain and recipient allowlists for a
+// transaction, the default-deny typed-data rules for an EIP-712 payload. What
+// comes back is public — the raw transaction and its hash, or the signature
+// and its digest — and the key never leaves the process.
+async function cmdWalletSign(flags) {
+  const name = flags.name;
+  if (!name) return outputError("--name <NAME> is required");
+  const kinds = ["transaction", "typed-data"].filter((kind) => flags[kind] === true);
+  if (kinds.length !== 1) {
+    return outputError("Say what to sign: exactly one of --transaction and --typed-data");
+  }
+  const [kind] = kinds;
+  let payload;
+  try {
+    const raw = flags["payload-file"]
+      ? await fs.readFile(flags["payload-file"], "utf8")
+      : await readStdin();
+    payload = JSON.parse(raw ?? "");
+  } catch (err) {
+    return outputError(`the ${kind} to sign must be JSON, on stdin or in --payload-file: ${err.message}`);
+  }
+
+  const vault = await openWithFlags(flags);
+  try {
+    const rec = vault.get(name);
+    if (!rec) return outputError(`No credential named '${name}'`);
+    if (rec.type !== "evm-keypair") {
+      return outputError(`'${name}' is a ${rec.type}, and wallet-sign signs with an evm-keypair only`);
+    }
+    // A signature moves money or authorizes it: never a read.
+    if (effectiveAccess(rec) === "ro") {
+      return outputError(
+        `Credential '${name}' has access level 'ro' — it signs nothing. ` +
+          "Only the owner can raise it: `agent-id-vault set-access` (human-confirmed)."
+      );
+    }
+    let signed;
+    try {
+      signed =
+        kind === "transaction"
+          ? signEvmTransactionFor(payload, rec.privateKey, rec.address, {
+              chainIdAllowlist: rec.chainIdAllowlist,
+              toAllowlist: rec.toAllowlist,
+            })
+          : signEvmTypedDataFor(payload, rec.privateKey, rec.address, {
+              typedDataAllowlist: rec.typedDataAllowlist,
+            });
+    } catch (err) {
+      return outputError(err.message);
+    }
+    // Nothing is written back: a signature reads the vault, and a save here
+    // would race every other writer of the file for a timestamp.
+    outputJson({ ok: true, name, kind, ...signed });
   } finally {
     vault.lock();
   }
@@ -2450,7 +3026,33 @@ function printHelp() {
       "  generate --name N --type solana-keypair|evm-keypair --domains H[,H…] [--overwrite]",
       "      creates the keypair inside the vault; prints ONLY the public address",
       "      evm:    [--chain-id-allowlist 1,137] [--to-allowlist 0x..,0x..]",
+      "              [--typed-data-allowlist '<JSON>']   EIP-712 payloads the key may sign",
+      "              (default-DENY: without it the key signs no typed data)",
       "      solana: [--program-allowlist <base58>,..]   (default-allow when omitted)",
+      "  set-typed-data --name N (--rules '<JSON>' | --clear)",
+      "              replace an EVM wallet's typed-data rules. Removing applies at once;",
+      "              ADDING a rule requires the owner to confirm via the secure prompt.",
+      '              Rules: JSON array of {"primaryType":"Order","domain":{"name":"…",',
+      '              "version":"1","chainId":137,"verifyingContract":"0x…"}} — the whole',
+      "              domain is matched, so list every field the payload's domain carries",
+      "  set-withdrawal --name N [--remove <address|label> | --clear]",
+      "              the accounts an EVM wallet's funds may leave to. With no flag the",
+      "              OWNER types one address (and a name for it) on the secure prompt;",
+      "              no flag carries an address in. Removing applies at once.",
+      "  set-refund --name N (--chain CODE | --remove CODE | --clear)",
+      "              where funds the owner sends in from another chain (BTC, SOL, TRON…)",
+      "              go back to if the swap that carries them fails: with --chain the OWNER",
+      "              types their own address on that chain on the secure prompt. One per chain.",
+      "  set-daily-limit --name N [--clear]",
+      "              the most an EVM wallet may trade in 24 hours, in US dollars, typed",
+      "              by the OWNER on the secure prompt. The vault keeps both settings and",
+      "              lists them; the caller that trades holds itself to them.",
+      "  wallet-sign --name N (--transaction | --typed-data) [--payload-file F]",
+      "      one signature from an in-vault EVM key, for the process that holds the",
+      "      vault and broadcasts on its own; the payload is JSON on stdin. A",
+      "      transaction (EIP-1559 object) answers {raw, hash, from} under the chain",
+      "      and recipient allowlists; typed data (EIP-712) answers {signature, digest}",
+      "      under the record's typed-data rules. The key is never printed.",
       "  show --name N    (sealed/generated secrets are redacted)",
       "  read-card --name N",
       "      the card's four values, for the process that types them into a page",
@@ -2506,6 +3108,11 @@ const commands = {
   "set-login-url": cmdSetLoginUrl,
   "set-otp": cmdSetOtp,
   "set-access": cmdSetAccess,
+  "set-typed-data": cmdSetTypedData,
+  "set-withdrawal": cmdSetWithdrawal,
+  "set-daily-limit": cmdSetDailyLimit,
+  "set-refund": cmdSetRefund,
+  "wallet-sign": cmdWalletSign,
   generate: cmdGenerate,
   show: cmdShow,
   "read-card": cmdReadCard,

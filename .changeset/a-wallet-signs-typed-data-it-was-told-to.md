@@ -1,0 +1,6 @@
+---
+"@alien-id/agent-id-core": minor
+"@alien-id/agent-id-vault": minor
+---
+
+An in-vault EVM wallet signs EIP-712 typed data, for the domains its record lists and no other. `evm.mjs` gains `hashTypedData` / `signTypedData` (strict: an undeclared field, a missing value or a number out of range is refused, not encoded) and the rule matcher. A wallet record takes a `typedDataAllowlist` of `{primaryType, domain}` rules that match the whole domain; it is default-deny, so a key signs no typed data unless told to, and never a token permit by accident. `vault generate --type evm-keypair --typed-data-allowlist '<JSON>'` sets the rules at birth, `vault set-typed-data --name N --rules '<JSON>' | --clear` replaces them (adding a rule asks the owner on the secure prompt, removing one does not), and `vault list` shows every signing rule a wallet carries. `vault wallet-sign --name N --transaction | --typed-data` answers one signature for a process that holds the vault and broadcasts on its own, under the same rules; the key is never printed. The proxy answers `eth_signTypedData_v4` and `eth_accounts` itself, and refuses `personal_sign`, `eth_sign` and the older typed-data versions instead of forwarding them.

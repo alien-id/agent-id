@@ -381,6 +381,470 @@ export function signEip1559Transaction(tx, privKey32) {
   };
 }
 
+// ─── EIP-712 typed structured data ──────────────────────────────────────────────
+// What an exchange or a prediction market asks a wallet to sign in place of a
+// transaction: an order, an API-key request. The digest is
+//   keccak256(0x19 0x01 ‖ hashStruct(domain) ‖ hashStruct(message))
+// and the signature authorizes whatever the verifying contract reads into the
+// message, with no chain, gas or recipient of its own to bound it. So the
+// encoder is strict where a wallet UI would be lenient: a field the type does
+// not declare, a missing value, a number out of range or a type nobody defined
+// is refused rather than encoded as something the signer did not mean.
+
+const TYPED_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const TYPED_ARRAY_RE = /^(.*)\[(\d*)\]$/;
+const TYPED_DOMAIN_FIELDS = [
+  ["name", "string"],
+  ["version", "string"],
+  ["chainId", "uint256"],
+  ["verifyingContract", "address"],
+  ["salt", "bytes32"],
+];
+
+function typedBaseType(type) {
+  let base = type;
+  for (let m = TYPED_ARRAY_RE.exec(base); m; m = TYPED_ARRAY_RE.exec(base)) base = m[1];
+  return base;
+}
+
+function isTypedAtomic(type) {
+  if (type === "bool" || type === "address" || type === "string" || type === "bytes") return true;
+  let m = /^u?int(\d+)$/.exec(type);
+  if (m) {
+    const bits = Number(m[1]);
+    return bits >= 8 && bits <= 256 && bits % 8 === 0;
+  }
+  m = /^bytes(\d+)$/.exec(type);
+  if (m) {
+    const len = Number(m[1]);
+    return len >= 1 && len <= 32;
+  }
+  return false;
+}
+
+function validateTypedTypes(types) {
+  if (!types || typeof types !== "object" || Array.isArray(types)) {
+    throw new Error("typed data: `types` must be an object");
+  }
+  for (const [name, fields] of Object.entries(types)) {
+    if (!TYPED_IDENT_RE.test(name) || isTypedAtomic(name)) {
+      throw new Error(`typed data: bad struct name '${name}'`);
+    }
+    if (!Array.isArray(fields)) throw new Error(`typed data: type '${name}' must list its fields`);
+    const seen = new Set();
+    for (const field of fields) {
+      if (
+        !field ||
+        typeof field !== "object" ||
+        typeof field.name !== "string" ||
+        typeof field.type !== "string" ||
+        !TYPED_IDENT_RE.test(field.name)
+      ) {
+        throw new Error(`typed data: type '${name}' has a malformed field`);
+      }
+      if (seen.has(field.name)) {
+        throw new Error(`typed data: type '${name}' declares '${field.name}' twice`);
+      }
+      seen.add(field.name);
+      const base = typedBaseType(field.type);
+      if (!isTypedAtomic(base) && !Object.hasOwn(types, base)) {
+        throw new Error(`typed data: field '${name}.${field.name}' has unknown type '${field.type}'`);
+      }
+    }
+  }
+}
+
+function typedDependencies(type, types, found = new Set()) {
+  const base = typedBaseType(type);
+  if (found.has(base) || !Object.hasOwn(types, base)) return found;
+  found.add(base);
+  for (const field of types[base]) typedDependencies(field.type, types, found);
+  return found;
+}
+
+/** The EIP-712 type string: the primary type, then what it refers to, sorted. */
+export function encodeTypedType(primaryType, types) {
+  if (!Object.hasOwn(types, primaryType)) {
+    throw new Error(`typed data: type '${primaryType}' is not defined`);
+  }
+  const deps = [...typedDependencies(primaryType, types)].filter((t) => t !== primaryType).sort();
+  return [primaryType, ...deps]
+    .map((t) => `${t}(${types[t].map((f) => `${f.type} ${f.name}`).join(",")})`)
+    .join("");
+}
+
+function typedInteger(value, what) {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw new Error(`typed data: ${what} is not a safe integer`);
+    return BigInt(value);
+  }
+  if (typeof value === "string" && /^(-?(0|[1-9]\d*)|0[xX][0-9a-fA-F]+)$/.test(value)) {
+    return BigInt(value);
+  }
+  throw new Error(`typed data: ${what} is not an integer`);
+}
+
+function typedHexBytes(value, what) {
+  if (typeof value !== "string" || !/^0[xX]([0-9a-fA-F]{2})*$/.test(value)) {
+    throw new Error(`typed data: ${what} must be 0x-prefixed hex bytes`);
+  }
+  return Buffer.from(value.slice(2), "hex");
+}
+
+function encodeTypedValue(type, value, types, what) {
+  if (value === undefined || value === null) {
+    throw new Error(`typed data: ${what} is missing`);
+  }
+  const array = TYPED_ARRAY_RE.exec(type);
+  if (array) {
+    if (!Array.isArray(value)) throw new Error(`typed data: ${what} must be an array`);
+    if (array[2] !== "" && value.length !== Number(array[2])) {
+      throw new Error(`typed data: ${what} must hold ${array[2]} items`);
+    }
+    return keccak256(
+      Buffer.concat(value.map((item, i) => encodeTypedValue(array[1], item, types, `${what}[${i}]`))),
+    );
+  }
+  if (Object.hasOwn(types, type)) return hashTypedStruct(type, value, types, what);
+  if (type === "string") {
+    if (typeof value !== "string") throw new Error(`typed data: ${what} must be a string`);
+    return keccak256(Buffer.from(value, "utf8"));
+  }
+  if (type === "bytes") return keccak256(typedHexBytes(value, what));
+  if (type === "bool") {
+    if (typeof value !== "boolean") throw new Error(`typed data: ${what} must be true or false`);
+    return bigTo32(value ? 1n : 0n);
+  }
+  if (type === "address") {
+    if (typeof value !== "string" || !/^0[xX][0-9a-fA-F]{40}$/.test(value)) {
+      throw new Error(`typed data: ${what} must be a 20-byte address`);
+    }
+    return Buffer.concat([Buffer.alloc(12), Buffer.from(value.slice(2), "hex")]);
+  }
+  let m = /^(u?)int(\d+)$/.exec(type);
+  if (m && isTypedAtomic(type)) {
+    const bits = BigInt(m[2]);
+    const n = typedInteger(value, what);
+    if (m[1] === "u") {
+      if (n < 0n || n >= 1n << bits) throw new Error(`typed data: ${what} is out of range for ${type}`);
+      return bigTo32(n);
+    }
+    const half = 1n << (bits - 1n);
+    if (n < -half || n >= half) throw new Error(`typed data: ${what} is out of range for ${type}`);
+    return bigTo32(n < 0n ? n + (1n << 256n) : n);
+  }
+  m = /^bytes(\d+)$/.exec(type);
+  if (m && isTypedAtomic(type)) {
+    const bytes = typedHexBytes(value, what);
+    if (bytes.length !== Number(m[1])) {
+      throw new Error(`typed data: ${what} must be exactly ${m[1]} bytes`);
+    }
+    return Buffer.concat([bytes, Buffer.alloc(32 - bytes.length)]);
+  }
+  throw new Error(`typed data: ${what} has unknown type '${type}'`);
+}
+
+function hashTypedStruct(type, value, types, what = type) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`typed data: ${what} must be an object`);
+  }
+  const fields = types[type];
+  const declared = new Set(fields.map((f) => f.name));
+  for (const key of Object.keys(value)) {
+    if (!declared.has(key)) {
+      throw new Error(`typed data: ${what} carries '${key}', which type ${type} does not declare`);
+    }
+  }
+  const parts = [keccak256(Buffer.from(encodeTypedType(type, types), "utf8"))];
+  for (const field of fields) {
+    parts.push(encodeTypedValue(field.type, value[field.name], types, `${what}.${field.name}`));
+  }
+  return keccak256(Buffer.concat(parts));
+}
+
+// The domain's type is what the domain object holds, in the EIP's own order.
+// A payload that also spells it out under `types.EIP712Domain` must spell out
+// exactly that: a declared field the object lacks (or the reverse) would sign
+// under a separator the reader of the object never saw.
+function typedDomainType(domain, declared) {
+  if (!domain || typeof domain !== "object" || Array.isArray(domain)) {
+    throw new Error("typed data: `domain` must be an object");
+  }
+  const known = new Map(TYPED_DOMAIN_FIELDS);
+  for (const key of Object.keys(domain)) {
+    if (!known.has(key)) throw new Error(`typed data: domain carries unknown field '${key}'`);
+  }
+  const derived = TYPED_DOMAIN_FIELDS.filter(([name]) => domain[name] !== undefined).map(
+    ([name, type]) => ({ name, type }),
+  );
+  if (derived.length === 0) throw new Error("typed data: domain is empty");
+  if (declared !== undefined) {
+    const same =
+      Array.isArray(declared) &&
+      declared.length === derived.length &&
+      declared.every((f, i) => f && f.name === derived[i].name && f.type === derived[i].type);
+    if (!same) {
+      throw new Error("typed data: types.EIP712Domain does not match the fields of `domain`");
+    }
+  }
+  return derived;
+}
+
+/**
+ * The EIP-712 digest of a typed-data payload `{types, primaryType, domain,
+ * message}` (the `eth_signTypedData_v4` shape). Returns the 32-byte digest and
+ * its two halves, all public.
+ */
+export function hashTypedData(typedData) {
+  if (!typedData || typeof typedData !== "object" || Array.isArray(typedData)) {
+    throw new Error("typed data: payload must be an object");
+  }
+  const { types, primaryType, domain, message } = typedData;
+  if (typeof primaryType !== "string" || primaryType === "EIP712Domain") {
+    throw new Error("typed data: `primaryType` must name a message type");
+  }
+  validateTypedTypes(types);
+  const domainFields = typedDomainType(domain, types.EIP712Domain);
+  const all = { ...types, EIP712Domain: domainFields };
+  if (!Object.hasOwn(types, primaryType)) {
+    throw new Error(`typed data: primaryType '${primaryType}' is not defined in types`);
+  }
+  const domainSeparator = hashTypedStruct("EIP712Domain", domain, all, "domain");
+  const messageHash = hashTypedStruct(primaryType, message, all, "message");
+  const digest = keccak256(Buffer.concat([Buffer.from([0x19, 0x01]), domainSeparator, messageHash]));
+  return { digest, domainSeparator, messageHash };
+}
+
+/**
+ * Sign a typed-data payload with a 32-byte private key. Returns the 65-byte
+ * `r ‖ s ‖ v` signature (v = 27 | 28) as 0x hex, plus the digest — public
+ * material only.
+ */
+export function signTypedData(typedData, privKey32) {
+  const { digest } = hashTypedData(typedData);
+  const { r, s, yParity } = ecdsaSignHash(digest, privKey32);
+  const signature = Buffer.concat([bigTo32(r), bigTo32(s), Buffer.from([27 + yParity])]);
+  return { signature: "0x" + signature.toString("hex"), digest: "0x" + digest.toString("hex") };
+}
+
+// ─── Typed-data signing rules ───────────────────────────────────────────────────
+// A wallet record's `typedDataAllowlist` names what the key may sign off chain:
+//
+//   [{ primaryType: "Order",
+//      domain: { name: "…", version: "1", chainId: 137, verifyingContract: "0x…" } }]
+//
+// Default-DENY, unlike the transaction constraints: a record without the list
+// signs no typed data at all. A transaction is bounded by its chain, its gas
+// and the RPC-host allowlist; a typed-data signature is bounded by nothing but
+// the contract that reads it, and the best-known ones (ERC-2612 permits,
+// Permit2) hand a token balance to whoever holds the signature.
+//
+// A rule matches on the primary type and on the WHOLE domain: every field the
+// rule lists must be equal, and the payload's domain may carry no field the
+// rule does not. That pins the domain separator, so a contract that borrows a
+// trusted name cannot have its messages signed under the trusted rule.
+
+function sameDomainValue(field, a, b) {
+  if (field === "chainId") {
+    try {
+      return typedInteger(a, "chainId") === typedInteger(b, "chainId");
+    } catch {
+      return false;
+    }
+  }
+  if (field === "verifyingContract" || field === "salt") {
+    return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+  }
+  return a === b;
+}
+
+export function typedDataRuleMatches(rule, typedData) {
+  if (!rule || typeof rule !== "object" || !rule.domain || typeof rule.domain !== "object") {
+    return false;
+  }
+  if (!typedData || typeof typedData !== "object" || typedData.primaryType !== rule.primaryType) {
+    return false;
+  }
+  const domain = typedData.domain;
+  if (!domain || typeof domain !== "object" || Array.isArray(domain)) return false;
+  const ruleKeys = Object.keys(rule.domain).filter((k) => rule.domain[k] !== undefined);
+  const dataKeys = Object.keys(domain).filter((k) => domain[k] !== undefined);
+  if (ruleKeys.length !== dataKeys.length) return false;
+  return ruleKeys.every(
+    (key) => Object.hasOwn(domain, key) && sameDomainValue(key, rule.domain[key], domain[key]),
+  );
+}
+
+// JSON-RPC methods a wallet answers itself, without a node.
+const EVM_SIGN_TYPED_DATA = "eth_signTypedData_v4";
+const EVM_ACCOUNT_METHODS = new Set(["eth_accounts", "eth_requestAccounts"]);
+// Signing methods this wallet never serves. `eth_sign` and `personal_sign` put
+// the key under bytes nobody can read back; the older typed-data versions hash
+// differently from what a reviewer of v4 expects. Left to pass through they
+// would reach a node that holds no account, so the refusal is said here.
+const EVM_REFUSED_SIGN_METHODS = new Set([
+  "eth_sign",
+  "personal_sign",
+  "eth_signTransaction",
+  "eth_signTypedData",
+  "eth_signTypedData_v1",
+  "eth_signTypedData_v3",
+]);
+
+/**
+ * Answer the JSON-RPC calls an EVM wallet serves by itself: `eth_accounts`
+ * (the credential's address) and `eth_signTypedData_v4` (an EIP-712 signature
+ * under the record's `typedDataAllowlist`). Returns `null` for everything
+ * else, which the caller forwards as before; `{ body, signed, digests }` when
+ * the answer is made here and nothing is to reach the upstream.
+ *
+ * Throws for a typed-data request the record does not allow, for a malformed
+ * one, for a signing method this wallet never serves, and for any of these
+ * inside a batch — a batch is forwarded whole, and a signature has no place
+ * in a request that leaves this process.
+ */
+export function answerEvmWalletRpc(bodyText, privateKeyHex, credAddress, constraints = {}) {
+  let parsed;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  const isLocal = (msg) =>
+    msg &&
+    typeof msg === "object" &&
+    (msg.method === EVM_SIGN_TYPED_DATA ||
+      EVM_ACCOUNT_METHODS.has(msg.method) ||
+      EVM_REFUSED_SIGN_METHODS.has(msg.method));
+  if (Array.isArray(parsed)) {
+    const local = parsed.find(isLocal);
+    if (local) throw new Error(`${local.method}: not served inside a batch — send it on its own`);
+    return null;
+  }
+  if (!isLocal(parsed)) return null;
+  const reply = (result) => ({
+    body: JSON.stringify({ jsonrpc: "2.0", id: parsed.id ?? null, result }),
+  });
+
+  if (EVM_ACCOUNT_METHODS.has(parsed.method)) {
+    return { ...reply([credAddress]), signed: false, digests: [] };
+  }
+  if (EVM_REFUSED_SIGN_METHODS.has(parsed.method)) {
+    throw new Error(
+      `${parsed.method}: this wallet signs transactions (eth_sendTransaction) and allowlisted ` +
+        "EIP-712 typed data (eth_signTypedData_v4) only",
+    );
+  }
+
+  if (!/^[0-9a-fA-F]{64}$/.test(privateKeyHex || "")) {
+    throw new Error("evm credential: privateKey must be 32 bytes of hex");
+  }
+  if (!Array.isArray(parsed.params) || parsed.params.length < 2) {
+    throw new Error(`${EVM_SIGN_TYPED_DATA}: params must be [address, typedData]`);
+  }
+  const [from, raw] = parsed.params;
+  if (typeof from !== "string" || from.toLowerCase() !== credAddress.toLowerCase()) {
+    throw new Error(
+      `${EVM_SIGN_TYPED_DATA}: signer (${from}) does not match the credential address (${credAddress})`,
+    );
+  }
+  let typedData = raw;
+  if (typeof raw === "string") {
+    try {
+      typedData = JSON.parse(raw);
+    } catch {
+      throw new Error(`${EVM_SIGN_TYPED_DATA}: typed data is not valid JSON`);
+    }
+  }
+  const allowlist = Array.isArray(constraints.typedDataAllowlist) ? constraints.typedDataAllowlist : [];
+  if (!allowlist.some((rule) => typedDataRuleMatches(rule, typedData))) {
+    const name = typedData && typedData.domain && typeof typedData.domain.name === "string"
+      ? typedData.domain.name
+      : "(unnamed)";
+    throw new Error(
+      `${EVM_SIGN_TYPED_DATA}: '${typedData && typedData.primaryType}' for domain '${name}' is ` +
+        "not in this credential's typedDataAllowlist",
+    );
+  }
+  const { signature, digest } = signTypedData(typedData, Buffer.from(privateKeyHex, "hex"));
+  return { ...reply(signature), signed: true, digests: [digest] };
+}
+
+// Hold one transaction object to a wallet record's constraints (all optional,
+// default-allow) and pin its `from` to the credential, so the wallet actually
+// being spent is always explicit. Throws on a violation, before anything is
+// signed. `what` names the entrance in the refusal.
+function constrainEvmTransaction(tx, credAddress, constraints, what) {
+  if (!tx || typeof tx !== "object" || Array.isArray(tx)) {
+    throw new Error(`${what}: a transaction object is required`);
+  }
+  if (tx.from && String(tx.from).toLowerCase() !== credAddress.toLowerCase()) {
+    throw new Error(
+      `${what}: 'from' (${tx.from}) does not match the credential address (${credAddress})`,
+    );
+  }
+  if (!tx.from) tx.from = credAddress;
+  const chainIdAllowlist = Array.isArray(constraints.chainIdAllowlist)
+    ? constraints.chainIdAllowlist
+    : null;
+  const toAllowlist = Array.isArray(constraints.toAllowlist)
+    ? constraints.toAllowlist.map((a) => a.toLowerCase())
+    : null;
+  if (chainIdAllowlist) {
+    const chainId = Number(qty(tx.chainId, "chainId"));
+    if (!chainIdAllowlist.includes(chainId)) {
+      throw new Error(`${what}: chainId ${chainId} not in this credential's chainIdAllowlist`);
+    }
+  }
+  if (toAllowlist) {
+    const to = tx.to == null ? "" : String(tx.to).toLowerCase();
+    if (!toAllowlist.includes(to)) {
+      throw new Error(
+        `${what}: recipient ${tx.to || "(contract-creation)"} not in this credential's toAllowlist`,
+      );
+    }
+  }
+}
+
+function evmCredentialKey(privateKeyHex) {
+  if (!/^[0-9a-fA-F]{64}$/.test(privateKeyHex || "")) {
+    throw new Error("evm credential: privateKey must be 32 bytes of hex");
+  }
+  return Buffer.from(privateKeyHex, "hex");
+}
+
+/**
+ * Sign one EIP-1559 transaction object with a wallet credential, under the
+ * record's constraints — the same checks `eth_sendTransaction` gets through
+ * the proxy, for a caller that holds the vault itself and broadcasts the raw
+ * transaction on its own. Returns { raw, hash, from }: public material only.
+ */
+export function signEvmTransactionFor(tx, privateKeyHex, credAddress, constraints = {}) {
+  const priv = evmCredentialKey(privateKeyHex);
+  const pinned = { ...tx };
+  constrainEvmTransaction(pinned, credAddress, constraints, "transaction");
+  return signEip1559Transaction(pinned, priv);
+}
+
+/**
+ * Sign one EIP-712 payload with a wallet credential, under the record's
+ * `typedDataAllowlist` (default-deny). Returns { signature, digest, address }.
+ */
+export function signEvmTypedDataFor(typedData, privateKeyHex, credAddress, constraints = {}) {
+  const answer = answerEvmWalletRpc(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: EVM_SIGN_TYPED_DATA, params: [credAddress, typedData] }),
+    privateKeyHex,
+    credAddress,
+    constraints,
+  );
+  return {
+    signature: JSON.parse(answer.body).result,
+    digest: answer.digests[0],
+    address: credAddress,
+  };
+}
+
 /**
  * Transform an EVM JSON-RPC body: `eth_sendTransaction` becomes
  * `eth_sendRawTransaction` with the EIP-1559 tx signed by the vaulted key.
@@ -397,19 +861,8 @@ export function signEvmRpcBody(bodyText, privateKeyHex, credAddress, constraints
   } catch {
     return { body: bodyText, signed: false, hashes: [] };
   }
-  if (!/^[0-9a-fA-F]{64}$/.test(privateKeyHex || "")) {
-    throw new Error("evm credential: privateKey must be 32 bytes of hex");
-  }
-  const priv = Buffer.from(privateKeyHex, "hex");
+  const priv = evmCredentialKey(privateKeyHex);
   const hashes = [];
-
-  // Optional, default-allow signing constraints from the credential record.
-  const chainIdAllowlist = Array.isArray(constraints.chainIdAllowlist)
-    ? constraints.chainIdAllowlist
-    : null;
-  const toAllowlist = Array.isArray(constraints.toAllowlist)
-    ? constraints.toAllowlist.map((a) => a.toLowerCase())
-    : null;
 
   const signOne = (msg) => {
     if (!msg || typeof msg !== "object" || msg.method !== "eth_sendTransaction") return msg;
@@ -417,30 +870,8 @@ export function signEvmRpcBody(bodyText, privateKeyHex, credAddress, constraints
       throw new Error("eth_sendTransaction: params[0] must be a transaction object");
     }
     const tx = msg.params[0];
-    if (tx.from && String(tx.from).toLowerCase() !== credAddress.toLowerCase()) {
-      throw new Error(
-        `eth_sendTransaction: 'from' (${tx.from}) does not match the credential address (${credAddress})`,
-      );
-    }
-    // Pin 'from' to the credential address when the agent omitted it, so the
-    // wallet actually being spent is always explicit.
-    if (!tx.from) tx.from = credAddress;
-    if (chainIdAllowlist) {
-      const chainId = Number(qty(tx.chainId, "chainId"));
-      if (!chainIdAllowlist.includes(chainId)) {
-        throw new Error(
-          `eth_sendTransaction: chainId ${chainId} not in this credential's chainIdAllowlist`,
-        );
-      }
-    }
-    if (toAllowlist) {
-      const to = tx.to == null ? "" : String(tx.to).toLowerCase();
-      if (!toAllowlist.includes(to)) {
-        throw new Error(
-          `eth_sendTransaction: recipient ${tx.to || "(contract-creation)"} not in this credential's toAllowlist`,
-        );
-      }
-    }
+    // Optional, default-allow signing constraints from the credential record.
+    constrainEvmTransaction(tx, credAddress, constraints, "eth_sendTransaction");
     const { raw, hash } = signEip1559Transaction(tx, priv);
     hashes.push(hash);
     return { ...msg, method: "eth_sendRawTransaction", params: [raw] };

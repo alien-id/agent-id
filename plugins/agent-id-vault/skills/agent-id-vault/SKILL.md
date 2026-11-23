@@ -225,6 +225,83 @@ EVM) — that is all an agent ever needs: fund the address, build unsigned
 transactions against it, and submit them through the proxy, which signs them
 in-process (see the proxy skill, "Wallet credentials").
 
+### What a wallet key will sign
+
+A wallet record can bound its own key. `list` shows these rules; they are
+policy, not secrets.
+
+| Rule | Applies to | When absent |
+|---|---|---|
+| `--chain-id-allowlist 1,137` | EVM transactions | any chain |
+| `--to-allowlist 0x…,0x…` | EVM transactions (the `to` field) | any recipient |
+| `--program-allowlist <base58>,…` | Solana transactions | any program |
+| `--typed-data-allowlist '<JSON>'` | EIP-712 payloads (`eth_signTypedData_v4`) | **no typed data at all** |
+
+Typed data is default-deny on purpose. A transaction is bounded by its chain,
+its gas and the RPC allowlist; a typed-data signature is bounded only by the
+contract that reads it, and the best-known ones (token permits) hand a balance
+to whoever holds the signature. A rule names a primary type and the **whole**
+domain it is signed under, so list every field the payload's domain carries:
+
+```bash
+node CLI generate --name trader --type evm-keypair \
+  --domains polygon-bor-rpc.publicnode.com --chain-id-allowlist 137 \
+  --typed-data-allowlist '[{"primaryType":"Order","domain":{"name":"Example Exchange","version":"1","chainId":137,"verifyingContract":"0x…"}}]'
+
+# Later: replace the rules. Removing one applies at once; ADDING one asks the
+# owner to confirm on the secure prompt (the agent cannot widen its own key).
+node CLI set-typed-data --name trader --rules '<JSON array>'
+node CLI set-typed-data --name trader --clear
+```
+
+### One signature, for a process that holds the vault
+
+The proxy signs for an agent that must not hold the vault. A supervisor that
+already holds it, and broadcasts on its own, asks for one signature at a time:
+
+```bash
+# An EIP-1559 transaction object on stdin → {raw, hash, from}
+echo '{"chainId":137,"nonce":7,"gas":21000,"maxFeePerGas":"100000000000","maxPriorityFeePerGas":"30000000000","to":"0x…","value":"1000","data":"0x"}' \
+  | node CLI wallet-sign --name trader --transaction
+
+# An EIP-712 payload on stdin → {signature, digest, address}
+node CLI wallet-sign --name trader --typed-data < order.json
+```
+
+The same rules apply as through the proxy, a read-only (`access: ro`) wallet
+signs nothing, and the key is never printed.
+
+### What the owner sets for a wallet
+
+Three settings belong to the owner alone, and each is typed by them on the
+secure prompt. No flag, file or variable carries an address or a figure in: an
+agent can raise the card and can take an entry away, and cannot put one there.
+
+```bash
+# The accounts the wallet's funds may leave to. The owner types one address
+# (and a name for it) on the card; mixed-case addresses must pass EIP-55.
+node CLI set-withdrawal --name trader
+node CLI set-withdrawal --name trader --remove Ledger     # by name or address, no card
+node CLI set-withdrawal --name trader --clear
+
+# The most the wallet may trade in 24 hours, in whole US dollars.
+node CLI set-daily-limit --name trader
+node CLI set-daily-limit --name trader --clear            # no limit set = nothing is traded
+
+# Where funds the owner sends IN from another chain go back to if the swap
+# that carries them fails: one address per chain, the owner's own.
+node CLI set-refund --name trader --chain BTC             # the owner types their BTC address
+node CLI set-refund --name trader --remove BTC            # no card
+```
+
+`list` shows them as `withdrawalAllowlist` (`[{address, label}]`),
+`dailySpendLimitUsd` and `refundAddresses` (`[{chain, address}]`). The vault keeps these and guards who writes them; it does
+not enforce them, because it signs a transaction without knowing where the money
+inside a contract call ends up or what a trade is worth. The process that
+carries out trades reads them from `list` and holds itself to them. Never ask
+the owner to send you an address or a limit in the chat to "set it for them":
+there is no command that would take it.
+
 ## List, show, remove
 
 ```bash

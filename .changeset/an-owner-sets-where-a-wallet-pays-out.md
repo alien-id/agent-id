@@ -1,0 +1,5 @@
+---
+"@alien-id/agent-id-vault": minor
+---
+
+An in-vault EVM wallet carries two settings that only its owner writes: `withdrawalAllowlist`, the accounts its funds may leave to, and `dailySpendLimitUsd`, the most it may trade in 24 hours. `vault set-withdrawal --name N` and `vault set-daily-limit --name N` raise the secure prompt, where the owner types the address (with a name for it) or the figure; no flag carries either in, so an agent can ask for the card and can take an entry away (`--remove <address|label>`, `--clear`) and cannot add one. An address in mixed case must pass its EIP-55 checksum and is kept in that form; the wallet's own address and the zero address are refused. A third setting, `refundAddresses`, holds one address per foreign chain for funds the owner sends in through a swap that then fails: `vault set-refund --name N --chain CODE` has the owner type it, `--remove CODE` and `--clear` take it away. `vault list` shows all three settings. The vault keeps them and does not enforce them: the process that carries out trades reads them and holds itself to them.
