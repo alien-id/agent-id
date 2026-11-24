@@ -392,6 +392,11 @@ export function signEip1559Transaction(tx, privKey32) {
 // is refused rather than encoded as something the signer did not mean.
 
 const TYPED_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// A struct's name may be namespaced, identifiers joined by colons: Hyperliquid
+// signs its user actions as `HyperliquidTransaction:ApproveAgent`, and every
+// wallet hashes that name into the type string as written. A field's name is
+// a plain identifier.
+export const TYPED_STRUCT_RE = /^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)*$/;
 const TYPED_ARRAY_RE = /^(.*)\[(\d*)\]$/;
 const TYPED_DOMAIN_FIELDS = [
   ["name", "string"],
@@ -427,7 +432,7 @@ function validateTypedTypes(types) {
     throw new Error("typed data: `types` must be an object");
   }
   for (const [name, fields] of Object.entries(types)) {
-    if (!TYPED_IDENT_RE.test(name) || isTypedAtomic(name)) {
+    if (!TYPED_STRUCT_RE.test(name) || isTypedAtomic(name)) {
       throw new Error(`typed data: bad struct name '${name}'`);
     }
     if (!Array.isArray(fields)) throw new Error(`typed data: type '${name}' must list its fields`);

@@ -19,7 +19,7 @@
 //   }
 
 import { nowMs } from "@alien-id/agent-id-core/lib/crypto.mjs";
-import { toChecksumAddress } from "@alien-id/agent-id-core/lib/evm.mjs";
+import { TYPED_STRUCT_RE, toChecksumAddress } from "@alien-id/agent-id-core/lib/evm.mjs";
 import { isLoopbackHost } from "@alien-id/agent-id-core/lib/http.mjs";
 import { assertHostAllowed, credentialHost, hostMatchesAllowlist, siteName, validateAccessFields } from "./access.mjs";
 
@@ -227,7 +227,7 @@ function validateTypedDataAllowlist(rec) {
     }
     if (
       typeof rule.primaryType !== "string" ||
-      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(rule.primaryType) ||
+      !TYPED_STRUCT_RE.test(rule.primaryType) ||
       rule.primaryType === "EIP712Domain"
     ) {
       throw new Error(`Credential ${rec.name}: typedDataAllowlist primaryType must name a message type`);
