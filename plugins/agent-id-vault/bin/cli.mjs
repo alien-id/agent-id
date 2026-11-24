@@ -941,6 +941,22 @@ async function cmdAdd(flags) {
     // when no --access flag is given, and refuse a widening flag — only
     // `set-access` (owner-confirmed) may relax.
     const existing = vault.get(name);
+    // An add is an upsert by name, whatever the record under that name is. A caller
+    // that stores what the owner just typed must not swap an unrelated record for
+    // it: `--if-absent` refuses a name that is taken, and `--expect-kind` refuses
+    // one taken by anything but a personal record of that kind — the two ways to
+    // say "new" and "a replacement of this very record".
+    if (existing && flags["if-absent"]) {
+      return outputError(`A credential named '${name}' already exists; nothing was stored.`);
+    }
+    if (existing && flags["expect-kind"] != null) {
+      const expected = String(flags["expect-kind"]);
+      if (existing.type !== "personal" || existing.kind !== expected) {
+        return outputError(
+          `'${name}' is not a ${expected} record, so it was not replaced; nothing was stored.`,
+        );
+      }
+    }
     if (existing) {
       if (!access && existing.access != null) record.access = existing.access;
       if (existing.accessRules != null) record.accessRules = existing.accessRules;

@@ -75,6 +75,54 @@ const addPersonal = (dir, name, kind, values) =>
     stdin: JSON.stringify(values),
   });
 
+const PASSPORT = { number: "X1234567", expiry: "2031-04-01", issuingCountry: "DE" };
+
+// An add is an upsert by name. A caller that stores what the owner just typed
+// would otherwise swap an unrelated record for it without anything failing: a
+// second traveller's passport over the first one's, or a document over a login.
+test("a name that is taken is not overwritten by a record that was meant to be new", () =>
+  withVault(async (dir) => {
+    const first = await addPersonal(dir, "passport.anna", "passport", PASSPORT);
+    assert.equal(first.json?.ok, true, first.stdout + first.stderr);
+
+    const again = await cli(
+      dir,
+      ["add", "--name", "passport.anna", "--type", "personal", "--kind", "passport", "--form", "--values-stdin", "--if-absent"],
+      { stdin: JSON.stringify({ ...PASSPORT, number: "Y7654321" }) },
+    );
+    assert.notEqual(again.code, 0);
+    assert.equal(again.json?.ok, false);
+    assert.ok(!again.stdout.includes("Y7654321"), "a refusal repeats no value");
+
+    const kept = await cli(dir, ["read-personal", "--name", "passport.anna"]);
+    assert.equal(kept.json?.fields?.number, "X1234567");
+  }));
+
+test("a replacement goes only over a record of the same kind", () =>
+  withVault(async (dir) => {
+    await addPersonal(dir, "passport", "passport", PASSPORT);
+    await addPersonal(dir, "id", "national_id", { number: "ID-1" });
+
+    const replaced = await cli(
+      dir,
+      ["add", "--name", "passport", "--type", "personal", "--kind", "passport", "--form", "--values-stdin", "--expect-kind", "passport"],
+      { stdin: JSON.stringify({ ...PASSPORT, number: "Y7654321" }) },
+    );
+    assert.equal(replaced.json?.ok, true, replaced.stdout + replaced.stderr);
+    const now = await cli(dir, ["read-personal", "--name", "passport"]);
+    assert.equal(now.json?.fields?.number, "Y7654321");
+
+    const wrong = await cli(
+      dir,
+      ["add", "--name", "id", "--type", "personal", "--kind", "passport", "--form", "--values-stdin", "--expect-kind", "passport"],
+      { stdin: JSON.stringify(PASSPORT) },
+    );
+    assert.notEqual(wrong.code, 0);
+    const untouched = await cli(dir, ["read-personal", "--name", "id"]);
+    assert.equal(untouched.json?.kind, "national_id");
+    assert.equal(untouched.json?.fields?.number, "ID-1");
+  }));
+
 test("a stored phone is listed by name and kind, never by value", () =>
   withVault(async (dir) => {
     const added = await addPersonal(dir, "phone", "phone", { number: PHONE });
