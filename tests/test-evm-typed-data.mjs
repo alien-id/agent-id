@@ -152,6 +152,37 @@ function everyKind() {
   };
 }
 
+// Hyperliquid's approval of a trading key, as its exchange takes it: a user
+// action whose struct name is namespaced (`HyperliquidTransaction:…`).
+const HYPERLIQUID_DOMAIN = {
+  name: "HyperliquidSignTransaction",
+  version: "1",
+  chainId: 421614,
+  verifyingContract: "0x0000000000000000000000000000000000000000",
+};
+
+function approveAgent() {
+  return {
+    types: {
+      EIP712Domain: DOMAIN_TYPE,
+      "HyperliquidTransaction:ApproveAgent": [
+        { name: "hyperliquidChain", type: "string" },
+        { name: "agentAddress", type: "address" },
+        { name: "agentName", type: "string" },
+        { name: "nonce", type: "uint64" },
+      ],
+    },
+    primaryType: "HyperliquidTransaction:ApproveAgent",
+    domain: { ...HYPERLIQUID_DOMAIN },
+    message: {
+      hyperliquidChain: "Testnet",
+      agentAddress: "0x8c967e73e7b15087c42a10d344cff4c96d877f1d",
+      agentName: "agent",
+      nonce: 1763856000000,
+    },
+  };
+}
+
 describe("EIP-712 digest and signature", () => {
   it("reproduces the specification's example", () => {
     const typed = specMail();
@@ -201,6 +232,32 @@ describe("EIP-712 digest and signature", () => {
         "4f0c003a18661483fdee478380de008fac91fcdf6f2af636ab5c9dc03e447b30" +
         "1c",
     );
+  });
+
+  it("signs a namespaced struct name as eth-account does", () => {
+    const typed = approveAgent();
+    assert.equal(
+      encodeTypedType(typed.primaryType, typed.types),
+      "HyperliquidTransaction:ApproveAgent(string hyperliquidChain,address agentAddress,string agentName,uint64 nonce)",
+    );
+    const signed = signTypedData(typed, COW_KEY);
+    assert.equal(signed.digest, "0x63cf42c621c5817997bb1fdfa2afec4af52858723333e8ebc30aa0b892b74f4e");
+    assert.equal(
+      signed.signature,
+      "0x7ce02d54412f7dc8e20daf8171986f096f13d7646dca25a43b2719b783eb36a2" +
+        "3fe57a6b72cca3daf9da217fb26e6b3e0ec1cfe057cb1a7464477f27e0b5494d" +
+        "1c",
+    );
+  });
+
+  it("refuses a struct name that is not identifiers joined by colons", () => {
+    for (const name of ["Hyperliquid:", ":ApproveAgent", "a::b", "a:1b", "a b", "Mail(x)"]) {
+      const typed = approveAgent();
+      typed.types[name] = typed.types[typed.primaryType];
+      delete typed.types[typed.primaryType];
+      typed.primaryType = name;
+      assert.throws(() => hashTypedData(typed), /bad struct name/, name);
+    }
   });
 
   it("gives the same digest whether or not the domain's type is spelled out", () => {
@@ -400,6 +457,9 @@ describe("store validation of typedDataAllowlist", () => {
   it("accepts a rule that pins a whole domain", () => {
     validateRecord(record([{ primaryType: "Mail", domain: { ...MAIL_DOMAIN } }]));
     validateRecord(record([{ primaryType: "Auth", domain: { name: "Desk", version: "1", chainId: 137 } }]));
+    validateRecord(
+      record([{ primaryType: "HyperliquidTransaction:ApproveAgent", domain: { ...HYPERLIQUID_DOMAIN } }]),
+    );
   });
 
   it("rejects an empty list, a rule without a domain, and unknown keys", () => {
@@ -419,6 +479,10 @@ describe("store validation of typedDataAllowlist", () => {
   it("rejects a malformed primary type, chain or contract", () => {
     assert.throws(
       () => validateRecord(record([{ primaryType: "EIP712Domain", domain: { name: "x" } }])),
+      /must name a message type/,
+    );
+    assert.throws(
+      () => validateRecord(record([{ primaryType: "Hyperliquid:", domain: { name: "x" } }])),
       /must name a message type/,
     );
     assert.throws(
