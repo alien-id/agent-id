@@ -732,6 +732,39 @@ function ownerEndedTheCard(err, extra = {}) {
   return null;
 }
 
+// The refusal `--if-absent` / `--expect-kind` give for the record under `name`, or
+// null when the add may go ahead.
+function takenNameRefusal(existing, flags, name) {
+  if (!existing) return null;
+  if (flags["if-absent"]) {
+    return `A credential named '${name}' already exists; nothing was stored.`;
+  }
+  const expected = flags["expect-kind"];
+  if (expected != null && (existing.type !== "personal" || existing.kind !== expected)) {
+    return `'${name}' is not a ${expected} record, so it was not replaced; nothing was stored.`;
+  }
+  return null;
+}
+
+// The same refusal, before a form is raised. The vault is opened only where it
+// unlocks without asking the owner anything (the agent key, a passphrase flag);
+// otherwise the check waits for the open after the form, so the owner is never
+// asked to unlock earlier than before. That later check runs either way.
+async function takenNameRefusalBeforeForm(flags, name) {
+  if (!flags["if-absent"] && flags["expect-kind"] == null) return null;
+  let vault = null;
+  try {
+    vault = await openWithFlags(flags, { allowPrompt: false });
+  } catch {
+    return null;
+  }
+  try {
+    return takenNameRefusal(vault.get(name), flags, name);
+  } finally {
+    vault.lock();
+  }
+}
+
 async function cmdAdd(flags) {
   const name = flags.name;
   const type = flags.type;
@@ -739,6 +772,22 @@ async function cmdAdd(flags) {
   if (!type) return outputError(`--type <${CREDENTIAL_TYPES.join("|")}> is required`);
   if (!CREDENTIAL_TYPES.includes(type)) {
     return outputError(`Unknown type: ${type}. Allowed: ${CREDENTIAL_TYPES.join(", ")}`);
+  }
+  // `--expect-kind K` says "this replaces the owner's K record", so what is added has
+  // to be that record too: a personal record of kind K. A bare flag parses as `true`.
+  if (flags["expect-kind"] != null) {
+    const expected = flags["expect-kind"];
+    if (!personalKind(expected)) {
+      return outputError(
+        `--expect-kind must be one of: ${Object.keys(PERSONAL_KINDS).join(", ")}`,
+      );
+    }
+    if (type !== "personal" || flags.kind !== expected) {
+      return outputError(
+        `--expect-kind ${expected} replaces a ${expected} record, so it needs ` +
+          `--type personal --kind ${expected}; nothing was stored.`,
+      );
+    }
   }
   const access = flags.access != null ? String(flags.access) : null;
   if (access && !ACCESS_LEVELS.includes(access)) {
@@ -894,23 +943,29 @@ async function cmdAdd(flags) {
         return outputError("--values-stdin must be a JSON object of the card's values");
       }
       formValues = parsed;
-    } else try {
-      // collectSecret routes through the secure-prompt resolver (browser form →
-      // /dev/tty → hosted harness), so this works where no GUI browser is present.
-      const out = await collectSecret(card);
-      formValues = out.values;
-    } catch (err) {
-      const ended = ownerEndedTheCard(err, {
-        name,
-        type,
-        url: flags["login-url"] || null,
-      });
-      if (ended) {
-        outputJson({ ok: false, stored: false, ...ended });
-        process.exitCode = 1;
-        return;
+    } else {
+      // A name the add is going to refuse is refused before the owner types the
+      // form, not after it.
+      const refusal = await takenNameRefusalBeforeForm(flags, name);
+      if (refusal) return outputError(refusal);
+      try {
+        // collectSecret routes through the secure-prompt resolver (browser form →
+        // /dev/tty → hosted harness), so this works where no GUI browser is present.
+        const out = await collectSecret(card);
+        formValues = out.values;
+      } catch (err) {
+        const ended = ownerEndedTheCard(err, {
+          name,
+          type,
+          url: flags["login-url"] || null,
+        });
+        if (ended) {
+          outputJson({ ok: false, stored: false, ...ended });
+          process.exitCode = 1;
+          return;
+        }
+        return outputError(`secure form: ${err.message}`);
       }
-      return outputError(`secure form: ${err.message}`);
     }
   }
 
@@ -946,17 +1001,8 @@ async function cmdAdd(flags) {
     // it: `--if-absent` refuses a name that is taken, and `--expect-kind` refuses
     // one taken by anything but a personal record of that kind — the two ways to
     // say "new" and "a replacement of this very record".
-    if (existing && flags["if-absent"]) {
-      return outputError(`A credential named '${name}' already exists; nothing was stored.`);
-    }
-    if (existing && flags["expect-kind"] != null) {
-      const expected = String(flags["expect-kind"]);
-      if (existing.type !== "personal" || existing.kind !== expected) {
-        return outputError(
-          `'${name}' is not a ${expected} record, so it was not replaced; nothing was stored.`,
-        );
-      }
-    }
+    const refusal = takenNameRefusal(existing, flags, name);
+    if (refusal) return outputError(refusal);
     if (existing) {
       if (!access && existing.access != null) record.access = existing.access;
       if (existing.accessRules != null) record.accessRules = existing.accessRules;
@@ -2427,6 +2473,9 @@ function printHelp() {
       "      --type personal --kind K --form   the owner's own details, typed by the owner:",
       `               K is one of ${Object.keys(PERSONAL_KINDS).join(", ")}`,
       "      --type address --form   an address of its own, not tied to a card",
+      "      --if-absent   refuse a name that is taken; nothing is stored",
+      "      --expect-kind K   replace only the personal record of kind K under this",
+      "               name (needs --type personal --kind K); refuse anything else",
       "  form-spec <add's flags>   print the card `add --form` would raise, without",
       "               raising it or opening the vault",
       "      --access ro   read-only: the proxy/browser allow only read-shaped",
