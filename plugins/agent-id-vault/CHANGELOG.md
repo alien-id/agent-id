@@ -1,5 +1,16 @@
 # @alien-id/agent-id-vault
 
+## 7.15.0
+
+### Minor Changes
+
+- [#182](https://github.com/alien-id/agent-id/pull/182) [`797501f`](https://github.com/alien-id/agent-id/commit/797501f475b402a42f40a6c556c20c98939ffbbc) Thanks [@stelchankad](https://github.com/stelchankad)! - `vault add` takes `--if-absent` and `--expect-kind <kind>`. An add is an upsert by name, so a caller
+  that stores what the owner just typed could swap an unrelated record for it. `--if-absent` refuses a
+  name that is taken. `--expect-kind` refuses a name taken by anything but a personal record of that
+  kind, which is how a caller says it replaces that very record; it takes one of the personal kinds,
+  and the record being added must be `--type personal --kind` that kind. Either refusal stores
+  nothing, and where the vault unlocks without asking the owner, it comes before the form is raised.
+
 ## 7.14.0
 
 ### Minor Changes
