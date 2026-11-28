@@ -47,7 +47,7 @@ async function withVault(run) {
   }
 }
 
-function cli(dir, args, { stdin = null, env = {} } = {}) {
+function cli(dir, args, { stdin = null, env = {}, timeoutMs = null } = {}) {
   return new Promise((resolve) => {
     const child = spawn("node", [CLI, ...args, "--state-dir", dir], {
       env: { ...process.env, ...env },
@@ -56,7 +56,10 @@ function cli(dir, args, { stdin = null, env = {} } = {}) {
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
+    // A command still waiting on a form at the deadline is killed; it exits with no code.
+    const timer = timeoutMs == null ? null : setTimeout(() => child.kill("SIGKILL"), timeoutMs);
     child.on("exit", (code) => {
+      if (timer) clearTimeout(timer);
       let json = null;
       try {
         json = JSON.parse(stdout);
@@ -74,6 +77,127 @@ const addPersonal = (dir, name, kind, values) =>
   cli(dir, ["add", "--name", name, "--type", "personal", "--kind", kind, "--form", "--values-stdin"], {
     stdin: JSON.stringify(values),
   });
+
+const PASSPORT = { number: "X1234567", expiry: "2031-04-01", issuingCountry: "DE" };
+
+// An add is an upsert by name. A caller that stores what the owner just typed
+// would otherwise swap an unrelated record for it without anything failing: a
+// second traveller's passport over the first one's, or a document over a login.
+test("a name that is taken is not overwritten by a record that was meant to be new", () =>
+  withVault(async (dir) => {
+    const first = await addPersonal(dir, "passport.anna", "passport", PASSPORT);
+    assert.equal(first.json?.ok, true, first.stdout + first.stderr);
+
+    const again = await cli(
+      dir,
+      ["add", "--name", "passport.anna", "--type", "personal", "--kind", "passport", "--form", "--values-stdin", "--if-absent"],
+      { stdin: JSON.stringify({ ...PASSPORT, number: "Y7654321" }) },
+    );
+    assert.notEqual(again.code, 0);
+    assert.equal(again.json?.ok, false);
+    assert.ok(!again.stdout.includes("Y7654321"), "a refusal repeats no value");
+    assert.ok(!again.stderr.includes("Y7654321"), "a refusal repeats no value");
+
+    const kept = await cli(dir, ["read-personal", "--name", "passport.anna"]);
+    assert.equal(kept.json?.fields?.number, "X1234567");
+  }));
+
+test("a replacement goes only over a record of the same kind", () =>
+  withVault(async (dir) => {
+    await addPersonal(dir, "passport", "passport", PASSPORT);
+    await addPersonal(dir, "id", "national_id", { number: "ID-1" });
+
+    const replaced = await cli(
+      dir,
+      ["add", "--name", "passport", "--type", "personal", "--kind", "passport", "--form", "--values-stdin", "--expect-kind", "passport"],
+      { stdin: JSON.stringify({ ...PASSPORT, number: "Y7654321" }) },
+    );
+    assert.equal(replaced.json?.ok, true, replaced.stdout + replaced.stderr);
+    const now = await cli(dir, ["read-personal", "--name", "passport"]);
+    assert.equal(now.json?.fields?.number, "Y7654321");
+
+    const wrong = await cli(
+      dir,
+      ["add", "--name", "id", "--type", "personal", "--kind", "passport", "--form", "--values-stdin", "--expect-kind", "passport"],
+      { stdin: JSON.stringify(PASSPORT) },
+    );
+    assert.notEqual(wrong.code, 0);
+    assert.equal(wrong.json?.ok, false);
+    assert.ok(!wrong.stdout.includes("X1234567"), "a refusal repeats no value");
+    assert.ok(!wrong.stderr.includes("X1234567"), "a refusal repeats no value");
+    const untouched = await cli(dir, ["read-personal", "--name", "id"]);
+    assert.equal(untouched.json?.kind, "national_id");
+    assert.equal(untouched.json?.fields?.number, "ID-1");
+  }));
+
+// The owner would otherwise type a whole passport into a form whose answer is then
+// refused. The form is raised in a browser that nobody answers: a command that gets
+// that far waits on it until it is killed.
+test("a taken name is refused before the form is raised", () =>
+  withVault(async (dir) => {
+    await addPersonal(dir, "passport", "passport", PASSPORT);
+    await addPersonal(dir, "id", "national_id", { number: "ID-1" });
+    const formEnv = { AGENT_ID_NO_BROWSER: "1", AGENT_ID_SECURE_PROMPT: "browser" };
+
+    for (const guard of [["--if-absent"], ["--expect-kind", "passport"]]) {
+      const name = guard[0] === "--if-absent" ? "passport" : "id";
+      const refused = await cli(
+        dir,
+        ["add", "--name", name, "--type", "personal", "--kind", "passport", "--form", ...guard],
+        { env: formEnv, timeoutMs: 15_000 },
+      );
+      assert.equal(refused.code, 1, `${guard[0]}: ${refused.stdout}${refused.stderr}`);
+      assert.equal(refused.json?.ok, false);
+      assert.ok(!/127\.0\.0\.1:\d+/.test(refused.stderr), `${guard[0]} raised a form`);
+    }
+  }));
+
+test("--expect-kind takes one of the personal kinds", () =>
+  withVault(async (dir) => {
+    await addPersonal(dir, "passport", "passport", PASSPORT);
+    for (const expectKind of [["--expect-kind"], ["--expect-kind", "boarding_pass"]]) {
+      const refused = await cli(
+        dir,
+        ["add", "--name", "passport", "--type", "personal", "--kind", "passport", "--form", "--values-stdin", ...expectKind],
+        { stdin: JSON.stringify({ ...PASSPORT, number: "Y7654321" }) },
+      );
+      assert.notEqual(refused.code, 0);
+      assert.equal(refused.json?.ok, false);
+      assert.match(refused.json?.error ?? "", /--expect-kind must be one of/);
+    }
+    const kept = await cli(dir, ["read-personal", "--name", "passport"]);
+    assert.equal(kept.json?.fields?.number, "X1234567");
+  }));
+
+// The flag guards the record that is there; the record being added has to be the
+// same kind of record, or a passport is replaced by a login that merely asked for it.
+test("--expect-kind refuses an added record of another type or kind", () =>
+  withVault(async (dir) => {
+    await addPersonal(dir, "passport", "passport", PASSPORT);
+    const attempts = [
+      {
+        args: ["--type", "personal", "--kind", "national_id", "--form", "--values-stdin"],
+        values: { number: "ID-2" },
+      },
+      {
+        args: ["--type", "login", "--login-url", "https://example.com/login", "--form", "--values-stdin"],
+        values: { username: "anna", password: "hunter2" },
+      },
+    ];
+    for (const { args, values } of attempts) {
+      const refused = await cli(
+        dir,
+        ["add", "--name", "passport", ...args, "--expect-kind", "passport"],
+        { stdin: JSON.stringify(values) },
+      );
+      assert.notEqual(refused.code, 0, refused.stdout);
+      assert.equal(refused.json?.ok, false);
+      assert.match(refused.json?.error ?? "", /needs --type personal --kind passport/);
+    }
+    const kept = await cli(dir, ["read-personal", "--name", "passport"]);
+    assert.equal(kept.json?.kind, "passport");
+    assert.equal(kept.json?.fields?.number, "X1234567");
+  }));
 
 test("a stored phone is listed by name and kind, never by value", () =>
   withVault(async (dir) => {
